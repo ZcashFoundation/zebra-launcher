@@ -1,24 +1,30 @@
+use futures::StreamExt;
+
 use leptos::leptos_dom::ev::SubmitEvent;
 use leptos::*;
 use serde::{Deserialize, Serialize};
-use serde_wasm_bindgen::to_value;
-use wasm_bindgen::prelude::*;
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "tauri"])]
-    async fn invoke(cmd: &str, args: JsValue) -> JsValue;
-}
+use tauri_sys::{event, tauri};
 
 #[derive(Serialize, Deserialize)]
 struct GreetArgs<'a> {
     name: &'a str,
 }
 
+async fn listen_for_logs(event_writer: WriteSignal<Vec<String>>) {
+    let mut events = event::listen::<String>("log").await.unwrap();
+
+    while let Some(event) = events.next().await {
+        event_writer.update(|all_events| all_events.push(event.payload));
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let (name, set_name) = create_signal(String::new());
     let (greet_msg, set_greet_msg) = create_signal(String::new());
+
+    let (logs, set_logs) = create_signal::<Vec<String>>(vec![]);
+    create_local_resource(move || set_logs, listen_for_logs);
 
     let update_name = move |ev| {
         let v = event_target_value(&ev);
@@ -28,14 +34,15 @@ pub fn App() -> impl IntoView {
     let greet = move |ev: SubmitEvent| {
         ev.prevent_default();
         spawn_local(async move {
-            let name = name.get_untracked();
+            let name = &name.get_untracked();
             if name.is_empty() {
                 return;
             }
 
-            let args = to_value(&GreetArgs { name: &name }).unwrap();
             // Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
-            let new_msg = invoke("greet", args).await.as_string().unwrap();
+            let new_msg = tauri::invoke::<_, String>("greet", &GreetArgs { name })
+                .await
+                .unwrap();
             set_greet_msg.set(new_msg);
         });
     };
@@ -54,24 +61,35 @@ pub fn App() -> impl IntoView {
             <p>"Click on the Tauri and Leptos logos to learn more."</p>
 
             <p>
-                "Recommended IDE setup: "
-                <a href="https://code.visualstudio.com/" target="_blank">"VS Code"</a>
-                " + "
-                <a href="https://github.com/tauri-apps/tauri-vscode" target="_blank">"Tauri"</a>
-                " + "
-                <a href="https://github.com/rust-lang/rust-analyzer" target="_blank">"rust-analyzer"</a>
+                "Recommended IDE setup: " <a href="https://code.visualstudio.com/" target="_blank">
+                    "VS Code"
+                </a> " + " <a href="https://github.com/tauri-apps/tauri-vscode" target="_blank">
+                    "Tauri"
+                </a> " + " <a href="https://github.com/rust-lang/rust-analyzer" target="_blank">
+                    "rust-analyzer"
+                </a>
             </p>
 
             <form class="row" on:submit=greet>
-                <input
-                    id="greet-input"
-                    placeholder="Enter a name..."
-                    on:input=update_name
-                />
+                <input id="greet-input" placeholder="Enter a name..." on:input=update_name/>
                 <button type="submit">"Greet"</button>
             </form>
 
-            <p><b>{ move || greet_msg.get() }</b></p>
+            <p>
+                <b>{move || greet_msg.get()}</b>
+            </p>
+
+            <For
+                // a function that returns the items we're iterating over; a signal is fine
+                each=move || logs.get()
+                // a unique key for each item
+                key=|log| log.clone()
+                // renders each item to a view
+                children=move |log: String| {
+                    view! { <code>{log}</code> }
+                }
+            />
+
         </main>
     }
 }

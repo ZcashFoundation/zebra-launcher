@@ -40,8 +40,10 @@ fn main() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    let log_msg = zebrad_log_receiver.recv().await;
-                    app_handle.trigger_global("log", log_msg);
+                    if let Some(output) = zebrad_log_receiver.recv().await {
+                        app_handle.emit_all("log", output.clone()).unwrap();
+                        println!("logged something, output: {output}");
+                    }
                 }
             });
 
