@@ -1,17 +1,27 @@
-import { createSignal, onCleanup, onMount } from "solid-js";
 import { listen, Event, UnlistenFn } from "@tauri-apps/api/event";
 
+import { createSignal, onCleanup, onMount } from "solid-js";
 import { styled } from "solid-styled-components";
+
+import { EXAMPLE_LOGS } from "./example_logs";
+
+const LogPage = styled("div")`
+  display: flex;
+  flex-grow: 1;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: hidden;
+  background-color: #1c1c1c;
+`;
 
 const LogContainer = styled("div")`
   display: flex;
   flex-grow: 1;
   flex-direction: column;
   justify-content: end;
-  overflow-x: hidden;
-  overflow-y: scroll;
+  overflow: hidden;
   background-color: #1c1c1c;
-  padding: 8px;
+  padding: 4px;
 `;
 
 const LogLine = styled("div")`
@@ -55,27 +65,32 @@ const Log = ({ children }: { children: string }) => (
 );
 
 function App() {
-  let stop_listening: UnlistenFn;
-
+  const is_tauri_app = window.hasOwnProperty("__TAURI_INTERNALS__");
   const [logs, set_logs] = createSignal<Array<string>>([]);
 
-  onMount(async () => {
-    stop_listening = await listen("log", (event: Event<string>) =>
-      set_logs([...logs(), event.payload])
-    );
-  });
+  if (is_tauri_app) {
+    let stop_listening: UnlistenFn;
 
-  onCleanup(() => stop_listening());
+    onMount(async () => {
+      stop_listening = await listen("log", (event: Event<string>) =>
+        set_logs([...logs(), event.payload])
+      );
+    });
+
+    onCleanup(() => stop_listening());
+  } else {
+    set_logs(EXAMPLE_LOGS);
+  }
 
   return (
-    <>
+    <LogPage>
       <LogContainer>
         {logs().map((log) => (
           <Log>{log}</Log>
         ))}
         <LogLine>&gt; _</LogLine>
       </LogContainer>
-    </>
+    </LogPage>
   );
 }
 
