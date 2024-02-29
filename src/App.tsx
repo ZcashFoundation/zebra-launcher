@@ -3,7 +3,31 @@ import { listen, Event, UnlistenFn } from "@tauri-apps/api/event";
 import { createSignal, onCleanup, onMount } from "solid-js";
 import { styled } from "solid-styled-components";
 
-import { EXAMPLE_LOGS } from "./example_logs";
+import { EXAMPLE_LOGS } from "./tests/example_logs";
+
+const NAVIGATION_BAR_HEIGHT = "50px";
+
+const TabNavigation = styled("ul")`
+  display: flex;
+  position: fixed;
+  font-size: 11px;
+  background-color: #1c1c1c;
+  margin: 0;
+  height: ${NAVIGATION_BAR_HEIGHT};
+  width: 100%;
+  box-sizing: border-box;
+  list-style-type: none;
+  padding: 0 0 12px;
+`;
+
+const TabItem = styled("li")`
+  text-transform: uppercase;
+  font-family: sans-serif;
+  padding: 16px 4px 6px;
+  margin: 0 20px;
+  vertical-align: middle;
+  border-bottom: solid 1px #fff;
+`;
 
 const LogPage = styled("div")`
   display: flex;
@@ -19,9 +43,9 @@ const LogContainer = styled("div")`
   flex-grow: 1;
   flex-direction: column;
   justify-content: end;
-  overflow: hidden;
   background-color: #1c1c1c;
   padding: 4px;
+  margin-top: ${NAVIGATION_BAR_HEIGHT};
 `;
 
 const LogLine = styled("div")`
@@ -72,18 +96,29 @@ function App() {
     let stop_listening: UnlistenFn;
 
     onMount(async () => {
-      stop_listening = await listen("log", (event: Event<string>) =>
-        set_logs([...logs(), event.payload])
-      );
+      stop_listening = await listen("log", (event: Event<string>) => {
+        set_logs([...logs(), event.payload]);
+      });
     });
 
     onCleanup(() => stop_listening());
   } else {
-    set_logs(EXAMPLE_LOGS);
+    let example_log_index = 0;
+    const interval = setInterval(() => {
+      set_logs([...logs(), EXAMPLE_LOGS[example_log_index]]);
+      example_log_index += 1;
+
+      if (example_log_index >= EXAMPLE_LOGS.length) {
+        clearInterval(interval);
+      }
+    }, 100);
   }
 
   return (
     <LogPage>
+      <TabNavigation>
+        <TabItem>Logs</TabItem>
+      </TabNavigation>
       <LogContainer>
         {logs().map((log) => (
           <Log>{log}</Log>
