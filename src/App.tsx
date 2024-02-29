@@ -10,7 +10,7 @@ const NAVIGATION_BAR_HEIGHT = "50px";
 const TabNavigation = styled("ul")`
   display: flex;
   position: fixed;
-  font-size: 11px;
+  font-size: 12px;
   background-color: #1c1c1c;
   margin: 0;
   height: ${NAVIGATION_BAR_HEIGHT};
@@ -92,12 +92,30 @@ function App() {
   const is_tauri_app = window.hasOwnProperty("__TAURI_INTERNALS__");
   const [logs, set_logs] = createSignal<Array<string>>([]);
 
+  const is_at_bottom = () => {
+    const { innerHeight, scrollY } = window;
+
+    const y_bottom = Math.ceil(scrollY) + innerHeight;
+
+    return y_bottom >= document.body.scrollHeight;
+  };
+
+  const scroll_to_bottom = () => {
+    window.scroll(0, document.body.scrollHeight);
+  };
+
   if (is_tauri_app) {
     let stop_listening: UnlistenFn;
 
     onMount(async () => {
       stop_listening = await listen("log", (event: Event<string>) => {
+        const was_at_bottom = is_at_bottom();
+
         set_logs([...logs(), event.payload]);
+
+        if (was_at_bottom) {
+          scroll_to_bottom();
+        }
       });
     });
 
@@ -105,13 +123,19 @@ function App() {
   } else {
     let example_log_index = 0;
     const interval = setInterval(() => {
+      const was_at_bottom = is_at_bottom();
+
       set_logs([...logs(), EXAMPLE_LOGS[example_log_index]]);
       example_log_index += 1;
+
+      if (was_at_bottom) {
+        scroll_to_bottom();
+      }
 
       if (example_log_index >= EXAMPLE_LOGS.length) {
         clearInterval(interval);
       }
-    }, 100);
+    }, 150);
   }
 
   return (
