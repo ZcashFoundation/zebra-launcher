@@ -678,6 +678,11 @@ globals@^11.1.0:
   resolved "https://registry.yarnpkg.com/globals/-/globals-11.12.0.tgz#ab8795338868a0babd8525758018c2a7eb95c42e"
   integrity sha512-WOBp/EEGUiIsJSp7wcv/y6MO+lV9UoncWqxuFfm8eBwzWNgyfBd6Gz+IeKQ9jCmyhoH99g15M3T+QaVHFjizVA==
 
+goober@^2.1.10:
+  version "2.1.14"
+  resolved "https://registry.yarnpkg.com/goober/-/goober-2.1.14.tgz#4a5c94fc34dc086a8e6035360ae1800005135acd"
+  integrity sha512-4UpC0NdGyAFqLNPnhCT2iHpza2q+RAY3GV85a/mRPdzyPQMsj0KmMMuetdIkzWRbJ+Hgau1EZztq8ImmiMGhsg==
+
 has-flag@^3.0.0:
   version "3.0.0"
   resolved "https://registry.yarnpkg.com/has-flag/-/has-flag-3.0.0.tgz#b5d454dc2199ae225699f3467e5a07f3b955bafd"
@@ -805,6 +810,14 @@ solid-refresh@^0.6.3:
     "@babel/generator" "^7.23.6"
     "@babel/helper-module-imports" "^7.22.15"
     "@babel/types" "^7.23.6"
+
+solid-styled-components@^0.28.5:
+  version "0.28.5"
+  resolved "https://registry.yarnpkg.com/solid-styled-components/-/solid-styled-components-0.28.5.tgz#ea6ddc6ccf34097392f9dd603dd88d2259d5226e"
+  integrity sha512-vwTcdp76wZNnESIzB6rRZ3U55NgcSAQXCiiRIiEFhxTFqT0bEh/warNT1qaRZu4OkAzrBkViOngF35ktI8sc4A==
+  dependencies:
+    csstype "^3.1.0"
+    goober "^2.1.10"
 
 source-map-js@^1.0.2:
   version "1.0.2"

@@ -42,7 +42,6 @@ fn main() {
                 loop {
                     if let Some(output) = zebrad_log_receiver.recv().await {
                         app_handle.emit("log", output.clone()).unwrap();
-                        println!("logged something, output: {output}");
                     }
                 }
             });
