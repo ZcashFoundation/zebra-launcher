@@ -1,4 +1,4 @@
-import { Router, Route } from "@solidjs/router";
+import { Router, Route, RouteSectionProps } from "@solidjs/router";
 import { styled } from "solid-styled-components";
 
 import { NAVIGATION_BAR_HEIGHT } from "./constants";
@@ -17,7 +17,7 @@ const TabNavigation = styled("ul")`
   padding: 0 0 12px;
 `;
 
-const TabItem = styled("li")`
+const TabNavigationItem = styled("li")`
   text-transform: uppercase;
   font-family: sans-serif;
   padding: 16px 4px 6px;
@@ -26,7 +26,7 @@ const TabItem = styled("li")`
   border-bottom: solid 1px #fff;
 `;
 
-const LogPage = styled("div")`
+const Container = styled("div")`
   display: flex;
   flex-grow: 1;
   flex-direction: column;
@@ -35,19 +35,19 @@ const LogPage = styled("div")`
   background-color: #1c1c1c;
 `;
 
-const AppContainer = () => (
-  <LogPage>
+const AppContainer = ({ children }: RouteSectionProps) => (
+  <Container>
     <TabNavigation>
-      <TabItem>Logs</TabItem>
+      <TabNavigationItem>Logs</TabNavigationItem>
     </TabNavigation>
-    <Logs />
-  </LogPage>
+    {children}
+  </Container>
 );
 
 function App() {
   return (
     <Router root={AppContainer}>
-      <Route path="/" component={Logs}></Route>
+      <Route path="/" component={Logs} />
     </Router>
   );
 }
