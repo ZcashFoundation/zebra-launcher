@@ -1,6 +1,6 @@
 import { listen, Event, UnlistenFn } from "@tauri-apps/api/event";
 
-import { createSignal, onCleanup, onMount } from "solid-js";
+import { createSignal, onCleanup, onMount, For } from "solid-js";
 import { styled } from "solid-styled-components";
 
 import { EXAMPLE_LOGS } from "./tests/example_logs";
@@ -80,23 +80,34 @@ const LogMessage = styled("code")`
   color: #eee;
 `;
 
-const Log = ({ children }: { children: string }) => (
-  <LogLine>
-    <LogTimestamp>{children.slice(0, 27)}</LogTimestamp>
-    <LogLevel>{children.slice(27, 34)}</LogLevel>
-    <LogMessage>{children.slice(34)}</LogMessage>
-  </LogLine>
-);
+const Log = ({ children }: { children: string }) => {
+  const is_likely_timestamp = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{6}Z/.test(
+    children.slice(0, 27)
+  );
+
+  if (is_likely_timestamp) {
+    return (
+      <LogLine>
+        <LogTimestamp>{children.slice(0, 27)}</LogTimestamp>
+        <LogLevel>{children.slice(27, 34)}</LogLevel>
+        <LogMessage>{children.slice(34)}</LogMessage>
+      </LogLine>
+    );
+  } else {
+    return (
+      <LogLine>
+        <LogMessage>{children}</LogMessage>
+      </LogLine>
+    );
+  }
+};
 
 function App() {
   const is_tauri_app = window.hasOwnProperty("__TAURI_INTERNALS__");
   const [logs, set_logs] = createSignal<Array<string>>([]);
 
   const is_at_bottom = () => {
-    const { innerHeight, scrollY } = window;
-
-    const y_bottom = Math.ceil(scrollY) + innerHeight;
-
+    const y_bottom = Math.ceil(window.scrollY) + window.innerHeight;
     return y_bottom >= document.body.scrollHeight;
   };
 
@@ -144,9 +155,9 @@ function App() {
         <TabItem>Logs</TabItem>
       </TabNavigation>
       <LogContainer>
-        {logs().map((log) => (
-          <Log>{log}</Log>
-        ))}
+        <For each={logs()} fallback={<Log>Waiting for zebrad to start...</Log>}>
+          {(log) => <Log>{log}</Log>}
+        </For>
         <LogLine>&gt; _</LogLine>
       </LogContainer>
     </LogPage>
