@@ -7,6 +7,9 @@ import { EXAMPLE_LOGS } from "./tests/example_logs";
 
 const NAVIGATION_BAR_HEIGHT = "50px";
 
+// Assuming <500B/line, this limits the logs display memory usage to ~500kB
+const MAX_NUM_LOG_LINES = 1000;
+
 const TabNavigation = styled("ul")`
   display: flex;
   position: fixed;
@@ -122,7 +125,7 @@ function App() {
       stop_listening = await listen("log", (event: Event<string>) => {
         const was_at_bottom = is_at_bottom();
 
-        set_logs([...logs(), event.payload]);
+        set_logs([...logs().slice(-MAX_NUM_LOG_LINES), event.payload]);
 
         if (was_at_bottom) {
           scroll_to_bottom();
@@ -133,10 +136,14 @@ function App() {
     onCleanup(() => stop_listening());
   } else {
     let example_log_index = 0;
-    const interval = setInterval(() => {
+    // const interval =
+    setInterval(() => {
       const was_at_bottom = is_at_bottom();
 
-      set_logs([...logs(), EXAMPLE_LOGS[example_log_index]]);
+      set_logs([
+        ...logs().slice(-MAX_NUM_LOG_LINES),
+        EXAMPLE_LOGS[example_log_index],
+      ]);
       example_log_index += 1;
 
       if (was_at_bottom) {
@@ -144,9 +151,10 @@ function App() {
       }
 
       if (example_log_index >= EXAMPLE_LOGS.length) {
-        clearInterval(interval);
+        example_log_index = 0;
+        // clearInterval(interval);
       }
-    }, 150);
+    }, 100);
   }
 
   return (
