@@ -4,7 +4,7 @@ import { createSignal, onCleanup, onMount, For } from "solid-js";
 import { styled } from "solid-styled-components";
 
 import { EXAMPLE_LOGS } from "./tests/example_logs";
-import { MAX_NUM_LOG_LINES, NAVIGATION_BAR_HEIGHT } from "./constants";
+import { MAX_NUM_LOG_LINES } from "./constants";
 
 const LogContainer = styled("div")`
   display: flex;
@@ -12,7 +12,6 @@ const LogContainer = styled("div")`
   flex-direction: column;
   justify-content: end;
   padding: 4px;
-  margin-top: ${NAVIGATION_BAR_HEIGHT};
 `;
 
 const LogLine = styled("div")`
