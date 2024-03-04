@@ -2,8 +2,8 @@ import { Router, Route, RouteSectionProps, A, useMatch } from "@solidjs/router";
 import { css, styled } from "solid-styled-components";
 
 import { NAVIGATION_BAR_HEIGHT } from "./constants";
-import Logs from "./Logs";
-import Configuration from "./Configure";
+import Logs from "./pages/Logs";
+import Configuration from "./pages/Configure";
 
 const TabNavigation = styled("header")`
   display: flex;
