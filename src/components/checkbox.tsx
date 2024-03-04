@@ -1,4 +1,6 @@
 // Modified from <https://github.com/fabian-hiller/modular-forms/blob/main/playgrounds/solid/src/components/Checkbox.tsx>
+// Copyright (c) 2022 Fabian Hiller
+// Copyright 2024 Zcash Foundation
 
 import { JSX, splitProps } from "solid-js";
 import { css } from "solid-styled-components";
@@ -31,7 +33,7 @@ export function Checkbox(props: CheckboxProps) {
     "padding",
   ]);
   return (
-    <div>
+    <div style={{ margin: "16px 0" }}>
       <label
         class={css`
           border: solid 1px ${props.checked ? "#fff" : "#888"};
@@ -47,7 +49,7 @@ export function Checkbox(props: CheckboxProps) {
                 color: ${props.checked ? "#fff" : "#888"};
             `}
         >
-          {props.label}
+          {props.label}:
         </span>
         <input
           {...inputProps}
