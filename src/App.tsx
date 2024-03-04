@@ -1,5 +1,5 @@
 import { Router, Route, RouteSectionProps, A, useMatch } from "@solidjs/router";
-import { styled } from "solid-styled-components";
+import { css, styled } from "solid-styled-components";
 
 import { NAVIGATION_BAR_HEIGHT } from "./constants";
 import Logs from "./Logs";
@@ -36,18 +36,20 @@ const NavItem = ({ children, href }: { children: string; href: string }) => {
   return (
     <A
       href={href}
-      style={{
-        "text-transform": "uppercase",
-        "font-family": "sans-serif",
-        padding: "16px 4px 6px",
-        margin: "0 20px",
-        "vertical-align": "middle",
-        "border-bottom": is_active()
-          ? "solid 1px #fff"
-          : "solid 1px transparent",
-        color: is_active() ? "#fff" : "#888",
-        "text-decoration": "none",
-      }}
+      class={css`
+        text-transform: uppercase;
+        font-family: sans-serif;
+        padding: 16px 4px 6px;
+        margin: 0 20px;
+        vertical-align: middle;
+        text-decoration: none;
+        border-bottom: solid 1px ${is_active() ? "#fff" : "transparent"};
+        color: ${is_active() ? "#fff" : "#888"};
+
+        &:hover {
+          color: #fff;
+        }
+      `}
     >
       {children}
     </A>
