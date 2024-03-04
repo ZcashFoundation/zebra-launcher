@@ -99,7 +99,6 @@ const Logs = () => {
     onCleanup(() => stop_listening());
   } else {
     let example_log_index = 0;
-    // const interval =
     setInterval(() => {
       const was_at_bottom = is_at_bottom();
 
