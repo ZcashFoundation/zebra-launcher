@@ -10,13 +10,16 @@ use std::{
 
 use tauri::{AppHandle, Manager, RunEvent};
 
+mod process;
+use process::relative_command_path;
+
 // TODO: Add a command for updating the config and restarting `zebrad` child process
 #[tauri::command]
 fn save_config() {}
 
 fn main() {
     // Spawn initial zebrad process
-    let mut zebrad = Command::new("zebrad")
+    let mut zebrad = Command::new(relative_command_path("zebrad").unwrap())
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
