@@ -355,6 +355,11 @@
     "@jridgewell/resolve-uri" "^3.1.0"
     "@jridgewell/sourcemap-codec" "^1.4.14"
 
+"@modular-forms/solid@^0.20.0":
+  version "0.20.0"
+  resolved "https://registry.yarnpkg.com/@modular-forms/solid/-/solid-0.20.0.tgz#7fce5fd983f25be89f4d33906487612adaa6b43c"
+  integrity sha512-CyXoeo2cwNel2N753c+iDzA+4DgtBrLNAS87DY/aODFZG7QoY0A9YSxdUxRf0N5NDwkzmn1O0XqwMP+EAiOHbA==
+
 "@rollup/rollup-android-arm-eabi@4.12.0":
   version "4.12.0"
   resolved "https://registry.yarnpkg.com/@rollup/rollup-android-arm-eabi/-/rollup-android-arm-eabi-4.12.0.tgz#38c3abd1955a3c21d492af6b1a1dca4bb1d894d6"
