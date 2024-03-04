@@ -1,14 +1,15 @@
 {
   "productName": "zebra-app",
   "version": "0.0.0",
-  "identifier": "com.tauri.dev",
+  "identifier": "zebra.app",
   "build": {
     "beforeDevCommand": "yarn dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "yarn build",
     "frontendDist": "../dist"
   },
-  "app": {"windows": [
+  "app": {
+    "windows": [
       {
         "title": "zebra-app",
         "width": 800,
@@ -28,6 +29,7 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "externalBin": ["binaries/zebrad"]
   }
 }
