@@ -3,9 +3,12 @@
 use std::{
     io::{BufRead, BufReader},
     process::{Child, Command, Stdio},
+    time::Duration,
 };
 
-use tauri::{async_runtime::spawn_blocking, utils};
+use tauri::{utils, AppHandle, Manager};
+
+use tokio::sync::mpsc::Receiver;
 
 /// Zebrad Configuration Filename
 pub const CONFIG_FILE: &str = "zebrad.toml";
@@ -16,7 +19,7 @@ pub const ZEBRAD_COMMAND_NAME: &str = "zebrad.exe";
 #[cfg(not(windows))]
 pub const ZEBRAD_COMMAND_NAME: &str = "zebrad";
 
-pub fn run_zebrad_and_read_output() -> Child {
+pub fn run_zebrad() -> (Child, Receiver<String>) {
     let exe_path =
         utils::platform::current_exe().expect("could not get path to current executable");
 
@@ -45,10 +48,47 @@ pub fn run_zebrad_and_read_output() -> Child {
         );
     }
 
-    Command::new(zebrad_path_str)
+    let mut zebrad_child = Command::new(zebrad_path_str)
         .args(["-c", &zebrad_config_path_str])
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("zebrad should be installed as a bundled binary and should start successfully")
+        .expect("zebrad should be installed as a bundled binary and should start successfully");
+
+    let zebrad_stdout = zebrad_child
+        .stdout
+        .take()
+        .expect("should have anonymous pipe");
+
+    // Spawn a task for reading output and sending it to a channel
+    let (output_sender, output_receiver) = tokio::sync::mpsc::channel(100);
+    let _output_reader_task_handle = tauri::async_runtime::spawn_blocking(move || {
+        for line in BufReader::new(zebrad_stdout).lines() {
+            // Ignore send errors for now
+            if let Err(error) =
+                output_sender.blocking_send(line.expect("zebrad logs should be valid UTF-8"))
+            {
+                tracing::warn!(
+                    ?error,
+                    "zebrad output channel is closed before output terminated"
+                );
+            }
+        }
+    });
+
+    (zebrad_child, output_receiver)
+}
+
+pub fn spawn_logs_emitter(mut output_receiver: Receiver<String>, app_handle: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Wait for webview to start
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        // Exit the task once the channel is closed and empty.
+        while let Some(output) = output_receiver.recv().await {
+            if let Err(error) = app_handle.emit("log", output) {
+                tracing::warn!(?error, "log could not be serialized to JSON");
+            }
+        }
+    });
 }

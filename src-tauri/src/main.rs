@@ -3,46 +3,25 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::io::{BufRead, BufReader};
+use child_process::{run_zebrad, spawn_logs_emitter};
 use tauri::{AppHandle, Manager, RunEvent};
 
 mod child_process;
+mod state;
 
-use child_process::run_zebrad_and_read_output;
+use state::AppState;
 
 // TODO: Add a command for updating the config and restarting `zebrad` child process
 #[tauri::command]
 fn save_config() {}
 
 fn main() {
-    // Spawn initial zebrad process
-    let mut zebrad = run_zebrad_and_read_output();
-
-    // Spawn a task for reading output and sending it to a channel
-    let (zebrad_log_sender, mut zebrad_log_receiver) = tokio::sync::mpsc::channel(100);
-    let zebrad_stdout = zebrad.stdout.take().expect("should have anonymous pipe");
-
-    // TODO: Use a blocking tokio/async_runtime thread? The io is blocking (reading the child process output from stdio), so
-    //       it shouldn't use a green thread
-    let _log_emitter_handle = std::thread::spawn(move || {
-        for line in BufReader::new(zebrad_stdout).lines() {
-            // Ignore send errors for now
-            let _ =
-                zebrad_log_sender.blocking_send(line.expect("zebrad logs should be valid UTF-8"));
-        }
-    });
+    let (zebrad_child, zebrad_output_receiver) = run_zebrad();
 
     tauri::Builder::default()
+        .manage(AppState::new(zebrad_child))
         .setup(|app| {
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    if let Some(output) = zebrad_log_receiver.recv().await {
-                        app_handle.emit("log", output.clone()).unwrap();
-                    }
-                }
-            });
-
+            spawn_logs_emitter(zebrad_output_receiver, app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![save_config])
@@ -50,7 +29,7 @@ fn main() {
         .unwrap()
         .run(move |app_handle: &AppHandle, _event| {
             if let RunEvent::Exit = &_event {
-                zebrad.kill().expect("could not kill zebrad process");
+                app_handle.state::<AppState>().kill_zebrad_child();
                 app_handle.exit(0);
             }
         });
