@@ -3,17 +3,35 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use child_process::{run_zebrad, spawn_logs_emitter};
-use tauri::{AppHandle, Manager, RunEvent};
+use std::fs;
+
+use child_process::{run_zebrad, spawn_logs_emitter, zebrad_config_path};
+use tauri::{ipc::InvokeError, AppHandle, Manager, RunEvent};
 
 mod child_process;
 mod state;
 
 use state::AppState;
 
-// TODO: Add a command for updating the config and restarting `zebrad` child process
 #[tauri::command]
-fn save_config() {}
+fn save_config(app_handle: AppHandle, new_config: String) -> Result<String, InvokeError> {
+    app_handle.state::<AppState>().kill_zebrad_child();
+    let zebrad_config_path = zebrad_config_path();
+
+    let old_config_contents = fs::read_to_string(&zebrad_config_path)
+        .map_err(|err| format!("could not read existing config file, error: {err}"))?;
+
+    fs::write(zebrad_config_path, new_config)
+        .map_err(|err| format!("could not write to config file, error: {err}"))?;
+
+    let (zebrad_child, zebrad_output_receiver) = run_zebrad();
+    app_handle
+        .state::<AppState>()
+        .insert_zebrad_child(zebrad_child);
+    spawn_logs_emitter(zebrad_output_receiver, app_handle);
+
+    Ok(old_config_contents)
+}
 
 fn main() {
     let (zebrad_child, zebrad_output_receiver) = run_zebrad();

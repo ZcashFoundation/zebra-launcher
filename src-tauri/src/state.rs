@@ -11,6 +11,17 @@ impl AppState {
         }
     }
 
+    pub fn insert_zebrad_child(&self, new_zebrad_child: Child) {
+        let mut zebrad_child_handle = self
+            .zebrad_child
+            .lock()
+            .expect("could not get lock on zebrad child mutex");
+
+        *zebrad_child_handle = Some(new_zebrad_child);
+    }
+
+    /// Drops and kills the `zebrad_child` child process, if any.
+    ///
     /// Returns true if there was a zebrad child process that's been killed and dropped, or
     /// returns false if there was no zebrad child process in the state.
     pub fn kill_zebrad_child(&self) -> bool {

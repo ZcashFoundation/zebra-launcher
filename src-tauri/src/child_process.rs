@@ -2,6 +2,7 @@
 
 use std::{
     io::{BufRead, BufReader},
+    path::PathBuf,
     process::{Child, Command, Stdio},
     time::Duration,
 };
@@ -19,7 +20,7 @@ pub const ZEBRAD_COMMAND_NAME: &str = "zebrad.exe";
 #[cfg(not(windows))]
 pub const ZEBRAD_COMMAND_NAME: &str = "zebrad";
 
-pub fn run_zebrad() -> (Child, Receiver<String>) {
+pub fn zebrad_config_path() -> PathBuf {
     let exe_path =
         utils::platform::current_exe().expect("could not get path to current executable");
 
@@ -27,8 +28,23 @@ pub fn run_zebrad() -> (Child, Receiver<String>) {
         .parent()
         .expect("could not get path to parent directory of executable");
 
-    let zebrad_config_path = exe_dir_path.join(CONFIG_FILE);
-    let zebrad_path = exe_dir_path.join(ZEBRAD_COMMAND_NAME);
+    exe_dir_path.join(CONFIG_FILE)
+}
+
+pub fn zebrad_bin_path() -> PathBuf {
+    let exe_path =
+        utils::platform::current_exe().expect("could not get path to current executable");
+
+    let exe_dir_path = exe_path
+        .parent()
+        .expect("could not get path to parent directory of executable");
+
+    exe_dir_path.join(ZEBRAD_COMMAND_NAME)
+}
+
+pub fn run_zebrad() -> (Child, Receiver<String>) {
+    let zebrad_config_path = zebrad_config_path();
+    let zebrad_path = zebrad_bin_path();
 
     let zebrad_config_path_str = zebrad_config_path.display().to_string();
     let zebrad_path_str = zebrad_path.display().to_string();
