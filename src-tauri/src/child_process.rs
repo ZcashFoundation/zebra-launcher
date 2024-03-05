@@ -98,7 +98,7 @@ pub fn run_zebrad() -> (Child, Receiver<String>) {
 pub fn spawn_logs_emitter(mut output_receiver: Receiver<String>, app_handle: AppHandle) {
     tauri::async_runtime::spawn(async move {
         // Wait for webview to start
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
 
         // Exit the task once the channel is closed and empty.
         while let Some(output) = output_receiver.recv().await {
