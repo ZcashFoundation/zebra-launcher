@@ -3,15 +3,12 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::{
-    io::{BufRead, BufReader},
-    process::{Command, Stdio},
-};
-
+use std::io::{BufRead, BufReader};
 use tauri::{AppHandle, Manager, RunEvent};
 
-mod process;
-use process::relative_command_path;
+mod child_process;
+
+use child_process::run_zebrad_and_read_output;
 
 // TODO: Add a command for updating the config and restarting `zebrad` child process
 #[tauri::command]
@@ -19,11 +16,7 @@ fn save_config() {}
 
 fn main() {
     // Spawn initial zebrad process
-    let mut zebrad = Command::new(relative_command_path("zebrad").unwrap())
-        .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("zebrad should be installed as a bundled binary and should start successfully");
+    let mut zebrad = run_zebrad_and_read_output();
 
     // Spawn a task for reading output and sending it to a channel
     let (zebrad_log_sender, mut zebrad_log_receiver) = tokio::sync::mpsc::channel(100);
