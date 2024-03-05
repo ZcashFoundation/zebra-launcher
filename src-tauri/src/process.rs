@@ -1,6 +1,6 @@
-// Copyright 2019-2023 Tauri Programme within The Commons Conservancy
+//! Child process management
+
 // Copyright 2024 Zcash Foundation
-// This code is modified from the Tauri code.
 
 use tauri::utils;
 
