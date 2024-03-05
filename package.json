@@ -3,6 +3,11 @@
   "version": "0.0.0",
   "description": "",
   "type": "module",
+  "pnpm": {
+    "overrides": {
+      "rollup": "npm:@rollup/wasm-node"
+    }
+  },
   "scripts": {
     "start": "vite",
     "dev": "vite",
@@ -17,12 +22,12 @@
     "@tauri-apps/api": ">=2.0.0-beta.0",
     "@tauri-apps/plugin-shell": ">=2.0.0-beta.0",
     "solid-js": "^1.7.8",
-    "solid-styled-components": "^0.28.5"
+    "solid-styled-components": "^0.28.5",
+    "vite": "^5.1.5"
   },
   "devDependencies": {
     "@tauri-apps/cli": ">=2.0.0-beta.0",
     "typescript": "^5.0.2",
-    "vite": "^5.0.0",
     "vite-plugin-solid": "^2.8.0"
   }
 }
