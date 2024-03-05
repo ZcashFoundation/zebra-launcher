@@ -33,6 +33,12 @@ fn save_config(app_handle: AppHandle, new_config: String) -> Result<String, Invo
     Ok(old_config_contents)
 }
 
+#[tauri::command]
+fn read_config() -> Result<String, InvokeError> {
+    Ok(fs::read_to_string(zebrad_config_path())
+        .map_err(|err| format!("could not read existing config file, error: {err}"))?)
+}
+
 fn main() {
     let (zebrad_child, zebrad_output_receiver) = run_zebrad();
 
@@ -42,7 +48,7 @@ fn main() {
             spawn_logs_emitter(zebrad_output_receiver, app.handle().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![save_config])
+        .invoke_handler(tauri::generate_handler![save_config, read_config])
         .build(tauri::generate_context!())
         .unwrap()
         .run(move |app_handle: &AppHandle, _event| {
