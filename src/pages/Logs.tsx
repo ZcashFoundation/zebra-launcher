@@ -1,10 +1,5 @@
-import { listen, Event, UnlistenFn } from "@tauri-apps/api/event";
-
-import { createSignal, onCleanup, onMount, For } from "solid-js";
+import { For, Accessor } from "solid-js";
 import { styled } from "solid-styled-components";
-
-import { EXAMPLE_LOGS } from "../tests/example_data";
-import { MAX_NUM_LOG_LINES } from "../constants";
 
 const LogContainer = styled("div")`
   display: flex;
@@ -68,53 +63,7 @@ const Log = ({ children }: { children: string }) => {
   }
 };
 
-const Logs = () => {
-  const is_tauri_app = window.hasOwnProperty("__TAURI_INTERNALS__");
-  const [logs, set_logs] = createSignal<Array<string>>([]);
-
-  const is_at_bottom = () => {
-    const y_bottom = Math.ceil(window.scrollY) + window.innerHeight;
-    return y_bottom >= document.body.scrollHeight;
-  };
-
-  const scroll_to_bottom = () => {
-    window.scroll(0, document.body.scrollHeight);
-  };
-
-  if (is_tauri_app) {
-    let stop_listening: UnlistenFn;
-
-    onMount(async () => {
-      stop_listening = await listen("log", (event: Event<string>) => {
-        const was_at_bottom = is_at_bottom();
-
-        set_logs([...logs().slice(-MAX_NUM_LOG_LINES), event.payload]);
-
-        if (was_at_bottom) {
-          scroll_to_bottom();
-        }
-      });
-    });
-
-    onCleanup(() => stop_listening());
-  } else {
-    let example_log_index = 0;
-    setInterval(() => {
-      const was_at_bottom = is_at_bottom();
-
-      set_logs([
-        ...logs().slice(-MAX_NUM_LOG_LINES),
-        EXAMPLE_LOGS[example_log_index],
-      ]);
-
-      if (was_at_bottom) {
-        scroll_to_bottom();
-      }
-
-      example_log_index = (example_log_index + 1) % EXAMPLE_LOGS.length;
-    }, 100);
-  }
-
+const Logs = ({ logs }: { logs: Accessor<string[]> }) => {
   return (
     <LogContainer>
       <For each={logs()} fallback={<Log>Waiting for zebrad to start...</Log>}>

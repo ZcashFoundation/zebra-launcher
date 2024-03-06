@@ -37,7 +37,7 @@ async fn save_config(app_handle: AppHandle, new_config: String) -> Result<String
     app_handle
         .state::<AppState>()
         .insert_zebrad_child(zebrad_child);
-    spawn_logs_emitter(zebrad_output_receiver, app_handle);
+    spawn_logs_emitter(zebrad_output_receiver, app_handle, false);
 
     Ok(old_config_contents)
 }
@@ -54,10 +54,7 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState::new(zebrad_child))
         .setup(|app| {
-            // Wait for webview to start
-            std::thread::sleep(Duration::from_secs(3));
-
-            spawn_logs_emitter(zebrad_output_receiver, app.handle().clone());
+            spawn_logs_emitter(zebrad_output_receiver, app.handle().clone(), true);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![save_config, read_config])
