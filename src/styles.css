@@ -12,3 +12,24 @@ body {
   color: #f6f6f6;
   background-color: #2f2f2f;
 }
+
+.hljs-comment {
+  color: rgb(86, 174, 86);
+}
+
+.hljs-section,
+.hljs-attr {
+  color: rgb(151, 190, 229);
+}
+
+.hljs-literal {
+  color: rgb(87, 151, 215);
+}
+
+.hljs-string {
+  color: rgb(225, 143, 118);
+}
+
+.hljs-number {
+  color: rgb(183, 241, 171);
+}

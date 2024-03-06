@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { Accessor, createSignal, onMount } from "solid-js";
 import { styled } from "solid-styled-components";
+
+import hljs from "highlight.js";
+
 import { EXAMPLE_CONFIG_CONTENTS } from "../tests/example_data";
 
 const PageContainer = styled("div")`
@@ -14,9 +17,10 @@ const PageContainer = styled("div")`
 const FloatingButtonContainer = styled("div")`
   background: #1c1c1c;
   position: fixed;
-  right: 8px;
+  right: 0;
   margin-top: 6px;
-  padding: 8px;
+  padding: 0 8px 0 0;
+  box-shadow: #1c1c1c 0 0 6px 2px, #1c1c1c 0 0 12px 2px, #1c1c1c 0 0 24px 2px;
 `;
 
 const Button = styled("button")`
@@ -24,13 +28,13 @@ const Button = styled("button")`
   border: solid 2px white;
   color: white;
   padding: 8px 14px;
-  margin: 8px;
+  margin: 12px;
   border-radius: 8px;
   font-size: 14px;
   text-transform: uppercase;
   cursor: pointer;
   letter-spacing: 1px;
-  background: none;
+  background: transparent;
 
   &:hover {
     color: #aaa;
@@ -47,11 +51,14 @@ const ConfigTextArea = styled("textarea")`
 `;
 
 const ConfigDisplay = ({ children }: { children: Accessor<string> }) => {
-  console.log(children().split("\n").length);
+  const highlighted_code = () =>
+    hljs.highlight(children(), {
+      language: "toml",
+    }).value;
 
   return (
     <pre>
-      <code>{children()}</code>
+      <code innerHTML={highlighted_code()} />
     </pre>
   );
 };
