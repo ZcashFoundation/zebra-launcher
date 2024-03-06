@@ -18,8 +18,8 @@ const FloatingButtonContainer = styled("div")`
   background: #1c1c1c;
   position: fixed;
   right: 0;
-  margin-top: 6px;
-  padding: 0 8px 0 0;
+  padding: 6px 8px 0 0;
+  border-radius: 8px;
   box-shadow: #1c1c1c 0 0 6px 2px, #1c1c1c 0 0 12px 2px, #1c1c1c 0 0 24px 2px;
 `;
 
@@ -85,17 +85,17 @@ const Configuration = () => {
       return;
     }
 
+    set_config_contents(new_config);
+    set_edited_config(null);
     set_is_saving(true);
 
     if (is_tauri_app) {
-      await invoke("save_config", { new_config });
+      await invoke("save_config", { newConfig: new_config });
     } else {
       await new Promise((resolve) => setTimeout(resolve, 450));
     }
 
     set_is_saving(false);
-    set_config_contents(new_config);
-    set_edited_config(null);
   };
 
   const discard_changes = () => {
@@ -121,6 +121,14 @@ const Configuration = () => {
             }
           />
           <FloatingButtonContainer>
+            <Button onClick={discard_changes}>Discard Changes</Button>
+            <Button onClick={save_and_apply}>Save & Apply</Button>
+          </FloatingButtonContainer>
+        </>
+      ) : (
+        <>
+          <ConfigDisplay>{config_contents}</ConfigDisplay>
+          <FloatingButtonContainer>
             {is_saving() ? (
               <span
                 style={{
@@ -132,18 +140,8 @@ const Configuration = () => {
                 Saving and restarting Zebra ...
               </span>
             ) : (
-              <>
-                <Button onClick={discard_changes}>Discard Changes</Button>
-                <Button onClick={save_and_apply}>Save & Apply</Button>
-              </>
+              <Button onClick={start_editing}>Edit</Button>
             )}
-          </FloatingButtonContainer>
-        </>
-      ) : (
-        <>
-          <ConfigDisplay>{config_contents}</ConfigDisplay>
-          <FloatingButtonContainer>
-            <Button onClick={start_editing}>Edit</Button>
           </FloatingButtonContainer>
         </>
       )}
