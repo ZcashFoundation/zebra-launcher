@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { createSignal, onMount } from "solid-js";
+import { Accessor, createSignal, onMount } from "solid-js";
 import { styled } from "solid-styled-components";
+import { EXAMPLE_CONFIG_CONTENTS } from "../tests/example_data";
 
 const PageContainer = styled("div")`
   display: flex;
@@ -10,18 +11,33 @@ const PageContainer = styled("div")`
   font-family: sans-serif;
 `;
 
-const ConfigTextArea = styled("textarea")``;
+const ConfigTextArea = styled("textarea")`
+  display: flex;
+  flex-grow: 1;
+`;
 
-const ConfigDisplay = ({ children }: { children: string }) => {
-  return <code>{children}</code>;
+const ConfigDisplay = ({ children }: { children: Accessor<string> }) => {
+  console.log(children().split("\n").length);
+
+  return (
+    <pre>
+      <code>{children()}</code>
+    </pre>
+  );
 };
 
 const Configuration = () => {
+  const is_tauri_app = window.hasOwnProperty("__TAURI_INTERNALS__");
+
   const [config_contents, set_config_contents] = createSignal<string>("");
   const [edited_config, set_edited_config] = createSignal<string | null>(null);
 
   onMount(async () => {
-    set_config_contents(await invoke("read_config"));
+    if (is_tauri_app) {
+      set_config_contents(await invoke("read_config"));
+    } else {
+      set_config_contents(EXAMPLE_CONFIG_CONTENTS);
+    }
   });
 
   const save_and_apply = () => {
@@ -33,7 +49,7 @@ const Configuration = () => {
   };
 
   const start_editing = () => {
-    set_edited_config("");
+    set_edited_config(config_contents());
   };
 
   const is_editable = () => edited_config() !== null;
@@ -49,13 +65,14 @@ const Configuration = () => {
             onChange={({ currentTarget: { value } }) =>
               set_edited_config(value)
             }
-          />{" "}
+          />
+
           <button onClick={discard_changes}>Discard Changes</button>
           <button onClick={save_and_apply}>Save & Apply</button>
         </>
       ) : (
         <>
-          <ConfigDisplay>{config_contents()}</ConfigDisplay>
+          <ConfigDisplay>{config_contents}</ConfigDisplay>
           <button onClick={start_editing}>Edit</button>
         </>
       )}

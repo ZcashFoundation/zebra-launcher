@@ -3,7 +3,7 @@ import { listen, Event, UnlistenFn } from "@tauri-apps/api/event";
 import { createSignal, onCleanup, onMount, For } from "solid-js";
 import { styled } from "solid-styled-components";
 
-import { EXAMPLE_LOGS } from "../tests/example_logs";
+import { EXAMPLE_LOGS } from "../tests/example_data";
 import { MAX_NUM_LOG_LINES } from "../constants";
 
 const LogContainer = styled("div")`
