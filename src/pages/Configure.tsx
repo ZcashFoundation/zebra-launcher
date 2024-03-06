@@ -41,6 +41,9 @@ const Button = styled("button")`
 const ConfigTextArea = styled("textarea")`
   display: flex;
   flex-grow: 1;
+  background: none;
+  color: white;
+  padding: 0 8px;
 `;
 
 const ConfigDisplay = ({ children }: { children: Accessor<string> }) => {
