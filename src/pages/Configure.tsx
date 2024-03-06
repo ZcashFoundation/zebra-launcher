@@ -11,6 +11,33 @@ const PageContainer = styled("div")`
   font-family: sans-serif;
 `;
 
+const FloatingButtonContainer = styled("div")`
+  background: #1c1c1c;
+  position: fixed;
+  right: 8px;
+  margin-top: 6px;
+  padding: 8px;
+`;
+
+const Button = styled("button")`
+  outline: none;
+  border: solid 2px white;
+  color: white;
+  padding: 8px 14px;
+  margin: 8px;
+  border-radius: 8px;
+  font-size: 14px;
+  text-transform: uppercase;
+  cursor: pointer;
+  letter-spacing: 1px;
+  background: none;
+
+  &:hover {
+    color: #aaa;
+    border-color: #aaa;
+  }
+`;
+
 const ConfigTextArea = styled("textarea")`
   display: flex;
   flex-grow: 1;
@@ -66,14 +93,17 @@ const Configuration = () => {
               set_edited_config(value)
             }
           />
-
-          <button onClick={discard_changes}>Discard Changes</button>
-          <button onClick={save_and_apply}>Save & Apply</button>
+          <FloatingButtonContainer>
+            <Button onClick={discard_changes}>Discard Changes</Button>
+            <Button onClick={save_and_apply}>Save & Apply</Button>
+          </FloatingButtonContainer>
         </>
       ) : (
         <>
           <ConfigDisplay>{config_contents}</ConfigDisplay>
-          <button onClick={start_editing}>Edit</button>
+          <FloatingButtonContainer>
+            <Button onClick={start_editing}>Edit</Button>
+          </FloatingButtonContainer>
         </>
       )}
     </PageContainer>
