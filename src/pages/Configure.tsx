@@ -48,6 +48,7 @@ const ConfigTextArea = styled("textarea")`
   background: none;
   color: white;
   padding: 0 8px;
+  resize: none;
 `;
 
 const ConfigDisplay = ({ children }: { children: Accessor<string> }) => {
