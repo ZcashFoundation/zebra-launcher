@@ -106,8 +106,6 @@ jobs:
             --max-instances=${{ inputs.max_instances }}
             --cpu=${{ inputs.cpu }}
             --memory=${{ inputs.memory }}
-            --network=${{ vars.GCP_NETWORK }}
-            --subnet=${{ vars.GCP_SUBNETWORK }}
 
       - name: Allow unauthenticated calls to the service
         if: ${{ inputs.environment != 'prod' }}
