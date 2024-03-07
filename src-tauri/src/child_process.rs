@@ -9,7 +9,7 @@ use std::{
 
 use tauri::{utils, AppHandle, Manager};
 
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::{mpsc::Receiver, oneshot};
 
 /// Zebrad Configuration Filename
 pub const CONFIG_FILE: &str = "zebrad.toml";
@@ -42,7 +42,7 @@ pub fn zebrad_bin_path() -> PathBuf {
     exe_dir_path.join(ZEBRAD_COMMAND_NAME)
 }
 
-pub fn run_zebrad() -> (Child, Receiver<String>) {
+pub fn run_zebrad() -> (Child, Receiver<String>, oneshot::Sender<()>) {
     let zebrad_config_path = zebrad_config_path();
     let zebrad_path = zebrad_bin_path();
 
@@ -77,22 +77,27 @@ pub fn run_zebrad() -> (Child, Receiver<String>) {
         .expect("should have anonymous pipe");
 
     // Spawn a task for reading output and sending it to a channel
+    let (shutdown_sender, mut shutdown_receiver) = oneshot::channel();
     let (output_sender, output_receiver) = tokio::sync::mpsc::channel(100);
     let _output_reader_task_handle = tauri::async_runtime::spawn_blocking(move || {
         for line in BufReader::new(zebrad_stdout).lines() {
+            let line = line.expect("zebrad logs should be valid UTF-8");
+
             // Ignore send errors for now
-            if let Err(error) =
-                output_sender.blocking_send(line.expect("zebrad logs should be valid UTF-8"))
-            {
+            if let Err(error) = output_sender.blocking_send(line) {
                 tracing::warn!(
                     ?error,
                     "zebrad output channel is closed before output terminated"
                 );
             }
+
+            if shutdown_receiver.try_recv().is_ok() {
+                break;
+            }
         }
     });
 
-    (zebrad_child, output_receiver)
+    (zebrad_child, output_receiver, shutdown_sender)
 }
 
 pub fn spawn_logs_emitter(

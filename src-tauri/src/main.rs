@@ -11,15 +11,15 @@ use tauri::{ipc::InvokeError, AppHandle, Manager, RunEvent};
 mod child_process;
 mod state;
 
-use state::AppState;
+use state::ZebradChild;
 
 #[tauri::command]
 async fn save_config(app_handle: AppHandle, new_config: String) -> Result<String, InvokeError> {
-    tracing::info!("dropping and killing zebrad child process");
-    app_handle.state::<AppState>().kill_zebrad_child();
+    println!("dropping and killing zebrad child process");
+    app_handle.state::<ZebradChild>().kill();
     let zebrad_config_path = zebrad_config_path();
 
-    tracing::info!("reading old config");
+    println!("reading old config");
     let old_config_contents = fs::read_to_string(&zebrad_config_path)
         .map_err(|err| format!("could not read existing config file, error: {err}"))?;
 
@@ -27,16 +27,35 @@ async fn save_config(app_handle: AppHandle, new_config: String) -> Result<String
     fs::write(zebrad_config_path, new_config)
         .map_err(|err| format!("could not write to config file, error: {err}"))?;
 
-    tracing::info!("waiting for old zebrad child process to shutdown");
+    println!("waiting for old zebrad child process to shutdown");
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    tracing::info!("starting new zebrad child process");
-    let (zebrad_child, zebrad_output_receiver) = run_zebrad();
+    println!("starting new zebrad child process");
 
-    tracing::info!("started new zebrad child process, starting output reader task");
+    loop {
+        // Check for an existing zebrad process
+        if app_handle.state::<ZebradChild>().is_running() {
+            println!("new zebrad child is running after old zebrad child was killed, was a new config saved before zebrad restarted?");
+            app_handle.state::<ZebradChild>().kill();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        } else {
+            break;
+        }
+    }
+
+    let (zebrad_child, zebrad_output_receiver, read_task_shutdown_sender) = run_zebrad();
+
+    println!("started new zebrad child process, starting output reader task");
+
     app_handle
-        .state::<AppState>()
+        .state::<ZebradChild>()
         .insert_zebrad_child(zebrad_child);
+
+    app_handle
+        .state::<ZebradChild>()
+        .insert_log_reader_shutdown_sender(read_task_shutdown_sender);
+
     spawn_logs_emitter(zebrad_output_receiver, app_handle, false);
 
     Ok(old_config_contents)
@@ -49,10 +68,10 @@ fn read_config() -> Result<String, InvokeError> {
 }
 
 fn main() {
-    let (zebrad_child, zebrad_output_receiver) = run_zebrad();
+    let (zebrad_child, zebrad_output_receiver, read_task_shutdown_sender) = run_zebrad();
 
     tauri::Builder::default()
-        .manage(AppState::new(zebrad_child))
+        .manage(ZebradChild::new(zebrad_child, read_task_shutdown_sender))
         .setup(|app| {
             spawn_logs_emitter(zebrad_output_receiver, app.handle().clone(), true);
             Ok(())
@@ -62,7 +81,7 @@ fn main() {
         .unwrap()
         .run(move |app_handle: &AppHandle, _event| {
             if let RunEvent::Exit = &_event {
-                app_handle.state::<AppState>().kill_zebrad_child();
+                app_handle.state::<ZebradChild>().kill();
                 app_handle.exit(0);
             }
         });
