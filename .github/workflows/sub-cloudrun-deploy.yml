@@ -68,6 +68,9 @@ jobs:
     environment:
       name: ${{ inputs.environment }}
       url: ${{ steps.deploy.outputs.url }}
+    permissions:
+      contents: 'read'
+      id-token: 'write'
     steps:
       - name: Inject slug/short variables
         uses: rlespinasse/github-slug-action@v4.4.1
