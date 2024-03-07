@@ -30,6 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image_digest: ${{ steps.docker_build.outputs.digest }}
+    permissions:
+      contents: 'read'
+      id-token: 'write'
     steps:
       - uses: actions/checkout@v4.1.1
         with:
