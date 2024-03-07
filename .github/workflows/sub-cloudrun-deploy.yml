@@ -100,8 +100,6 @@ jobs:
             --max-instances=${{ inputs.max_instances }}
             --cpu=${{ inputs.cpu }}
             --memory=${{ inputs.memory }}
-            --network=default
-            --subnet=default
 
       - name: Allow unauthenticated calls to the service
         run: |
