@@ -14,8 +14,19 @@ use tokio::sync::{mpsc::Receiver, oneshot};
 /// Zebrad Configuration Filename
 pub const CONFIG_FILE: &str = "zebrad.toml";
 
+/// > The process is a console application that is being run without a console window.
+/// > Therefore, the console handle for the application is not set.
+/// > This flag is ignored if the application is not a console application, or
+/// > if it is used with either CREATE_NEW_CONSOLE or DETACHED_PROCESS.
+/// See <https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags>
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 #[cfg(windows)]
 pub const ZEBRAD_COMMAND_NAME: &str = "zebrad.exe";
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[cfg(not(windows))]
 pub const ZEBRAD_COMMAND_NAME: &str = "zebrad";
@@ -64,10 +75,17 @@ pub fn run_zebrad() -> (Child, Receiver<String>, oneshot::Sender<()>) {
         );
     }
 
-    let mut zebrad_child = Command::new(zebrad_path_str)
+    let mut zebrad_child = Command::new(zebrad_path_str);
+
+    zebrad_child
         .args(["-c", &zebrad_config_path_str])
         .stderr(Stdio::piped())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::piped());
+
+    #[cfg(windows)]
+    zebrad_child.creation_flags(CREATE_NO_WINDOW);
+
+    let mut zebrad_child = zebrad_child
         .spawn()
         .expect("zebrad should be installed as a bundled binary and should start successfully");
 
