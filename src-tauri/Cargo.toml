@@ -1,7 +1,7 @@
 [package]
 name = "zebra-app"
 version = "0.0.0-alpha.0"
-description = "A Tauri App"
+description = "Zebra App"
 authors = ["you"]
 edition = "2021"
 

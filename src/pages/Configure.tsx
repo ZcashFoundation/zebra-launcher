@@ -21,21 +21,23 @@ const FloatingButtonContainer = styled("div")`
   padding: 6px 8px 0 0;
   border-radius: 8px;
   box-shadow: #1c1c1c 0 0 6px 2px, #1c1c1c 0 0 12px 2px, #1c1c1c 0 0 24px 2px;
+
+  > button {
+    outline: none;
+    border: solid 2px white;
+    color: white;
+    padding: 8px 14px;
+    margin: 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    text-transform: uppercase;
+    cursor: pointer;
+    letter-spacing: 1px;
+    background: transparent;
+  }
 `;
 
 const Button = styled("button")`
-  outline: none;
-  border: solid 2px white;
-  color: white;
-  padding: 8px 14px;
-  margin: 12px;
-  border-radius: 8px;
-  font-size: 14px;
-  text-transform: uppercase;
-  cursor: pointer;
-  letter-spacing: 1px;
-  background: transparent;
-
   &:hover {
     color: #aaa;
     border-color: #aaa;
@@ -114,38 +116,33 @@ const Configuration = () => {
       <h1>Configuration</h1>
 
       {is_editable() ? (
-        <>
-          <ConfigTextArea
-            value={edited_config() || ""}
-            onChange={({ currentTarget: { value } }) =>
-              set_edited_config(value)
-            }
-          />
-          <FloatingButtonContainer>
+        <ConfigTextArea
+          value={edited_config() || ""}
+          onChange={({ currentTarget: { value } }) => set_edited_config(value)}
+        />
+      ) : (
+        <ConfigDisplay>{config_contents}</ConfigDisplay>
+      )}
+      <FloatingButtonContainer>
+        {is_editable() ? (
+          <>
             <Button onClick={discard_changes}>Discard Changes</Button>
             <Button onClick={save_and_apply}>Save & Apply</Button>
-          </FloatingButtonContainer>
-        </>
-      ) : (
-        <>
-          <ConfigDisplay>{config_contents}</ConfigDisplay>
-          <FloatingButtonContainer>
-            {is_saving() ? (
-              <span
-                style={{
-                  padding: "16px",
-                  "margin-top": "16px",
-                  display: "inline-block",
-                }}
-              >
-                Saving and restarting Zebra ...
-              </span>
-            ) : (
-              <Button onClick={start_editing}>Edit</Button>
-            )}
-          </FloatingButtonContainer>
-        </>
-      )}
+          </>
+        ) : is_saving() ? (
+          <span
+            style={{
+              padding: "16px",
+              "margin-top": "16px",
+              display: "inline-block",
+            }}
+          >
+            Saving and restarting Zebra ...
+          </span>
+        ) : (
+          <Button onClick={start_editing}>Edit</Button>
+        )}
+      </FloatingButtonContainer>
     </PageContainer>
   );
 };
