@@ -9,8 +9,8 @@ overrides:
 
 dependencies:
   '@solidjs/router':
-    specifier: ^0.12.4
-    version: 0.12.5(solid-js@1.8.15)
+    specifier: ^0.13.0
+    version: 0.13.0(solid-js@1.8.15)
   '@tauri-apps/api':
     specifier: '>=2.0.0-beta.0'
     version: 2.0.0-beta.3
@@ -511,8 +511,8 @@ packages:
       fsevents: 2.3.3
     dev: false
 
-  /@solidjs/router@0.12.5(solid-js@1.8.15):
-    resolution: {integrity: sha512-UK9GnWPS1RmBf7w35DpWwqNgpVbKhon5eXOl7Xk+edPMTzzHkwPW2RytQKQ0BMRQOHzyM/WRetWLbIAubKdlog==}
+  /@solidjs/router@0.13.0(solid-js@1.8.15):
+    resolution: {integrity: sha512-YHLbFv9J53+iG4yVrh0vVdYiyXPTk892UyZ1jiMPsUXn2dYkX4552N+8SjvlKWWsmNmYxaoefM6jZn1YtVIUUg==}
     peerDependencies:
       solid-js: ^1.8.6
     dependencies:
