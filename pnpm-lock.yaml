@@ -12,8 +12,8 @@ dependencies:
     specifier: ^0.12.4
     version: 0.12.5(solid-js@1.8.15)
   '@tauri-apps/api':
-    specifier: '>=2.0.0-beta.0'
-    version: 2.0.0-beta.3
+    specifier: '>=2.0.0-beta.6'
+    version: 2.0.0-beta.6
   '@tauri-apps/plugin-shell':
     specifier: '>=2.0.0-beta.0'
     version: 2.0.0-beta.1
@@ -501,8 +501,8 @@ packages:
       '@jridgewell/sourcemap-codec': 1.4.15
     dev: false
 
-  /@rollup/wasm-node@4.12.1:
-    resolution: {integrity: sha512-5j3BVQEccCzCb8fkl++IbDgAsnlsKBPz049C4C//j5s3pFKxKGlybl63QApdJKl1fNLr7HIwQEJcBImQtA3ZHg==}
+  /@rollup/wasm-node@4.13.2:
+    resolution: {integrity: sha512-4JXYomW63fBnXseG2mFkZwaNMDK0PkNamj9WD6H96FqEEl9ov3VjG3MK9UcOAj7Ap9o2weqSSCVng+QsxBeKfw==}
     engines: {node: '>=18.0.0', npm: '>=8.0.0'}
     hasBin: true
     dependencies:
@@ -524,8 +524,8 @@ packages:
     engines: {node: '>= 18', npm: '>= 6.6.0', yarn: '>= 1.19.1'}
     dev: false
 
-  /@tauri-apps/api@2.0.0-beta.3:
-    resolution: {integrity: sha512-gDSJzKpBs6efXw2ZWqjl9QVNImY5GR5qygXqB7JK4y7prcQInxnTj2ARFR0vD4wuzkrUHGrlIKraiJJPHWJ9vg==}
+  /@tauri-apps/api@2.0.0-beta.6:
+    resolution: {integrity: sha512-ay3kAXYQoqC3rX4Vr3y6uGwrBhRPM7UQqZ9wr1VYzN6lkcMIcu7+UBvytmcfXDlVctqFoMQJafn6+dK/Oqh8+Q==}
     engines: {node: '>= 18', npm: '>= 6.6.0', yarn: '>= 1.19.1'}
     dev: false
 
@@ -1042,7 +1042,7 @@ packages:
     dependencies:
       esbuild: 0.19.12
       postcss: 8.4.35
-      rollup: /@rollup/wasm-node@4.12.1
+      rollup: /@rollup/wasm-node@4.13.2
     optionalDependencies:
       fsevents: 2.3.3
     dev: false
