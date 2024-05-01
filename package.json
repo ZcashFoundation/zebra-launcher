@@ -28,7 +28,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": ">=2.0.0-beta.0",
-    "typescript": "^5.0.2"
+    "typescript": "^5.4.5"
   },
   "packageManager": "pnpm@8.15.4+sha256.cea6d0bdf2de3a0549582da3983c70c92ffc577ff4410cbf190817ddc35137c2"
 }

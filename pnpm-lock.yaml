@@ -38,8 +38,8 @@ devDependencies:
     specifier: '>=2.0.0-beta.0'
     version: 2.0.0-beta.6
   typescript:
-    specifier: ^5.0.2
-    version: 5.3.3
+    specifier: ^5.4.5
+    version: 5.4.5
 
 packages:
 
@@ -501,8 +501,8 @@ packages:
       '@jridgewell/sourcemap-codec': 1.4.15
     dev: false
 
-  /@rollup/wasm-node@4.12.1:
-    resolution: {integrity: sha512-5j3BVQEccCzCb8fkl++IbDgAsnlsKBPz049C4C//j5s3pFKxKGlybl63QApdJKl1fNLr7HIwQEJcBImQtA3ZHg==}
+  /@rollup/wasm-node@4.17.2:
+    resolution: {integrity: sha512-4F6C3XaUn02XY/GJMQTXncWrLyCkRHdRZe4OyWuQUprWKmU2u+esISOtCYdr3Bp9AqCIo/X3So2Ik7N9dNDwow==}
     engines: {node: '>=18.0.0', npm: '>=8.0.0'}
     hasBin: true
     dependencies:
@@ -969,8 +969,8 @@ packages:
     engines: {node: '>=4'}
     dev: false
 
-  /typescript@5.3.3:
-    resolution: {integrity: sha512-pXWcraxM0uxAS+tN0AG/BF2TyqmHO014Z070UsJ+pFvYuRSq8KH8DmWpnbXe0pEPDHXZV3FcAbJkijJ5oNEnWw==}
+  /typescript@5.4.5:
+    resolution: {integrity: sha512-vcI4UpRgg81oIRUFwR0WSIHKt11nJ7SAVlYNIu+QpqeyXP+gpQJy/Z4+F0aGxSE4MqwjyXvW/TzgkLAx2AGHwQ==}
     engines: {node: '>=14.17'}
     hasBin: true
     dev: true
@@ -1042,7 +1042,7 @@ packages:
     dependencies:
       esbuild: 0.19.12
       postcss: 8.4.35
-      rollup: /@rollup/wasm-node@4.12.1
+      rollup: /@rollup/wasm-node@4.17.2
     optionalDependencies:
       fsevents: 2.3.3
     dev: false
