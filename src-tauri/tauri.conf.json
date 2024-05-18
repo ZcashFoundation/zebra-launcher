@@ -30,6 +30,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/zebrad"]
+    "externalBin": [
+      "binaries/zebrad-v1.7.0"
+    ]
   }
 }
