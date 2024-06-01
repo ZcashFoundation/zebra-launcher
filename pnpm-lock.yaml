@@ -15,8 +15,8 @@ dependencies:
     specifier: '>=2.0.0-beta.0'
     version: 2.0.0-beta.3
   '@tauri-apps/plugin-shell':
-    specifier: '>=2.0.0-beta.0'
-    version: 2.0.0-beta.1
+    specifier: '>=2.0.0-beta.6'
+    version: 2.0.0-beta.6
   highlight.js:
     specifier: ^11.9.0
     version: 11.9.0
@@ -501,8 +501,8 @@ packages:
       '@jridgewell/sourcemap-codec': 1.4.15
     dev: false
 
-  /@rollup/wasm-node@4.12.1:
-    resolution: {integrity: sha512-5j3BVQEccCzCb8fkl++IbDgAsnlsKBPz049C4C//j5s3pFKxKGlybl63QApdJKl1fNLr7HIwQEJcBImQtA3ZHg==}
+  /@rollup/wasm-node@4.18.0:
+    resolution: {integrity: sha512-DkLoyblRMhJw9ZogW9zCpyH0CNJ+7GaM7Ty+Vl+G21z/Gr7uKBaXqcJqwWUiNYVxTOgxZrxhDG6pmOFxOuswvw==}
     engines: {node: '>=18.0.0', npm: '>=8.0.0'}
     hasBin: true
     dependencies:
@@ -519,8 +519,8 @@ packages:
       solid-js: 1.8.15
     dev: false
 
-  /@tauri-apps/api@2.0.0-beta.2:
-    resolution: {integrity: sha512-4r1r6kgttzIWxJ3HxkZQH+b7EiUtKhdUCPbi0KSalD+2T3j6klw+v8VyxhKwEdjM/eo60NE+J33v1E/Urq8puw==}
+  /@tauri-apps/api@2.0.0-beta.13:
+    resolution: {integrity: sha512-Np1opKANzRMF3lgJ9gDquBCB9SxlE2lRmNpVx1+L6RyzAmigkuh0ZulT5jMnDA3JLsuSDU135r/s4t/Pmx4atg==}
     engines: {node: '>= 18', npm: '>= 6.6.0', yarn: '>= 1.19.1'}
     dev: false
 
@@ -636,10 +636,10 @@ packages:
       '@tauri-apps/cli-win32-x64-msvc': 2.0.0-beta.6
     dev: true
 
-  /@tauri-apps/plugin-shell@2.0.0-beta.1:
-    resolution: {integrity: sha512-yMf9CMHCRkGnx0pv420MptEeUdk+bVrXyM5zwFisy75GBhXgvEEtSjAkubTsC0jkzLfn4EInizaW2GER9ub7cQ==}
+  /@tauri-apps/plugin-shell@2.0.0-beta.6:
+    resolution: {integrity: sha512-g3nM9cQQGl7Iv4MvyFuco/aPTiwOI/MixcoKso3VQIg5Aqd64NqR0r+GfsB0qx52txItqzSXwmeaj1eZjO9Q6Q==}
     dependencies:
-      '@tauri-apps/api': 2.0.0-beta.2
+      '@tauri-apps/api': 2.0.0-beta.13
     dev: false
 
   /@types/babel__core@7.20.5:
@@ -1042,7 +1042,7 @@ packages:
     dependencies:
       esbuild: 0.19.12
       postcss: 8.4.35
-      rollup: /@rollup/wasm-node@4.12.1
+      rollup: /@rollup/wasm-node@4.18.0
     optionalDependencies:
       fsevents: 2.3.3
     dev: false
