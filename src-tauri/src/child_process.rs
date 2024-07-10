@@ -23,13 +23,7 @@ pub const CONFIG_FILE: &str = "zebrad.toml";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[cfg(windows)]
-pub const ZEBRAD_COMMAND_NAME: &str = "zebrad.exe";
-
-#[cfg(windows)]
 use std::os::windows::process::CommandExt;
-
-#[cfg(not(windows))]
-pub const ZEBRAD_COMMAND_NAME: &str = "zebrad";
 
 pub fn zebrad_config_path() -> PathBuf {
     let exe_path =
@@ -43,14 +37,7 @@ pub fn zebrad_config_path() -> PathBuf {
 }
 
 pub fn zebrad_bin_path() -> PathBuf {
-    let exe_path =
-        utils::platform::current_exe().expect("could not get path to current executable");
-
-    let exe_dir_path = exe_path
-        .parent()
-        .expect("could not get path to parent directory of executable");
-
-    exe_dir_path.join(ZEBRAD_COMMAND_NAME)
+    env!("CARGO_BIN_FILE_ZEBRAD_zebrad").into()
 }
 
 pub fn run_zebrad() -> (Child, Receiver<String>, oneshot::Sender<()>) {
