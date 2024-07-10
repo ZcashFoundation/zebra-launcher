@@ -9,6 +9,7 @@ edition = "2021"
 
 [build-dependencies]
 tauri-build = { version = "2.0.0-beta", features = [] }
+zebrad = { version = "1.8.0", artifact = "bin:zebrad" }
 
 [dependencies]
 tauri = { version = "2.0.0-beta.6", features = ["devtools"] }
@@ -18,8 +19,10 @@ serde_json = "1"
 tokio = { version = "1.36.0", features = ["full", "tracing", "test-util"] }
 tracing = "0.1.40"
 
-zebrad = { version = "1.8.0", artifact = "bin:zebrad" }
-
 [features]
 # This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+lto = "thin"
