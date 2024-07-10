@@ -18,6 +18,8 @@ serde_json = "1"
 tokio = { version = "1.36.0", features = ["full", "tracing", "test-util"] }
 tracing = "0.1.40"
 
+zebrad = { version = "1.8.0", artifact = "bin:zebrad" }
+
 [features]
 # This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"]
