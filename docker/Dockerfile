@@ -45,7 +45,7 @@ ARG PORT=8080
 WORKDIR ${WORK_DIR}
 
 # use a custom template for nginx
-COPY docker/nginx.conf /etc/nginx/conf.d/default.conf.template
+COPY --chown=nginx:nginx docker/nginx.conf /etc/nginx/conf.d/default.conf.template
 COPY --from=deps --chown=nginx:nginx ${WORK_DIR}/node_modules ./node_modules
 COPY --from=build --chown=nginx:nginx ${WORK_DIR}/dist /usr/share/nginx/html
 
