@@ -11,6 +11,8 @@ on:
       - pnpm-lock.yaml
       - .github/workflows/ci-lint-codebase.yml
 
+permissions: read-all
+
 jobs:
   linter:
     runs-on: ubuntu-latest

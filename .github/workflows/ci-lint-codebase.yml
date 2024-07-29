@@ -28,19 +28,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+permissions: read-all
+
 jobs:
   linter:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code Repository
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v4.1.7
         with:
           # Full git history is needed to get a proper
           # list of changed files within `super-linter`
           fetch-depth: 0
 
       - name: Lint Code Base
-        uses: super-linter/super-linter/slim@v5.2.1
+        uses: super-linter/super-linter/slim@v6.7.0
         env:
           LOG_LEVEL: ERROR
           VALIDATE_ALL_CODEBASE: false
@@ -51,7 +53,5 @@ jobs:
           VALIDATE_MARKDOWN: false
           VALIDATE_DOCKERFILE_HADOLINT: false
           LINTER_RULES_PATH: /
-          JAVASCRIPT_DEFAULT_STYLE: prettier
-          TYPESCRIPT_DEFAULT_STYLE: prettier
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

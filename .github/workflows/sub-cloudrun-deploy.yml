@@ -106,8 +106,10 @@ jobs:
             --max-instances=${{ inputs.max_instances }}
             --cpu=${{ inputs.cpu }}
             --memory=${{ inputs.memory }}
-            --network=projects/zfnd-dev-net-spoke-0/global/networks/dev-spoke-0
-            --subnet=projects/zfnd-dev-net-spoke-0/regions/us-east1/subnetworks/dev-default-ue1
+            --port=53
+            --service-account=${{ vars.GCP_CLOUDRUN_SA }}
+            --network=${{ vars.GCP_NETWORK }}
+            --subnet=${{ vars.GCP_SUBNETWORK }}
 
       - name: Allow unauthenticated calls to the service
         if: ${{ inputs.environment != 'prod' }}
