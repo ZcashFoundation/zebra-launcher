@@ -13,8 +13,8 @@ updates:
         patterns:
           - "@tauri*"
         update-types:
-        - "minor"
-        - "patch"
+          - "minor"
+          - "patch"
       dependencies:
         dependency-type: "production"
         exclude-patterns:
