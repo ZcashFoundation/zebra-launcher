@@ -107,7 +107,6 @@ jobs:
             --cpu=${{ inputs.cpu }}
             --memory=${{ inputs.memory }}
             --port=53
-            --service-account=${{ vars.GCP_CLOUDRUN_SA }}
             --network=${{ vars.GCP_NETWORK }}
             --subnet=${{ vars.GCP_SUBNETWORK }}
 
