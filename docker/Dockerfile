@@ -56,7 +56,4 @@ ENV HOST 0.0.0.0
 
 HEALTHCHECK NONE
 
-# TODO: by default Nginx run as root, otherwise we would need an alternative image
-USER root
-
 CMD sh -c "envsubst '\$PORT' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"

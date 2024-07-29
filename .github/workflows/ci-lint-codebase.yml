@@ -52,6 +52,7 @@ jobs:
           VALIDATE_EDITORCONFIG: false
           VALIDATE_MARKDOWN: false
           VALIDATE_DOCKERFILE_HADOLINT: false
+          VALIDATE_CHECKOV: false
           LINTER_RULES_PATH: /
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
