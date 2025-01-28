@@ -17,14 +17,14 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@solidjs/router": "^0.12.4",
+    "@solidjs/router": "^0.14.7",
     "@tauri-apps/api": ">=2.0.0-beta.0",
     "@tauri-apps/plugin-shell": ">=2.0.0-beta.0",
-    "highlight.js": "^11.9.0",
-    "solid-js": "^1.7.8",
+    "highlight.js": "^11.10.0",
+    "solid-js": "^1.9.1",
     "solid-styled-components": "^0.28.5",
-    "vite": "^5.1.5",
-    "vite-plugin-solid": "^2.10.1"
+    "vite": "^5.4.8",
+    "vite-plugin-solid": "^2.10.2"
   },
   "devDependencies": {
     "@tauri-apps/cli": ">=2.0.0-beta.0",
