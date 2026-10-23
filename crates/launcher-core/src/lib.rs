@@ -10,3 +10,4 @@ pub mod paths;
 pub mod pidfile;
 pub mod policy;
 pub mod process;
+pub mod supervisor;

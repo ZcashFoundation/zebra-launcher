@@ -150,6 +150,8 @@ pub enum ExitClass {
     DbLocked,
     /// A listener address is already in use.
     PortInUse,
+    /// The process could not be started at all, for example because the binary is missing.
+    SpawnFailed,
     /// An unexpected exit: a non-zero code, a signal, or a panic with no known cause.
     Crash,
 }
@@ -163,6 +165,7 @@ impl ExitClass {
                 | ExitClass::EosHalt
                 | ExitClass::DbLocked
                 | ExitClass::PortInUse
+                | ExitClass::SpawnFailed
         )
     }
 }
