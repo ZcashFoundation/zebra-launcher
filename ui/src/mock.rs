@@ -255,6 +255,9 @@ struct Mock {
     legacy: ArcRwSignal<Option<LegacyInstall>>,
     /// The size of the chain state, freed by `delete_node_data`.
     state_bytes: Arc<AtomicU64>,
+    /// `?running`: zebrad runs from the start, even with `?firstrun`, and `start_zebrad` fails
+    /// while it runs.
+    refuse_start_while_running: bool,
 }
 
 thread_local! {
@@ -293,6 +296,7 @@ impl Mock {
             } else {
                 SYNCED_STATE_BYTES
             })),
+            refuse_start_while_running: url_flag("running"),
         };
         // `?stale` in the page URL simulates a zebrad left behind by an earlier launcher run.
         if url_flag("stale") {
@@ -302,7 +306,7 @@ impl Mock {
                     binary: "/opt/zebra-launcher/zebrad".into(),
                 })
             });
-        } else if !first_run {
+        } else if !first_run || mock.refuse_start_while_running {
             mock.start();
         }
         let ticker = mock.clone();
@@ -470,6 +474,9 @@ pub async fn start_zebrad() -> Result<(), String> {
             "a zebrad from an earlier launcher run is still running (pid {})",
             stale.pid
         ));
+    }
+    if mock.refuse_start_while_running && matches!(mock.phase(), Phase::Starting | Phase::Running) {
+        return Err("(mock) another start is in progress".into());
     }
     if matches!(
         mock.phase(),

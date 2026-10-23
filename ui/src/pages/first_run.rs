@@ -5,7 +5,7 @@
 //! Steps: welcome, data location and network, alpha.4 leftovers (only when some were found),
 //! update mode, and notes (firewall prompt, logs).
 
-use launcher_types::{FirstRunInfo, ImportOutcome, Network, Settings, UpdateMode};
+use launcher_types::{FirstRunInfo, ImportOutcome, Network, Phase, Settings, UpdateMode};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -66,6 +66,13 @@ fn low_space_warning(free_bytes: Option<u64>) -> Option<impl IntoView> {
             )}
         </div>
     })
+}
+
+/// True when the backend reports zebrad starting or running.
+async fn already_running() -> bool {
+    api::get_status()
+        .await
+        .is_ok_and(|status| matches!(status.phase, Phase::Starting | Phase::Running))
 }
 
 /// Saves a change to the current settings and publishes what was stored.
@@ -570,6 +577,9 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                     });
                     match api::start_zebrad().await {
                         Ok(()) => open.set(false),
+                        // Nothing starts zebrad before the first run is done, but if it runs
+                        // anyway, the start failing is not a problem: the node is up.
+                        Err(_) if already_running().await => open.set(false),
                         Err(failure) => start_error.set(Some(failure.to_string())),
                     }
                 }
