@@ -29,6 +29,14 @@ tauri = { version = "2.12", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
 tauri-plugin-single-instance = "2"
+# >= 2.12 for CVE-2026-95625; 2.14 for `requireSignedVersion` and `Update::verify`.
+# No `zip` feature: it only unpacks `.nsis.zip` and `.AppImage.tar.gz` updates,
+# and we ship the raw NSIS installer and AppImage (macOS `.app.tar.gz` support
+# is unconditional). It also pulls `zip` 4 (RUSTSEC-2026-0367/0368/0369).
+tauri-plugin-updater = { version = "2.14", default-features = false, features = [
+    "rustls-tls",
+    "system-proxy",
+] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "macros"] }
 tracing = { workspace = true }

@@ -61,6 +61,20 @@
     },
     "macOS": {
       "minimumSystemVersion": "12.0"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/ZcashFoundation/zebra-launcher/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_WITH_MINISIGN_PUBLIC_KEY",
+      "requireSignedVersion": true,
+      "allowDowngrades": false,
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

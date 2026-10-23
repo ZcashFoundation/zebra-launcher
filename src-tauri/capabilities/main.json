@@ -20,6 +20,11 @@
     "allow-get-settings",
     "allow-set-settings",
     "allow-get-node-stats",
-    "allow-open-path"
+    "allow-open-path",
+    "allow-get-update-state",
+    "allow-get-update-info",
+    "allow-check-for-update",
+    "allow-install-update",
+    "allow-cancel-update"
   ]
 }

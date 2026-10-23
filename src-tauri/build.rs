@@ -20,6 +20,11 @@ const COMMANDS: &[&str] = &[
     "set_settings",
     "get_node_stats",
     "open_path",
+    "get_update_state",
+    "get_update_info",
+    "check_for_update",
+    "install_update",
+    "cancel_update",
 ];
 
 fn main() {

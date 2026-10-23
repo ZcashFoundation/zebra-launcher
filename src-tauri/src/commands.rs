@@ -287,3 +287,48 @@ pub fn open_path<R: Runtime>(
     };
     result.map_err(message)
 }
+
+/// What the launcher's updater is doing.
+#[tauri::command]
+pub fn get_update_state(
+    updater: State<'_, launcher_core::updates::UpdaterHandle>,
+) -> launcher_types::UpdateState {
+    updater.state()
+}
+
+/// Everything the UI shows about launcher updates: the state, the mode, the
+/// stale-check warning, whether this install can update itself, and a
+/// post-update health failure.
+#[tauri::command]
+pub fn get_update_info(
+    updater: State<'_, launcher_core::updates::UpdaterHandle>,
+) -> launcher_types::UpdateInfo {
+    updater.info()
+}
+
+/// Checks for a launcher update now and returns the resulting state. Allowed
+/// in every update mode, Off included, because the user asked.
+#[tauri::command]
+pub async fn check_for_update(
+    updater: State<'_, launcher_core::updates::UpdaterHandle>,
+) -> Result<launcher_types::UpdateState, String> {
+    updater.check().await.map_err(message)
+}
+
+/// Starts installing the available update: download (if needed), signature
+/// check, graceful zebrad stop, install, relaunch. Returns once it started;
+/// progress arrives as `update_state` events.
+#[tauri::command]
+pub async fn install_update(
+    updater: State<'_, launcher_core::updates::UpdaterHandle>,
+) -> Result<(), String> {
+    updater.install().await.map_err(message)
+}
+
+/// Cancels an update check, a download, or an automatic-install countdown.
+#[tauri::command]
+pub async fn cancel_update(
+    updater: State<'_, launcher_core::updates::UpdaterHandle>,
+) -> Result<(), String> {
+    updater.cancel().await.map_err(message)
+}
