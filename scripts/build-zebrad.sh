@@ -110,8 +110,14 @@ if [ -z "${src}" ]; then
     trap 'rm -rf "$(dirname "${src}")"' EXIT
 else
     # Absolute, so --remap-path-prefix matches the paths rustc sees.
-    mkdir -p "$(dirname "${src}")"
-    src="$(cd "$(dirname "${src}")" && pwd)/$(basename "${src}")"
+    src_parent="$(dirname "${src}")"
+    [ -d "${src_parent}" ] || run mkdir -p "${src_parent}"
+    if [ -d "${src_parent}" ]; then
+        src="$(cd "${src_parent}" && pwd)/$(basename "${src}")"
+    else
+        # Dry run: the parent was not created, so only make the path absolute.
+        case "${src}" in /*) ;; *) src="${PWD}/${src}" ;; esac
+    fi
 fi
 
 # 1. Check out the release tag, and check that it is the pinned commit.
