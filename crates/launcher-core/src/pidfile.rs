@@ -286,6 +286,28 @@ mod tests {
     use super::*;
 
     /// A child that stays alive until killed.
+    /// `executable_of` for a child we just spawned. Right after `spawn` returns,
+    /// the kernel can still report the parent's image for the child (the exec
+    /// has not replaced it yet), so wait until it no longer reads as our own
+    /// executable.
+    fn settled_executable_of(pid: u32) -> Option<PathBuf> {
+        let ours = std::env::current_exe()
+            .ok()
+            .and_then(|p| fs::canonicalize(p).ok());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let seen = executable_of(pid);
+            let seen_canonical = seen.as_ref().and_then(|p| fs::canonicalize(p).ok());
+            if seen.is_some() && (ours.is_none() || seen_canonical != ours) {
+                return seen;
+            }
+            if std::time::Instant::now() >= deadline {
+                return seen;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     fn sleeper() -> std::process::Child {
         let mut cmd = if cfg!(windows) {
             let mut c = std::process::Command::new("cmd");
@@ -343,7 +365,7 @@ mod tests {
         // A live process running the recorded binary is reported.
         let mut live = sleeper();
         let pid = live.id();
-        let binary = executable_of(pid).unwrap_or_else(|| PathBuf::from("/opt/zebrad"));
+        let binary = settled_executable_of(pid).unwrap_or_else(|| PathBuf::from("/opt/zebrad"));
         write(&path, pid, &binary).expect("write");
         let found = check(&path);
         live.kill().expect("kill");
