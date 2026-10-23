@@ -13,6 +13,11 @@ as the full 40-character lowercase SHA. A Git tag can be moved, but a commit SHA
 cannot, so every script checks the release against the commit and not just the
 tag. The two files describe one release and change together (see
 [Bumping ZEBRAD_VERSION](#bumping-zebrad_version)).
+[`scripts/check-versions.sh`](../scripts/check-versions.sh), which CI runs,
+checks that both files are well formed and that `fake-zebrad` reports the same
+version. Once a workflow pins tauri-cli in a `TAURI_CLI_VERSION` env entry, it
+also checks that the pin has the same minor version as the `tauri` crate in
+`Cargo.lock`. No workflow pins tauri-cli yet, so the script skips that check.
 
 The scripts read both files by default. `ZEBRAD_COMMIT` applies only to the
 version in `ZEBRAD_VERSION`. To build any other version, pass its commit as well
@@ -166,7 +171,7 @@ tarball makes step 2 fail.
 
      Check the result against the commit shown on the GitHub release page.
 3. Update `VERSION` in `crates/launcher-core/src/bin/fake-zebrad.rs` so the
-   fake reports the same version.
+   fake reports the same version. Then run `scripts/check-versions.sh`.
 4. Check the new Linux release locally:
    `scripts/fetch-zebrad-linux.sh --out /tmp/zebrad-check/zebrad`. The cosign
    and attestation checks fail if `ZEBRAD_COMMIT` is not the commit that
