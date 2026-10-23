@@ -91,7 +91,7 @@ pub struct ChildHandle {
     pid: u32,
     stdin: Option<ChildStdin>,
     #[cfg(windows)]
-    job: Option<windows::Job>,
+    job: windows::Job,
 }
 
 impl ChildHandle {
@@ -127,10 +127,7 @@ impl ChildHandle {
         }
         #[cfg(windows)]
         {
-            match &self.job {
-                Some(job) => job.terminate(),
-                None => crate::pidfile::terminate(self.pid),
-            }
+            self.job.terminate()
         }
     }
 }
@@ -230,7 +227,7 @@ fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
 
     #[cfg(windows)]
     let job = match windows::attach_job(&child, command.kill_on_launcher_exit) {
-        Ok(job) => Some(job),
+        Ok(job) => job,
         Err(err) => {
             // The child is still suspended; kill_on_drop finishes it off.
             let _ = child.start_kill();
