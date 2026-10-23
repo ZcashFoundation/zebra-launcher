@@ -38,8 +38,18 @@ backend that makes every page demoable:
   see a rollback followed by a failed reload);
 - open `http://localhost:1420/?stale` to simulate a zebrad left behind by an earlier launcher run:
   the stale-process banner shows, Start fails, and "Stop it and start" clears it;
+- open `http://localhost:1420/?firstrun` for the first-run wizard: zebrad stays stopped until
+  Finish, the default data folder has 212.4 GB free (so the low-space warning shows), "Choose
+  another folder…" always picks `/mnt/storage/zebra` (1,834.5 GB free), and alpha.4 leftovers
+  (a `zebrad.toml` and 96.7 GB of state, counted as a lower bound) are offered for moving.
+  Combine both flags (`?firstrun&stale`) to see Finish report that zebrad did not start;
 - Settings are kept in memory; set the Grafana URL to see the iframe (it stays blank unless Grafana
-  runs on that address).
+  runs on that address). Without `?firstrun` the first run counts as done. "Change…" for the data
+  folder and "Delete node data…" work once the node is stopped (they refuse with "stop zebrad
+  first" otherwise, like the backend); the mock state is 248.3 GB. "Copy diagnostics" shows the
+  text below the button when the browser denies clipboard access, as headless browsers do.
+
+The flags are read from the query string once, when the page loads.
 
 ## Build
 
@@ -82,7 +92,7 @@ to the CSP when it serves the bundled assets.
 | `src/mock.rs` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads |
 | `src/log_view.rs`, `src/format.rs` | Pure logic (log buffer, gaps, filters, formatting), unit-tested natively |
 | `src/app.rs` | Shared state, subscriptions, the shell |
-| `src/components/`, `src/pages/` | The status strip, tabs and the four pages |
+| `src/components/`, `src/pages/` | The status strip, tabs, the four pages and the first-run wizard (`pages/first_run.rs`) |
 
 The crate also compiles natively so `cargo clippy --workspace --all-targets` and
 `cargo test --workspace` cover it; the native binary only prints a hint. Check the wasm build with

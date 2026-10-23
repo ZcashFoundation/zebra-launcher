@@ -1,4 +1,5 @@
-//! The app shell: shared state, backend subscriptions, the header and the four pages.
+//! The app shell: shared state, backend subscriptions, the header, the four pages and the
+//! first-run wizard.
 
 use std::time::{Duration, SystemTime};
 
@@ -9,7 +10,10 @@ use crate::{
     api, clock,
     components::{nav::Nav, stale_banner::StaleBanner, status_strip::StatusStrip},
     log_view::LogBuffer,
-    pages::{configure::Configure, dashboard::Dashboard, logs::Logs, settings::SettingsPage},
+    pages::{
+        configure::Configure, dashboard::Dashboard, first_run::FirstRun, logs::Logs,
+        settings::SettingsPage,
+    },
 };
 
 /// The four pages.
@@ -148,9 +152,11 @@ pub fn App() -> impl IntoView {
     // Pages stay mounted while hidden, so a half-edited config or the log scroll position
     // survive switching tabs.
     let hidden = move |tab: Tab| move || state.tab.get() != tab;
+    // While the first-run wizard is open, the app behind it takes no input.
+    let first_run_open = RwSignal::new(false);
 
     view! {
-        <div class="app">
+        <div class="app" inert=move || first_run_open.get()>
             <header class="app-header">
                 <Nav />
                 <StatusStrip />
@@ -189,5 +195,6 @@ pub fn App() -> impl IntoView {
                 </section>
             </main>
         </div>
+        <FirstRun open=first_run_open />
     }
 }

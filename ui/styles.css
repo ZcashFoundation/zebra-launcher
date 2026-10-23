@@ -550,3 +550,108 @@ input.invalid {
   padding: 4px 0;
   overflow-wrap: anywhere;
 }
+
+.settings .buttons {
+  flex-wrap: wrap;
+}
+
+/* A fieldset is as wide as its widest line by default; let the diagnostics scroll instead. */
+.settings fieldset {
+  min-width: 0;
+}
+
+button.danger {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.delete-confirm {
+  margin: 8px 0 0;
+}
+
+.delete-confirm p {
+  margin: 0 0 4px;
+}
+
+details.diagnostics {
+  margin-top: 8px;
+}
+
+details.diagnostics pre {
+  max-height: 40vh;
+  overflow: auto;
+  padding: 8px;
+  background: var(--panel);
+  border-radius: 4px;
+  user-select: text;
+}
+
+/* First-run wizard */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.65);
+  z-index: 10;
+}
+
+.modal {
+  width: min(680px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 24px;
+}
+
+.modal .step-count {
+  margin: 0 0 4px;
+  font-size: 12px;
+}
+
+.modal h3 {
+  margin-top: 16px;
+}
+
+.modal .rows {
+  margin: 8px 0 12px;
+}
+
+.modal code {
+  overflow-wrap: anywhere;
+}
+
+.modal fieldset.choices {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 12px 0;
+  padding: 8px 16px 12px;
+}
+
+.modal legend {
+  color: var(--muted);
+  padding: 0 6px;
+}
+
+.modal .radio,
+.modal .check {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.modal .banner {
+  margin: 8px 0;
+}
+
+.wizard-nav {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}

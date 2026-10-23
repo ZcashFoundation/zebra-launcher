@@ -5,7 +5,8 @@
 Start with **Settings → Copy diagnostics**: it copies the launcher and bundled zebrad
 versions, the OS, the node status, the settings, the managed `zebrad.toml` and the last
 200 lines of the launcher and zebrad logs to the clipboard, ready to paste into an issue.
-It never includes the RPC cookie, and credentials in the Grafana URL are redacted.
+It never includes the RPC cookie, and credentials in the Grafana URL are redacted. If the
+clipboard cannot be written, the text is shown below the button to copy by hand.
 
 The logs live in the app log directory: `~/.local/share/org.zfnd.zebra-launcher/logs`
 (Linux), `~/Library/Logs/org.zfnd.zebra-launcher` (macOS),

@@ -41,10 +41,10 @@ existing state; the old directory stays until you delete it.
 
 ### Delete node data
 
-**Settings → Delete node data** (only while zebrad is stopped, after a confirmation)
-removes the current chain state directory, `<data dir>/state`, and nothing else:
-`zebrad.toml`, `launcher.json`, the logs and the RPC cookie stay, and the next start
-syncs from scratch. It refuses to delete anything that is not a `state` directory inside
+**Settings → Delete node data…** (only while zebrad is stopped or failed, after you type
+`delete` to confirm) removes the current chain state directory, `<data dir>/state`, and
+nothing else: `zebrad.toml`, `launcher.json` (the launcher settings), the logs and the RPC
+cookie stay, and the next start syncs from scratch. It shows how much space was freed. It refuses to delete anything that is not a `state` directory inside
 the launcher's data dir or the data dir chosen in the settings. A data dir you chose
 yourself is never removed by an uninstaller; delete it by hand if you no longer want it.
 
@@ -78,7 +78,8 @@ The old prototype kept its files in different places:
 
 The new launcher's first run detects a `zebrad.toml` next to its own executable and a
 `state` directory in that cache dir, shows the state's size, and offers to move the
-state into its own state directory (or leave it). The move is a rename, so it only works
+state into its own state directory ("Move it here", after you confirm that the old
+launcher is not running) or to leave it ("Leave it"). The move is a rename, so it only works
 when both are on the same drive; otherwise the launcher asks you to move the folder by
 hand and never copies it itself. It runs only while the launcher's zebrad is stopped.
 
