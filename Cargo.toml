@@ -1,8 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/launcher-types", "crates/launcher-core"]
-# The Tauri app is migrated into the workspace once it is rewritten (M5).
-exclude = ["src-tauri"]
+members = ["crates/launcher-types", "crates/launcher-core", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 launcher-types = { path = "crates/launcher-types" }
+launcher-core = { path = "crates/launcher-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

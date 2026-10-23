@@ -4,6 +4,17 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+# Unmaintained crates pulled in by Tauri 2's Linux stack, with no upgrade we
+# can make ourselves. Revisit on every Tauri bump.
+ignore = [
+    # proc-macro-error: build-time only, via gtk-rs 0.18 (glib-macros, gtk3-macros).
+    { id = "RUSTSEC-2024-0370", reason = "transitive through Tauri's gtk-rs 0.18; no safe upgrade" },
+    # zvariant, zbus_names, zvariant_derive: merged into zbus 6; used through
+    # zbus 5 by tauri-plugin-opener and tauri-plugin-single-instance on Linux.
+    { id = "RUSTSEC-2026-0370", reason = "transitive through zbus 5 in Tauri plugins; fixed by their move to zbus 6" },
+    { id = "RUSTSEC-2026-0371", reason = "transitive through zbus 5 in Tauri plugins; fixed by their move to zbus 6" },
+    { id = "RUSTSEC-2026-0372", reason = "transitive through zbus 5 in Tauri plugins; fixed by their move to zbus 6" },
+]
 
 [licenses]
 allow = [
