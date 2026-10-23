@@ -1,0 +1,3 @@
+# Sidecar binaries are fetched or built by scripts, never committed.
+*
+!.gitignore
