@@ -1,13 +1,9 @@
 //! The launcher settings form. Save sends the whole settings object to `set_settings`.
 
+use launcher_types::{Network, Settings, UpdateMode};
 use leptos::{prelude::*, task::spawn_local};
 
-use crate::{
-    api,
-    app::AppState,
-    format::validate_grafana_url,
-    types::{Network, Settings, UpdateMode},
-};
+use crate::{api, app::AppState, format::validate_grafana_url};
 
 const STOP_GRACE_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 

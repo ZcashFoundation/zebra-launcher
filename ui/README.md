@@ -70,8 +70,7 @@ to the CSP when it serves the bundled assets.
 | --- | --- |
 | `src/tauri.rs` | `#[wasm_bindgen]` externs to `window.__TAURI__`, JSON-compatible (de)serialization |
 | `src/api.rs` | One typed function per backend command or event, Tauri or mock |
-| `src/mock.rs` | The fake backend for `trunk serve` |
-| `src/types.rs` | Temporary copies of types moving to `launcher-types` in M4 |
+| `src/mock.rs` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads |
 | `src/log_view.rs`, `src/format.rs` | Pure logic (log buffer, gaps, filters, formatting, URL validation), unit-tested natively |
 | `src/app.rs` | Shared state, subscriptions, the shell |
 | `src/components/`, `src/pages/` | The status strip, tabs and the four pages |

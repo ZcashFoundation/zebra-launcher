@@ -16,7 +16,6 @@ mod format;
 mod log_view;
 mod mock;
 mod tauri;
-mod types;
 
 mod components {
     pub mod nav;

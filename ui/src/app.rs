@@ -2,7 +2,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::Status;
+use launcher_types::{NodeStats, Settings, Status};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -10,7 +10,6 @@ use crate::{
     components::{nav::Nav, status_strip::StatusStrip},
     log_view::LogBuffer,
     pages::{configure::Configure, dashboard::Dashboard, logs::Logs, settings::SettingsPage},
-    types::{NodeStats, Settings},
 };
 
 /// The four pages.

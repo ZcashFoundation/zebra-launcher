@@ -6,11 +6,9 @@
 
 use leptos::{prelude::*, task::spawn_local};
 
-use crate::{
-    api,
-    format::highlight_toml,
-    types::{ApplyOutcome, ConfigDocument},
-};
+use launcher_types::{ApplyErrorKind, ApplyOutcome, ConfigDocument};
+
+use crate::{api, format::highlight_toml};
 
 /// What the editor area shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,7 +97,7 @@ pub fn Configure() -> impl IntoView {
                     notice.set(Some(Notice::RolledBack(error)));
                     load(true);
                 }
-                Err(error) if error.kind == "conflict" => {
+                Err(error) if error.kind == ApplyErrorKind::Conflict => {
                     notice.set(Some(Notice::Conflict(error.message)));
                     mode.set(Mode::Editing);
                 }

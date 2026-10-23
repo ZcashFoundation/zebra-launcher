@@ -13,12 +13,13 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    clock,
-    types::{ApplyError, ApplyOutcome, ConfigDocument, EosInfo, NodeStats, Settings},
+use launcher_types::{
+    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, EosInfo, ExitClass, ExitInfo,
+    LogLevel, LogLine, LogStream, NodeStats, Phase, Settings, Status,
 };
-use launcher_types::{ExitClass, ExitInfo, LogLevel, LogLine, LogStream, Phase, Status};
 use leptos::prelude::*;
+
+use crate::clock;
 
 /// The config document the mock starts with: what the launcher's minimal managed file looks like.
 const SAMPLE_CONFIG: &str = r#"# Managed by Zebra Launcher. Keys you add are kept; the RPC, metrics and
@@ -436,7 +437,7 @@ pub async fn apply_config(text: String, token: String) -> Result<ApplyOutcome, A
     let current = mock.config.get_untracked();
     if token != current.token || text.contains(CONFLICT_MARKER) {
         return Err(ApplyError {
-            kind: "conflict".into(),
+            kind: ApplyErrorKind::Conflict,
             message: format!("{} changed on disk since it was read", current.path),
         });
     }

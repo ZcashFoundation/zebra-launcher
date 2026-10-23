@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use launcher_types::{Phase, Status};
+use launcher_types::{NodeStats, Phase, Status};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -82,7 +82,7 @@ pub fn StatusStrip() -> impl IntoView {
     };
     let can = move || state.status.with(|status| controls(&status.phase));
 
-    let stat = move |pick: fn(&crate::types::NodeStats) -> String| {
+    let stat = move |pick: fn(&NodeStats) -> String| {
         move || {
             state
                 .stats

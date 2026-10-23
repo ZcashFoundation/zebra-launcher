@@ -3,14 +3,15 @@
 
 use std::fmt;
 
-use launcher_types::{LogLine, Status};
-use serde::Serialize;
+use launcher_types::{
+    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, LogLine, NodeStats, Settings, Status,
+};
+use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::{
     mock,
     tauri::{self, is_tauri},
-    types::{ApplyError, ApplyOutcome, ConfigDocument, NodeStats, Settings},
 };
 
 /// A failed command, with a message for display.
@@ -49,9 +50,16 @@ impl From<JsValue> for ApiError {
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
+/// Sends a mock value through the same JSON (de)serialization as a Tauri payload, so the mock
+/// exercises the real `launcher-types` wire shapes (`SystemTime` as
+/// `{secs_since_epoch, nanos_since_epoch}`, `SocketAddr` as a string, tagged enums).
+fn wire<T: Serialize + DeserializeOwned>(value: T) -> Result<T, JsValue> {
+    tauri::from_js(tauri::to_js(&value)?)
+}
+
 pub async fn get_status() -> ApiResult<Status> {
     if !is_tauri() {
-        return Ok(mock::get_status().await);
+        return Ok(wire(mock::get_status().await)?);
     }
     Ok(tauri::invoke0("get_status").await?)
 }
@@ -120,14 +128,14 @@ struct LogHistoryArgs {
 /// The buffered lines with `seq >= since`.
 pub async fn log_history(since: u64) -> ApiResult<Vec<LogLine>> {
     if !is_tauri() {
-        return Ok(mock::log_history(since).await);
+        return Ok(wire(mock::log_history(since).await)?);
     }
     Ok(tauri::invoke("log_history", &LogHistoryArgs { since }).await?)
 }
 
 pub async fn read_config() -> ApiResult<ConfigDocument> {
     if !is_tauri() {
-        return Ok(mock::read_config().await);
+        return Ok(wire(mock::read_config().await)?);
     }
     Ok(tauri::invoke0("read_config").await?)
 }
@@ -141,7 +149,10 @@ struct ApplyConfigArgs<'a> {
 /// Writes the config and restarts zebrad. `Err` means nothing was written.
 pub async fn apply_config(text: String, token: String) -> Result<ApplyOutcome, ApplyError> {
     if !is_tauri() {
-        return mock::apply_config(text, token).await;
+        return match mock::apply_config(text, token).await {
+            Ok(outcome) => wire(outcome).map_err(apply_error),
+            Err(error) => Err(wire(error).unwrap_or_else(apply_error)),
+        };
     }
     let args = ApplyConfigArgs {
         text: &text,
@@ -153,17 +164,18 @@ pub async fn apply_config(text: String, token: String) -> Result<ApplyOutcome, A
     }
 }
 
-/// Reads an `ApplyError` rejection, falling back to kind `other` for anything else.
+/// Reads an `ApplyError` rejection. Anything else (the IPC call itself failed, or the payload
+/// did not deserialize) is reported as kind `io`, which the page shows as a plain failure.
 fn apply_error(error: JsValue) -> ApplyError {
     tauri::from_js::<ApplyError>(error.clone()).unwrap_or_else(|_| ApplyError {
-        kind: "other".into(),
+        kind: ApplyErrorKind::Io,
         message: ApiError::from(error).0,
     })
 }
 
 pub async fn get_settings() -> ApiResult<Settings> {
     if !is_tauri() {
-        return Ok(mock::get_settings().await);
+        return Ok(wire(mock::get_settings().await)?);
     }
     Ok(tauri::invoke0("get_settings").await?)
 }
@@ -176,7 +188,7 @@ struct SetSettingsArgs<'a> {
 /// Saves the settings and returns them as stored.
 pub async fn set_settings(settings: Settings) -> ApiResult<Settings> {
     if !is_tauri() {
-        return Ok(mock::set_settings(settings).await);
+        return Ok(wire(mock::set_settings(wire(settings)?).await)?);
     }
     Ok(tauri::invoke(
         "set_settings",
@@ -189,7 +201,7 @@ pub async fn set_settings(settings: Settings) -> ApiResult<Settings> {
 
 pub async fn get_node_stats() -> ApiResult<Option<NodeStats>> {
     if !is_tauri() {
-        return Ok(mock::get_node_stats().await);
+        return Ok(wire(mock::get_node_stats().await)?);
     }
     Ok(tauri::invoke0("get_node_stats").await?)
 }
