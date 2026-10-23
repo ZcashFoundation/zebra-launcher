@@ -48,7 +48,8 @@ Windows zebrad builds are cold.
 3. **Approve the `release` environment.** In the workflow run, use *Review deployments*,
    then select `release`. The approver must not be the person who pushed the tag;
    self-review is blocked. The five `bundle_sign` jobs then package, sign, notarize and
-   upload to the draft.
+   upload to the draft. In each, `cargo tauri bundle` runs with a throwaway updater key,
+   and a separate step re-signs the updater artifacts with the real one.
 4. **Wait for `manifest` and `summary`.** `manifest` adds `latest.json`, `SHA256SUMS`,
    `SHA256SUMS.sigstore.json` and attestations. The `summary` job's page shows the
    checklist below and the draft's link.
@@ -91,6 +92,8 @@ Windows zebrad builds are cold.
 - [ ] `sha256sum -c SHA256SUMS`, `cosign verify-blob` and `gh attestation verify` pass
       for every asset; `latest.json` lists `linux-x86_64`, `linux-aarch64`,
       `darwin-aarch64`, `darwin-x86_64` and `windows-x86_64` with this version.
+- [ ] `for s in *.sig; do base64 -d < "$s" | sed -n 3p; done` prints, for every
+      signature, a trusted comment ending in `version:X.Y.Z` (this version).
 - [ ] **Linux x86_64** (Ubuntu 22.04 and 24.04): the AppImage starts after `chmod +x`,
       the node reaches Running, and About shows "Zebra Launcher X.Y.Z (zebrad A.B.C)".
 - [ ] **Linux deb** (Debian 12): `sudo apt install ./zebra-launcher_X.Y.Z_amd64.deb`
@@ -180,7 +183,7 @@ it, and only after approval. Custody, escrow and rotation are in
 
 | Name | Kind | Used for | Backup / reissue |
 | --- | --- | --- | --- |
-| `TAURI_SIGNING_PRIVATE_KEY` | `release` secret | updater `.sig` files (minisign) | offline escrow, two custodians (SECURITY.md) |
+| `TAURI_SIGNING_PRIVATE_KEY` | `release` secret | updater `.sig` files (minisign); only the "Sign the updater artifacts" step sees it, never `cargo tauri bundle` ([SECURITY.md](SECURITY.md#release-pipeline-downloads)) | offline escrow, two custodians (SECURITY.md) |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | `release` secret | decrypts the key above | escrowed with the key |
 | `APPLE_CERTIFICATE` | `release` secret | Developer ID Application `.p12`, base64 | Apple Developer account holder reissues |
 | `APPLE_CERTIFICATE_PASSWORD` | `release` secret | `.p12` password | set when exporting the `.p12` |
