@@ -9,8 +9,10 @@
 #   draft        creates the draft release once; the matrix jobs upload to it
 #   build        UNPRIVILEGED, no secrets: compiles the app (`--no-bundle`)
 #   bundle_sign  environment `release` (required reviewer), NO caches:
-#                `cargo tauri bundle` packages and signs the compiled app,
-#                uploads installers and updater .sig files to the draft
+#                `cargo tauri bundle` packages the compiled app and does the
+#                platform signing; a separate step, the only one with the
+#                updater key, writes the updater .sig files; uploads to the
+#                draft
 #   manifest     latest.json (all five platform keys), SHA256SUMS, keyless
 #                cosign bundle, build provenance attestations
 #   summary      smoke-test checklist from docs/RELEASING.md in the run summary
@@ -19,10 +21,9 @@
 # which has no secrets and read-only contents. No job restores a cache: the
 # signed bundle is made from binaries compiled from scratch in this run.
 #
-# Downloads in bundle_sign. tauri-cli and trunk are sha256-pinned in
+# Downloads in bundle_sign. tauri-cli is sha256-pinned in
 # .github/tool-versions.env, but tauri-cli's bundler (tauri-bundler 2.10.4 for
-# tauri-cli 2.12.4) also fetches helper tools itself while it bundles, with
-# the signing secrets in its environment:
+# tauri-cli 2.12.4) also fetches helper tools itself while it bundles:
 #   - Linux AppImage: AppRun and linuxdeploy from tauri-apps/binary-releases,
 #     and linuxdeploy-plugin-appimage from the moving `continuous` release of
 #     linuxdeploy/linuxdeploy-plugin-appimage. tauri-bundler checks NO hash
@@ -32,7 +33,16 @@
 #   - WebView2: nothing at bundle time (the default downloadBootstrapper mode
 #     makes the installer fetch Microsoft's bootstrapper on the user's machine).
 #   - macOS: nothing.
-# See docs/SECURITY.md#release-pipeline-downloads.
+# So the updater key (TAURI_SIGNING_PRIVATE_KEY) is never in the bundler's
+# environment, on any OS. tauri-cli signs updater artifacts itself and fails
+# without a key, so `cargo tauri bundle` gets a throwaway key generated in the
+# job; the "Sign the updater artifacts" step then replaces those .sig files
+# with real ones (scripts/sign-updater-artifacts.sh, `cargo tauri signer sign
+# --app-version`) and is the only step that sees the key. The platform
+# signing stays inside `cargo tauri bundle`: macOS codesign and notarization
+# (macOS downloads nothing) and the Windows signCommand (the NSIS downloads
+# are SHA-1 checked), so the Apple and Azure credentials do share the
+# bundler's environment. See docs/SECURITY.md#release-pipeline-downloads.
 #
 # Secrets and variables live in the `release` environment; see
 # docs/RELEASING.md#secrets-inventory.
@@ -349,9 +359,11 @@ jobs:
   # ---------------------------------------------------------------------------
   # bundle_sign: PRIVILEGED. Environment `release` (required reviewer, self-
   # review blocked). No caches. Packages the compiled app with
-  # `cargo tauri bundle`, which also signs: Windows signCommand (Azure Artifact
-  # Signing) for the app, the sidecar and the installer; macOS codesign of the
-  # app and sidecar plus notarization; updater .sig files with the minisign key.
+  # `cargo tauri bundle`, which also does the platform signing: Windows
+  # signCommand (Azure Artifact Signing) for the app, the sidecar and the
+  # installer; macOS codesign of the app and sidecar plus notarization. The
+  # updater .sig files are made afterwards by "Sign the updater artifacts",
+  # the only step with the minisign key (see the header).
   # ---------------------------------------------------------------------------
   bundle_sign:
     name: Bundle and sign (${{ matrix.target }})
@@ -493,38 +505,80 @@ jobs:
           }' > "${config}"
           cat "${config}"
 
-      # --- Bundle and sign -----------------------------------------------------
-      # One step per OS, so each sees only the secrets it uses.
+      # --- Throwaway updater key -----------------------------------------------
+      # With bundle.createUpdaterArtifacts, `cargo tauri bundle` signs the
+      # updater artifacts itself and fails without TAURI_SIGNING_PRIVATE_KEY.
+      # It gets this key instead of the real one (as a path, which tauri-cli
+      # reads as a key file). Its .sig files only record which files to sign;
+      # "Sign the updater artifacts" replaces them.
+      - name: Generate a throwaway updater key
+        run: cargo tauri signer generate --ci -w "${RUNNER_TEMP}/throwaway-updater.key"
+
+      # --- Bundle and platform signing -----------------------------------------
+      # One step per OS, so each sees only the secrets it uses. None of them
+      # sees the updater key.
       - name: Bundle and sign (Linux)
         if: runner.os == 'Linux'
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: cargo tauri bundle --target "${TARGET}" --ci
+        run: |
+          set -euo pipefail
+          export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          cargo tauri bundle --target "${TARGET}" --ci
 
       - name: Bundle and sign (macOS)
         if: runner.os == 'macOS'
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           # APPLE_API_KEY_PATH comes from GITHUB_ENV (step above).
-        run: cargo tauri bundle --target "${TARGET}" --ci
+        run: |
+          set -euo pipefail
+          export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          cargo tauri bundle --target "${TARGET}" --ci
 
       - name: Bundle and sign (Windows)
         if: runner.os == 'Windows'
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: cargo tauri bundle --target "${TARGET}" --ci --config "${RUNNER_TEMP}/tauri.windows-sign.json"
+        run: |
+          set -euo pipefail
+          export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          cargo tauri bundle --target "${TARGET}" --ci --config "${RUNNER_TEMP}/tauri.windows-sign.json"
 
       - name: Remove the App Store Connect API key
         if: always() && runner.os == 'macOS'
         run: rm -f "${RUNNER_TEMP}/AuthKey.p8"
+
+      # --- Updater signatures --------------------------------------------------
+      # The ONLY step with the updater key. It runs nothing the bundler
+      # downloaded, just the sha256-pinned cargo-tauri: `cargo tauri signer
+      # sign --private-key-path <0600 temp file> --app-version ${VERSION}` for
+      # each file the bundler signed with the throwaway key (Linux AppImage and
+      # .deb, macOS .app.tar.gz, Windows NSIS -setup.exe). --app-version writes
+      # the trusted comment the bundler writes (`version:` field), which
+      # plugins.updater.requireSignedVersion needs. Every new signature is
+      # checked against plugins.updater.pubkey.
+      - id: sign-updater-artifacts
+        name: Sign the updater artifacts
+        if: env.REQUIRE_UPDATER == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          pubkey="$(jq -r '.plugins.updater.pubkey // empty' src-tauri/tauri.conf.json)"
+          if [ -z "${pubkey}" ]; then
+            echo "::error::src-tauri/tauri.conf.json has no plugins.updater.pubkey"
+            exit 1
+          fi
+          scripts/sign-updater-artifacts.sh --dir "target/${TARGET}/release/bundle" \
+            --version "${VERSION}" --pubkey "${pubkey}"
+
+      # Updater artifacts not required (UPDATER_ENABLED=false): ship no .sig
+      # files rather than the throwaway ones.
+      - name: Discard the throwaway updater signatures
+        if: env.REQUIRE_UPDATER != 'true'
+        run: find "target/${TARGET}/release/bundle" -type f -name '*.sig' -print -delete
 
       # --- Upload to the draft -------------------------------------------------
       - name: Collect bundles
@@ -562,19 +616,19 @@ jobs:
   #      its chmod +x), and drop `compile: "false"` from
   #      ./.github/actions/setup-tauri.
   #   3. In the three "Bundle and sign" steps, replace `cargo tauri bundle` with
-  #      `cargo tauri build`, keeping the same flags and env, e.g.:
+  #      `cargo tauri build`, keeping the same flags, env and throwaway key,
+  #      e.g.:
   #
   #        - name: Bundle and sign (Linux)
   #          if: runner.os == 'Linux'
-  #          env:
-  #            TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-  #            TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
   #          run: |
   #            set -euo pipefail
+  #            export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
   #            cargo fetch --locked
   #            cargo tauri build --target "${TARGET}" --ci
   #
-  #      Add `scripts/check-glibc.sh` after it on Linux. Never add
+  #      Add `scripts/check-glibc.sh` after it on Linux. Keep "Sign the updater
+  #      artifacts" as the only step with the updater key. Never add
   #      Swatinem/rust-cache or actions/cache to this job.
   # ===========================================================================
 
