@@ -197,6 +197,7 @@ impl Detector {
         match line.stream {
             LogStream::Stdout => detect_stdout(line),
             LogStream::Stderr => self.detect_stderr(line),
+            LogStream::Launcher => None,
         }
     }
 

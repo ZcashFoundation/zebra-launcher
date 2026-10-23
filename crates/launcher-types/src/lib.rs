@@ -5,16 +5,20 @@
 
 #![forbid(unsafe_code)]
 
-use std::{fmt, net::SocketAddr, str::FromStr};
+use std::{fmt, net::SocketAddr, str::FromStr, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-/// Which pipe of the zebrad child a log line came from.
+/// Where a log line came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogStream {
+    /// zebrad's stdout.
     Stdout,
+    /// zebrad's stderr.
     Stderr,
+    /// A note added by the launcher itself, such as "zebrad exited".
+    Launcher,
 }
 
 /// A `tracing` log level as zebrad prints it.
@@ -160,5 +164,88 @@ impl ExitClass {
                 | ExitClass::DbLocked
                 | ExitClass::PortInUse
         )
+    }
+}
+
+/// What the supervisor is doing with zebrad.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum Phase {
+    /// No zebrad is running and none is scheduled.
+    Stopped,
+    /// zebrad was spawned and is loading its configuration.
+    Starting,
+    /// zebrad accepted its configuration and is running.
+    Running,
+    /// A stop was requested; waiting for zebrad to exit.
+    Stopping,
+    /// zebrad crashed; a restart is scheduled.
+    Backoff {
+        /// When the restart happens.
+        until: SystemTime,
+        /// How many crashes happened in the current window.
+        crashes: u32,
+    },
+    /// zebrad will not be restarted until the user intervenes.
+    Failed {
+        /// Why.
+        class: ExitClass,
+    },
+}
+
+/// How the last zebrad run ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitInfo {
+    /// The exit code, or `None` when zebrad was killed by a signal.
+    pub code: Option<i32>,
+    /// The classification derived from the exit code and the logged events.
+    pub class: ExitClass,
+    /// zebrad's own description of a fatal error or panic, if it logged one.
+    pub detail: Option<String>,
+    /// When the exit was observed.
+    pub at: SystemTime,
+    /// Whether the launcher asked zebrad to stop.
+    pub requested: bool,
+}
+
+/// A zebrad process left behind by an earlier launcher run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleProcessInfo {
+    /// Its process id.
+    pub pid: u32,
+    /// The zebrad binary it was started from, for display.
+    pub binary: String,
+}
+
+/// The supervisor's view of zebrad, published on a `watch` channel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Status {
+    /// The current phase.
+    pub phase: Phase,
+    /// The pid of the running zebrad, while there is one.
+    pub pid: Option<u32>,
+    /// When the current run was spawned.
+    pub started_at: Option<SystemTime>,
+    /// The RPC address zebrad reported as opened in this run.
+    pub rpc_addr: Option<SocketAddr>,
+    /// The metrics address zebrad reported as opened in this run.
+    pub metrics_addr: Option<SocketAddr>,
+    /// How the previous run ended.
+    pub last_exit: Option<ExitInfo>,
+    /// A zebrad from an earlier launcher run that is still alive, if detected.
+    pub stale: Option<StaleProcessInfo>,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self {
+            phase: Phase::Stopped,
+            pid: None,
+            started_at: None,
+            rpc_addr: None,
+            metrics_addr: None,
+            last_exit: None,
+            stale: None,
+        }
     }
 }
