@@ -282,7 +282,7 @@ pub(crate) async fn start_in_background(app: AppHandle, state: AppState) {
 
 /// Tells the UI with [`STALE_PROCESS_EVENT`] that a zebrad from an earlier
 /// launcher run is still alive.
-pub(crate) fn report_stale_process(app: &AppHandle, stale: &StaleProcess) {
+pub(crate) fn report_stale_process<R: tauri::Runtime>(app: &AppHandle<R>, stale: &StaleProcess) {
     tracing::warn!(
         pid = stale.pid,
         "a zebrad from an earlier launcher run is still running"

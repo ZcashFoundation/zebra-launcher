@@ -23,6 +23,7 @@ use std::{
 
 use launcher_core::{
     firstrun,
+    supervisor::SupervisorError,
     updates::{
         self, FoundUpdate, NodeControl, OnChunk, UpdateBackend, UpdaterConfig, UpdaterHandle,
     },
@@ -181,12 +182,24 @@ impl<R: Runtime> UpdateBackend for PluginBackend<R> {
 /// supervisor, but starts (the health gate's, and the restart after a failed
 /// install) follow the same rules as every other start:
 /// [`firstrun::start_allowed`], and not while the node data is being changed.
-#[derive(Clone)]
-struct GatedNode {
+/// A zebrad left by an earlier run is reported to the UI like at launch
+/// (`stale_process`); the health gate waits for the user to resolve it.
+struct GatedNode<R: Runtime> {
+    app: AppHandle<R>,
     state: AppState,
 }
 
-impl NodeControl for GatedNode {
+// Not derived: that would require `R: Clone`.
+impl<R: Runtime> Clone for GatedNode<R> {
+    fn clone(&self) -> Self {
+        Self {
+            app: self.app.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<R: Runtime> NodeControl for GatedNode<R> {
     fn watch_status(&self) -> watch::Receiver<Status> {
         self.state.supervisor.watch_status()
     }
@@ -198,7 +211,14 @@ impl NodeControl for GatedNode {
     async fn start(&self) -> Result<(), String> {
         firstrun::start_allowed(&self.state.settings.current())?;
         let _permit = self.state.start_permit()?;
-        NodeControl::start(&self.state.supervisor).await
+        match self.state.supervisor.start().await {
+            Ok(()) => Ok(()),
+            Err(SupervisorError::StaleProcess(stale)) => {
+                crate::report_stale_process(&self.app, &stale);
+                Err(SupervisorError::StaleProcess(stale).to_string())
+            }
+            Err(err) => Err(err.to_string()),
+        }
     }
 }
 
@@ -230,6 +250,7 @@ pub fn start<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> UpdaterHandle 
     let backend = PluginBackend { app: app.clone() };
     // The actor is spawned with `tokio::spawn`, so enter the runtime.
     let node = GatedNode {
+        app: app.clone(),
         state: state.clone(),
     };
     let handle = tauri::async_runtime::block_on(async {
