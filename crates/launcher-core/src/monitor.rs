@@ -149,7 +149,8 @@ async fn run(
 
 /// Polls zebrad once.
 async fn poll(run: &mut Run, eos_interval: Duration) -> Result<NodeStats, RpcError> {
-    let client = &run.client;
+    // One cookie read for the whole poll.
+    let client = run.client.session().await?;
     let (chain, info, mempool, peers) = tokio::join!(
         client.get_blockchain_info(),
         client.get_info(),

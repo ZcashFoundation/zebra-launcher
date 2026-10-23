@@ -153,6 +153,43 @@ async fn rpc_client_requires_the_cookie() {
     assert!(matches!(err, RpcError::Cookie { .. }), "{err:?}");
 }
 
+#[tokio::test]
+async fn a_session_reads_the_cookie_once() {
+    let fake = spawn_fake().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cookie_file = dir.path().join(".cookie");
+    std::fs::copy(&fake.cookie_file, &cookie_file).expect("copy cookie");
+    let client = RpcClient::new(fake.addr, cookie_file.clone()).expect("client");
+
+    let session = timeout(T, client.session())
+        .await
+        .expect("in time")
+        .expect("session");
+    // Later calls in the session do not read the file again.
+    std::fs::remove_file(&cookie_file).expect("remove cookie");
+    let (chain, info, mempool, peers) = timeout(T, async {
+        tokio::join!(
+            session.get_blockchain_info(),
+            session.get_info(),
+            session.get_mempool_info(),
+            session.get_peer_info(),
+        )
+    })
+    .await
+    .expect("in time");
+    assert_eq!(chain.expect("getblockchaininfo").blocks, 2_500_000);
+    assert_eq!(info.expect("getinfo").release(), "7.0.0");
+    assert_eq!(mempool.expect("getmempoolinfo").size, 42);
+    assert_eq!(peers.expect("getpeerinfo"), 8);
+
+    // The client itself reads the file per call.
+    let err = timeout(T, client.get_info())
+        .await
+        .expect("in time")
+        .expect_err("cookie gone");
+    assert!(matches!(err, RpcError::Cookie { .. }), "{err:?}");
+}
+
 async fn wait_for(
     stats: &mut watch::Receiver<Option<NodeStats>>,
     what: &str,
