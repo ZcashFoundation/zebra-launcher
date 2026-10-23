@@ -55,21 +55,32 @@ fn sample_legacy() -> LegacyInstall {
     }
 }
 
-/// True when the page URL's query contains `flag`, such as `?stale` or `?firstrun`.
-fn url_flag(flag: &str) -> bool {
-    web_sys::window()
+/// The page URL's query parameters, as `(key, value)` pairs.
+fn url_params() -> Vec<(String, String)> {
+    let search = web_sys::window()
         .and_then(|window| window.location().search().ok())
-        .is_some_and(|search| search.contains(flag))
+        .unwrap_or_default();
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (key.to_owned(), value.to_owned())
+        })
+        .collect()
+}
+
+/// True when the page URL's query has the parameter `flag`, such as `?stale` or `?firstrun`.
+fn url_flag(flag: &str) -> bool {
+    url_params().iter().any(|(key, _)| key == flag)
 }
 
 /// The value of `key` in the page URL's query, such as `available` for `?update=available`.
 fn url_value(key: &str) -> Option<String> {
-    let search = web_sys::window()?.location().search().ok()?;
-    search
-        .trim_start_matches('?')
-        .split('&')
-        .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
-        .map(str::to_owned)
+    url_params()
+        .into_iter()
+        .find_map(|(k, value)| (k == key).then_some(value))
 }
 
 /// The launcher version the mock runs.
