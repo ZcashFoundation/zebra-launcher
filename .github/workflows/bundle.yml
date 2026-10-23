@@ -36,8 +36,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CI: true
-  # Pinned tools. TAURI_CLI_VERSION follows the tauri crate's minor
-  # (scripts/check-versions.sh once it exists).
+  # Pinned tools; keep in sync with release.yml. TAURI_CLI_VERSION's minor
+  # must be the tauri crate's (scripts/check-versions.sh checks it).
   TAURI_CLI_VERSION: 2.12.4
   TRUNK_VERSION: 0.22.0
   BINSTALL_VERSION: 1.26.0

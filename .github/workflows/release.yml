@@ -98,13 +98,7 @@ jobs:
 
       - name: Check tool versions
         shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f scripts/check-versions.sh ]; then
-            TAURI_CLI_VERSION="${TAURI_CLI_VERSION}" bash scripts/check-versions.sh
-          else
-            echo "::notice::scripts/check-versions.sh does not exist yet; skipped"
-          fi
+        run: scripts/check-versions.sh
 
   # ---------------------------------------------------------------------------
   # draft: one draft release, created once, so parallel jobs cannot race to
