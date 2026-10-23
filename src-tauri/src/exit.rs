@@ -7,13 +7,18 @@
 //! [`RunEvent::Exit`] is the last resort when the event loop ends without a
 //! request we could prevent: it blocks until the shutdown finishes or the cap
 //! expires.
+//!
+//! Closing the main window hides it instead when `close_to_tray` is on and
+//! the tray icon exists, so zebrad keeps running; without a tray (Linux
+//! without libappindicator) closing the window quits as above. The tray's
+//! Show item, a second launch and the macOS dock icon show it again.
 
 use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
-use tauri::{AppHandle, Manager, RunEvent, Runtime};
+use tauri::{AppHandle, Manager, RunEvent, Runtime, WindowEvent};
 
 use crate::app_state::AppState;
 
@@ -58,6 +63,27 @@ pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
                 }
             });
         }
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } => {
+            let Some(state) = app.try_state::<AppState>() else {
+                return;
+            };
+            let hide = !state.exit.started.load(Ordering::SeqCst)
+                && state.tray_ready.load(Ordering::SeqCst)
+                && state.settings.current().close_to_tray;
+            if hide && let Some(window) = app.get_webview_window(&label) {
+                api.prevent_close();
+                if let Err(err) = window.hide() {
+                    tracing::warn!(%err, "could not hide the window");
+                }
+                tracing::info!("window hidden to the tray; zebrad keeps running");
+            }
+        }
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => crate::show_main_window(app),
         RunEvent::Exit => {
             let Some(state) = app.try_state::<AppState>() else {
                 return;
