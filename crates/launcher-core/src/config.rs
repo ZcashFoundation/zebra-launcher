@@ -6,8 +6,16 @@
 //! the node as soon as a newer zebrad drops it. Edits go through
 //! [`toml_edit`], which keeps the user's comments and layout.
 //!
+//! The managed keys ([`ManagedKeys`]: `network.network`, `rpc.listen_addr`,
+//! `rpc.enable_cookie_auth`, `rpc.cookie_dir`, `metrics.endpoint_addr` and
+//! `state.cache_dir`) are launcher-owned: the supervisor and the RPC monitor
+//! rely on their values. [`ensure`] rewrites them at every start, and
+//! [`begin_apply_with_managed`] overrides any user edit to them before saving,
+//! so an edit to a managed key never takes effect.
+//!
 //! Saving from the editor is a small protocol with rollback:
-//! [`begin_apply`] checks the compare-and-swap token from [`read`], validates
+//! [`begin_apply_with_managed`] (or [`begin_apply`], which leaves the managed
+//! keys as written) checks the compare-and-swap token from [`read`], validates
 //! the text, keeps the current file as `zebrad.toml.bak`, writes a
 //! `zebrad.toml.pending` marker and replaces the file atomically. The caller
 //! restarts zebrad and then calls [`PendingApply::commit`] or
@@ -405,6 +413,33 @@ pub fn begin_apply(
     })
 }
 
+/// Like [`begin_apply`], but first sets the launcher-managed keys in
+/// `new_text` to `keys`, so user edits to them are overridden
+/// deterministically instead of being reverted silently by the next
+/// [`ensure`]. Everything else in the text, including comments, is kept.
+///
+/// A managed section that is not a table (for example `rpc = 5`) is refused
+/// with [`ConfigEditError::Forbidden`].
+pub fn begin_apply_with_managed(
+    paths: &Paths,
+    new_text: &str,
+    expected_token: &str,
+    keys: &ManagedKeys,
+) -> Result<PendingApply, ConfigEditError> {
+    let mut doc: DocumentMut = new_text
+        .parse()
+        .map_err(|err: toml_edit::TomlError| ConfigEditError::InvalidToml(err.to_string()))?;
+    set_managed(&mut doc, keys).map_err(|err| match err {
+        ConfigError::NotATable(section) => ConfigEditError::Forbidden {
+            key: section,
+            reason: "must be a table: the launcher manages keys in it".to_string(),
+        },
+        ConfigError::Io(err) => ConfigEditError::Io(err),
+        other => ConfigEditError::Io(io::Error::other(other.to_string())),
+    })?;
+    begin_apply(paths, &doc.to_string(), expected_token)
+}
+
 /// What [`recover`] rolled back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recovered {
@@ -659,6 +694,69 @@ tx_cost_limit = 1000
             files(paths.config_dir()),
             ["zebrad.toml", "zebrad.toml.bak"]
         );
+    }
+
+    #[test]
+    fn apply_with_managed_overrides_edits_to_managed_keys() {
+        let (_dir, paths, keys) = setup();
+        ensure(&paths, &keys).expect("ensure");
+        let original = read(&paths).expect("read");
+        let edited = "\
+# my edit
+[network]
+network = \"Testnet\" # switched
+[rpc]
+listen_addr = \"127.0.0.1:1234\"
+cookie_dir = \"/elsewhere\"
+[state]
+cache_dir = \"/other/state\"
+[mempool]
+tx_cost_limit = 1000
+";
+        let pending =
+            begin_apply_with_managed(&paths, edited, &original.token, &keys).expect("begin");
+        pending.commit().expect("commit");
+        let text = read(&paths).expect("read").text;
+        for kept in [
+            "# my edit",
+            "network = \"Mainnet\" # switched",
+            "listen_addr = \"127.0.0.1:8232\"",
+            "enable_cookie_auth = true",
+            "cache_dir = \"/chain/state\"",
+            "endpoint_addr = \"127.0.0.1:9999\"",
+            "tx_cost_limit = 1000",
+        ] {
+            assert!(text.contains(kept), "{kept:?} missing from:\n{text}");
+        }
+        for gone in ["Testnet", "1234", "/elsewhere", "/other/state"] {
+            assert!(!text.contains(gone), "{gone:?} kept in:\n{text}");
+        }
+        // The result is what ensure would produce: it has nothing to change.
+        let token = read(&paths).expect("read").token;
+        ensure(&paths, &keys).expect("ensure");
+        assert_eq!(read(&paths).expect("read").token, token);
+
+        // Forbidden values outside the managed keys are still refused, and a
+        // managed section that is not a table is refused too.
+        let current = read(&paths).expect("read");
+        assert!(matches!(
+            begin_apply_with_managed(
+                &paths,
+                "[rpc]\nindexer_listen_addr = \"0.0.0.0:1\"\n",
+                &current.token,
+                &keys
+            ),
+            Err(ConfigEditError::Forbidden { key, .. }) if key == "rpc.indexer_listen_addr"
+        ));
+        assert!(matches!(
+            begin_apply_with_managed(&paths, "rpc = 5\n", &current.token, &keys),
+            Err(ConfigEditError::Forbidden { key, .. }) if key == "rpc"
+        ));
+        assert!(matches!(
+            begin_apply_with_managed(&paths, "[rpc\n", &current.token, &keys),
+            Err(ConfigEditError::InvalidToml(_))
+        ));
+        assert_eq!(read(&paths).expect("read"), current);
     }
 
     #[test]

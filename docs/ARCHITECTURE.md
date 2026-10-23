@@ -129,6 +129,11 @@ edits, never full `zebrad generate` output. Every zebrad section is
 | `state.cache_dir` | `<chosen data dir>/state` |
 | `zcashd_compat` | forced off (unsupported) |
 
+The managed keys are launcher-owned: the supervisor and the RPC monitor rely on them.
+`config::ensure` rewrites them at every start, and `config::begin_apply_with_managed`
+overrides any edit to them before saving, so the editor cannot change them; they change
+only through the launcher (first run, `PortInUse` remediation).
+
 Applying an edit:
 
 1. `read_config` returns the text and a compare-and-swap token.
