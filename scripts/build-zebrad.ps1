@@ -134,6 +134,17 @@ if (-not $SrcDir) {
 $SrcDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SrcDir)
 $Out = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Out)
 
+# The build sets these for cargo; they are restored when the script ends, so
+# they do not leak into the caller's session.
+$buildEnvNames = @(
+    'RUSTUP_TOOLCHAIN', 'LIBCLANG_PATH', 'SOURCE_DATE_EPOCH',
+    'CARGO_ENCODED_RUSTFLAGS', 'CARGO_PROFILE_RELEASE_STRIP'
+)
+$savedEnv = @{}
+foreach ($name in $buildEnvNames) {
+    $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name)
+}
+
 try {
     # 1. Check out the release tag, and check that it is the pinned commit.
     if (Test-Path (Join-Path $SrcDir '.git')) {
@@ -235,5 +246,12 @@ try {
 
     Write-Host "zebrad $Version ($Target): built from $tag ($Commit) with $toolchain, installed at $Out"
 } finally {
+    foreach ($name in $buildEnvNames) {
+        if ($null -eq $savedEnv[$name]) {
+            Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
+        } else {
+            Set-Item -Path "Env:$name" -Value $savedEnv[$name]
+        }
+    }
     if ($tempRoot -and (Test-Path $tempRoot)) { Remove-Item -Recurse -Force $tempRoot }
 }
