@@ -158,9 +158,11 @@ Applying an edit:
    overwritten. It refuses non-loopback RPC (including the indexer and lightwalletd
    listeners), metrics or health addresses and cookie auth off. It writes atomically (temp file + rename, `.bak` kept) and sets a pending-apply
    marker.
-3. zebrad restarts gracefully and is watched for 20 s. On `ConfigError` the `.bak` is
-   restored, zebrad is restarted, and the UI shows zebrad's stderr plus "rolled back". A
-   crash mid-apply rolls back on the next launch via the marker.
+3. If zebrad is not running (stopped, or failed and waiting for the user), the new file
+   is committed and read on the next start. Otherwise zebrad restarts gracefully and is
+   watched for 20 s. On `ConfigError` the `.bak` is restored, zebrad is restarted, and
+   the UI shows zebrad's stderr plus "rolled back". A crash mid-apply rolls back on the
+   next launch via the marker.
 
 When the bundled zebrad version changes, the config is validated with a 10 s probe run
 first; on failure the managed keys are regenerated, the user's other keys kept, and the
@@ -169,6 +171,49 @@ keys. The RPC address always comes from the written config, never from log lines
 
 Launcher settings live in `launcher.json` (with `schema_version`), owned by a settings
 actor.
+
+## First run and node data
+
+`launcher-core/src/firstrun.rs` holds the Tauri-free logic, tested with temporary
+directories; the commands in `src-tauri/src/commands.rs` call it off the async runtime.
+
+| Command | Returns | Does |
+| --- | --- | --- |
+| `get_first_run_info` | `FirstRunInfo` | first run until `settings.first_run_done`; the default data dir and its free space (`statvfs` / `GetDiskFreeSpaceExW`, at the nearest existing ancestor); alpha.4 leftovers with the state size from a capped walk |
+| `pick_data_dir` | `Option<String>` | the native folder picker |
+| `choose_data_dir(path)` | `DataDirChoice` | checks `path` is absolute and writable, saves `settings.data_dir`, rewrites `state.cache_dir`; returns the free space, the UI decides whether to warn |
+| `import_legacy_state` | `ImportOutcome` | renames `dirs::cache_dir()/zebra/state` into the current state dir; across volumes it fails and asks the user to move it by hand, never copying |
+| `delete_node_data` | `u64` (bytes freed) | removes `<data dir>/state` only, and only inside the launcher's data dir or the chosen one |
+| `copy_diagnostics` | `String` | versions, OS, status, settings (URL credentials redacted), `zebrad.toml`, last 200 lines of each log; never the RPC cookie |
+| `complete_first_run` | `()` | sets `first_run_done`; from then on zebrad starts at launch |
+
+zebrad is not started at launch before the first run is complete. The data commands run
+only while zebrad is `Stopped` or `Failed`. A semaphore in `AppState` keeps them apart
+from starts: each start (UI, tray, launch, the restart inside `apply_config`) holds one
+permit until it finishes, and a data change holds all of them, so zebrad cannot start
+while its state is being moved or deleted.
+
+## Window, tray and exit
+
+```text
+tray menu: Show | Start zebrad | Stop zebrad | Quit      tooltip: phase (watch<Status>)
+window close --(close_to_tray && tray exists)--> hide; zebrad keeps running
+            '--(otherwise)--> last window closed -> ExitRequested
+Quit / ExitRequested -> prevent_exit -> supervisor.shutdown() capped at grace + 10 s -> exit
+Show / second launch (single-instance) / macOS dock -> show + focus the window
+```
+
+- The tray is built in `setup` (`src-tauri/src/tray.rs`). On Linux it is
+  libayatana-appindicator: menu only, no click events, no tooltip. If the library is
+  missing (it panics; the panic is caught) the tray is skipped, `AppState::tray_ready`
+  stays false and closing the window quits.
+- The exit flow (`src-tauri/src/exit.rs`) runs once, guarded by atomics: a second exit
+  request passes through once the shutdown finished; `RunEvent::Exit` blocks on the
+  shutdown as a last resort.
+- If startup fails (paths, settings, supervisor), the window is hidden and a native error
+  dialog names the error and the log directory; dismissing it exits with code 1. A
+  `zebrad.toml` that cannot be updated is not fatal: zebrad reports it and the editor can
+  fix it.
 
 ## Status and metrics
 

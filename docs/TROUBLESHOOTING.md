@@ -2,9 +2,38 @@
 
 > Skeleton. Entries marked TODO are completed as the features land (M5–M12).
 
-Start with **Settings → Copy diagnostics** (M8): it bundles the launcher log, the tail of
-the zebrad log, versions and the config, ready to attach to an issue.
-TODO(M8): list where `launcher.log` and `zebrad.log` live on each OS.
+Start with **Settings → Copy diagnostics**: it copies the launcher and bundled zebrad
+versions, the OS, the node status, the settings, the managed `zebrad.toml` and the last
+200 lines of the launcher and zebrad logs to the clipboard, ready to paste into an issue.
+It never includes the RPC cookie, and credentials in the Grafana URL are redacted.
+
+The logs live in the app log directory: `~/.local/share/org.zfnd.zebra-launcher/logs`
+(Linux), `~/Library/Logs/org.zfnd.zebra-launcher` (macOS),
+`%LOCALAPPDATA%\org.zfnd.zebra-launcher\logs` (Windows). The launcher writes one
+`launcher.<date>.log` per day (14 kept); zebrad's output goes to `zebrad.log`, rotated at
+10 MB. If the launcher cannot start at all, an error dialog names this directory.
+
+## No tray icon (Linux)
+
+On Linux the tray icon needs `libayatana-appindicator3` (a dependency of the deb, bundled
+in the AppImage) and a desktop that shows AppIndicators. Stock GNOME does not: install
+the "AppIndicator and KStatusNotifierItem Support" extension (Ubuntu ships it enabled).
+On Linux the icon only has a menu (Show, Start zebrad, Stop zebrad, Quit); clicking it
+does nothing else, and it shows no tooltip.
+
+If the library is missing, the launcher logs that it could not create the tray icon,
+and closing the window quits (stopping zebrad) instead of hiding it. If the library is
+present but the desktop does not show the icon, closing the window hides it while zebrad
+keeps running: start the launcher again to bring the window back, or turn off
+**Settings → Close to tray**.
+
+## Not enough disk space
+
+The first run shows the free space where the chain state will go. Mainnet state needs
+hundreds of GB and keeps growing; Testnet needs much less. If the drive is too small,
+choose a data directory on a larger drive before starting the node; existing state is
+not moved, so delete it afterwards if you no longer need it (see
+[UNINSTALL.md](UNINSTALL.md#delete-node-data)). zebrad fails when the disk fills up.
 
 ## A port is already in use
 
@@ -61,10 +90,13 @@ Choose More info → Run anyway after checking the signature
 
 ## Firewall prompt for port 8233
 
-zebrad listens for peers on `[::]:8233` (P2P). macOS and Windows ask whether to allow
-incoming connections the first time. Allowing it helps the network; denying it still lets
-your node sync through outbound connections. RPC and metrics are loopback-only and never
-need a firewall rule. TODO(M8): match the first-run note's wording.
+zebrad listens for peers on `[::]:8233` (P2P; `18233` on Testnet). The first time the
+node starts, macOS and Windows ask whether to allow incoming connections for
+`zebra-launcher-zebrad`; the first-run screen warns about this prompt. Allowing it helps
+the network; denying it still lets your node sync through outbound connections. RPC and
+metrics are loopback-only and never need a firewall rule. To change your answer later:
+Windows Security → Firewall & network protection → Allow an app through firewall; macOS
+System Settings → Network → Firewall → Options.
 
 ## Node stopped: release too old
 
