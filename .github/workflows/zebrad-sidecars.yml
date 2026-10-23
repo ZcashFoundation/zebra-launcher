@@ -203,10 +203,12 @@ jobs:
             } >> "${GITHUB_OUTPUT}"
           done
 
-  # The job names are static: GitHub shows a skipped job's `name:` with its
-  # expressions unrendered. The first step of each job says what it does.
+  # The job names carry the target: with an explicit `name:` GitHub does not
+  # append the matrix values, so a static name would be the same for both
+  # Linux (and both macOS) targets. A skipped job shows the expression
+  # unrendered, which is the lesser problem.
   linux:
-    name: zebrad (Linux)
+    name: zebrad (${{ matrix.target }})
     needs: version
     if: needs.version.outputs.has_linux == 'true'
     runs-on: ${{ matrix.runner }}
@@ -336,7 +338,7 @@ jobs:
           if-no-files-found: error
 
   macos:
-    name: zebrad (macOS)
+    name: zebrad (${{ matrix.target }})
     needs: version
     if: needs.version.outputs.has_macos == 'true'
     runs-on: ${{ matrix.runner }}
@@ -452,7 +454,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    name: zebrad (Windows)
+    name: zebrad (${{ matrix.target }})
     needs: version
     if: needs.version.outputs.has_windows == 'true'
     runs-on: ${{ matrix.runner }}
