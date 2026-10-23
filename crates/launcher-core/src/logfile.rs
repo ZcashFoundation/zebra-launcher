@@ -114,8 +114,17 @@ impl RotatingFile {
 
     fn write_line(&mut self, line: &[u8]) -> io::Result<()> {
         let len = line.len() as u64;
-        if self.size > 0 && self.size + len > self.config.max_bytes {
-            self.rotate()?;
+        if self.size > 0
+            && self.size + len > self.config.max_bytes
+            && let Err(err) = self.rotate()
+        {
+            // Keep the on-disk log alive rather than freezing it: lose the
+            // current file's content and try rotating again next time.
+            tracing::warn!(
+                ?err,
+                "could not rotate the zebrad log file; truncating it instead"
+            );
+            self.truncate()?;
         }
         self.file.write_all(line)?;
         self.size += len;
@@ -207,6 +216,40 @@ mod tests {
         // The newest lines are in the current file.
         let current = fs::read_to_string(&config.path).expect("read");
         assert!(current.contains("line 09"), "{current}");
+    }
+
+    #[test]
+    fn a_failed_rotation_truncates_and_rotation_is_retried_later() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = RotatingLogConfig {
+            path: dir.path().join("zebrad.log"),
+            max_bytes: 100,
+            keep: 1,
+        };
+        // Renaming the current file over a non-empty directory fails everywhere.
+        let blocker = dir.path().join("zebrad.log.1");
+        fs::create_dir(&blocker).expect("mkdir");
+        fs::write(blocker.join("inner"), b"x").expect("write inner");
+
+        let mut file = RotatingFile::open(config.clone()).expect("open");
+        let line = |i: usize| format!("line {i:02} {}\n", "x".repeat(21));
+        for i in 0..10 {
+            file.write_line(line(i).as_bytes()).expect("write");
+        }
+        file.flush().expect("flush");
+        let current = fs::read_to_string(&config.path).expect("read");
+        assert!(current.len() <= 100, "{current}");
+        assert!(current.contains("line 09"), "{current}");
+
+        // Once the obstacle is gone, rotation works again.
+        fs::remove_dir_all(&blocker).expect("rmdir");
+        for i in 10..20 {
+            file.write_line(line(i).as_bytes()).expect("write");
+        }
+        file.flush().expect("flush");
+        assert!(blocker.is_file(), "rotation resumed");
+        let current = fs::read_to_string(&config.path).expect("read");
+        assert!(current.contains("line 19"), "{current}");
     }
 
     #[test]
