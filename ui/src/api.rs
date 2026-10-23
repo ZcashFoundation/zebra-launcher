@@ -4,8 +4,8 @@
 use std::{cell::Cell, fmt};
 
 use launcher_types::{
-    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, LogLine, NodeStats, Settings,
-    StaleProcessInfo, Status,
+    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
+    ImportOutcome, LogLine, NodeStats, Settings, StaleProcessInfo, Status,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
@@ -251,4 +251,85 @@ pub async fn get_node_stats() -> ApiResult<Option<NodeStats>> {
         return Ok(wire(mock::get_node_stats().await)?);
     }
     Ok(tauri::invoke0("get_node_stats").await?)
+}
+
+/// What the first-run flow shows: the default data directory, its free space and any alpha.4
+/// leftovers. Sizing the leftovers can take a moment.
+pub async fn get_first_run_info() -> ApiResult<FirstRunInfo> {
+    if !is_tauri() {
+        return Ok(wire(mock::get_first_run_info().await)?);
+    }
+    Ok(tauri::invoke0("get_first_run_info").await?)
+}
+
+/// Opens the system's folder picker. `None` when the user cancelled.
+pub async fn pick_data_dir() -> ApiResult<Option<String>> {
+    if !is_tauri() {
+        return Ok(wire(mock::pick_data_dir().await)?);
+    }
+    Ok(tauri::invoke0("pick_data_dir").await?)
+}
+
+#[derive(Serialize)]
+struct ChooseDataDirArgs<'a> {
+    path: &'a str,
+}
+
+/// Makes `path` the data directory (only while zebrad is stopped or failed) and returns the
+/// saved settings with the free space there. State in the old location stays where it is.
+pub async fn choose_data_dir(path: String) -> ApiResult<DataDirChoice> {
+    if !is_tauri() {
+        return Ok(wire(mock::choose_data_dir(path).await.map_err(ApiError)?)?);
+    }
+    Ok(tauri::invoke("choose_data_dir", &ChooseDataDirArgs { path: &path }).await?)
+}
+
+/// Moves the alpha.4 state into the current state directory: a rename on the same volume,
+/// only while zebrad is stopped or failed.
+pub async fn import_legacy_state() -> ApiResult<ImportOutcome> {
+    if !is_tauri() {
+        return Ok(wire(mock::import_legacy_state().await.map_err(ApiError)?)?);
+    }
+    Ok(tauri::invoke0("import_legacy_state").await?)
+}
+
+/// Deletes the chain state and returns the bytes freed. Only while zebrad is stopped or
+/// failed.
+pub async fn delete_node_data() -> ApiResult<u64> {
+    if !is_tauri() {
+        return mock::delete_node_data().await.map_err(ApiError);
+    }
+    Ok(tauri::invoke0("delete_node_data").await?)
+}
+
+/// The diagnostics text for a bug report.
+pub async fn copy_diagnostics() -> ApiResult<String> {
+    if !is_tauri() {
+        return Ok(mock::copy_diagnostics().await);
+    }
+    Ok(tauri::invoke0("copy_diagnostics").await?)
+}
+
+/// Records that the first-run flow is done; zebrad starts at launch from now on.
+pub async fn complete_first_run() -> ApiResult<()> {
+    if !is_tauri() {
+        mock::complete_first_run().await;
+        return Ok(());
+    }
+    Ok(tauri::invoke0("complete_first_run").await?)
+}
+
+#[derive(Serialize)]
+struct OpenPathArgs {
+    target: &'static str,
+}
+
+/// Opens one of the backend's fixed locations (`config_dir`, `data_dir`, `log_dir`,
+/// `releases_page`) with the system's default handler.
+pub async fn open_path(target: &'static str) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::open_path(target).await;
+        return Ok(());
+    }
+    Ok(tauri::invoke("open_path", &OpenPathArgs { target }).await?)
 }
