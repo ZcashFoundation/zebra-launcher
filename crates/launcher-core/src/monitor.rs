@@ -66,7 +66,7 @@ impl Monitor {
         config: MonitorConfig,
     ) -> watch::Receiver<Option<NodeStats>> {
         let (tx, rx) = watch::channel(None);
-        tokio::spawn(run(status, config, tx));
+        tokio::spawn(run(status, config, tx, RpcClient::new));
         rx
     }
 }
@@ -79,10 +79,13 @@ struct Run {
     eos_checked: Option<Instant>,
 }
 
+/// The monitor task. `new_client` builds the client for each run; it is a
+/// parameter so tests can make it fail.
 async fn run(
     mut status: watch::Receiver<Status>,
     config: MonitorConfig,
     tx: watch::Sender<Option<NodeStats>>,
+    new_client: impl Fn(SocketAddr, PathBuf) -> Result<RpcClient, RpcError>,
 ) {
     let mut current: Option<Run> = None;
     loop {
@@ -107,11 +110,16 @@ async fn run(
         let run = match current.take() {
             Some(run) if run.addr == addr => current.insert(run),
             _ => {
-                let client = match RpcClient::new(addr, config.cookie_file.clone()) {
+                let client = match new_client(addr, config.cookie_file.clone()) {
                     Ok(client) => client,
                     Err(err) => {
+                        // Keep the task (and the stats watch) alive; try again
+                        // after the interval.
                         tracing::warn!(%err, "could not create the RPC client");
-                        return;
+                        if !wait_for_next_poll(&mut status, &tx, config.interval).await {
+                            return;
+                        }
+                        continue;
                     }
                 };
                 current.insert(Run {
@@ -143,11 +151,23 @@ async fn run(
             }
         }
 
-        tokio::select! {
-            () = tokio::time::sleep(config.interval) => {}
-            changed = status.changed() => if changed.is_err() { return },
-            () = tx.closed() => return,
+        if !wait_for_next_poll(&mut status, &tx, config.interval).await {
+            return;
         }
+    }
+}
+
+/// Waits for the interval or a status change. False when the monitor should
+/// stop: the status sender or every stats receiver is gone.
+async fn wait_for_next_poll(
+    status: &mut watch::Receiver<Status>,
+    tx: &watch::Sender<Option<NodeStats>>,
+    interval: Duration,
+) -> bool {
+    tokio::select! {
+        () = tokio::time::sleep(interval) => true,
+        changed = status.changed() => changed.is_ok(),
+        () = tx.closed() => false,
     }
 }
 
@@ -210,5 +230,61 @@ fn unix_time(secs: i64) -> SystemTime {
     match u64::try_from(secs) {
         Ok(secs) => UNIX_EPOCH + Duration::from_secs(secs),
         Err(_) => UNIX_EPOCH,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        net::Ipv4Addr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failing_client_is_retried_and_the_stats_watch_stays_open() {
+        let (status_tx, status_rx) = watch::channel(Status::default());
+        let (tx, mut stats) = watch::channel(None);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let config = MonitorConfig {
+            cookie_file: PathBuf::from("/nonexistent/.cookie"),
+            interval: Duration::from_millis(10),
+            eos_interval: DEFAULT_EOS_INTERVAL,
+        };
+        let counter = attempts.clone();
+        let task = tokio::spawn(run(status_rx, config, tx, move |_, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            Err(RpcError::InvalidResponse("no client".to_string()))
+        }));
+        status_tx.send_modify(|s| {
+            s.phase = Phase::Running;
+            s.rpc_addr = Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 1)));
+        });
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while attempts.load(Ordering::Relaxed) < 3 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the client is retried");
+        assert!(!task.is_finished());
+        assert!(stats.has_changed().is_ok(), "the stats sender is alive");
+
+        drop(status_tx);
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the monitor stops in time")
+            .expect("the monitor task did not panic");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), stats.changed())
+                .await
+                .expect("in time")
+                .is_err()
+        );
     }
 }
