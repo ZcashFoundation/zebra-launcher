@@ -193,13 +193,30 @@ impl LegacyLocations {
     }
 }
 
+/// `path` with symbolic links resolved, as far as it exists: the nearest
+/// existing ancestor is canonicalized and the rest appended unchanged. Falls
+/// back to `path` itself when nothing can be resolved.
+fn resolve(path: &Path) -> PathBuf {
+    for ancestor in path.ancestors() {
+        if let Ok(resolved) = fs::canonicalize(ancestor) {
+            return match path.strip_prefix(ancestor) {
+                Ok(rest) if rest.as_os_str().is_empty() => resolved,
+                Ok(rest) => resolved.join(rest),
+                Err(_) => path.to_path_buf(),
+            };
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Looks for alpha.4 leftovers: a `zebrad.toml` in `exe_dir`, or a
 /// `zebra_cache_dir` holding a `state` directory. The state size is counted
 /// up to [`SIZE_WALK_LIMIT`] entries.
 ///
 /// `current_state_dir` is the launcher's own `state.cache_dir`: when it lies
-/// inside the zebra cache directory (the user chose that location), the
-/// state there is the launcher's and is not reported.
+/// inside the zebra cache directory (the user chose that location, possibly
+/// through a symbolic link), the state there is the launcher's and is not
+/// reported. Both paths are compared with links resolved.
 pub fn detect_legacy(
     locations: &LegacyLocations,
     current_state_dir: &Path,
@@ -209,11 +226,12 @@ pub fn detect_legacy(
         .as_deref()
         .map(|dir| dir.join("zebrad.toml"))
         .filter(|file| file.is_file());
+    let current_state_dir = resolve(current_state_dir);
     let state_dir = locations
         .zebra_cache_dir
         .as_deref()
         .filter(|dir| dir.join(STATE_DIR_NAME).is_dir())
-        .filter(|dir| !current_state_dir.starts_with(dir))
+        .filter(|dir| !current_state_dir.starts_with(resolve(dir)))
         .map(Path::to_path_buf);
     if config_file.is_none() && state_dir.is_none() {
         return None;
@@ -256,7 +274,12 @@ fn import_with(
         ));
     }
     let target = to.join(STATE_DIR_NAME);
-    if target.starts_with(&source) || source.starts_with(&target) {
+    // Compared with links resolved, so a directory is never moved into itself
+    // through a symbolic link.
+    let (resolved_source, resolved_target) = (resolve(&source), resolve(&target));
+    if resolved_target.starts_with(&resolved_source)
+        || resolved_source.starts_with(&resolved_target)
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
@@ -524,6 +547,41 @@ mod tests {
         write_file(&from.join("state/a"), 1);
         let err = import_legacy_state(&from, &from.join("state")).expect_err("overlap");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_data_dirs_are_compared_resolved() {
+        let dir = tempdir();
+        let cache = dir.path().join("cache/zebra");
+        write_file(&cache.join("state/v27/mainnet/000001.sst"), 3);
+        let locations = LegacyLocations {
+            exe_dir: None,
+            zebra_cache_dir: Some(cache.clone()),
+        };
+
+        // The chosen data dir is a link to the zebra cache dir: its state is
+        // the launcher's own, not a leftover, and cannot be imported.
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&cache, &link).expect("symlink");
+        assert_eq!(detect_legacy(&locations, &link.join("state")), None);
+        let err = import_legacy_state(&cache, &link).expect_err("same directory");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // A data dir reached through a link into the state itself would move
+        // the state into itself.
+        let into_state = dir.path().join("into-state");
+        std::os::unix::fs::symlink(cache.join("state"), &into_state).expect("symlink");
+        let to = into_state.join("sub");
+        assert_eq!(detect_legacy(&locations, &to.join("state")), None);
+        let err = import_legacy_state(&cache, &to).expect_err("into itself");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(cache.join("state/v27/mainnet/000001.sst").is_file());
+        assert!(!cache.join("state/sub").exists());
+
+        // A real directory elsewhere still sees the leftover.
+        let found = detect_legacy(&locations, &dir.path().join("data/state")).expect("found");
+        assert_eq!(found.state_dir, Some(cache.display().to_string()));
     }
 
     #[test]
