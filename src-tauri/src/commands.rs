@@ -11,7 +11,7 @@ use launcher_core::{
     supervisor::{StartOptions, SupervisorError},
 };
 use launcher_types::{
-    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, ExitClass, LogLine, NodeStats,
+    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, ExitClass, LogLine, NodeStats, Phase,
     Settings, Status,
 };
 use tauri::{AppHandle, Runtime, State, ipc::Channel};
@@ -121,6 +121,15 @@ fn io_error(err: impl Display) -> ApplyError {
     apply_error(ApplyErrorKind::Io, err)
 }
 
+/// Whether `apply_config` restarts zebrad: it is running, starting, or about
+/// to be restarted after a crash. A stopping zebrad is left stopped.
+fn was_running(phase: &Phase) -> bool {
+    matches!(
+        phase,
+        Phase::Starting | Phase::Running | Phase::Backoff { .. }
+    )
+}
+
 fn edit_error(err: ConfigEditError) -> ApplyError {
     let kind = match &err {
         ConfigEditError::InvalidToml(_) => ApplyErrorKind::InvalidToml,
@@ -132,10 +141,15 @@ fn edit_error(err: ConfigEditError) -> ApplyError {
     apply_error(kind, err)
 }
 
-/// Saves `text` as `zebrad.toml` and restarts zebrad with it.
+/// Saves `text` as `zebrad.toml` and, if zebrad was running, restarts it
+/// with the new file.
 ///
-/// `token` is the one `read_config` returned. If zebrad refuses the file as
-/// a configuration error, the previous file is restored, zebrad is started
+/// `token` is the one `read_config` returned. The launcher-managed keys are
+/// set to the launcher's values before the file is checked and written.
+/// When zebrad is not running (stopped, or failed and waiting for the user)
+/// the file is saved and the outcome is `applied`; zebrad reads it on its
+/// next start. Otherwise zebrad is restarted: if it refuses the file as a
+/// configuration error, the previous file is restored, zebrad is started
 /// with it, and the outcome is `rolled_back` with zebrad's message. Any
 /// other start failure keeps the new file (zebrad got past loading it) and
 /// shows up in the status. Rejections leave the file unchanged.
@@ -157,10 +171,20 @@ pub async fn apply_config(
         })?;
 
     let paths = state.paths.clone();
-    let pending = blocking(move || config::begin_apply(&paths, &text, &token))
+    let keys = managed_keys(&state.settings.current(), &paths);
+    let pending = blocking(move || config::begin_apply_with_managed(&paths, &text, &token, &keys))
         .await
         .map_err(io_error)?
         .map_err(edit_error)?;
+
+    if !was_running(&state.supervisor.status().phase) {
+        blocking(move || pending.commit())
+            .await
+            .map_err(io_error)?
+            .map_err(io_error)?;
+        tracing::info!("saved the new configuration; zebrad uses it on its next start");
+        return Ok(ApplyOutcome::Applied);
+    }
 
     if let Err(err) = state.supervisor.stop().await {
         // The launcher is exiting. Restore the file now; if that fails, the
