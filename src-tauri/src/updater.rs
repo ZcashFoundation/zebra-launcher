@@ -100,10 +100,31 @@ fn dev_endpoints() -> Result<Option<Vec<tauri::Url>>, String> {
 /// Whether this installation can replace itself: the AppImage, the NSIS
 /// installer and the macOS app can. The `.deb` cannot (its updates need root
 /// and the package manager), and neither can a development build.
+///
+/// On macOS `bundle_type()` reports `App` for any build, bundled or not, so
+/// the running executable must also be inside a `.app` bundle, and a debug
+/// build never counts.
 fn can_self_update() -> bool {
+    match bundle_type() {
+        Some(BundleType::AppImage | BundleType::Nsis) => true,
+        Some(BundleType::App) => {
+            !cfg!(debug_assertions)
+                && std::env::current_exe().is_ok_and(|exe| is_in_app_bundle(&exe))
+        }
+        _ => false,
+    }
+}
+
+/// `exe` is the main executable of a macOS `.app` bundle
+/// (`<name>.app/Contents/MacOS/<exe>`).
+fn is_in_app_bundle(exe: &std::path::Path) -> bool {
+    let mut dirs = exe.ancestors().skip(1).map(std::path::Path::file_name);
     matches!(
-        bundle_type(),
-        Some(BundleType::AppImage | BundleType::Nsis | BundleType::App)
+        (dirs.next(), dirs.next(), dirs.next()),
+        (Some(Some(macos)), Some(Some(contents)), Some(Some(app)))
+            if macos == "MacOS"
+                && contents == "Contents"
+                && std::path::Path::new(app).extension().is_some_and(|ext| ext == "app")
     )
 }
 
@@ -265,5 +286,28 @@ async fn forward<R: Runtime>(app: AppHandle<R>, mut rx: watch::Receiver<UpdateIn
         if rx.changed().await.is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::is_in_app_bundle;
+
+    #[test]
+    fn app_bundle_detection() {
+        assert!(is_in_app_bundle(Path::new(
+            "/Applications/Zebra Launcher.app/Contents/MacOS/zebra-launcher"
+        )));
+        assert!(!is_in_app_bundle(Path::new(
+            "/Users/me/zebra-launcher/target/debug/zebra-launcher"
+        )));
+        assert!(!is_in_app_bundle(Path::new(
+            "/Applications/Zebra Launcher.app/Contents/Resources/zebra-launcher"
+        )));
+        assert!(!is_in_app_bundle(Path::new(
+            "/Contents/MacOS/zebra-launcher"
+        )));
     }
 }
