@@ -45,9 +45,13 @@ pub const UPDATE_INFO_EVENT: &str = "update_info";
 /// [`launcher_types::UpdateHealthFailure`].
 pub const UPDATE_HEALTH_FAILED_EVENT: &str = "update_health_failed";
 
-/// How long a check may take. Downloads have no timeout; they can be
-/// cancelled.
+/// How long a check may take.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a download may take in total. The plugin copies the builder's
+/// timeout into the `Update` and applies it to the download request as an
+/// overall limit, so the check's 30 s would end any large download; the
+/// download gets this instead. The user can cancel it sooner.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// Development only: replaces the configured endpoints. Not read by release
 /// builds.
@@ -126,6 +130,9 @@ impl<R: Runtime> UpdateBackend for PluginBackend<R> {
     }
 
     async fn download(&self, release: &Update, on_chunk: OnChunk) -> Result<Vec<u8>, String> {
+        // The check's timeout came along in `release.timeout`; replace it.
+        let mut release = release.clone();
+        release.timeout = Some(DOWNLOAD_TIMEOUT);
         release.download(on_chunk, || {}).await.map_err(message)
     }
 
