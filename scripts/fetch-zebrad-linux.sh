@@ -34,6 +34,9 @@ die() {
     exit 1
 }
 
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 usage() {
     cat <<'EOF'
 Usage: fetch-zebrad-linux.sh [--target TRIPLE] [--version X.Y.Z] [--commit SHA] [--out PATH]
@@ -85,25 +88,11 @@ case "${target}" in
     *) die "unsupported target ${target}; Zebra only publishes Linux x86_64 and aarch64 binaries" ;;
 esac
 
-if [ -z "${version}" ]; then
-    [ -f "${repo_root}/ZEBRAD_VERSION" ] || die "no --version given and ${repo_root}/ZEBRAD_VERSION is missing"
-    version="$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_VERSION")"
-fi
+[ -n "${version}" ] || version="$(read_zebrad_version "${repo_root}")"
 # ZEBRAD_COMMIT pins the commit of ZEBRAD_VERSION, so it only applies to it.
-if [ -z "${commit}" ] && [ -f "${repo_root}/ZEBRAD_COMMIT" ] &&
-    [ "${version}" = "$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_VERSION" 2>/dev/null)" ]; then
-    commit="$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_COMMIT")"
-fi
-if [ -n "${commit}" ] && ! printf '%s\n' "${commit}" | grep -Eq '^[0-9a-f]{40}$'; then
-    die "commit '${commit}' is not a full 40-character lowercase hex SHA"
-fi
-case "${version}" in
-    v* | V*) die "version '${version}' must not start with 'v' (asset names are zebrad-<X.Y.Z>-<target>.tar.gz)" ;;
-esac
-# Plain semver, optionally with a pre-release suffix, so it is safe in URLs and patterns.
-if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
-    die "version '${version}' is not of the form X.Y.Z"
-fi
+[ -n "${commit}" ] || commit="$(read_zebrad_commit "${repo_root}" "${version}")"
+[ -z "${commit}" ] || check_commit "${commit}"
+check_zebrad_version "${version}" "(asset names are zebrad-<X.Y.Z>-<target>.tar.gz)"
 
 [ -n "${out}" ] || out="${repo_root}/src-tauri/binaries/zebra-launcher-zebrad-${target}"
 
@@ -178,19 +167,6 @@ if [ ! -f "${work}/extract/zebrad" ] || [ -L "${work}/extract/zebrad" ]; then
     die "zebrad in ${asset} is not a regular file"
 fi
 
-mkdir -p "$(dirname "${out}")"
-# Install through a temporary file so a failed check never leaves a bad sidecar.
-cp "${work}/extract/zebrad" "${out}.tmp"
-chmod +x "${out}.tmp"
-
-reported="$("${out}.tmp" --version 2>/dev/null | head -n 1)" || reported=""
-case "${reported}" in
-    "zebrad ${version}" | "zebrad ${version} "* | "zebrad ${version}+"*) ;;
-    *)
-        rm -f "${out}.tmp"
-        die "binary reports '${reported}', expected 'zebrad ${version}'"
-        ;;
-esac
-mv -f "${out}.tmp" "${out}"
+install_atomic "${work}/extract/zebrad" "${out}" "${version}"
 
 echo "zebrad ${version} (${target}, commit ${commit:-not pinned}): cosign verified, sha256 ok, attestation ${attestation}, installed at ${out}"
