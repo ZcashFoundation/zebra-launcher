@@ -1,3 +1,4 @@
 Touch this file (one line per request) to run dev-windows.yml on the rebuild branch.
 request 1: 2026-10-23T20:45Z zebrad main, windows-only
 request 2: 2026-10-23T21:25Z retry after the sha256 backslash fix
+request 3: 2026-10-23T21:40Z retry after the tar path fix
