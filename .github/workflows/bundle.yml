@@ -33,24 +33,35 @@ concurrency:
   group: bundle-${{ github.ref }}
   cancel-in-progress: true
 
+# Tool pins, APP_BIN, GLIBC_FLOOR and LINUX_PACKAGES come from
+# .github/tool-versions.env (loaded by the setup-tauri action); the target
+# matrix from .github/targets.json. release.yml uses the same two files.
 env:
   CARGO_TERM_COLOR: always
   CI: true
-  # Pinned tools; keep in sync with release.yml. TAURI_CLI_VERSION's minor
-  # must be the tauri crate's (scripts/check-versions.sh checks it).
-  TAURI_CLI_VERSION: 2.12.4
-  TRUNK_VERSION: 0.22.0
-  BINSTALL_VERSION: 1.26.0
-  # The app's main binary (tauri.conf.json mainBinaryName).
-  APP_BIN: zebra-launcher
-  GLIBC_FLOOR: "2.35"
-  # Build and runtime packages for the ubuntu:22.04 container.
-  LINUX_PACKAGES: >-
-    libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
-    libssl-dev patchelf file libfuse2 curl git build-essential pkg-config
-    ca-certificates
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # The target matrix, read once.
+  # ---------------------------------------------------------------------------
+  targets:
+    name: Read the target matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The five-target matrix, from .github/targets.json.
+      - id: targets
+        name: Read the target matrix
+        shell: bash
+        run: echo "matrix=$(jq -c . .github/targets.json)" >> "${GITHUB_OUTPUT}"
+
   # ---------------------------------------------------------------------------
   # zebrad sidecars: verified Linux downloads, macOS/Windows builds, attested.
   # Resolves and validates ZEBRAD_VERSION/ZEBRAD_COMMIT; its `version` output
@@ -69,7 +80,7 @@ jobs:
   # ---------------------------------------------------------------------------
   bundle:
     name: Bundle (${{ matrix.target }})
-    needs: sidecars
+    needs: [targets, sidecars]
     runs-on: ${{ matrix.runner }}
     # Empty for macOS and Windows: the job then runs directly on the runner.
     container: ${{ matrix.container }}
@@ -78,25 +89,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # Linux builds run in ubuntu:22.04 to keep the glibc floor at 2.35
-          # (the ubuntu-22.04 runner labels retire on 2027-04-17).
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
-            container: ubuntu:22.04
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-            container: ubuntu:22.04
-          - target: aarch64-apple-darwin
-            runner: macos-15
-            container: ""
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-            container: ""
-          - target: x86_64-pc-windows-msvc
-            runner: windows-2025
-            container: ""
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
     defaults:
       run:
         shell: bash
@@ -105,27 +98,24 @@ jobs:
       ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
       # linuxdeploy (AppImage) cannot use FUSE inside a container.
       APPIMAGE_EXTRACT_AND_RUN: 1
-      EXE_SUFFIX: ${{ startsWith(matrix.target, 'x86_64-pc-windows') && '.exe' || '' }}
+      EXE_SUFFIX: ${{ matrix.exe_suffix }}
     steps:
       # git must exist before checkout, or checkout falls back to a tarball.
-      - name: Install Linux packages
+      # The rest of LINUX_PACKAGES comes from setup-tauri, which needs the
+      # checkout for .github/tool-versions.env.
+      - name: Install git (Linux container)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          # shellcheck disable=SC2086 # LINUX_PACKAGES is a word list
-          apt-get install -y --no-install-recommends ${LINUX_PACKAGES}
+          apt-get install -y --no-install-recommends git ca-certificates
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - uses: ./.github/actions/setup-tauri
-        with:
-          tauri-cli-version: ${{ env.TAURI_CLI_VERSION }}
-          trunk-version: ${{ env.TRUNK_VERSION }}
-          binstall-version: ${{ env.BINSTALL_VERSION }}
 
       # Unprivileged, unsigned job: a cache only speeds it up. release.yml uses
       # no caches.

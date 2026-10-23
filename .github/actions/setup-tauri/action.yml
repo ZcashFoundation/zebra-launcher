@@ -1,7 +1,9 @@
-# Installs what `cargo tauri build` / `cargo tauri bundle` need on top of the
-# OS packages: the Rust toolchain from rust-toolchain.toml, cargo-binstall, and
-# tauri-cli and trunk at pinned versions. Used by bundle.yml and release.yml;
-# runs after actions/checkout, from the repository root.
+# Installs what `cargo tauri build` / `cargo tauri bundle` need: the tool pins
+# from .github/tool-versions.env (loaded into $GITHUB_ENV for the rest of the
+# job), the Linux packages (LINUX_PACKAGES, in the ubuntu:22.04 container, as
+# root), the Rust toolchain from rust-toolchain.toml, cargo-binstall, and
+# tauri-cli and trunk at the pinned versions. Used by bundle.yml and
+# release.yml; runs after actions/checkout, from the repository root.
 #
 # Rust toolchain: the macOS and Windows runner images ship rustup, so only the
 # toolchain is installed. In the ubuntu:22.04 container there is no rustup; it
@@ -15,23 +17,46 @@
 # trunk and tauri-cli come from their GitHub release binaries through
 # cargo-binstall (`--locked` applies if binstall falls back to compiling).
 name: Set up the Tauri toolchain
-description: Rust toolchain from rust-toolchain.toml, cargo-binstall, tauri-cli and trunk at pinned versions.
+description: Tool pins from .github/tool-versions.env, Linux packages, Rust toolchain, tauri-cli and (to compile) trunk.
 
 inputs:
-  tauri-cli-version:
-    description: tauri-cli version, without a leading v
-    required: true
-  trunk-version:
-    description: trunk version, without a leading v; empty skips trunk (not needed to bundle)
+  compile:
+    description: '"true" when the job compiles the app (installs trunk); "false" when it only bundles'
     required: false
-    default: ""
-  binstall-version:
-    description: cargo-binstall version, without a leading v
-    required: true
+    default: "true"
 
 runs:
   using: composite
   steps:
+    # KEY=value lines only (no `KEY<<DELIM` multi-line values), with CRs
+    # dropped in case a Windows checkout converted line endings.
+    - name: Load the tool pins
+      shell: bash
+      run: |
+        set -euo pipefail
+        pins="${GITHUB_WORKSPACE}/.github/tool-versions.env"
+        while IFS= read -r line || [ -n "${line}" ]; do
+          line="${line%$'\r'}"
+          case "${line}" in
+            '' | '#'*) continue ;;
+          esac
+          if ! [[ "${line}" =~ ^[A-Z][A-Z0-9_]*= ]]; then
+            echo "::error file=.github/tool-versions.env::malformed line: ${line}"
+            exit 1
+          fi
+          printf '%s\n' "${line}" >> "${GITHUB_ENV}"
+        done < "${pins}"
+
+    - name: Install Linux packages
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        # shellcheck disable=SC2086 # LINUX_PACKAGES is a word list
+        apt-get install -y --no-install-recommends ${LINUX_PACKAGES}
+
     - name: Install rustup (container)
       if: runner.os == 'Linux'
       shell: bash
@@ -71,21 +96,20 @@ runs:
 
     - uses: cargo-bins/cargo-binstall@8a2045612414e945291083f820cd50b4d8fc2218 # v1.26.0
       with:
-        version: ${{ inputs.binstall-version }}
+        version: ${{ env.BINSTALL_VERSION }}
 
     - name: Install tauri-cli and trunk
       shell: bash
       env:
-        TAURI_CLI_VERSION: ${{ inputs.tauri-cli-version }}
-        TRUNK_VERSION: ${{ inputs.trunk-version }}
+        COMPILE: ${{ inputs.compile }}
       run: |
         set -euo pipefail
         crates=("tauri-cli@${TAURI_CLI_VERSION}")
-        if [ -n "${TRUNK_VERSION}" ]; then
+        if [ "${COMPILE}" = true ]; then
           crates+=("trunk@${TRUNK_VERSION}")
         fi
         cargo binstall --no-confirm --locked --disable-telemetry "${crates[@]}"
         cargo tauri --version
-        if [ -n "${TRUNK_VERSION}" ]; then
+        if [ "${COMPILE}" = true ]; then
           trunk --version
         fi

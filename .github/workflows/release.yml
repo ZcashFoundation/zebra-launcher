@@ -37,17 +37,10 @@ env:
   CARGO_TERM_COLOR: always
   CI: true
   TAG: ${{ github.ref_name }}
-  # Pinned tools; keep in sync with bundle.yml.
-  TAURI_CLI_VERSION: 2.12.4
-  TRUNK_VERSION: 0.22.0
-  BINSTALL_VERSION: 1.26.0
-  # The app's main binary (tauri.conf.json mainBinaryName).
-  APP_BIN: zebra-launcher
-  GLIBC_FLOOR: "2.35"
-  LINUX_PACKAGES: >-
-    libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
-    libssl-dev patchelf file libfuse2 curl git build-essential pkg-config
-    ca-certificates jq
+# Tool pins, APP_BIN, GLIBC_FLOOR and LINUX_PACKAGES come from
+# .github/tool-versions.env (loaded by the setup-tauri action); the target
+# matrix from .github/targets.json, read once by `verify`. bundle.yml uses the
+# same two files.
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -63,6 +56,7 @@ jobs:
       version: ${{ steps.versions.outputs.version }}
       prerelease: ${{ steps.versions.outputs.prerelease }}
       require_updater: ${{ steps.updater.outputs.require_updater }}
+      matrix: ${{ steps.targets.outputs.matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -97,6 +91,12 @@ jobs:
       - name: Check tool versions
         shell: bash
         run: scripts/check-versions.sh
+
+      # The five-target matrix, from .github/targets.json.
+      - id: targets
+        name: Read the target matrix
+        shell: bash
+        run: echo "matrix=$(jq -c . .github/targets.json)" >> "${GITHUB_OUTPUT}"
 
       # The one place that decides whether this release must ship updater
       # artifacts (.sig files and latest.json): tauri.conf.json's
@@ -271,48 +271,30 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
-            container: ubuntu:22.04
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-            container: ubuntu:22.04
-          - target: aarch64-apple-darwin
-            runner: macos-15
-            container: ""
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-            container: ""
-          - target: x86_64-pc-windows-msvc
-            runner: windows-2025
-            container: ""
+      matrix: ${{ fromJSON(needs.verify.outputs.matrix) }}
     defaults:
       run:
         shell: bash
     env:
       TARGET: ${{ matrix.target }}
-      EXE_SUFFIX: ${{ startsWith(matrix.target, 'x86_64-pc-windows') && '.exe' || '' }}
+      EXE_SUFFIX: ${{ matrix.exe_suffix }}
     steps:
-      - name: Install Linux packages
+      # git must exist before checkout, or checkout falls back to a tarball.
+      # The rest of LINUX_PACKAGES comes from setup-tauri, which needs the
+      # checkout for .github/tool-versions.env.
+      - name: Install git (Linux container)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          # shellcheck disable=SC2086 # LINUX_PACKAGES is a word list
-          apt-get install -y --no-install-recommends ${LINUX_PACKAGES}
+          apt-get install -y --no-install-recommends git ca-certificates
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - uses: ./.github/actions/setup-tauri
-        with:
-          tauri-cli-version: ${{ env.TAURI_CLI_VERSION }}
-          trunk-version: ${{ env.TRUNK_VERSION }}
-          binstall-version: ${{ env.BINSTALL_VERSION }}
 
       # tauri-build needs the sidecar file to exist at compile time.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -368,41 +350,27 @@ jobs:
       id-token: write # azure/login OIDC (Windows)
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
-            container: ubuntu:22.04
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-            container: ubuntu:22.04
-          - target: aarch64-apple-darwin
-            runner: macos-15
-            container: ""
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-            container: ""
-          - target: x86_64-pc-windows-msvc
-            runner: windows-2025
-            container: ""
+      matrix: ${{ fromJSON(needs.verify.outputs.matrix) }}
     defaults:
       run:
         shell: bash
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.verify.outputs.version }}
-      EXE_SUFFIX: ${{ startsWith(matrix.target, 'x86_64-pc-windows') && '.exe' || '' }}
+      EXE_SUFFIX: ${{ matrix.exe_suffix }}
       APPIMAGE_EXTRACT_AND_RUN: 1
       REQUIRE_UPDATER: ${{ needs.verify.outputs.require_updater }}
     steps:
-      - name: Install Linux packages
+      # git must exist before checkout, or checkout falls back to a tarball.
+      # The rest of LINUX_PACKAGES comes from setup-tauri, which needs the
+      # checkout for .github/tool-versions.env.
+      - name: Install git (Linux container)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          # shellcheck disable=SC2086 # LINUX_PACKAGES is a word list
-          apt-get install -y --no-install-recommends ${LINUX_PACKAGES}
+          apt-get install -y --no-install-recommends git ca-certificates
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -411,8 +379,7 @@ jobs:
       # No trunk: the frontend is already embedded in the compiled binary.
       - uses: ./.github/actions/setup-tauri
         with:
-          tauri-cli-version: ${{ env.TAURI_CLI_VERSION }}
-          binstall-version: ${{ env.BINSTALL_VERSION }}
+          compile: "false"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -577,7 +544,7 @@ jobs:
   #      [verify, draft, sidecars].
   #   2. In bundle_sign, delete the "build-<target>" download-artifact step and
   #      the "Place the compiled app" step (keep the zebrad download and add
-  #      its chmod +x), and pass `trunk-version: ${{ env.TRUNK_VERSION }}` to
+  #      its chmod +x), and drop `compile: "false"` from
   #      ./.github/actions/setup-tauri.
   #   3. In the three "Bundle and sign" steps, replace `cargo tauri bundle` with
   #      `cargo tauri build`, keeping the same flags and env, e.g.:
