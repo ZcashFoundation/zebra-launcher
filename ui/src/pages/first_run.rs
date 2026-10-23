@@ -57,15 +57,14 @@ fn free_text(free_bytes: Option<u64>) -> String {
 
 /// The warning shown below 300 GB of free space. The user may continue anyway.
 fn low_space_warning(free_bytes: Option<u64>) -> Option<impl IntoView> {
-    is_low_space(free_bytes).then(|| {
-        view! {
-            <div class="banner banner-warn" role="status">
-                {format!(
-                    "Only {} free there. Mainnet needs hundreds of GB, and the chain keeps growing. Choose a folder on a bigger drive, or continue if you use Testnet or will free up space.",
-                    free_bytes.map(bytes).unwrap_or_default(),
-                )}
-            </div>
-        }
+    let free = free_bytes.filter(|_| is_low_space(free_bytes))?;
+    Some(view! {
+        <div class="banner banner-warn" role="status">
+            {format!(
+                "Only {} free there. Mainnet needs hundreds of GB, and the chain keeps growing. Choose a folder on a bigger drive, or continue if you use Testnet or will free up space.",
+                bytes(free),
+            )}
+        </div>
     })
 }
 
