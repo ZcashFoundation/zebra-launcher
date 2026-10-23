@@ -78,10 +78,11 @@ pub fn Dashboard() -> impl IntoView {
         })
     };
 
-    let chain_rows = move || {
+    // One derived signal, so the rows update in place instead of being rebuilt every tick.
+    let chain_rows = Signal::derive(move || {
         let now = state.now.get();
         state.stats.with(|stats| {
-            stats.as_ref().map(|s| {
+            stats.as_ref().map_or_else(Vec::new, |s| {
                 vec![
                     ("Chain", s.chain.clone()),
                     ("Height", thousands(s.height)),
@@ -94,7 +95,7 @@ pub fn Dashboard() -> impl IntoView {
                 ]
             })
         })
-    };
+    });
 
     // A memo, so saving unrelated settings does not reload the iframe.
     let grafana_url = Memo::new(move |_| {
@@ -141,10 +142,12 @@ pub fn Dashboard() -> impl IntoView {
                 </div>
                 <div class="card">
                     <h3>"Chain"</h3>
-                    {move || match chain_rows() {
-                        Some(rows) => view! { <Rows rows=Signal::derive(move || rows.clone()) /> }.into_any(),
-                        None => view! { <p class="muted">"No data from zebrad's RPC yet."</p> }.into_any(),
-                    }}
+                    <Show
+                        when=move || state.stats.with(Option::is_some)
+                        fallback=|| view! { <p class="muted">"No data from zebrad's RPC yet."</p> }
+                    >
+                        <Rows rows=chain_rows />
+                    </Show>
                 </div>
             </div>
             {grafana}
