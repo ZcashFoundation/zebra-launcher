@@ -468,7 +468,12 @@ pub fn reset(paths: &Paths, keys: &ManagedKeys) -> Result<ConfigDocument, Config
     }
     fsutil::write_atomic(&config, text.as_bytes())?;
     tracing::info!(backup = %paths.zebrad_config_backup().display(), "reset zebrad.toml to the managed defaults");
-    read(paths)
+    // What `read` would return, from the text just written.
+    Ok(ConfigDocument {
+        token: token(text.as_bytes()),
+        text,
+        path: config.display().to_string(),
+    })
 }
 
 /// What [`recover`] rolled back.

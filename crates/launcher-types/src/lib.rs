@@ -5,7 +5,12 @@
 
 #![forbid(unsafe_code)]
 
-use std::{fmt, net::SocketAddr, str::FromStr, time::SystemTime};
+use std::{
+    fmt,
+    net::SocketAddr,
+    str::FromStr,
+    time::{Duration, SystemTime},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -403,6 +408,18 @@ pub struct EosInfo {
     pub estimated_time: SystemTime,
 }
 
+/// zebrad's end-of-support warning: this close to the estimated halt, Auto mode installs a
+/// downloaded update (after a countdown) and the dashboard offers "Check for updates".
+pub const EOS_WARNING_WINDOW: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+
+/// The estimated end of support is at most `window` after `now` (or already past).
+pub fn eos_within(estimated_time: SystemTime, now: SystemTime, window: Duration) -> bool {
+    match now.checked_add(window) {
+        Some(limit) => estimated_time <= limit,
+        None => true,
+    }
+}
+
 /// The launcher-managed `zebrad.toml`, as shown in the editor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigDocument {
@@ -629,6 +646,23 @@ pub struct UpdateInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eos_window_bounds() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let day = Duration::from_secs(86_400);
+        assert!(eos_within(now - day, now, EOS_WARNING_WINDOW), "past");
+        assert!(eos_within(
+            now + EOS_WARNING_WINDOW,
+            now,
+            EOS_WARNING_WINDOW
+        ));
+        assert!(!eos_within(
+            now + EOS_WARNING_WINDOW + day,
+            now,
+            EOS_WARNING_WINDOW
+        ));
+    }
 
     #[test]
     fn apply_payload_shapes() {

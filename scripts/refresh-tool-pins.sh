@@ -103,6 +103,8 @@ sha256_of() {
 platforms="$(sed -n "s/^${prefix}_SHA256_\([A-Z0-9_]*\)=.*/\1/p" "${env_file}")"
 [ -n "${platforms}" ] || die "${env_file} has no ${prefix}_SHA256_* lines to refresh"
 current_version="$(sed -n "s/^${prefix}_VERSION=//p" "${env_file}")"
+# A checkout with CRLF line ends leaves a CR on each value, as check-versions.sh notes.
+current_version="${current_version%$'\r'}"
 [ -n "${current_version}" ] || die "${env_file} has no ${prefix}_VERSION line"
 
 # GitHub's per-asset digests, as "name<TAB>sha256:hex" lines, when gh can get them.
@@ -144,6 +146,7 @@ while IFS= read -r platform; do
         *) check="no GitHub digest to compare" ;;
     esac
     old="$(sed -n "s/^${key}=//p" "${env_file}")"
+    old="${old%$'\r'}"
     if [ "${old}" = "${hash}" ]; then
         state="unchanged"
     else

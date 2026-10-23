@@ -361,6 +361,27 @@ fn DataDirRow(
     let state = AppState::get();
     let allowed = data_change_open(state);
     let result = RwSignal::new(None::<Result<Option<u64>, String>>);
+    // The free space at a chosen folder, read (read-only) whenever the stored one changes.
+    // The default folder's is not known here; the first-run flow showed it.
+    let stored_dir = Memo::new(move |_| {
+        state
+            .settings
+            .with(|s| s.as_ref().and_then(|s| s.data_dir.clone()))
+    });
+    let stored_free = RwSignal::new(None::<u64>);
+    Effect::new(move |_| {
+        let Some(dir) = stored_dir.get() else {
+            stored_free.set(None);
+            return;
+        };
+        spawn_local(async move {
+            let free = api::free_space(dir.clone()).await.ok().flatten();
+            // Unless the folder changed meanwhile.
+            if stored_dir.with_untracked(|current| current.as_ref() == Some(&dir)) {
+                stored_free.set(free);
+            }
+        });
+    });
 
     let change = move |_| {
         if busy.get_untracked().is_some() {
@@ -402,6 +423,26 @@ fn DataDirRow(
                         .unwrap_or_else(|| "default (the launcher's data folder)".into())
                 }}
             </code>
+            {move || {
+                stored_free
+                    .get()
+                    .filter(|_| result.with(Option::is_none))
+                    .map(|free| {
+                        view! {
+                            <span class="muted data-dir-free">
+                                {format!("{} free there.", bytes(free))}
+                            </span>
+                            {is_low_space(Some(free))
+                                .then(|| {
+                                    view! {
+                                        <span class="error">
+                                            "Mainnet needs hundreds of GB; this drive may fill up."
+                                        </span>
+                                    }
+                                })}
+                        }
+                    })
+            }}
             <div class="buttons">
                 <button
                     type="button"

@@ -26,6 +26,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+pub use launcher_types::EOS_WARNING_WINDOW;
 use launcher_types::{
     EosInfo, ExitClass, Phase, RecoveryAction, StaleProcessInfo, Status, UpdateHealthFailure,
     UpdateMode,
@@ -48,9 +49,6 @@ pub const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// Each interval is stretched or shrunk by up to this many percent, so
 /// launchers started together do not keep hitting the endpoint together.
 pub const CHECK_JITTER_PERCENT: u64 = 10;
-/// zebrad's end-of-support warning: this close to the estimated halt, Auto
-/// mode installs a downloaded update (after a countdown).
-pub const EOS_WARNING_WINDOW: Duration = Duration::from_secs(14 * DAY.as_secs());
 /// This close to the estimated halt, a stale last check is worth a warning.
 pub const EOS_APPROACH_WINDOW: Duration = Duration::from_secs(28 * DAY.as_secs());
 /// A last successful check older than this is stale.
@@ -123,10 +121,7 @@ pub fn next_check(
 }
 
 fn eos_within(eos: Option<&EosInfo>, now: SystemTime, window: Duration) -> bool {
-    eos.is_some_and(|eos| match now.checked_add(window) {
-        Some(limit) => eos.estimated_time <= limit,
-        None => true,
-    })
+    eos.is_some_and(|eos| launcher_types::eos_within(eos.estimated_time, now, window))
 }
 
 /// zebrad's end-of-support warning is on: the estimated halt is within

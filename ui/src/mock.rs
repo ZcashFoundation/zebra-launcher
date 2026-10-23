@@ -15,9 +15,9 @@ use std::{
 
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, EosInfo, ExitClass,
-    ExitInfo, FirstRunInfo, ImportOutcome, LegacyInstall, LogLevel, LogLine, LogStream, NodeStats,
-    Phase, RecoveryAction, Settings, StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo,
-    UpdateMode, UpdateState,
+    ExitInfo, FirstRunInfo, ImportOutcome, LegacyInstall, LogLevel, LogLine, LogStream, Network,
+    NodeStats, Phase, RecoveryAction, Settings, StaleProcessInfo, Status, UpdateHealthFailure,
+    UpdateInfo, UpdateMode, UpdateState,
 };
 use leptos::prelude::*;
 
@@ -225,8 +225,15 @@ cache_dir = "/home/user/.local/share/org.zfnd.zebra-launcher/zebra"
 use_color = false
 "#;
 
-/// What `reset_config` writes: the launcher's minimal file for the mock's paths.
-const MINIMAL_CONFIG: &str = r#"# zebrad configuration managed by Zebra Launcher.
+/// What `reset_config` writes: the launcher's minimal file for the network and the state
+/// directory, like `config::render_minimal`.
+fn minimal_config(network: Network, state_dir: &str) -> String {
+    let rpc_port = match network {
+        Network::Mainnet => 8232,
+        Network::Testnet => 18232,
+    };
+    format!(
+        r#"# zebrad configuration managed by Zebra Launcher.
 #
 # The launcher keeps network.network, rpc.listen_addr, rpc.enable_cookie_auth,
 # rpc.cookie_dir, metrics.endpoint_addr and state.cache_dir up to date.
@@ -234,19 +241,22 @@ const MINIMAL_CONFIG: &str = r#"# zebrad configuration managed by Zebra Launcher
 # default. Keys you do not set use zebrad's defaults.
 
 [network]
-network = "Mainnet"
+network = "{network}"
 
 [rpc]
-listen_addr = "127.0.0.1:8232"
+listen_addr = "127.0.0.1:{rpc_port}"
 enable_cookie_auth = true
-cookie_dir = "/home/user/.local/share/org.zfnd.zebra-launcher/rpc"
+cookie_dir = "{DEFAULT_DATA_DIR}/rpc"
 
 [metrics]
 endpoint_addr = "127.0.0.1:9999"
 
 [state]
-cache_dir = "/home/user/.local/share/org.zfnd.zebra-launcher/state"
-"#;
+cache_dir = "{state_dir}"
+"#,
+        network = network.as_str(),
+    )
+}
 
 /// The text that makes the mock reject a config, and the error zebrad 7.0.0 prints for it.
 const BAD_KEY: &str = "bogus";
@@ -468,7 +478,8 @@ impl Mock {
             next_seq: Arc::new(AtomicU64::new(0)),
             generation: Arc::new(AtomicU64::new(0)),
             next_pid: Arc::new(AtomicU32::new(4242)),
-            fail_next_read: Arc::new(AtomicBool::new(false)),
+            // `?configfail`: the first `read_config` fails, as for an unreadable file.
+            fail_next_read: Arc::new(AtomicBool::new(url_flag("configfail"))),
             legacy: ArcRwSignal::new(first_run.then(sample_legacy)),
             state_bytes: Arc::new(AtomicU64::new(if first_run {
                 0
@@ -922,8 +933,10 @@ pub async fn reset_config() -> Result<ConfigDocument, String> {
     sleep(300).await;
     let mock = mock();
     mock.require_stopped()?;
+    let network = mock.settings.with_untracked(|settings| settings.network);
+    let text = minimal_config(network, &mock.state_dir());
     mock.config.update(|config| {
-        config.text = MINIMAL_CONFIG.into();
+        config.text = text;
         config.token = format!("mock-{}", js_sys::Date::now());
     });
     Ok(mock.config.get_untracked())
@@ -1001,6 +1014,19 @@ pub async fn choose_data_dir(path: String) -> Result<DataDirChoice, String> {
             _ => FREE_ELSEWHERE,
         }),
     })
+}
+
+pub async fn free_space(path: String) -> Option<u64> {
+    // Slower than `get_first_run_info`, so the wizard's data step shows "checking" while Next
+    // is already enabled.
+    sleep(1500).await;
+    let path = path.trim().trim_end_matches('/');
+    match path {
+        DEFAULT_DATA_DIR => Some(FREE_AT_DEFAULT),
+        PICKED_DATA_DIR => Some(FREE_AT_PICKED),
+        _ if path.starts_with('/') => Some(FREE_ELSEWHERE),
+        _ => None,
+    }
 }
 
 pub async fn import_legacy_state() -> Result<ImportOutcome, String> {
@@ -1127,7 +1153,7 @@ pub async fn check_for_update() -> UpdateState {
     mock.set_update_state(UpdateState::Checking);
     sleep(1200).await;
     if mock.update_generation.load(Ordering::Relaxed) != generation {
-        // Cancelled, or the mode changed meanwhile.
+        // Cancelled, or the mode changed meanwhile; whatever superseded it set the state.
         return mock.update_state();
     }
     let found = match mock.update_flag {
@@ -1162,9 +1188,11 @@ pub async fn install_update() -> Result<(), String> {
     if !mock.update.with_untracked(|info| info.can_install) {
         return Err("this installation cannot update itself; download the new version from the releases page".into());
     }
-    mock.update_generation.fetch_add(1, Ordering::Relaxed);
+    // Validate first: bumping the generation cancels a running check, which must not happen
+    // for an install that is refused.
     match mock.update_state() {
         UpdateState::Available { version, .. } => {
+            mock.update_generation.fetch_add(1, Ordering::Relaxed);
             mock.install_requested.store(true, Ordering::Relaxed);
             mock.set_update_state(UpdateState::Downloading {
                 version,
@@ -1175,6 +1203,7 @@ pub async fn install_update() -> Result<(), String> {
             Ok(())
         }
         UpdateState::ReadyToInstall { version, .. } => {
+            mock.update_generation.fetch_add(1, Ordering::Relaxed);
             mock.install(version);
             Ok(())
         }

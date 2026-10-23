@@ -73,19 +73,27 @@ pub fn Configure() -> impl IntoView {
     };
     load(false);
 
-    // A reset, here or in the update recovery panel, replaces the file: show the new one. An
-    // open edit is left alone; saving it is then refused as a conflict.
+    // A reset, here or in the update recovery panel, replaces the file: re-read it. An open
+    // edit keeps its token, so saving it is refused as a conflict, and Discard re-reads; a save
+    // in progress re-reads when it finishes.
     let state = AppState::get();
-    Effect::new(move |_| {
-        let Some(fresh) = state.config_reset.get() else {
-            return;
-        };
-        if matches!(mode.get_untracked(), Mode::Viewing | Mode::Loading) {
-            notice.set(None);
-            load_error.set(None);
-            document.set(Some(fresh));
-            mode.set(Mode::Viewing);
+    Effect::new(move |previous: Option<u64>| {
+        let changed = state.config_changed.get();
+        if previous.is_some_and(|previous| previous != changed) {
+            match mode.get_untracked() {
+                Mode::Viewing | Mode::Loading => {
+                    notice.set(None);
+                    load_error.set(None);
+                    load(false);
+                }
+                Mode::Editing => notice.set(Some(Notice::Conflict(
+                    "zebrad.toml was reset while you were editing; saving this edit is refused."
+                        .into(),
+                ))),
+                Mode::Applying => {}
+            }
         }
+        changed
     });
 
     let retry_load = move |_| {
@@ -104,9 +112,12 @@ pub fn Configure() -> impl IntoView {
             mode.set(Mode::Editing);
         }
     };
+    // Re-reads the file, so a reset or an outside change made while the edit was open shows.
     let discard = move |_| {
-        mode.set(Mode::Viewing);
+        mode.set(Mode::Loading);
         notice.set(None);
+        load_error.set(None);
+        load(false);
     };
     let reload = move |_| {
         notice.set(None);
@@ -253,7 +264,12 @@ pub fn Configure() -> impl IntoView {
             {load_error_view}
             {body}
             <section class="config-reset">
-                <ResetConfigButton disabled=Signal::derive(move || mode.get() != Mode::Viewing) />
+                // Also when the file cannot be read, the main case a reset is for.
+                <ResetConfigButton disabled=Signal::derive(move || match mode.get() {
+                    Mode::Viewing => false,
+                    Mode::Loading => load_error.with(Option::is_none),
+                    Mode::Editing | Mode::Applying => true,
+                }) />
             </section>
         </div>
     }

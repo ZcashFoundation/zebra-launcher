@@ -1,6 +1,8 @@
 //! Launcher updates: the header banner, the update buttons, "Check for updates", and the
 //! recovery options after an update that did not come back healthy.
 
+use std::time::SystemTime;
+
 use launcher_types::{RecoveryAction, UpdateInfo, UpdateState};
 use leptos::{prelude::*, task::spawn_local};
 
@@ -47,6 +49,69 @@ fn banner_kind(state: &UpdateState) -> BannerKind {
     }
 }
 
+/// What the banner headline says, without the parts that change while it shows (download
+/// progress, countdown seconds, relative times).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Headline {
+    Available {
+        version: String,
+        current: String,
+        pub_date: Option<SystemTime>,
+    },
+    Downloading {
+        version: String,
+    },
+    Ready {
+        version: String,
+    },
+    Countdown {
+        version: String,
+    },
+    Installing {
+        version: String,
+    },
+    Error {
+        message: String,
+        at: SystemTime,
+    },
+}
+
+fn headline_for(info: &UpdateInfo) -> Option<Headline> {
+    let version = |version: &String| version.clone();
+    Some(match &info.state {
+        UpdateState::Available {
+            version, pub_date, ..
+        } => Headline::Available {
+            version: version.clone(),
+            current: info.current_version.clone(),
+            pub_date: *pub_date,
+        },
+        UpdateState::Downloading { version: v, .. } => Headline::Downloading {
+            version: version(v),
+        },
+        UpdateState::ReadyToInstall {
+            version: v,
+            countdown_secs: None,
+        } => Headline::Ready {
+            version: version(v),
+        },
+        UpdateState::ReadyToInstall {
+            version: v,
+            countdown_secs: Some(_),
+        } => Headline::Countdown {
+            version: version(v),
+        },
+        UpdateState::Installing { version: v } => Headline::Installing {
+            version: version(v),
+        },
+        UpdateState::Error { message, at } => Headline::Error {
+            message: message.clone(),
+            at: *at,
+        },
+        UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate { .. } => return None,
+    })
+}
+
 /// While one of these runs, "Check for updates" would not change anything.
 fn check_blocked(state: &UpdateState) -> bool {
     matches!(
@@ -89,69 +154,70 @@ pub fn UpdateBanner() -> impl IntoView {
         })
     };
 
+    // The headline is rebuilt only when its kind or wording changes; the download progress,
+    // the countdown and "published 2 days ago" are reactive text inside it, so the aria-live
+    // countdown span stays in place and the clock is only read where a text needs it.
+    let headline_kind = Memo::new(move |_| with_info(state, |info| headline_for(info?)));
     let headline = move || {
-        let now = state.now.get();
-        with_info(state, |info| {
-            let info = info?;
-            let current = &info.current_version;
-            Some(match &info.state {
-                UpdateState::Available {
-                    version, pub_date, ..
-                } => view! {
-                    <strong>{format!("Zebra Launcher {version} is available")}</strong>
-                    {format!(
-                        " (this is {current}{}).",
-                        pub_date
-                            .map(|date| format!(", published {}", relative(date, now)))
-                            .unwrap_or_default(),
-                    )}
-                }
-                .into_any(),
-                UpdateState::Downloading {
-                    version,
-                    downloaded,
-                    total,
-                } => view! {
-                    <strong>{format!("Downloading Zebra Launcher {version}")}</strong>
-                    {format!(": {}.", download_progress(*downloaded, *total))}
-                }
-                .into_any(),
-                UpdateState::ReadyToInstall {
-                    version,
-                    countdown_secs: None,
-                } => view! {
-                    <strong>{format!("Zebra Launcher {version} is ready to install.")}</strong>
-                    " It is downloaded and its signature verified. Installing stops the node and restarts the launcher."
-                }
-                .into_any(),
-                UpdateState::ReadyToInstall {
-                    version,
-                    countdown_secs: Some(secs),
-                } => view! {
-                    <strong>
-                        {format!("Zebra Launcher {version} installs automatically in ")}
-                        <span class="countdown" aria-live="polite">
-                            {format!("{secs} s")}
-                        </span>
-                        "."
-                    </strong>
-                    " This zebrad release is near its end of support. The node will be stopped and the launcher restarts. Cancel to install later."
-                }
-                .into_any(),
-                UpdateState::Installing { version } => view! {
-                    <strong>{format!("Installing Zebra Launcher {version}…")}</strong>
-                    " The node is being stopped; the launcher restarts next."
-                }
-                .into_any(),
-                UpdateState::Error { message, at } => view! {
-                    <strong>"Launcher update failed"</strong>
-                    {format!(" ({}): {message}", relative(*at, now))}
-                }
-                .into_any(),
-                UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate { .. } => {
-                    return None;
-                }
-            })
+        Some(match headline_kind.get()? {
+            Headline::Available {
+                version,
+                current,
+                pub_date,
+            } => view! {
+                <strong>{format!("Zebra Launcher {version} is available")}</strong>
+                {format!(" (this is {current}")}
+                {pub_date
+                    .map(|date| move || format!(", published {}", relative(date, state.now.get())))}
+                ")."
+            }
+            .into_any(),
+            Headline::Downloading { version } => view! {
+                <strong>{format!("Downloading Zebra Launcher {version}")}</strong>
+                {move || {
+                    with_info(state, |info| match info.map(|info| &info.state) {
+                        Some(UpdateState::Downloading {
+                            downloaded, total, ..
+                        }) => format!(": {}.", download_progress(*downloaded, *total)),
+                        _ => String::new(),
+                    })
+                }}
+            }
+            .into_any(),
+            Headline::Ready { version } => view! {
+                <strong>{format!("Zebra Launcher {version} is ready to install.")}</strong>
+                " It is downloaded and its signature verified. Installing stops the node and restarts the launcher."
+            }
+            .into_any(),
+            Headline::Countdown { version } => view! {
+                <strong>
+                    {format!("Zebra Launcher {version} installs automatically in ")}
+                    <span class="countdown" aria-live="polite">
+                        {move || {
+                            with_info(state, |info| match info.map(|info| &info.state) {
+                                Some(UpdateState::ReadyToInstall {
+                                    countdown_secs: Some(secs),
+                                    ..
+                                }) => format!("{secs} s"),
+                                _ => String::new(),
+                            })
+                        }}
+                    </span>
+                    "."
+                </strong>
+                " This zebrad release is near its end of support. The node will be stopped and the launcher restarts. Cancel to install later."
+            }
+            .into_any(),
+            Headline::Installing { version } => view! {
+                <strong>{format!("Installing Zebra Launcher {version}…")}</strong>
+                " The node is being stopped; the launcher restarts next."
+            }
+            .into_any(),
+            Headline::Error { message, at } => view! {
+                <strong>"Launcher update failed"</strong>
+                {move || format!(" ({}): {message}", relative(at, state.now.get()))}
+            }
+            .into_any(),
         })
     };
     let progress = move || {
@@ -243,9 +309,8 @@ pub fn UpdateActions() -> impl IntoView {
             let result = match action {
                 Action::Install => api::install_update().await,
                 Action::Cancel => api::cancel_update().await,
-                Action::Check => api::check_for_update().await.map(|found| {
-                    set_state(state, found);
-                }),
+                // The new state arrives as events, like every other.
+                Action::Check => api::check_for_update().await.map(|_| ()),
                 Action::OpenReleases => api::open_path("releases_page").await,
             };
             if let Err(failure) = result {
@@ -268,68 +333,91 @@ pub fn UpdateActions() -> impl IntoView {
         .into_any()
     };
 
-    let buttons = move || {
-        with_info(state, |info| {
-            let Some(info) = info else {
-                return Vec::new();
-            };
-            match &info.state {
-                UpdateState::Available { .. }
-                | UpdateState::ReadyToInstall {
-                    countdown_secs: None,
-                    ..
-                } => {
-                    if info.can_install {
-                        vec![button(
-                            "Install",
-                            "install the update",
-                            Action::Install,
-                            true,
-                        )]
-                    } else {
-                        vec![button(
-                            "Open releases page",
-                            "open the releases page",
-                            Action::OpenReleases,
-                            true,
-                        )]
-                    }
-                }
-                UpdateState::Downloading { .. } => vec![button(
-                    "Cancel download",
-                    "cancel the download",
-                    Action::Cancel,
-                    false,
-                )],
-                UpdateState::ReadyToInstall {
-                    countdown_secs: Some(_),
-                    ..
-                } => vec![
-                    button("Install now", "install the update", Action::Install, true),
-                    button(
-                        "Cancel",
-                        "cancel the automatic install",
-                        Action::Cancel,
-                        false,
-                    ),
-                ],
-                UpdateState::Error { .. } => vec![button(
-                    "Check again",
-                    "check for updates",
-                    Action::Check,
-                    false,
-                )],
-                UpdateState::Idle
-                | UpdateState::Checking
-                | UpdateState::Installing { .. }
-                | UpdateState::UpToDate { .. } => Vec::new(),
-            }
-        })
+    // Only the button set, so a progress or countdown event does not rebuild the buttons.
+    let buttons_kind = Memo::new(move |_| with_info(state, buttons_for));
+    let buttons = move || match buttons_kind.get() {
+        Buttons::None => Vec::new(),
+        Buttons::Install => vec![button(
+            "Install",
+            "install the update",
+            Action::Install,
+            true,
+        )],
+        Buttons::OpenReleases => vec![button(
+            "Open releases page",
+            "open the releases page",
+            Action::OpenReleases,
+            true,
+        )],
+        Buttons::CancelDownload => vec![button(
+            "Cancel download",
+            "cancel the download",
+            Action::Cancel,
+            false,
+        )],
+        Buttons::Countdown => vec![
+            button("Install now", "install the update", Action::Install, true),
+            button(
+                "Cancel",
+                "cancel the automatic install",
+                Action::Cancel,
+                false,
+            ),
+        ],
+        Buttons::CheckAgain => vec![button(
+            "Check again",
+            "check for updates",
+            Action::Check,
+            false,
+        )],
     };
 
     view! {
         {buttons}
         {move || error.get().map(|error| view! { <span class="error">{error}</span> })}
+    }
+}
+
+/// The update buttons a state shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Buttons {
+    None,
+    /// Install, where this installation can update itself.
+    Install,
+    /// Where it cannot.
+    OpenReleases,
+    CancelDownload,
+    /// "Install now" and "Cancel" during an automatic-install countdown.
+    Countdown,
+    CheckAgain,
+}
+
+fn buttons_for(info: Option<&UpdateInfo>) -> Buttons {
+    let Some(info) = info else {
+        return Buttons::None;
+    };
+    match &info.state {
+        UpdateState::Available { .. }
+        | UpdateState::ReadyToInstall {
+            countdown_secs: None,
+            ..
+        } => {
+            if info.can_install {
+                Buttons::Install
+            } else {
+                Buttons::OpenReleases
+            }
+        }
+        UpdateState::Downloading { .. } => Buttons::CancelDownload,
+        UpdateState::ReadyToInstall {
+            countdown_secs: Some(_),
+            ..
+        } => Buttons::Countdown,
+        UpdateState::Error { .. } => Buttons::CheckAgain,
+        UpdateState::Idle
+        | UpdateState::Checking
+        | UpdateState::Installing { .. }
+        | UpdateState::UpToDate { .. } => Buttons::None,
     }
 }
 
@@ -341,15 +429,6 @@ enum Action {
     OpenReleases,
 }
 
-/// Applies the state a command returned right away; the `update_state` event follows.
-fn set_state(state: AppState, update_state: UpdateState) {
-    state.update.update(|info| {
-        if let Some(info) = info {
-            info.state = update_state;
-        }
-    });
-}
-
 /// "Check for updates": asks the backend to check now, which works in every update mode (Off
 /// included), and with `show_result` says what the check found next to the button.
 #[component]
@@ -359,38 +438,43 @@ pub fn CheckForUpdate(
 ) -> impl IntoView {
     let state = AppState::get();
     let busy = RwSignal::new(false);
-    let outcome = RwSignal::new(None::<Result<(), String>>);
+    // What the check returned. It only feeds the text next to the button: `update_state` and
+    // `update_info` events drive the updater state everywhere else, and may already be newer.
+    let outcome = RwSignal::new(None::<Result<UpdateState, String>>);
 
     let check = move |_| {
         busy.set(true);
         outcome.set(None);
         spawn_local(async move {
-            outcome.set(Some(match api::check_for_update().await {
-                Ok(found) => {
-                    set_state(state, found);
-                    Ok(())
-                }
-                Err(failure) => Err(format!("Could not check for updates: {failure}")),
-            }));
+            outcome.set(Some(api::check_for_update().await.map_err(|failure| {
+                format!("Could not check for updates: {failure}")
+            })));
             busy.set(false);
         });
     };
     let blocked = move || {
         busy.get() || with_info(state, |info| info.is_some_and(|i| check_blocked(&i.state)))
     };
-    // What the check found, kept current: an update found can start downloading, and so on.
-    let result = move || match outcome.get()? {
-        Ok(()) if show_result => {
-            let now = state.now.get();
-            with_info(state, |info| {
-                info.map(|info| {
-                    view! { <span class="update-result">{update_state_text(&info.state, now)}</span> }
-                        .into_any()
-                })
-            })
-        }
-        Ok(()) => None,
-        Err(error) => Some(view! { <span class="error">{error}</span> }.into_any()),
+    // What the check found.
+    let result = move || {
+        outcome.with(|reply| match reply.as_ref()? {
+            Ok(_) if show_result => Some(
+                view! {
+                    <span class="update-result">
+                        {move || {
+                            outcome
+                                .with(|outcome| match outcome {
+                                    Some(Ok(found)) => Some(update_state_text(found, state.now.get())),
+                                    _ => None,
+                                })
+                        }}
+                    </span>
+                }
+                .into_any(),
+            ),
+            Ok(_) => None,
+            Err(error) => Some(view! { <span class="error">{error.clone()}</span> }.into_any()),
+        })
     };
 
     view! {
@@ -668,5 +752,50 @@ mod tests {
         }
         assert!(check_blocked(&downloading));
         assert!(!check_blocked(&available));
+    }
+
+    #[test]
+    fn buttons_change_with_the_kind_only() {
+        let info = |state, can_install| UpdateInfo {
+            state,
+            mode: launcher_types::UpdateMode::Auto,
+            current_version: "0.1.0".into(),
+            last_successful_check: None,
+            stale_check_warning: false,
+            can_install,
+            releases_url: String::new(),
+            health_failure: None,
+        };
+        let downloading = |downloaded| UpdateState::Downloading {
+            version: "0.2.0".into(),
+            downloaded,
+            total: Some(100),
+        };
+        let countdown = |secs| UpdateState::ReadyToInstall {
+            version: "0.2.0".into(),
+            countdown_secs: Some(secs),
+        };
+        assert_eq!(buttons_for(None), Buttons::None);
+        assert_eq!(
+            buttons_for(Some(&info(downloading(1), true))),
+            buttons_for(Some(&info(downloading(99), true))),
+        );
+        assert_eq!(
+            buttons_for(Some(&info(countdown(60), true))),
+            buttons_for(Some(&info(countdown(3), true))),
+        );
+        let available = UpdateState::Available {
+            version: "0.2.0".into(),
+            notes: None,
+            pub_date: None,
+        };
+        assert_eq!(
+            buttons_for(Some(&info(available.clone(), true))),
+            Buttons::Install
+        );
+        assert_eq!(
+            buttons_for(Some(&info(available, false))),
+            Buttons::OpenReleases
+        );
     }
 }

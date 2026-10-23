@@ -12,7 +12,10 @@ use std::{
 };
 
 use launcher_core::{
-    config::ManagedKeys, firstrun::SizeCache, paths::Paths, settings::SettingsHandle,
+    config::ManagedKeys,
+    firstrun::{LegacyLocations, SizeCache},
+    paths::Paths,
+    settings::SettingsHandle,
     supervisor::SupervisorHandle,
 };
 use launcher_types::{NodeStats, Phase, Settings};
@@ -101,6 +104,15 @@ impl AppState {
         Ok(permit)
     }
 
+    /// Held while `zebrad.toml` is written by a command that does not wait
+    /// for a running config change (a reset, a data directory change).
+    pub fn try_config_permit(&self) -> Result<OwnedSemaphorePermit, String> {
+        self.config_writer
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "a configuration change is being applied; try again".to_string())
+    }
+
     /// The directories `delete_node_data` may delete a state directory in:
     /// the launcher's data directory and the one chosen in the settings.
     pub fn data_roots(&self, settings: &Settings) -> Vec<PathBuf> {
@@ -108,6 +120,14 @@ impl AppState {
         roots.extend(settings.data_dir.as_ref().map(PathBuf::from));
         roots
     }
+}
+
+/// zebrad's default cache directory, where an alpha.4 launcher (or a zebrad
+/// run by hand) kept its chain state.
+pub fn legacy_cache_dir() -> Result<PathBuf, String> {
+    LegacyLocations::current()
+        .zebra_cache_dir
+        .ok_or_else(|| "this system has no default cache directory".to_string())
 }
 
 /// True when no zebrad runs and none is scheduled: [`Phase::Stopped`], or
