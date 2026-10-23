@@ -86,15 +86,34 @@ runs:
         rm -f "${init}"
         echo "${CARGO_HOME:-${HOME}/.cargo}/bin" >> "${GITHUB_PATH}"
 
-    # Without arguments, `rustup toolchain install` installs the toolchain,
-    # components and targets named in rust-toolchain.toml (rustup >= 1.28).
-    - name: Install the Rust toolchain from rust-toolchain.toml
+    # Only what this job needs: rust-toolchain.toml's channel with the minimal
+    # profile, plus the wasm32 target when it compiles the frontend. The
+    # file's clippy and rustfmt are for development and the lint jobs, not
+    # for building or bundling. RUSTUP_TOOLCHAIN then selects that toolchain
+    # for the rest of the job, so rustup does not go back to the toolchain
+    # file and install its components after all.
+    - name: Install the Rust toolchain
       shell: bash
+      env:
+        COMPILE: ${{ inputs.compile }}
       run: |
         set -euo pipefail
-        rustup toolchain install --profile minimal
+        channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+        if [ -z "${channel}" ]; then
+          echo "::error::no channel in rust-toolchain.toml"
+          exit 1
+        fi
+        # --no-self-update keeps the pinned rustup-init's rustup in the container.
+        args=(--profile minimal --no-self-update)
+        if [ "${COMPILE}" = true ]; then
+          args+=(--target wasm32-unknown-unknown)
+        fi
+        rustup toolchain install "${channel}" "${args[@]}"
+        echo "RUSTUP_TOOLCHAIN=${channel}" >> "${GITHUB_ENV}"
+        export RUSTUP_TOOLCHAIN="${channel}"
         rustc --version
         cargo --version
+        rustup component list --installed
 
     # Release binaries for the exact pinned versions, each checked against the
     # sha256 in .github/tool-versions.env before it is unpacked; a missing or
