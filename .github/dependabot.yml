@@ -1,29 +1,5 @@
 version: 2
 updates:
-  - package-ecosystem: npm
-    directory: /
-    pull-request-branch-name:
-      separator: "-"
-    schedule:
-      interval: monthly
-    commit-message:
-      prefix: "deps(node): "
-    groups:
-      tauri:
-        patterns:
-          - "@tauri*"
-        update-types:
-          - "minor"
-          - "patch"
-      dependencies:
-        dependency-type: "production"
-        exclude-patterns:
-          - "@tauri*"
-      devDependencies:
-        dependency-type: "development"
-        exclude-patterns:
-          - "@tauri*"
-
   - package-ecosystem: cargo
     directory: /
     pull-request-branch-name:
