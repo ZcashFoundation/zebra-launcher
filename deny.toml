@@ -4,6 +4,11 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+ignore = [
+    # `paste` is unmaintained; it is a compile-time proc macro pulled in by Leptos
+    # (`either_of`, `tachys`). Drop this once Leptos moves off it.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc macro, transitive via leptos" },
+]
 
 [licenses]
 allow = [
@@ -12,6 +17,7 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
     "ISC",
     "Unicode-3.0",
     "Zlib",

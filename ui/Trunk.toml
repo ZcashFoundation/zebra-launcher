@@ -1,0 +1,15 @@
+# Build with `trunk build --release`, develop with `trunk serve` (mock backend in a plain browser).
+#
+# `[tools] wasm_bindgen` is deliberately left unset: trunk then installs the wasm-bindgen CLI
+# matching the `wasm-bindgen` version in Cargo.lock, and the two must match exactly.
+
+[build]
+target = "index.html"
+dist = "dist"
+
+[watch]
+ignore = ["../src-tauri"]
+
+[serve]
+port = 1420
+open = false

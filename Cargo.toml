@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/launcher-types", "crates/launcher-core"]
+members = ["crates/launcher-types", "crates/launcher-core", "ui"]
 # The Tauri app is migrated into the workspace once it is rewritten (M5).
 exclude = ["src-tauri"]
 
