@@ -98,6 +98,10 @@ jobs:
 
       - name: Check tool versions
         shell: bash
+        env:
+          # "false" only while the repository variable says so; an unset
+          # variable means the updater is on and needs the real public key.
+          UPDATER_ENABLED: ${{ vars.UPDATER_ENABLED != 'false' }}
         run: |
           set -euo pipefail
           if [ -f scripts/check-versions.sh ]; then
