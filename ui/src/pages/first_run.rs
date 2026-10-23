@@ -11,7 +11,7 @@ use leptos::{prelude::*, task::spawn_local};
 use crate::{
     api,
     app::AppState,
-    format::{bytes, is_low_space, update_mode_text},
+    format::{bytes, is_low_space, state_dir, update_mode_text},
 };
 
 /// One page of the wizard.
@@ -44,12 +44,6 @@ fn steps(has_legacy: bool) -> Vec<Step> {
     }
     steps.extend([Step::Updates, Step::Notes]);
     steps
-}
-
-/// Where the chain state goes for a data directory, as the backend derives it.
-fn state_dir(data_dir: &str) -> String {
-    let separator = if data_dir.contains('\\') { '\\' } else { '/' };
-    format!("{}{separator}state", data_dir.trim_end_matches(['/', '\\']))
 }
 
 /// "212.4 GB free", or a note that it is unknown.
@@ -715,13 +709,6 @@ mod tests {
                 Step::Notes
             ]
         );
-    }
-
-    #[test]
-    fn state_dir_is_inside_the_data_dir() {
-        assert_eq!(state_dir("/mnt/zebra"), "/mnt/zebra/state");
-        assert_eq!(state_dir("/mnt/zebra/"), "/mnt/zebra/state");
-        assert_eq!(state_dir(r"D:\Zebra"), r"D:\Zebra\state");
     }
 
     #[test]

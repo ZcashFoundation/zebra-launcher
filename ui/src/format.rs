@@ -151,6 +151,12 @@ pub fn is_low_space(free_bytes: Option<u64>) -> bool {
     free_bytes.is_some_and(|free| free < LOW_SPACE_BYTES)
 }
 
+/// Where the chain state goes for a data directory, as the backend derives it.
+pub fn state_dir(data_dir: &str) -> String {
+    let separator = if data_dir.contains('\\') { '\\' } else { '/' };
+    format!("{}{separator}state", data_dir.trim_end_matches(['/', '\\']))
+}
+
 /// Whether the data directory may change or the node data be deleted: the backend allows it
 /// only while zebrad is stopped or failed.
 pub fn data_change_allowed(phase: &Phase) -> bool {
@@ -326,6 +332,13 @@ mod tests {
         assert!(!is_low_space(None));
         assert!(is_low_space(Some(LOW_SPACE_BYTES - 1)));
         assert!(!is_low_space(Some(LOW_SPACE_BYTES)));
+    }
+
+    #[test]
+    fn state_dir_is_inside_the_data_dir() {
+        assert_eq!(state_dir("/mnt/zebra"), "/mnt/zebra/state");
+        assert_eq!(state_dir("/mnt/zebra/"), "/mnt/zebra/state");
+        assert_eq!(state_dir(r"D:\Zebra"), r"D:\Zebra\state");
     }
 
     #[test]
