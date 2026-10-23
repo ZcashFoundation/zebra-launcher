@@ -66,18 +66,25 @@ pub struct BlockchainInfo {
 }
 
 /// The parts of `getinfo` the launcher uses.
+///
+/// Every field is optional, so a field zebrad renames or drops cannot fail
+/// the whole poll; a missing field decodes as zero or empty.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Info {
     /// The numeric node version.
+    #[serde(default)]
     pub version: u64,
     /// The release, such as `v7.0.0`.
     #[serde(default)]
     pub build: String,
     /// The P2P user agent, such as `/Zebra:7.0.0/`.
+    #[serde(default)]
     pub subversion: String,
     /// Inbound and outbound peer connections.
+    #[serde(default)]
     pub connections: u64,
     /// The last warning or error, or `no errors`.
+    #[serde(default)]
     pub errors: String,
 }
 
@@ -263,6 +270,15 @@ mod tests {
             decode::<MempoolInfo>(br#"{"result":{"bytes":1}}"#),
             Err(RpcError::InvalidResponse(_))
         ));
+    }
+
+    #[test]
+    fn info_tolerates_missing_fields() {
+        let info: Info =
+            decode(br#"{"jsonrpc":"2.0","id":1,"result":{"build":"v7.1.0"}}"#).expect("ok");
+        assert_eq!(info.release(), "7.1.0");
+        assert_eq!(info.last_error(), None);
+        assert_eq!(info.connections, 0);
     }
 
     #[test]
