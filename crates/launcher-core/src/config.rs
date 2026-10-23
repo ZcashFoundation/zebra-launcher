@@ -265,8 +265,10 @@ fn token(bytes: &[u8]) -> String {
 }
 
 /// The listener addresses that must stay on loopback.
-const LOOPBACK_KEYS: [(&str, &str); 3] = [
+const LOOPBACK_KEYS: [(&str, &str); 5] = [
     ("rpc", "listen_addr"),
+    ("rpc", "indexer_listen_addr"),
+    ("rpc", "lightwalletd_listen_addr"),
     ("metrics", "endpoint_addr"),
     ("health", "listen_addr"),
 ];
@@ -561,7 +563,7 @@ tx_cost_limit = 1000
         validate(GENERATED).expect("zebrad generate output is valid");
         validate("").expect("an empty file is valid");
         validate(
-            "[rpc]\nlisten_addr = \"[::1]:8232\"\n[health]\nlisten_addr = \"127.0.0.1:8080\"\n",
+            "[rpc]\nlisten_addr = \"[::1]:8232\"\nindexer_listen_addr = \"127.0.0.1:8230\"\nlightwalletd_listen_addr = \"127.0.0.1:9067\"\n[health]\nlisten_addr = \"127.0.0.1:8080\"\n",
         )
         .expect("loopback addresses are valid");
         validate("zcashd_compat = { enabled = false }\n").expect("compat off is valid");
@@ -577,6 +579,14 @@ tx_cost_limit = 1000
                 "rpc.listen_addr",
             ),
             ("[rpc]\nlisten_addr = 8232\n", "rpc.listen_addr"),
+            (
+                "[rpc]\nindexer_listen_addr = \"0.0.0.0:8230\"\n",
+                "rpc.indexer_listen_addr",
+            ),
+            (
+                "[rpc]\nlightwalletd_listen_addr = \"[::]:9067\"\n",
+                "rpc.lightwalletd_listen_addr",
+            ),
             (
                 "[metrics]\nendpoint_addr = \"192.168.1.2:9999\"\n",
                 "metrics.endpoint_addr",

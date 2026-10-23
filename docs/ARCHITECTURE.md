@@ -133,8 +133,8 @@ Applying an edit:
 
 1. `read_config` returns the text and a compare-and-swap token.
 2. `apply_config` checks TOML syntax and the token, so an external edit is never silently
-   overwritten. It refuses non-loopback RPC, metrics or health addresses and cookie auth
-   off. It writes atomically (temp file + rename, `.bak` kept) and sets a pending-apply
+   overwritten. It refuses non-loopback RPC (including the indexer and lightwalletd
+   listeners), metrics or health addresses and cookie auth off. It writes atomically (temp file + rename, `.bak` kept) and sets a pending-apply
    marker.
 3. zebrad restarts gracefully and is watched for 20 s. On `ConfigError` the `.bak` is
    restored, zebrad is restarted, and the UI shows zebrad's stderr plus "rolled back". A
