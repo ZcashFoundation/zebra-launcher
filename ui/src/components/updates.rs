@@ -7,7 +7,11 @@ use leptos::{prelude::*, task::spawn_local};
 use crate::{
     api,
     app::{AppState, Tab},
-    format::{NOTES_EXCERPT_CHARS, download_progress, notes_excerpt, relative, update_state_text},
+    components::reset_config::ResetConfigButton,
+    format::{
+        NOTES_EXCERPT_CHARS, data_change_allowed, download_progress, notes_excerpt, relative,
+        update_state_text,
+    },
 };
 
 /// How the header banner treats an updater state.
@@ -544,22 +548,38 @@ fn HealthFailurePanel() -> impl IntoView {
             </li>
         }
         .into_any(),
-        // There is no reset command: the launcher writes a fresh file when there is none.
+        // `reset_config` only runs while zebrad is stopped or failed; while it runs, the
+        // manual way is explained instead.
         RecoveryAction::ResetConfig => view! {
             <li>
-                <span>
-                    "Reset the zebrad configuration: remove the keys you added on the Configure page, or delete "
-                    <code>"zebrad.toml"</code>
-                    " from the config folder and restart the launcher, which then writes a fresh default file."
-                </span>
-                <div class="buttons">
-                    <button type="button" on:click=move |_| state.tab.set(Tab::Configure)>
-                        "Open Configure"
-                    </button>
-                    <button type="button" on:click=move |_| open("config_dir", "the config folder")>
-                        "Open the config folder"
-                    </button>
-                </div>
+                <ResetConfigButton on_reset=Callback::new(|_| {}) />
+                {move || {
+                    let stopped = state.status.with(|status| data_change_allowed(&status.phase));
+                    (!stopped)
+                        .then(|| {
+                            view! {
+                                <span>
+                                    "Or reset the zebrad configuration by hand: remove the keys you added on the Configure page, or delete "
+                                    <code>"zebrad.toml"</code>
+                                    " from the config folder and restart the launcher, which then writes a fresh default file."
+                                </span>
+                                <div class="buttons">
+                                    <button
+                                        type="button"
+                                        on:click=move |_| state.tab.set(Tab::Configure)
+                                    >
+                                        "Open Configure"
+                                    </button>
+                                    <button
+                                        type="button"
+                                        on:click=move |_| open("config_dir", "the config folder")
+                                    >
+                                        "Open the config folder"
+                                    </button>
+                                </div>
+                            }
+                        })
+                }}
             </li>
         }
         .into_any(),

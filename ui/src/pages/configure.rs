@@ -3,12 +3,15 @@
 //! Applying writes the file and restarts zebrad. If zebrad rejects the new config the backend
 //! restores the previous file and answers `RolledBack`; if the file changed on disk since it
 //! was read the backend refuses with a `conflict` error and nothing is written.
+//!
+//! "Reset to managed defaults" (only while zebrad is stopped or failed) replaces the file with
+//! the launcher's minimal one, keeping the old file as `zebrad.toml.bak`.
 
 use leptos::{prelude::*, task::spawn_local};
 
 use launcher_types::{ApplyErrorKind, ApplyOutcome, ConfigDocument};
 
-use crate::{api, format::highlight_toml};
+use crate::{api, components::reset_config::ResetConfigButton, format::highlight_toml};
 
 /// What the editor area shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,6 +235,17 @@ pub fn Configure() -> impl IntoView {
             {notice_view}
             {load_error_view}
             {body}
+            <section class="config-reset">
+                <ResetConfigButton
+                    on_reset=Callback::new(move |fresh: ConfigDocument| {
+                        notice.set(None);
+                        load_error.set(None);
+                        document.set(Some(fresh));
+                        mode.set(Mode::Viewing);
+                    })
+                    disabled=Signal::derive(move || mode.get() != Mode::Viewing)
+                />
+            </section>
         </div>
     }
 }

@@ -221,6 +221,15 @@ fn apply_error(error: JsValue) -> ApplyError {
     })
 }
 
+/// Replaces `zebrad.toml` with the minimal managed file, keeping the old one as
+/// `zebrad.toml.bak`, and returns the new file. Only while zebrad is stopped or failed.
+pub async fn reset_config() -> ApiResult<ConfigDocument> {
+    if !is_tauri() {
+        return Ok(wire(mock::reset_config().await.map_err(ApiError)?)?);
+    }
+    Ok(tauri::invoke0("reset_config").await?)
+}
+
 pub async fn get_settings() -> ApiResult<Settings> {
     if !is_tauri() {
         return Ok(wire(mock::get_settings().await)?);
