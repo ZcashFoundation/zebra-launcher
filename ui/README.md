@@ -48,6 +48,9 @@ cd ui
 trunk build --release   # writes ui/dist
 ```
 
+Release builds use the `release-wasm` profile from the root `Cargo.toml` (size over speed),
+selected by `data-cargo-profile-release` in `index.html`, then `wasm-opt -Oz`.
+
 ## How Tauri embeds it
 
 The Tauri app (`src-tauri`, rewritten in M5) points at this crate:
