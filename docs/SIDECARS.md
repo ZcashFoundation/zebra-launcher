@@ -72,8 +72,11 @@ binaries:
 Both scripts take `--dry-run` (`-DryRun` in PowerShell), which prints the
 commands without running them. The build dependencies are listed at the top of
 each script. On macOS that is Xcode command line tools, `brew install protobuf
-cmake` and rustup. On Windows it is the VS 2022 C++ build tools, LLVM, protoc
-and rustup.
+cmake` and rustup. On Windows it is the VS 2022 C++ build tools, LLVM, protoc,
+rustup and PowerShell 7 (`pwsh`; Windows PowerShell 5.1 is not supported).
+`build-zebrad.ps1` restores the environment variables it sets for cargo when
+it exits, so running it in an open `pwsh` session leaves that session as it
+was.
 
 **CI.** [`zebrad-sidecars.yml`](../.github/workflows/zebrad-sidecars.yml) runs
 the scripts on native runners for all five targets. Its first job reads
