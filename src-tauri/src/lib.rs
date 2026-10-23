@@ -22,6 +22,7 @@ use launcher_core::{
     config, firstrun,
     logfile::RotatingLogConfig,
     monitor::{self, Monitor},
+    pidfile::StaleProcess,
     process::ZebradCommand,
     settings::SettingsStore,
     supervisor::{self, SupervisorConfig, SupervisorError},
@@ -274,19 +275,23 @@ pub(crate) async fn start_in_background(app: AppHandle, state: AppState) {
     };
     match state.supervisor.start().await {
         Ok(()) => {}
-        Err(SupervisorError::StaleProcess(stale)) => {
-            tracing::warn!(
-                pid = stale.pid,
-                "a zebrad from an earlier launcher run is still running"
-            );
-            let info = StaleProcessInfo {
-                pid: stale.pid,
-                binary: stale.binary.display().to_string(),
-            };
-            if let Err(err) = app.emit(STALE_PROCESS_EVENT, info) {
-                tracing::warn!(%err, "could not emit stale_process");
-            }
-        }
+        Err(SupervisorError::StaleProcess(stale)) => report_stale_process(&app, &stale),
         Err(err) => tracing::warn!(%err, "zebrad did not start at launch"),
+    }
+}
+
+/// Tells the UI with [`STALE_PROCESS_EVENT`] that a zebrad from an earlier
+/// launcher run is still alive.
+pub(crate) fn report_stale_process(app: &AppHandle, stale: &StaleProcess) {
+    tracing::warn!(
+        pid = stale.pid,
+        "a zebrad from an earlier launcher run is still running"
+    );
+    let info = StaleProcessInfo {
+        pid: stale.pid,
+        binary: stale.binary.display().to_string(),
+    };
+    if let Err(err) = app.emit(STALE_PROCESS_EVENT, info) {
+        tracing::warn!(%err, "could not emit stale_process");
     }
 }
