@@ -31,7 +31,9 @@ backend that makes every page demoable:
   `crates/launcher-core/tests/fixtures`), and now and then a `Launcher` line "7 lines dropped"
   stands in for skipped lines, as the Tauri bridge sends when the UI falls behind; the page shows
   it as the "… N lines dropped" marker;
-- node stats tick while Running, with an end-of-support date so the EOS banner shows;
+- node stats tick while Running, with an end-of-support date 41 days away so the EOS banner
+  shows; `?eos=soon` moves it to 10 days (the banner then offers "Check for updates"), and
+  `?eos=halt` makes zebrad halt at its end of support (Failed, with the halt banner);
 - Configure: a config containing `bogus` is "rejected" and rolled back with zebrad's real error
   text; a config containing the line `# simulate-conflict` gets the "file changed on disk" error;
   one containing `# simulate-read-failure` makes the reload after Save fail (add `bogus` too to
@@ -42,12 +44,31 @@ backend that makes every page demoable:
   Finish, the default data folder has 212.4 GB free (so the low-space warning shows), "Choose
   another folder…" always picks `/mnt/storage/zebra` (1,834.5 GB free), and alpha.4 leftovers
   (a `zebrad.toml` and 96.7 GB of state, counted as a lower bound) are offered for moving.
-  Combine both flags (`?firstrun&stale`) to see Finish report that zebrad did not start;
+  Combine both flags (`?firstrun&stale`) to see Finish report that zebrad did not start.
+  `?firstrun&storeddir` starts with a data folder chosen in an earlier, unfinished first run
+  (`/media/small-disk/zebra`, 120.0 GB free, so the low-space warning shows), and
+  `?firstrun&running` has zebrad already running with Start failing, which Finish treats as
+  success;
 - Settings are kept in memory; set the Grafana URL to see the iframe (it stays blank unless Grafana
   runs on that address). Without `?firstrun` the first run counts as done. "Change…" for the data
   folder and "Delete node data…" work once the node is stopped (they refuse with "stop zebrad
   first" otherwise, like the backend); the mock state is 248.3 GB. "Copy diagnostics" shows the
-  text below the button when the browser denies clipboard access, as headless browsers do.
+  text below the button when the browser denies clipboard access, as headless browsers do;
+- launcher updates: the mock runs version 0.1.0 with updates Off, and "Check now" (Settings) or
+  "Check for updates" (dashboard) finds nothing. `?update=…` starts in a state, with the mode
+  that goes with it, and a check then finds 0.2.0 (84 MB) unless noted:
+  - `available`: Notify mode found 0.2.0; Install downloads it, installs, and "restarts" as
+    0.2.0;
+  - `downloading`: Auto mode is downloading it in the background, then waits, ready;
+  - `ready`: downloaded and verified, waiting for Install;
+  - `countdown`: Auto mode installs it after a 60 s countdown; Cancel stops it;
+  - `error`: the last check failed, and every check fails;
+  - `health`: the last update did not come back healthy (`UpdateInfo.health_failure`, and an
+    `update_health_failed` event 1.5 s after load); a check finds nothing;
+
+  add `&deb` for an installation that cannot update itself (the `.deb`: "Open releases page"
+  instead of Install) and `&stalecheck` for the stale-check warning (no successful check for
+  20 days). Saving the Off mode returns the updater to Idle, like the backend.
 
 The flags are read from the query string once, when the page loads.
 
@@ -91,8 +112,10 @@ to the CSP when it serves the bundled assets.
 | `src/api.rs` | One typed function per backend command or event, Tauri or mock |
 | `src/mock.rs` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads |
 | `src/log_view.rs`, `src/format.rs` | Pure logic (log buffer, gaps, filters, formatting), unit-tested natively |
+| `src/clipboard.rs` | Copying text to the system clipboard |
 | `src/app.rs` | Shared state, subscriptions, the shell |
-| `src/components/`, `src/pages/` | The status strip, tabs, the four pages and the first-run wizard (`pages/first_run.rs`) |
+| `src/components/` | The tabs, the status strip, the stale-process banner, the update-mode radio buttons shared by the wizard and Settings, and the updater UI (`updates.rs`: header banners, update buttons, "Check for updates", recovery panel) |
+| `src/pages/` | The four pages and the first-run wizard (`first_run.rs`) |
 
 The crate also compiles natively so `cargo clippy --workspace --all-targets` and
 `cargo test --workspace` cover it; the native binary only prints a hint. Check the wasm build with

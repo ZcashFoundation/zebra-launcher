@@ -5,7 +5,8 @@ use std::{cell::Cell, fmt};
 
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
-    ImportOutcome, LogLine, NodeStats, Settings, StaleProcessInfo, Status,
+    ImportOutcome, LogLine, NodeStats, Settings, StaleProcessInfo, Status, UpdateHealthFailure,
+    UpdateInfo, UpdateState,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
@@ -297,7 +298,7 @@ pub async fn import_legacy_state() -> ApiResult<ImportOutcome> {
 /// failed.
 pub async fn delete_node_data() -> ApiResult<u64> {
     if !is_tauri() {
-        return mock::delete_node_data().await.map_err(ApiError);
+        return Ok(wire(mock::delete_node_data().await.map_err(ApiError)?)?);
     }
     Ok(tauri::invoke0("delete_node_data").await?)
 }
@@ -305,7 +306,7 @@ pub async fn delete_node_data() -> ApiResult<u64> {
 /// The diagnostics text for a bug report.
 pub async fn copy_diagnostics() -> ApiResult<String> {
     if !is_tauri() {
-        return Ok(mock::copy_diagnostics().await);
+        return Ok(wire(mock::copy_diagnostics().await)?);
     }
     Ok(tauri::invoke0("copy_diagnostics").await?)
 }
@@ -313,10 +314,84 @@ pub async fn copy_diagnostics() -> ApiResult<String> {
 /// Records that the first-run flow is done; zebrad starts at launch from now on.
 pub async fn complete_first_run() -> ApiResult<()> {
     if !is_tauri() {
-        mock::complete_first_run().await;
-        return Ok(());
+        return Ok(wire(mock::complete_first_run().await)?);
     }
     Ok(tauri::invoke0("complete_first_run").await?)
+}
+
+/// Everything the UI shows about launcher updates.
+pub async fn get_update_info() -> ApiResult<UpdateInfo> {
+    if !is_tauri() {
+        return Ok(wire(mock::get_update_info().await)?);
+    }
+    Ok(tauri::invoke0("get_update_info").await?)
+}
+
+/// Checks for a launcher update now, in every update mode (Off included), and returns the
+/// resulting state.
+pub async fn check_for_update() -> ApiResult<UpdateState> {
+    if !is_tauri() {
+        return Ok(wire(mock::check_for_update().await)?);
+    }
+    Ok(tauri::invoke0("check_for_update").await?)
+}
+
+/// Starts installing the available update; progress arrives as `update_state` events.
+pub async fn install_update() -> ApiResult<()> {
+    if !is_tauri() {
+        return Ok(wire(mock::install_update().await.map_err(ApiError)?)?);
+    }
+    Ok(tauri::invoke0("install_update").await?)
+}
+
+/// Cancels an update check, a download, or an automatic-install countdown.
+pub async fn cancel_update() -> ApiResult<()> {
+    if !is_tauri() {
+        return Ok(wire(mock::cancel_update().await)?);
+    }
+    Ok(tauri::invoke0("cancel_update").await?)
+}
+
+/// Calls `on_state` with every `update_state` event (each change of the updater's state).
+pub async fn on_update_state(
+    on_state: impl Fn(UpdateState) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::on_update_state(mock_handler("`update_state` event", on_state, on_error));
+        return Ok(());
+    }
+    Ok(tauri::listen("update_state", on_state, on_error).await?)
+}
+
+/// Calls `on_info` with every `update_info` event (any change of what the UI shows about
+/// updates, the state included).
+pub async fn on_update_info(
+    on_info: impl Fn(UpdateInfo) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::on_update_info(mock_handler("`update_info` event", on_info, on_error));
+        return Ok(());
+    }
+    Ok(tauri::listen("update_info", on_info, on_error).await?)
+}
+
+/// Calls `on_failure` when the launcher did not come back healthy after an update. It may fire
+/// before the UI listens, so `get_update_info().health_failure` is read too.
+pub async fn on_update_health_failed(
+    on_failure: impl Fn(UpdateHealthFailure) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::on_update_health_failed(mock_handler(
+            "`update_health_failed` event",
+            on_failure,
+            on_error,
+        ));
+        return Ok(());
+    }
+    Ok(tauri::listen("update_health_failed", on_failure, on_error).await?)
 }
 
 #[derive(Serialize)]

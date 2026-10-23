@@ -5,13 +5,14 @@
 //! Steps: welcome, data location and network, alpha.4 leftovers (only when some were found),
 //! update mode, and notes (firewall prompt, logs).
 
-use launcher_types::{FirstRunInfo, ImportOutcome, Network, Settings, UpdateMode};
+use launcher_types::{FirstRunInfo, ImportOutcome, Network, Phase, Settings, UpdateMode};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
     api,
     app::AppState,
-    format::{bytes, is_low_space, update_mode_text},
+    components::update_mode_choice::UpdateModeChoice,
+    format::{bytes, is_low_space, state_dir, update_mode_text},
 };
 
 /// One page of the wizard.
@@ -46,12 +47,6 @@ fn steps(has_legacy: bool) -> Vec<Step> {
     steps
 }
 
-/// Where the chain state goes for a data directory, as the backend derives it.
-fn state_dir(data_dir: &str) -> String {
-    let separator = if data_dir.contains('\\') { '\\' } else { '/' };
-    format!("{}{separator}state", data_dir.trim_end_matches(['/', '\\']))
-}
-
 /// "212.4 GB free", or a note that it is unknown.
 fn free_text(free_bytes: Option<u64>) -> String {
     match free_bytes {
@@ -62,16 +57,22 @@ fn free_text(free_bytes: Option<u64>) -> String {
 
 /// The warning shown below 300 GB of free space. The user may continue anyway.
 fn low_space_warning(free_bytes: Option<u64>) -> Option<impl IntoView> {
-    is_low_space(free_bytes).then(|| {
-        view! {
-            <div class="banner banner-warn" role="status">
-                {format!(
-                    "Only {} free there. Mainnet needs hundreds of GB, and the chain keeps growing. Choose a folder on a bigger drive, or continue if you use Testnet or will free up space.",
-                    free_bytes.map(bytes).unwrap_or_default(),
-                )}
-            </div>
-        }
+    let free = free_bytes.filter(|_| is_low_space(free_bytes))?;
+    Some(view! {
+        <div class="banner banner-warn" role="status">
+            {format!(
+                "Only {} free there. Mainnet needs hundreds of GB, and the chain keeps growing. Choose a folder on a bigger drive, or continue if you use Testnet or will free up space.",
+                bytes(free),
+            )}
+        </div>
     })
+}
+
+/// True when the backend reports zebrad starting or running.
+async fn already_running() -> bool {
+    api::get_status()
+        .await
+        .is_ok_and(|status| matches!(status.phase, Phase::Starting | Phase::Running))
 }
 
 /// Saves a change to the current settings and publishes what was stored.
@@ -119,6 +120,29 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
         });
     };
 
+    // A folder chosen in an earlier, unfinished run of the wizard: there is no read-only query
+    // for the free space of an arbitrary folder, so choose it again (which changes nothing) for
+    // the free space there. Until that answers, or if it fails, the space shows as unknown.
+    let refresh_stored_dir = move |dir: String| {
+        busy.set(true);
+        spawn_local(async move {
+            if let Ok(choice) = api::choose_data_dir(dir.clone()).await {
+                // Unless another folder was chosen meanwhile.
+                if chosen.with_untracked(|c| c.as_ref().is_some_and(|(d, _)| *d == dir)) {
+                    chosen.set(
+                        choice
+                            .settings
+                            .data_dir
+                            .clone()
+                            .map(|dir| (dir, choice.free_bytes)),
+                    );
+                    state.settings.set(Some(choice.settings));
+                }
+            }
+            busy.set(false);
+        });
+    };
+
     // Open once the settings say the flow is due, starting from the stored choices.
     Effect::new(move |_| {
         let due = state
@@ -128,9 +152,12 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
             && !open.get_untracked()
         {
             network.set(settings.network);
-            chosen.set(settings.data_dir.map(|dir| (dir, None)));
+            chosen.set(settings.data_dir.clone().map(|dir| (dir, None)));
             open.set(true);
             load_info();
+            if let Some(dir) = settings.data_dir {
+                refresh_stored_dir(dir);
+            }
         }
     });
 
@@ -454,29 +481,16 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
         .into_any()
     };
 
-    let update_radio = move |mode: UpdateMode| {
-        let (label, hint) = update_mode_text(mode);
-        view! {
-            <label class="radio">
-                <input
-                    type="radio"
-                    name="first-run-update-mode"
-                    prop:checked=move || update_mode.get() == mode
-                    on:change=move |_| update_mode.set(mode)
-                />
-                <span>{label}</span>
-                <span class="muted">{hint}</span>
-            </label>
-        }
-    };
     let updates_view = move || {
         view! {
             <p>"How should the launcher keep itself up to date?"</p>
             <fieldset class="choices">
                 <legend>"Updates"</legend>
-                {update_radio(UpdateMode::Off)}
-                {update_radio(UpdateMode::Notify)}
-                {update_radio(UpdateMode::Auto)}
+                <UpdateModeChoice
+                    name="first-run-update-mode"
+                    selected=Signal::derive(move || Some(update_mode.get()))
+                    on_select=Callback::new(move |mode| update_mode.set(mode))
+                />
             </fieldset>
             <p class="muted">
                 "Each zebrad release stops working some months after it is published (its end of support), so a launcher that is never updated eventually stops syncing. You can change this later in Settings."
@@ -563,6 +577,9 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                     });
                     match api::start_zebrad().await {
                         Ok(()) => open.set(false),
+                        // Nothing starts zebrad before the first run is done, but if it runs
+                        // anyway, the start failing is not a problem: the node is up.
+                        Err(_) if already_running().await => open.set(false),
                         Err(failure) => start_error.set(Some(failure.to_string())),
                     }
                 }
@@ -715,13 +732,6 @@ mod tests {
                 Step::Notes
             ]
         );
-    }
-
-    #[test]
-    fn state_dir_is_inside_the_data_dir() {
-        assert_eq!(state_dir("/mnt/zebra"), "/mnt/zebra/state");
-        assert_eq!(state_dir("/mnt/zebra/"), "/mnt/zebra/state");
-        assert_eq!(state_dir(r"D:\Zebra"), r"D:\Zebra\state");
     }
 
     #[test]
