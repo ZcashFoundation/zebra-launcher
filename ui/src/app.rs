@@ -3,7 +3,9 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::{NodeStats, Settings, Status, UpdateHealthFailure, UpdateInfo, UpdateState};
+use launcher_types::{
+    ConfigDocument, NodeStats, Settings, Status, UpdateHealthFailure, UpdateInfo, UpdateState,
+};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -61,6 +63,9 @@ pub struct AppState {
     /// An `update_health_failed` event. The same failure is usually in
     /// `update.health_failure` too; see [`AppState::health_failure`].
     pub update_health: RwSignal<Option<UpdateHealthFailure>>,
+    /// The `zebrad.toml` written by the last `reset_config`, from whichever page reset it, so
+    /// the Configure page (always mounted) shows it.
+    pub config_reset: RwSignal<Option<ConfigDocument>>,
 }
 
 impl AppState {
@@ -100,6 +105,7 @@ pub fn App() -> impl IntoView {
         backend_error: RwSignal::new(None),
         update: RwSignal::new(None),
         update_health: RwSignal::new(None),
+        config_reset: RwSignal::new(None),
     };
     provide_context(state);
 

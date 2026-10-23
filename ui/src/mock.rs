@@ -225,6 +225,29 @@ cache_dir = "/home/user/.local/share/org.zfnd.zebra-launcher/zebra"
 use_color = false
 "#;
 
+/// What `reset_config` writes: the launcher's minimal file for the mock's paths.
+const MINIMAL_CONFIG: &str = r#"# zebrad configuration managed by Zebra Launcher.
+#
+# The launcher keeps network.network, rpc.listen_addr, rpc.enable_cookie_auth,
+# rpc.cookie_dir, metrics.endpoint_addr and state.cache_dir up to date.
+# Add your own settings below; the reference shows every option with its
+# default. Keys you do not set use zebrad's defaults.
+
+[network]
+network = "Mainnet"
+
+[rpc]
+listen_addr = "127.0.0.1:8232"
+enable_cookie_auth = true
+cookie_dir = "/home/user/.local/share/org.zfnd.zebra-launcher/rpc"
+
+[metrics]
+endpoint_addr = "127.0.0.1:9999"
+
+[state]
+cache_dir = "/home/user/.local/share/org.zfnd.zebra-launcher/state"
+"#;
+
 /// The text that makes the mock reject a config, and the error zebrad 7.0.0 prints for it.
 const BAD_KEY: &str = "bogus";
 const CONFIG_ERROR: &str = "error: Zebra could not load the provided configuration file and/or environment variables.\nerror: zebrad fatal error: I/O operation failed: Configuration error: unknown field `bogus`, expected one of `listen_addr`, `indexer_listen_addr`, `lightwalletd_listen_addr`, `parallel_cpu_threads`, `debug_force_finished_sync`, `cookie_dir`, `enable_cookie_auth`, `max_response_body_size` for key `rpc`";
@@ -895,6 +918,17 @@ pub async fn apply_config(text: String, token: String) -> Result<ApplyOutcome, A
     Ok(ApplyOutcome::Applied)
 }
 
+pub async fn reset_config() -> Result<ConfigDocument, String> {
+    sleep(300).await;
+    let mock = mock();
+    mock.require_stopped()?;
+    mock.config.update(|config| {
+        config.text = MINIMAL_CONFIG.into();
+        config.token = format!("mock-{}", js_sys::Date::now());
+    });
+    Ok(mock.config.get_untracked())
+}
+
 pub async fn get_settings() -> Settings {
     sleep(50).await;
     mock().settings.get_untracked()
@@ -987,6 +1021,28 @@ pub async fn import_legacy_state() -> Result<ImportOutcome, String> {
         from: format!("{state_dir}/state"),
         to: mock.state_dir(),
     })
+}
+
+pub async fn delete_legacy_state() -> Result<u64, String> {
+    sleep(700).await;
+    let mock = mock();
+    mock.require_stopped()?;
+    let Some(LegacyInstall {
+        state_dir: Some(_),
+        state_bytes,
+        ..
+    }) = mock.legacy.get_untracked()
+    else {
+        return Err("no alpha.4 chain state was found".into());
+    };
+    // The old config next to the old app stays.
+    mock.legacy.update(|legacy| {
+        if let Some(legacy) = legacy {
+            legacy.state_dir = None;
+            legacy.state_bytes = 0;
+        }
+    });
+    Ok(state_bytes)
 }
 
 pub async fn delete_node_data() -> Result<u64, String> {

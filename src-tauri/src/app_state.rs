@@ -46,11 +46,13 @@ pub struct AppState {
     /// instead of quitting.
     pub tray_ready: Arc<AtomicBool>,
     /// The alpha.4 state size, measured once per launcher session by
-    /// `get_first_run_info` and reused by `delete_node_data`.
+    /// `get_first_run_info` and reused by `delete_node_data` and
+    /// `delete_legacy_state`.
     pub sizes: Arc<SizeCache>,
     /// Keeps zebrad starts and node-data changes apart: every start holds one
     /// permit until it has finished, and a data change (choosing the data
-    /// directory, importing or deleting the state) holds all of them.
+    /// directory, importing or deleting the state or the alpha.4 state,
+    /// resetting `zebrad.toml`) holds all of them.
     data_gate: Arc<Semaphore>,
 }
 

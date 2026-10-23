@@ -203,8 +203,10 @@ jobs:
             } >> "${GITHUB_OUTPUT}"
           done
 
+  # The job names are static: GitHub shows a skipped job's `name:` with its
+  # expressions unrendered. The first step of each job says what it does.
   linux:
-    name: ${{ needs.version.outputs.zebrad_ref == '' && 'Fetch' || 'Build' }} zebrad (${{ matrix.target }})
+    name: zebrad (Linux)
     needs: version
     if: needs.version.outputs.has_linux == 'true'
     runs-on: ${{ matrix.runner }}
@@ -230,6 +232,14 @@ jobs:
       TARGET: ${{ matrix.target }}
       SIDECAR: dist/zebra-launcher-zebrad-${{ matrix.target }}
     steps:
+      - name: ${{ needs.version.outputs.zebrad_ref == '' && 'Fetch' || 'Build' }} zebrad for ${{ matrix.target }}
+        run: |
+          if [ -z "${ZEBRAD_REF}" ]; then
+            echo "${TARGET}: fetch and verify the released zebrad ${VERSION}"
+          else
+            echo "${TARGET}: build zebrad ${ZEBRAD_REF} (${ZEBRAD_COMMIT}) from source"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -326,7 +336,7 @@ jobs:
           if-no-files-found: error
 
   macos:
-    name: Build zebrad (${{ matrix.target }})
+    name: zebrad (macOS)
     needs: version
     if: needs.version.outputs.has_macos == 'true'
     runs-on: ${{ matrix.runner }}
@@ -351,6 +361,14 @@ jobs:
       TARGET: ${{ matrix.target }}
       SIDECAR: dist/zebra-launcher-zebrad-${{ matrix.target }}
     steps:
+      - name: Build zebrad for ${{ matrix.target }}
+        run: |
+          if [ -z "${ZEBRAD_REF}" ]; then
+            echo "${TARGET}: build zebrad ${VERSION} from source"
+          else
+            echo "${TARGET}: build zebrad ${ZEBRAD_REF} (${ZEBRAD_COMMIT}) from source"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -434,7 +452,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    name: Build zebrad (${{ matrix.target }})
+    name: zebrad (Windows)
     needs: version
     if: needs.version.outputs.has_windows == 'true'
     runs-on: ${{ matrix.runner }}
@@ -463,6 +481,15 @@ jobs:
       run:
         shell: pwsh
     steps:
+      - name: Build zebrad for ${{ matrix.target }}
+        shell: bash
+        run: |
+          if [ -z "${ZEBRAD_REF}" ]; then
+            echo "${TARGET}: build zebrad ${VERSION} from source"
+          else
+            echo "${TARGET}: build zebrad ${ZEBRAD_REF} (${ZEBRAD_COMMIT}) from source"
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

@@ -37,13 +37,15 @@ backend that makes every page demoable:
 - Configure: a config containing `bogus` is "rejected" and rolled back with zebrad's real error
   text; a config containing the line `# simulate-conflict` gets the "file changed on disk" error;
   one containing `# simulate-read-failure` makes the reload after Save fail (add `bogus` too to
-  see a rollback followed by a failed reload);
+  see a rollback followed by a failed reload). "Reset to managed defaults…" works once the node is
+  stopped and replaces the text with the launcher's minimal file;
 - open `http://localhost:1420/?stale` to simulate a zebrad left behind by an earlier launcher run:
   the stale-process banner shows, Start fails, and "Stop it and start" clears it;
 - open `http://localhost:1420/?firstrun` for the first-run wizard: zebrad stays stopped until
   Finish, the default data folder has 212.4 GB free (so the low-space warning shows), "Choose
   another folder…" always picks `/mnt/storage/zebra` (1,834.5 GB free), and alpha.4 leftovers
-  (a `zebrad.toml` and 96.7 GB of state, counted as a lower bound) are offered for moving.
+  (a `zebrad.toml` and 96.7 GB of state, counted as a lower bound) are offered for moving or
+  deleting (type `delete` to confirm).
   Combine both flags (`?firstrun&stale`) to see Finish report that zebrad did not start.
   `?firstrun&storeddir` starts with a data folder chosen in an earlier, unfinished first run
   (`/media/small-disk/zebra`, 120.0 GB free, so the low-space warning shows), and

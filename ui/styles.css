@@ -565,12 +565,22 @@ button.danger {
   color: var(--error);
 }
 
-.delete-confirm {
+.delete-confirm,
+.reset-confirm {
   margin: 8px 0 0;
 }
 
-.delete-confirm p {
+.delete-confirm p,
+.reset-confirm p {
   margin: 0 0 4px;
+}
+
+.config-reset {
+  margin-top: 16px;
+}
+
+.reset-result {
+  margin: 6px 0 0;
 }
 
 details.diagnostics {

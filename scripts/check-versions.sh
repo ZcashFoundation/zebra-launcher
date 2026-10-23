@@ -11,10 +11,11 @@
 #      outside the workspace, src-tauri/Cargo.lock): the CLI that bundles the
 #      app must match the runtime it was built against. Skipped if nothing
 #      pins tauri-cli.
-#   5. src-tauri/tauri.conf.json sets plugins.updater.requireSignedVersion,
-#      and its updater pubkey is not the placeholder, unless the environment
-#      variable UPDATER_ENABLED is "false". Skipped while UPDATER_ENABLED is
-#      unset (CI on pull requests); release.yml sets it.
+#   5. src-tauri/tauri.conf.json sets plugins.updater.requireSignedVersion
+#      to true, always. Its updater pubkey must also not be the placeholder,
+#      unless the environment variable UPDATER_ENABLED is "false"; only this
+#      pubkey part is skipped while UPDATER_ENABLED is unset (CI on pull
+#      requests). release.yml sets it.
 #   6. The wasm-bindgen CLI pin, `WASM_BINDGEN_VERSION=` in
 #      .github/tool-versions.env, equals the `wasm-bindgen` crate in Cargo.lock
 #      (read by scripts/cargo-lock-version.sh): trunk runs the CLI only at
@@ -129,11 +130,12 @@ else
     fi
 fi
 
-# 5. updater public key
-# The app is built with the minisign public key in tauri.conf.json. A release
-# with the updater enabled must not ship the placeholder: every update would
-# fail to verify. Checked only when UPDATER_ENABLED is set (release.yml sets
-# it); any value but "false" enforces it.
+# 5. updater signature settings
+# requireSignedVersion is always checked. The app is built with the minisign
+# public key in tauri.conf.json; a release with the updater enabled must not
+# ship the placeholder, or every update would fail to verify. The placeholder
+# is only checked when UPDATER_ENABLED is set (release.yml sets it); any value
+# but "false" enforces it.
 conf="src-tauri/tauri.conf.json"
 placeholder="REPLACE_WITH_MINISIGN_PUBLIC_KEY"
 if [ ! -f "${root}/${conf}" ]; then

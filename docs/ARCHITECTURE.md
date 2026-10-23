@@ -92,8 +92,9 @@ the UI's error banner (the first one per event or channel), not only logged.
 The updater UI: a header banner while an update is available, downloading, ready,
 counting down (not dismissible) or installing (not dismissible), or failed; Settings →
 Updates with the mode, "Check now" (every mode, Off included), the stale-check warning
-and the post-update recovery panel (open logs; how to reset `zebrad.toml`, as there is
-no `reset_config` command; the releases page); and "Check for updates" on the
+and the post-update recovery panel (open logs; reset `zebrad.toml` with `reset_config`
+while zebrad is stopped or failed, with the manual steps as a fallback while it runs; the
+releases page); and "Check for updates" on the
 dashboard's end-of-support banner once the halt is under 14 days away or zebrad halted.
 Where `UpdateInfo.can_install` is false (`.deb`, development builds) the UI offers
 "Open releases page" instead of Install.
@@ -202,6 +203,12 @@ Applying an edit:
    the UI shows zebrad's stderr plus "rolled back". A crash mid-apply rolls back on the
    next launch via the marker.
 
+`reset_config` (Configure → "Reset to managed defaults", and the post-update recovery
+panel) replaces the file with the minimal one `config::ensure` creates, keeping the old
+file as the same `zebrad.toml.bak`, and returns the new `ConfigDocument`. It runs only
+while zebrad is `Stopped` or `Failed`, holding the data-change gate (see below) so zebrad
+cannot start meanwhile, and refuses while an apply is in flight or its marker is pending.
+
 When the bundled zebrad version changes, the config is validated with a 10 s probe run
 first; on failure the managed keys are regenerated, the user's other keys kept, and the
 change shown. `PortInUse` remediation offers other ports and writes them into the managed
@@ -227,6 +234,7 @@ directories; the commands in `src-tauri/src/commands.rs` call it off the async r
 | `pick_data_dir` | `Option<String>` | the native folder picker |
 | `choose_data_dir(path)` | `DataDirChoice` | checks `path` is absolute and writable, saves `settings.data_dir`, rewrites `state.cache_dir`; returns the free space, the UI decides whether to warn |
 | `import_legacy_state` | `ImportOutcome` | renames `dirs::cache_dir()/zebra/state` into the current state dir; across volumes it fails and asks the user to move it by hand, never copying |
+| `delete_legacy_state` | `u64` (bytes freed) | removes `dirs::cache_dir()/zebra/state` only (the peer cache stays), with the rules of `delete_node_data` and the zebra cache dir as the only root; refuses when the launcher's own state dir is inside that cache dir |
 | `delete_node_data` | `u64` (bytes freed) | removes `<data dir>/state` only, and only inside the launcher's data dir or the chosen one; the bytes come from a size measured earlier in the session, 0 (unknown) otherwise, never from a walk of the whole state |
 | `copy_diagnostics` | `String` | versions, OS, status, settings (URL credentials redacted), `zebrad.toml`, last 200 lines of each log; never the RPC cookie |
 | `complete_first_run` | `()` | sets `first_run_done`; from then on zebrad starts at launch |

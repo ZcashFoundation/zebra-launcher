@@ -21,6 +21,9 @@
 //! restarts zebrad and then calls [`PendingApply::commit`] or
 //! [`PendingApply::rollback`]. If the launcher dies in between, [`recover`]
 //! rolls back on the next start.
+//!
+//! [`reset`] replaces the file with the minimal one, keeping the old file as
+//! `zebrad.toml.bak` too.
 
 use std::{
     fs,
@@ -440,6 +443,34 @@ pub fn begin_apply_with_managed(
     begin_apply(paths, &doc.to_string(), expected_token)
 }
 
+/// Replaces `zebrad.toml` with a fresh minimal managed file (the one [`ensure`]
+/// creates when there is none) and returns it with its token.
+///
+/// The current file, if any, is kept as `zebrad.toml.bak`, the backup
+/// [`begin_apply`] keeps too, so a reset can be undone by hand. The bytes are
+/// copied unchanged, so an unparsable or non-UTF-8 file is backed up as well.
+/// Refused while an apply is pending (its marker exists), because the backup
+/// is the file a [`recover`] would restore. The caller makes sure no zebrad is
+/// running and no apply runs at the same time.
+pub fn reset(paths: &Paths, keys: &ManagedKeys) -> Result<ConfigDocument, ConfigError> {
+    if paths.pending_apply_marker().exists() {
+        return Err(ConfigError::Io(io::Error::other(
+            "a configuration change is still being applied",
+        )));
+    }
+    let text = render_minimal(keys)?;
+    let config = paths.zebrad_config();
+    fs::create_dir_all(paths.config_dir())?;
+    match fs::read(&config) {
+        Ok(current) => fsutil::write_atomic(&paths.zebrad_config_backup(), &current)?,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    fsutil::write_atomic(&config, text.as_bytes())?;
+    tracing::info!(backup = %paths.zebrad_config_backup().display(), "reset zebrad.toml to the managed defaults");
+    read(paths)
+}
+
 /// What [`recover`] rolled back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recovered {
@@ -776,6 +807,65 @@ tx_cost_limit = 1000
         );
         assert_eq!(read(&paths).expect("read"), original);
         assert_eq!(recover(&paths).expect("second recover"), None);
+    }
+
+    #[test]
+    fn reset_writes_the_minimal_file_and_keeps_a_backup() {
+        let (_dir, paths, keys) = setup();
+        fs::create_dir_all(paths.config_dir()).expect("mkdir");
+        let user = "# mine\n[network]\nnetwork = \"Testnet\"\n[mempool]\ntx_cost_limit = 1\n";
+        fs::write(paths.zebrad_config(), user).expect("write");
+
+        let doc = reset(&paths, &keys).expect("reset");
+        let minimal = render_minimal(&keys).expect("render");
+        assert_eq!(doc.text, minimal);
+        assert_eq!(doc, read(&paths).expect("read"));
+        assert_eq!(doc.path, paths.zebrad_config().display().to_string());
+        assert_eq!(
+            fs::read_to_string(paths.zebrad_config_backup()).expect("backup"),
+            user
+        );
+        assert_eq!(
+            files(paths.config_dir()),
+            ["zebrad.toml", "zebrad.toml.bak"]
+        );
+        // The result is what ensure keeps.
+        ensure(&paths, &keys).expect("ensure");
+        assert_eq!(read(&paths).expect("read").token, doc.token);
+    }
+
+    #[test]
+    fn reset_backs_up_an_unparsable_file_and_creates_a_missing_one() {
+        let (_dir, paths, keys) = setup();
+        // No file yet: nothing to back up.
+        let doc = reset(&paths, &keys).expect("reset");
+        assert_eq!(doc.text, render_minimal(&keys).expect("render"));
+        assert_eq!(files(paths.config_dir()), ["zebrad.toml"]);
+
+        // A broken, non-UTF-8 file is kept byte for byte.
+        let broken = b"[rpc\n\xff\xfe".to_vec();
+        fs::write(paths.zebrad_config(), &broken).expect("write");
+        reset(&paths, &keys).expect("reset broken");
+        assert_eq!(
+            fs::read(paths.zebrad_config_backup()).expect("backup"),
+            broken
+        );
+        validate(&read(&paths).expect("read").text).expect("valid");
+    }
+
+    #[test]
+    fn reset_is_refused_while_an_apply_is_pending() {
+        let (_dir, paths, keys) = setup();
+        ensure(&paths, &keys).expect("ensure");
+        let original = read(&paths).expect("read");
+        let pending =
+            begin_apply(&paths, "[mempool]\ntx_cost_limit = 1\n", &original.token).expect("begin");
+        let applied = read(&paths).expect("read");
+        assert!(matches!(reset(&paths, &keys), Err(ConfigError::Io(_))));
+        // Neither the file nor the backup the rollback needs changed.
+        assert_eq!(read(&paths).expect("read"), applied);
+        pending.rollback().expect("rollback");
+        assert_eq!(read(&paths).expect("read"), original);
     }
 
     #[test]
