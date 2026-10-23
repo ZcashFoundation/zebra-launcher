@@ -81,6 +81,8 @@ pub fn Logs() -> impl IntoView {
     let text = RwSignal::new(String::new());
     let following = RwSignal::new(true);
     let copy_note = RwSignal::new(None::<String>);
+    // Bumped by every copy, so the timer of an earlier copy does not clear a newer note.
+    let copy_generation = StoredValue::new(0u64);
     let scroller = NodeRef::<html::Div>::new();
 
     let entries = Memo::new(move |_| {
@@ -131,8 +133,17 @@ pub fn Logs() -> impl IntoView {
                 Ok(()) => format!("Copied {count} lines"),
                 Err(error) => format!("Copy failed: {error}"),
             };
+            copy_generation.update_value(|generation| *generation += 1);
+            let mine = copy_generation.get_value();
             copy_note.set(Some(note));
-            set_timeout(move || copy_note.set(None), Duration::from_secs(3));
+            set_timeout(
+                move || {
+                    if copy_generation.get_value() == mine {
+                        copy_note.set(None);
+                    }
+                },
+                Duration::from_secs(3),
+            );
         });
     };
 
