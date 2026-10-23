@@ -552,7 +552,7 @@ fn HealthFailurePanel() -> impl IntoView {
         // manual way is explained instead.
         RecoveryAction::ResetConfig => view! {
             <li>
-                <ResetConfigButton on_reset=Callback::new(|_| {}) />
+                <ResetConfigButton />
                 {move || {
                     let stopped = state.status.with(|status| data_change_allowed(&status.phase));
                     (!stopped)

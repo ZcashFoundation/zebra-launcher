@@ -2,19 +2,16 @@
 //! writes, after a confirmation. Used on the Configure page and in the post-update recovery
 //! panel.
 
-use launcher_types::ConfigDocument;
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{api, app::AppState, format::data_change_allowed};
 
 /// The reset button, its confirmation and the outcome. The backend only resets while zebrad
-/// is stopped or failed, so the button is disabled otherwise. `on_reset` gets the new file;
-/// `disabled` blocks the button while the caller is busy (an edit or a save in progress).
+/// is stopped or failed, so the button is disabled otherwise. The new file goes to
+/// [`AppState::config_reset`]; `disabled` blocks the button while the caller is busy (an edit
+/// or a save in progress).
 #[component]
-pub fn ResetConfigButton(
-    #[prop(into)] on_reset: Callback<ConfigDocument>,
-    #[prop(into, optional)] disabled: Signal<bool>,
-) -> impl IntoView {
+pub fn ResetConfigButton(#[prop(into, optional)] disabled: Signal<bool>) -> impl IntoView {
     let state = AppState::get();
     let allowed = move || {
         state
@@ -36,7 +33,7 @@ pub fn ResetConfigButton(
                 Ok(document) => {
                     let message =
                         format!("Reset. The previous file is kept as {}.bak.", document.path);
-                    on_reset.run(document);
+                    state.config_reset.set(Some(document));
                     Ok(message)
                 }
                 Err(error) => Err(format!("Could not reset the config: {error}")),

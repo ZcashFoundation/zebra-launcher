@@ -11,7 +11,9 @@ use leptos::{prelude::*, task::spawn_local};
 
 use launcher_types::{ApplyErrorKind, ApplyOutcome, ConfigDocument};
 
-use crate::{api, components::reset_config::ResetConfigButton, format::highlight_toml};
+use crate::{
+    api, app::AppState, components::reset_config::ResetConfigButton, format::highlight_toml,
+};
 
 /// What the editor area shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +72,21 @@ pub fn Configure() -> impl IntoView {
         });
     };
     load(false);
+
+    // A reset, here or in the update recovery panel, replaces the file: show the new one. An
+    // open edit is left alone; saving it is then refused as a conflict.
+    let state = AppState::get();
+    Effect::new(move |_| {
+        let Some(fresh) = state.config_reset.get() else {
+            return;
+        };
+        if matches!(mode.get_untracked(), Mode::Viewing | Mode::Loading) {
+            notice.set(None);
+            load_error.set(None);
+            document.set(Some(fresh));
+            mode.set(Mode::Viewing);
+        }
+    });
 
     let retry_load = move |_| {
         let keep_editing = mode.get_untracked() == Mode::Editing;
@@ -236,15 +253,7 @@ pub fn Configure() -> impl IntoView {
             {load_error_view}
             {body}
             <section class="config-reset">
-                <ResetConfigButton
-                    on_reset=Callback::new(move |fresh: ConfigDocument| {
-                        notice.set(None);
-                        load_error.set(None);
-                        document.set(Some(fresh));
-                        mode.set(Mode::Viewing);
-                    })
-                    disabled=Signal::derive(move || mode.get() != Mode::Viewing)
-                />
+                <ResetConfigButton disabled=Signal::derive(move || mode.get() != Mode::Viewing) />
             </section>
         </div>
     }
