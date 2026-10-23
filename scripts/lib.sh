@@ -46,6 +46,22 @@ check_commit() {
         die "commit '$1' is not a full 40-character lowercase hex SHA"
 }
 
+# check_git_ref REF: dies unless REF looks like a branch, tag or commit name
+# that is safe to pass to git as an argument: no leading "-", no whitespace,
+# no "..", nothing but letters, digits and ._/+-.
+check_git_ref() {
+    case "$1" in
+        '' | -* | *..* | */ | *.lock) die "'$1' is not a usable git ref" ;;
+    esac
+    printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/+-]*$' ||
+        die "'$1' is not a usable git ref (allowed: letters, digits and ._/+-)"
+}
+
+# is_full_sha STRING: succeeds when STRING is a full 40-hex lowercase SHA.
+is_full_sha() {
+    printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{40}$'
+}
+
 # host_triple: prints rustc's host target triple.
 host_triple() {
     command -v rustc >/dev/null 2>&1 || die "rustup/rustc is required"
@@ -66,6 +82,21 @@ check_reported_version() {
         *)
             rm -f "$1"
             die "binary reports '${reported}', expected 'zebrad $2'"
+            ;;
+    esac
+}
+
+# zebrad_version_line BINARY: prints the first line of `BINARY --version`, and
+# dies, deleting BINARY, unless it is `zebrad <something>`. For development
+# builds from a git ref, whose version is not known in advance.
+zebrad_version_line() {
+    local reported
+    reported="$("$1" --version 2>/dev/null | head -n 1)" || reported=""
+    case "${reported}" in
+        "zebrad "?*) printf '%s\n' "${reported}" ;;
+        *)
+            rm -f "$1"
+            die "binary reports '${reported}', expected 'zebrad <version>'"
             ;;
     esac
 }
