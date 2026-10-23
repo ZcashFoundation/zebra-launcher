@@ -60,6 +60,25 @@ struct StopState {
     replies: Vec<oneshot::Sender<()>>,
 }
 
+/// The callers still waiting on a run that has ended.
+struct RunReplies {
+    start: Vec<oneshot::Sender<Result<(), SupervisorError>>>,
+    stop: Vec<oneshot::Sender<()>>,
+    info: ExitInfo,
+}
+
+impl RunReplies {
+    /// Start requests learn that zebrad exited; stop requests that it stopped.
+    fn send(self) {
+        for reply in self.start {
+            let _ = reply.send(Err(SupervisorError::ExitedDuringStart(self.info.clone())));
+        }
+        for reply in self.stop {
+            let _ = reply.send(());
+        }
+    }
+}
+
 struct Run {
     id: u64,
     handle: ChildHandle,
@@ -531,14 +550,14 @@ impl Actor {
             if requested { ", stop requested" } else { "" }
         ));
 
-        for reply in run.start_replies {
-            let _ = reply.send(Err(SupervisorError::ExitedDuringStart(info.clone())));
-        }
-        if let Some(stop) = run.stop {
-            for reply in stop.replies {
-                let _ = reply.send(());
-            }
-        }
+        // The callers waiting on this run are answered only once the status
+        // shows how it ended, so a caller that reads the status after its
+        // reply sees the final phase.
+        let replies = RunReplies {
+            start: run.start_replies,
+            stop: run.stop.map(|stop| stop.replies).unwrap_or_default(),
+            info: info.clone(),
+        };
 
         self.status.send_modify(|s| {
             s.pid = None;
@@ -550,6 +569,7 @@ impl Actor {
 
         if requested || self.shutdown_replies.is_some() {
             self.status.send_modify(|s| s.phase = Phase::Stopped);
+            replies.send();
             if self.shutdown_replies.is_none() && !self.pending_start.is_empty() {
                 let replies = std::mem::take(&mut self.pending_start);
                 self.spawn_run(StartOptions::default(), replies).await;
@@ -579,6 +599,7 @@ impl Actor {
                 self.note(format!("restarting zebrad in {delay:?}"));
             }
         }
+        replies.send();
     }
 
     /// Records a line: on disk, in the history, to live subscribers, and
