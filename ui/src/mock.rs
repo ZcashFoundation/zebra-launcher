@@ -444,12 +444,26 @@ pub fn subscribe_logs(on_batch: impl Fn(Vec<LogLine>) + 'static) {
                 return;
             }
             let batch_number = batches.fetch_add(1, Ordering::Relaxed);
+            let mut batch = Vec::new();
             if batch_number % 60 == 59 {
-                mock.next_seq.fetch_add(7, Ordering::Relaxed);
+                // Like the bridge after lagging: the lost lines are replaced by one launcher
+                // line that takes the seq of the last of them.
+                const DROPPED: u64 = 7;
+                let first_dropped = mock.next_seq.fetch_add(DROPPED, Ordering::Relaxed);
+                batch.push(LogLine {
+                    seq: first_dropped + DROPPED - 1,
+                    stream: LogStream::Launcher,
+                    timestamp: None,
+                    level: Some(LogLevel::Warn),
+                    spans: None,
+                    target: None,
+                    message: format!("{DROPPED} lines dropped"),
+                });
             }
             let count = 1 + (js_sys::Math::random() * 3.0) as u64;
             let first = mock.next_seq.fetch_add(count, Ordering::Relaxed);
-            on_batch((first..first + count).map(|seq| mock.line(seq)).collect());
+            batch.extend((first..first + count).map(|seq| mock.line(seq)));
+            on_batch(batch);
         },
         Duration::from_millis(400),
     );

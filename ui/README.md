@@ -28,8 +28,9 @@ backend that makes every page demoable:
 - zebrad "starts" on load (Starting, then Running) and Start / Stop / Restart change the phase
   after short delays;
 - the Logs page receives batches of real zebrad 7.0.0 lines (from
-  `crates/launcher-core/tests/fixtures`), and now and then a few sequence numbers are skipped to
-  show the "… N lines dropped" marker;
+  `crates/launcher-core/tests/fixtures`), and now and then a `Launcher` line "7 lines dropped"
+  stands in for skipped lines, as the Tauri bridge sends when the UI falls behind; the page shows
+  it as the "… N lines dropped" marker;
 - node stats tick while Running, with an end-of-support date so the EOS banner shows;
 - Configure: a config containing `bogus` is "rejected" and rolled back with zebrad's real error
   text; a config containing the line `# simulate-conflict` gets the "file changed on disk" error;
