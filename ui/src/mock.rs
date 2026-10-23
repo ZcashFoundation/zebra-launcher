@@ -321,7 +321,7 @@ impl Mock {
             .settings
             .with_untracked(|settings| settings.data_dir.clone())
             .unwrap_or_else(|| DEFAULT_DATA_DIR.into());
-        format!("{data_dir}/state")
+        format::state_dir(&data_dir)
     }
 
     /// Runs `step` after `delay` unless another command was issued in between.

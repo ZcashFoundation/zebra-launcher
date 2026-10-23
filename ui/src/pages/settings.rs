@@ -9,7 +9,7 @@ use crate::{
     api,
     app::AppState,
     clipboard::copy_to_clipboard,
-    format::{bytes, data_change_allowed, is_low_space, update_mode_text},
+    format::{bytes, data_change_allowed, is_low_space, state_dir, update_mode_text},
 };
 
 /// The word to type before node data is deleted.
@@ -527,14 +527,11 @@ fn DeleteNodeData() -> impl IntoView {
     let busy = RwSignal::new(false);
     let result = RwSignal::new(None::<Result<String, String>>);
 
-    let state_dir = move || {
+    let state_folder = move || {
         state
             .settings
             .with(|s| s.as_ref().and_then(|s| s.data_dir.clone()))
-            .map(|dir| {
-                let separator = if dir.contains('\\') { '\\' } else { '/' };
-                format!("{}{separator}state", dir.trim_end_matches(['/', '\\']))
-            })
+            .map(|dir| state_dir(&dir))
             .unwrap_or_else(|| "the state folder in the launcher's data folder".into())
     };
     let delete = move |_| {
@@ -578,7 +575,7 @@ fn DeleteNodeData() -> impl IntoView {
             <Show when=move || confirming.get()>
                 <div class="delete-confirm banner banner-warn">
                     <p>
-                        "This deletes the chain state in " <code>{state_dir}</code>
+                        "This deletes the chain state in " <code>{state_folder}</code>
                         " and nothing else: zebrad.toml, the launcher settings, the logs and the RPC cookie stay. The next start syncs the chain from scratch, which takes a day or more on Mainnet."
                     </p>
                     <label class="field">
