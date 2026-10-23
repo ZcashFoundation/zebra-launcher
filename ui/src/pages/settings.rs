@@ -1,9 +1,9 @@
 //! The launcher settings form. Save sends the whole settings object to `set_settings`.
 
-use launcher_types::{Network, Settings, UpdateMode};
+use launcher_types::{Network, Settings, UpdateMode, is_loopback_http_url};
 use leptos::{prelude::*, task::spawn_local};
 
-use crate::{api, app::AppState, format::validate_grafana_url};
+use crate::{api, app::AppState};
 
 const STOP_GRACE_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 
@@ -34,6 +34,23 @@ fn parse_stop_grace(text: &str) -> Result<u64, String> {
     }
 }
 
+/// Checks the Grafana URL field. Empty means "no dashboard"; anything else must pass the rule
+/// the backend also enforces, [`is_loopback_http_url`], which mirrors the CSP's `frame-src`.
+fn parse_grafana_url(input: &str) -> Result<Option<String>, String> {
+    let url = input.trim();
+    if url.is_empty() {
+        Ok(None)
+    } else if is_loopback_http_url(url) {
+        Ok(Some(url.to_owned()))
+    } else {
+        Err(
+            "Grafana must run on this computer: use http://127.0.0.1 or http://localhost, \
+             with an optional port and path."
+                .into(),
+        )
+    }
+}
+
 #[component]
 pub fn SettingsPage() -> impl IntoView {
     let state = AppState::get();
@@ -60,7 +77,7 @@ pub fn SettingsPage() -> impl IntoView {
     });
 
     let grafana_error =
-        Memo::new(move |_| fields.with(|f| validate_grafana_url(&f.grafana_url).err()));
+        Memo::new(move |_| fields.with(|f| parse_grafana_url(&f.grafana_url).err()));
     let grace_error =
         Memo::new(move |_| fields.with(|f| parse_stop_grace(&f.stop_grace_secs).err()));
     let dirty = move || {
@@ -68,7 +85,7 @@ pub fn SettingsPage() -> impl IntoView {
             return false;
         };
         let f = fields.get();
-        edited.grafana_url = validate_grafana_url(&f.grafana_url).ok().flatten();
+        edited.grafana_url = parse_grafana_url(&f.grafana_url).ok().flatten();
         edited.stop_grace_secs = parse_stop_grace(&f.stop_grace_secs).unwrap_or(0);
         state
             .settings
@@ -82,7 +99,7 @@ pub fn SettingsPage() -> impl IntoView {
         };
         let f = fields.get_untracked();
         let (grafana_url, stop_grace_secs) = match (
-            validate_grafana_url(&f.grafana_url),
+            parse_grafana_url(&f.grafana_url),
             parse_stop_grace(&f.stop_grace_secs),
         ) {
             (Ok(url), Ok(secs)) => (url, secs),
@@ -256,7 +273,7 @@ pub fn SettingsPage() -> impl IntoView {
                             }
                         />
                         <span class="muted">
-                            "Shown on the dashboard. Only Grafana on this computer (127.0.0.1 or localhost) can be embedded; leave empty to hide it."
+                            "Shown on the dashboard. Only Grafana on this computer (http://127.0.0.1 or http://localhost, any port) can be embedded; leave empty to hide it."
                         </span>
                         {move || grafana_error.get().map(|e| view! { <span class="error">{e}</span> })}
                     </label>
@@ -308,5 +325,28 @@ mod tests {
         assert!(parse_stop_grace("3601").is_err());
         assert!(parse_stop_grace("1.5").is_err());
         assert!(parse_stop_grace("").is_err());
+    }
+
+    #[test]
+    fn grafana_url_uses_the_shared_rule() {
+        assert_eq!(parse_grafana_url(""), Ok(None));
+        assert_eq!(parse_grafana_url("  "), Ok(None));
+        assert_eq!(
+            parse_grafana_url(" http://127.0.0.1:3000/d/zebra-overview "),
+            Ok(Some("http://127.0.0.1:3000/d/zebra-overview".into()))
+        );
+        assert_eq!(
+            parse_grafana_url("http://LOCALHOST:3000?orgId=1"),
+            Ok(Some("http://LOCALHOST:3000?orgId=1".into()))
+        );
+        for bad in [
+            "https://127.0.0.1:3000",
+            "http://[::1]:3000",
+            "http://grafana.example.com",
+            "http://example.com@127.0.0.1:3000",
+            "127.0.0.1:3000",
+        ] {
+            assert!(parse_grafana_url(bad).is_err(), "{bad} was accepted");
+        }
     }
 }

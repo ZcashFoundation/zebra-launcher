@@ -60,7 +60,8 @@ The Tauri app (`src-tauri`, rewritten in M5) points at this crate:
 `withGlobalTauri` is required: `src/tauri.rs` binds by hand (no `tauri-sys`) to
 `window.__TAURI__.core.invoke`, `window.__TAURI__.event.listen` and `window.__TAURI__.core.Channel`.
 The CSP must allow `'wasm-unsafe-eval'` in `script-src`, and `frame-src` must list the loopback
-origins the Grafana URL validator accepts (`http://127.0.0.1:* http://localhost:*`). trunk puts a
+origins the shared Grafana URL rule accepts (`http://127.0.0.1:* http://localhost:*`, see
+`launcher_types::is_loopback_http_url` and `docs/GRAFANA.md`). trunk puts a
 small inline module script in `index.html` to load the wasm; Tauri adds hashes for inline scripts
 to the CSP when it serves the bundled assets.
 
@@ -71,7 +72,7 @@ to the CSP when it serves the bundled assets.
 | `src/tauri.rs` | `#[wasm_bindgen]` externs to `window.__TAURI__`, JSON-compatible (de)serialization |
 | `src/api.rs` | One typed function per backend command or event, Tauri or mock |
 | `src/mock.rs` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads |
-| `src/log_view.rs`, `src/format.rs` | Pure logic (log buffer, gaps, filters, formatting, URL validation), unit-tested natively |
+| `src/log_view.rs`, `src/format.rs` | Pure logic (log buffer, gaps, filters, formatting), unit-tested natively |
 | `src/app.rs` | Shared state, subscriptions, the shell |
 | `src/components/`, `src/pages/` | The status strip, tabs and the four pages |
 
