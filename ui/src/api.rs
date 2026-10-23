@@ -1,7 +1,7 @@
 //! Typed wrappers around the backend commands and events. Each one goes to Tauri when the page
 //! runs in the Tauri webview, and to the [mock](crate::mock) backend otherwise.
 
-use std::fmt;
+use std::{cell::Cell, fmt};
 
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, LogLine, NodeStats, Settings, Status,
@@ -57,6 +57,20 @@ fn wire<T: Serialize + DeserializeOwned>(value: T) -> Result<T, JsValue> {
     tauri::from_js(tauri::to_js(&value)?)
 }
 
+/// Wraps a mock event handler so its payloads take the [`wire`] round trip, with failures
+/// reported like those of a Tauri event.
+fn mock_handler<T: Serialize + DeserializeOwned>(
+    source: &'static str,
+    handler: impl Fn(T) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> impl Fn(T) + 'static {
+    let reported = Cell::new(false);
+    move |value| match wire(value) {
+        Ok(value) => handler(value),
+        Err(error) => tauri::bad_payload(source, &error, &reported, &on_error),
+    }
+}
+
 pub async fn get_status() -> ApiResult<Status> {
     if !is_tauri() {
         return Ok(wire(mock::get_status().await)?);
@@ -88,32 +102,42 @@ pub async fn restart_zebrad() -> ApiResult<()> {
     Ok(tauri::invoke0("restart_zebrad").await?)
 }
 
-/// Calls `on_status` with every `status` event for the rest of the page's life.
-pub async fn on_status(on_status: impl Fn(Status) + 'static) -> ApiResult<()> {
+/// Calls `on_status` with every `status` event for the rest of the page's life. `on_error`
+/// gets a message the first time a payload does not deserialize.
+pub async fn on_status(
+    on_status: impl Fn(Status) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
     if !is_tauri() {
-        mock::on_status(on_status);
+        mock::on_status(mock_handler("`status` event", on_status, on_error));
         return Ok(());
     }
-    Ok(tauri::listen("status", on_status).await?)
+    Ok(tauri::listen("status", on_status, on_error).await?)
 }
 
 /// Calls `on_stats` with every `node_stats` event for the rest of the page's life.
-pub async fn on_node_stats(on_stats: impl Fn(Option<NodeStats>) + 'static) -> ApiResult<()> {
+pub async fn on_node_stats(
+    on_stats: impl Fn(Option<NodeStats>) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
     if !is_tauri() {
-        mock::on_node_stats(on_stats);
+        mock::on_node_stats(mock_handler("`node_stats` event", on_stats, on_error));
         return Ok(());
     }
-    Ok(tauri::listen("node_stats", on_stats).await?)
+    Ok(tauri::listen("node_stats", on_stats, on_error).await?)
 }
 
-/// Streams log batches to `on_batch` for the rest of the page's life. A batch may follow a gap
-/// in `seq` when the backend dropped lines.
-pub async fn subscribe_logs(on_batch: impl Fn(Vec<LogLine>) + 'static) -> ApiResult<()> {
+/// Streams log batches to `on_batch` for the rest of the page's life. When the backend fell
+/// behind, a `Launcher`-stream line saying "N lines dropped" takes the place of the lost lines.
+pub async fn subscribe_logs(
+    on_batch: impl Fn(Vec<LogLine>) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
     if !is_tauri() {
-        mock::subscribe_logs(on_batch);
+        mock::subscribe_logs(mock_handler("log batch", on_batch, on_error));
         return Ok(());
     }
-    let channel = tauri::channel(on_batch);
+    let channel = tauri::channel("log batch", on_batch, on_error);
     let args = js_sys::Object::new();
     js_sys::Reflect::set(&args, &JsValue::from_str("channel"), &channel)?;
     tauri::invoke_js("subscribe_logs", &args).await?;

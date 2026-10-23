@@ -59,6 +59,11 @@ impl AppState {
             self.backend_error.set(Some(format!("{what}: {error}")));
         }
     }
+
+    /// A callback for payloads that do not deserialize: shows the message under the header.
+    fn payload_error(self) -> impl Fn(String) + 'static {
+        move |message| self.backend_error.set(Some(message))
+    }
 }
 
 #[component]
@@ -78,7 +83,11 @@ pub fn App() -> impl IntoView {
 
     // Subscribe before fetching, so no update falls between the fetch and the subscription.
     spawn_local(async move {
-        let result = api::on_status(move |status| state.status.set(status)).await;
+        let result = api::on_status(
+            move |status| state.status.set(status),
+            state.payload_error(),
+        )
+        .await;
         state.report("Listening for status", result);
         match api::get_status().await {
             Ok(status) => state.status.set(status),
@@ -86,7 +95,8 @@ pub fn App() -> impl IntoView {
         }
     });
     spawn_local(async move {
-        let result = api::on_node_stats(move |stats| state.stats.set(stats)).await;
+        let result =
+            api::on_node_stats(move |stats| state.stats.set(stats), state.payload_error()).await;
         state.report("Listening for node stats", result);
         match api::get_node_stats().await {
             Ok(stats) => state.stats.set(stats),
@@ -100,8 +110,11 @@ pub fn App() -> impl IntoView {
         }
     });
     spawn_local(async move {
-        let result =
-            api::subscribe_logs(move |batch| state.logs.update(|logs| logs.merge(batch))).await;
+        let result = api::subscribe_logs(
+            move |batch| state.logs.update(|logs| logs.merge(batch)),
+            state.payload_error(),
+        )
+        .await;
         state.report("Subscribing to logs", result);
         match api::log_history(0).await {
             Ok(history) => state.logs.update(|logs| logs.merge(history)),
