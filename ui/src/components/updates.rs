@@ -243,9 +243,8 @@ pub fn UpdateActions() -> impl IntoView {
             let result = match action {
                 Action::Install => api::install_update().await,
                 Action::Cancel => api::cancel_update().await,
-                Action::Check => api::check_for_update().await.map(|found| {
-                    set_state(state, found);
-                }),
+                // The new state arrives as events, like every other.
+                Action::Check => api::check_for_update().await.map(|_| ()),
                 Action::OpenReleases => api::open_path("releases_page").await,
             };
             if let Err(failure) = result {
@@ -341,15 +340,6 @@ enum Action {
     OpenReleases,
 }
 
-/// Applies the state a command returned right away; the `update_state` event follows.
-fn set_state(state: AppState, update_state: UpdateState) {
-    state.update.update(|info| {
-        if let Some(info) = info {
-            info.state = update_state;
-        }
-    });
-}
-
 /// "Check for updates": asks the backend to check now, which works in every update mode (Off
 /// included), and with `show_result` says what the check found next to the button.
 #[component]
@@ -359,38 +349,43 @@ pub fn CheckForUpdate(
 ) -> impl IntoView {
     let state = AppState::get();
     let busy = RwSignal::new(false);
-    let outcome = RwSignal::new(None::<Result<(), String>>);
+    // What the check returned. It only feeds the text next to the button: `update_state` and
+    // `update_info` events drive the updater state everywhere else, and may already be newer.
+    let outcome = RwSignal::new(None::<Result<UpdateState, String>>);
 
     let check = move |_| {
         busy.set(true);
         outcome.set(None);
         spawn_local(async move {
-            outcome.set(Some(match api::check_for_update().await {
-                Ok(found) => {
-                    set_state(state, found);
-                    Ok(())
-                }
-                Err(failure) => Err(format!("Could not check for updates: {failure}")),
-            }));
+            outcome.set(Some(api::check_for_update().await.map_err(|failure| {
+                format!("Could not check for updates: {failure}")
+            })));
             busy.set(false);
         });
     };
     let blocked = move || {
         busy.get() || with_info(state, |info| info.is_some_and(|i| check_blocked(&i.state)))
     };
-    // What the check found, kept current: an update found can start downloading, and so on.
-    let result = move || match outcome.get()? {
-        Ok(()) if show_result => {
-            let now = state.now.get();
-            with_info(state, |info| {
-                info.map(|info| {
-                    view! { <span class="update-result">{update_state_text(&info.state, now)}</span> }
-                        .into_any()
-                })
-            })
-        }
-        Ok(()) => None,
-        Err(error) => Some(view! { <span class="error">{error}</span> }.into_any()),
+    // What the check found.
+    let result = move || {
+        outcome.with(|reply| match reply.as_ref()? {
+            Ok(_) if show_result => Some(
+                view! {
+                    <span class="update-result">
+                        {move || {
+                            outcome
+                                .with(|outcome| match outcome {
+                                    Some(Ok(found)) => Some(update_state_text(found, state.now.get())),
+                                    _ => None,
+                                })
+                        }}
+                    </span>
+                }
+                .into_any(),
+            ),
+            Ok(_) => None,
+            Err(error) => Some(view! { <span class="error">{error.clone()}</span> }.into_any()),
+        })
     };
 
     view! {
