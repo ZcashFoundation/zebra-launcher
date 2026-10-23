@@ -142,9 +142,11 @@ runs:
 
         sha256_of() {
           if command -v sha256sum > /dev/null 2>&1; then
-            sha256sum "$1" | cut -d' ' -f1
+            # Read from stdin: with a file operand GNU sha256sum prefixes the hash with
+          # a backslash when the path contains one (Windows paths do).
+          sha256sum < "$1" | cut -d' ' -f1
           else
-            shasum -a 256 "$1" | cut -d' ' -f1
+            shasum -a 256 < "$1" | cut -d' ' -f1
           fi
         }
 

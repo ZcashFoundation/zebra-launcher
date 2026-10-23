@@ -475,7 +475,9 @@ jobs:
           mkdir -p "${dir}"
           curl --proto '=https' --tlsv1.2 -sSfL -o "${dir}/client.nupkg" \
             "https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/${SIGNING_CLIENT_VERSION}/microsoft.artifactsigning.client.${SIGNING_CLIENT_VERSION}.nupkg"
-          echo "${SIGNING_CLIENT_SHA256}  ${dir}/client.nupkg" | sha256sum -c -
+          # Compare hashes directly: `sha256sum -c` mishandles Windows paths with backslashes.
+          got="$(sha256sum < "${dir}/client.nupkg" | cut -d' ' -f1)"
+          [ "${got}" = "${SIGNING_CLIENT_SHA256}" ] || { echo "::error::client.nupkg has sha256 ${got}, expected ${SIGNING_CLIENT_SHA256}"; exit 1; }
           7z x -y -o"${dir}/client" "${dir}/client.nupkg" > /dev/null
           dlib="$(cygpath -w "${dir}/client/bin/x64/Azure.CodeSigning.Dlib.dll")"
           shopt -s nullglob

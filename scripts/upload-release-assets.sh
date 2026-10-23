@@ -100,9 +100,10 @@ delete_assets() {
 
 sha256_of() {
     if command -v sha256sum > /dev/null 2>&1; then
-        sha256sum "$1" | cut -d' ' -f1
+        # stdin avoids GNU sha256sum's backslash-escaped output for paths with backslashes
+        sha256sum < "$1" | cut -d' ' -f1
     else
-        shasum -a 256 "$1" | cut -d' ' -f1
+        shasum -a 256 < "$1" | cut -d' ' -f1
     fi
 }
 
