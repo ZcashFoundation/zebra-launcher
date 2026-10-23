@@ -230,7 +230,7 @@ while its state is being moved or deleted.
 tray menu: Show | Start zebrad | Stop zebrad | Quit      tooltip: phase (watch<Status>)
 window close --(close_to_tray && tray exists)--> hide; zebrad keeps running
             '--(otherwise)--> last window closed -> ExitRequested
-Quit / ExitRequested -> prevent_exit -> supervisor.shutdown() capped at grace + 10 s -> exit
+Quit / ExitRequested -> prevent_exit -> supervisor.shutdown() capped at max(grace + 10 s, 70 s) -> exit
 Show / second launch (single-instance) / macOS dock -> show + focus the window
 ```
 
@@ -268,13 +268,17 @@ which preselects Notify.
   built. Only an explicit "Check for updates" (`check_for_update`) reaches the network.
 - **Notify** checks 30 s after launch, then every 6 h ± 10 % (seeded jitter), and shows
   what it found. Installing is always a user click.
-- **Auto** also downloads a found update in the background and verifies it. It installs
+- **Auto** also downloads a found update in the background. It installs
   only on a user click, or by itself when zebrad's end-of-support warning is on (the
   estimated halt is within 14 days, or zebrad already refused to run), and then only
   after a visible 60 s countdown that `cancel_update` stops. Never silently mid-session.
 - The `.deb` cannot update itself (root, package manager): it is Notify-only and the UI
   links to the releases page (`UpdateInfo.can_install = false`). Development builds
-  cannot install either.
+  cannot install either; on macOS only a release build running from inside a `.app`
+  bundle can (`bundle_type()` reports `App` for every macOS build).
+- A check times out after 30 s; a download after 1 h (the plugin copies the check's
+  timeout into the `Update`, so the backend replaces it before downloading). A download
+  can be cancelled sooner.
 
 ### Updater actor
 
@@ -288,7 +292,7 @@ them. `src-tauri/src/updater.rs` implements the actor's `UpdateBackend` with
   watch<Settings> ──────▶     │  ▲                                  update_state
   watch<NodeStats> (EOS) ─▶   │  │ results (job id)
   watch<Status> ────────▶     ▼  │
-                         child tasks: check | download+verify | install
+                         child tasks: check | download | install
                                     │
                     UpdateBackend (tauri-plugin-updater)   NodeControl (supervisor)
 ```
@@ -297,29 +301,50 @@ States (`UpdateState`, tagged `state`):
 
 ```text
 Idle ──check──▶ Checking ──▶ UpToDate | Error | Available
-Available ──install (or Auto)──▶ Downloading ──verify ok──▶ ReadyToInstall{countdown: None}
+Available ──install (or Auto)──▶ Downloading ──done──▶ ReadyToInstall{countdown: None}
 ReadyToInstall ──Auto + EOS warning──▶ ReadyToInstall{countdown: Some(60..1)} ──0──▶ Installing
 ReadyToInstall ──install──▶ Installing ──▶ (launcher restarts)
-cancel: Checking → the found update or Idle, Downloading → Available, countdown → ReadyToInstall{None}
+cancel: Checking → the found update or the state before the check (UpToDate, Error, Idle),
+        Downloading → Available, countdown → ReadyToInstall{None}
 update_mode → Off: abort everything except an install in progress → Idle
 ```
 
 Install sequence, in a child task:
 
 ```text
-Update::verify (minisign, signed version)  -- fails: Error, zebrad untouched
+Update::verify (minisign, signed version; spawn_blocking)  -- fails: Error, zebrad untouched
+  -> supervisor stop (graceful, kill after the grace period), capped at
+     supervisor::shutdown_cap = max(grace + 10 s, 70 s), the exit flow's cap
   -> write <config>/pending_update_check {from, to, zebrad_was_running}
-  -> supervisor stop (graceful, kill after the grace period)
   -> Update::install -> app.request_restart()  (Windows: the installer exits the app)
-stop or install fails -> remove the marker, start zebrad again if it was running, Error
+stop fails -> start zebrad again if it was running, Error
+stop exceeds the cap -> keep waiting for it (up to the cap again), then start zebrad
+                        again if it was running (never on top of a stop in flight), Error
+install fails -> remove the marker, start zebrad again if it was running, Error
 ```
+
+The launcher verifies the package once, right before stopping zebrad; the plugin also
+verifies inside `download` and `install`. The marker is written only after zebrad
+stopped, so a crash or failed stop before the install leaves no marker behind.
 
 At the next launch, if `pending_update_check` exists, the health gate checks that the
 new version is running and, if zebrad was running before, that it reaches `Running`
 with an RPC address within 5 minutes (starting it if `start_node_on_launch` is off).
 Then the marker is removed. On failure the `update_health_failed` event (and
-`UpdateInfo.health_failure`) carries the recovery hints: open logs, reset config, and
-the releases page for a previous installer.
+`UpdateInfo.health_failure`) carries a message and recovery hints:
+
+| Outcome | Recovery |
+|---|---|
+| still the old version: the update did not complete | open logs, releases page |
+| zebrad `Failed { EosHalt }`: past its end of support, update required | releases page |
+| zebrad failed otherwise, or not `Running` with RPC in 5 minutes | open logs, reset config, releases page |
+| a stale zebrad (`Status.stale`) still blocks the start at the limit; names its pid and binary | open logs |
+
+A stale zebrad from an earlier launcher run is not an update failure: the gate's start
+(and the restart after a failed install) emits `stale_process` like the start at
+launch, the gate waits for the user to resolve it, and the 5 minutes start again once
+it is gone. When the update did not complete, zebrad is still started again if it was
+running and `start_node_on_launch` is off.
 
 `UpdateInfo.stale_check_warning` is set when the end of support is within 28 days (or
 zebrad halted) and no check succeeded in the last 14 days; the last successful check
