@@ -15,9 +15,9 @@ use std::{
 
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, EosInfo, ExitClass,
-    ExitInfo, FirstRunInfo, ImportOutcome, LegacyInstall, LogLevel, LogLine, LogStream, NodeStats,
-    Phase, RecoveryAction, Settings, StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo,
-    UpdateMode, UpdateState,
+    ExitInfo, FirstRunInfo, ImportOutcome, LegacyInstall, LogLevel, LogLine, LogStream, Network,
+    NodeStats, Phase, RecoveryAction, Settings, StaleProcessInfo, Status, UpdateHealthFailure,
+    UpdateInfo, UpdateMode, UpdateState,
 };
 use leptos::prelude::*;
 
@@ -225,8 +225,15 @@ cache_dir = "/home/user/.local/share/org.zfnd.zebra-launcher/zebra"
 use_color = false
 "#;
 
-/// What `reset_config` writes: the launcher's minimal file for the mock's paths.
-const MINIMAL_CONFIG: &str = r#"# zebrad configuration managed by Zebra Launcher.
+/// What `reset_config` writes: the launcher's minimal file for the network and the state
+/// directory, like `config::render_minimal`.
+fn minimal_config(network: Network, state_dir: &str) -> String {
+    let rpc_port = match network {
+        Network::Mainnet => 8232,
+        Network::Testnet => 18232,
+    };
+    format!(
+        r#"# zebrad configuration managed by Zebra Launcher.
 #
 # The launcher keeps network.network, rpc.listen_addr, rpc.enable_cookie_auth,
 # rpc.cookie_dir, metrics.endpoint_addr and state.cache_dir up to date.
@@ -234,19 +241,22 @@ const MINIMAL_CONFIG: &str = r#"# zebrad configuration managed by Zebra Launcher
 # default. Keys you do not set use zebrad's defaults.
 
 [network]
-network = "Mainnet"
+network = "{network}"
 
 [rpc]
-listen_addr = "127.0.0.1:8232"
+listen_addr = "127.0.0.1:{rpc_port}"
 enable_cookie_auth = true
-cookie_dir = "/home/user/.local/share/org.zfnd.zebra-launcher/rpc"
+cookie_dir = "{DEFAULT_DATA_DIR}/rpc"
 
 [metrics]
 endpoint_addr = "127.0.0.1:9999"
 
 [state]
-cache_dir = "/home/user/.local/share/org.zfnd.zebra-launcher/state"
-"#;
+cache_dir = "{state_dir}"
+"#,
+        network = network.as_str(),
+    )
+}
 
 /// The text that makes the mock reject a config, and the error zebrad 7.0.0 prints for it.
 const BAD_KEY: &str = "bogus";
@@ -923,8 +933,10 @@ pub async fn reset_config() -> Result<ConfigDocument, String> {
     sleep(300).await;
     let mock = mock();
     mock.require_stopped()?;
+    let network = mock.settings.with_untracked(|settings| settings.network);
+    let text = minimal_config(network, &mock.state_dir());
     mock.config.update(|config| {
-        config.text = MINIMAL_CONFIG.into();
+        config.text = text;
         config.token = format!("mock-{}", js_sys::Date::now());
     });
     Ok(mock.config.get_untracked())
