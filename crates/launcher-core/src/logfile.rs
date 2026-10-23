@@ -5,7 +5,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -135,7 +135,9 @@ impl RotatingFile {
             PathBuf::from(name)
         };
         if self.config.keep == 0 {
-            fs::remove_file(path)?;
+            // Removing and reopening the open file fails on Windows without
+            // POSIX delete semantics, so empty it in place instead.
+            return self.truncate();
         } else {
             let _ = fs::remove_file(rotated(self.config.keep));
             for n in (1..self.config.keep).rev() {
@@ -147,6 +149,14 @@ impl RotatingFile {
             fs::rename(path, rotated(1))?;
         }
         self.file = OpenOptions::new().create(true).append(true).open(path)?;
+        self.size = 0;
+        Ok(())
+    }
+
+    /// Empties the current file in place.
+    fn truncate(&mut self) -> io::Result<()> {
+        self.file.set_len(0)?;
+        self.file.seek(SeekFrom::Start(0))?;
         self.size = 0;
         Ok(())
     }
@@ -197,6 +207,26 @@ mod tests {
         // The newest lines are in the current file.
         let current = fs::read_to_string(&config.path).expect("read");
         assert!(current.contains("line 09"), "{current}");
+    }
+
+    #[test]
+    fn keep_zero_truncates_the_current_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = RotatingLogConfig {
+            path: dir.path().join("zebrad.log"),
+            max_bytes: 100,
+            keep: 0,
+        };
+        let mut file = RotatingFile::open(config.clone()).expect("open");
+        for i in 0..10 {
+            file.write_line(format!("line {i:02} {}\n", "x".repeat(21)).as_bytes())
+                .expect("write");
+        }
+        file.flush().expect("flush");
+        assert_eq!(existing_files(&config), std::slice::from_ref(&config.path));
+        let current = fs::read_to_string(&config.path).expect("read");
+        assert!(current.len() <= 100, "{current}");
+        assert!(current.starts_with("line 09"), "{current}");
     }
 
     #[test]
