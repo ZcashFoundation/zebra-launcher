@@ -158,10 +158,12 @@ try {
     # 3. Build like Zebra's release workflow does.
     $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
     $env:SOURCE_DATE_EPOCH = $sourceDateEpoch
-    $env:RUSTFLAGS = "--remap-path-prefix=$SrcDir=/zebra --remap-path-prefix=$cargoHome=/cargo"
+    # The flags are separated by 0x1f, not spaces, so paths with spaces survive.
+    $rustFlags = @("--remap-path-prefix=$SrcDir=/zebra", "--remap-path-prefix=$cargoHome=/cargo")
+    $env:CARGO_ENCODED_RUSTFLAGS = $rustFlags -join [char]0x1f
     $env:CARGO_PROFILE_RELEASE_STRIP = 'symbols'
     Write-Host "+ `$env:SOURCE_DATE_EPOCH = '$env:SOURCE_DATE_EPOCH'"
-    Write-Host "+ `$env:RUSTFLAGS = '$env:RUSTFLAGS'"
+    Write-Host "+ `$env:CARGO_ENCODED_RUSTFLAGS = '$($rustFlags -join "' + [char]0x1f + '")'"
     Write-Host "+ `$env:CARGO_PROFILE_RELEASE_STRIP = 'symbols'"
     Invoke-Step cargo @(
         'build', '--manifest-path', (Join-Path $SrcDir 'Cargo.toml'),

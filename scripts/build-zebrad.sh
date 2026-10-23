@@ -158,10 +158,11 @@ run rustup target add --toolchain "${toolchain}" "${target}"
 
 # 3. Build like Zebra's release workflow does.
 export SOURCE_DATE_EPOCH="${source_date_epoch}"
-export RUSTFLAGS="--remap-path-prefix=${src}=/zebra --remap-path-prefix=${CARGO_HOME:-${HOME}/.cargo}=/cargo"
+# The flags are separated by 0x1f, not spaces, so paths with spaces survive.
+export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${src}=/zebra"$'\x1f'"--remap-path-prefix=${CARGO_HOME:-${HOME}/.cargo}=/cargo"
 export CARGO_PROFILE_RELEASE_STRIP=symbols
 echo "+ export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
-echo "+ export RUSTFLAGS=\"${RUSTFLAGS}\""
+printf '+ export CARGO_ENCODED_RUSTFLAGS=%q\n' "${CARGO_ENCODED_RUSTFLAGS}"
 echo "+ export CARGO_PROFILE_RELEASE_STRIP=symbols"
 run cargo build --manifest-path "${src}/Cargo.toml" --target-dir "${src}/target" \
     --locked --release -p zebrad --bin zebrad \
