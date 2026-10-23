@@ -1,13 +1,20 @@
 //! The dashboard: node details, the end-of-support banner, and the embedded Grafana dashboard.
 
+use std::time::Duration;
+
+use launcher_types::{ExitClass, Phase};
 use leptos::prelude::*;
 
 use crate::{
     app::AppState,
     clock,
-    components::status_strip::phase_detail,
+    components::{status_strip::phase_detail, updates::CheckForUpdate},
     format::{exit_class_text, kiosk_url, percent, phase_label, relative, thousands},
 };
+
+/// Inside this window before the end of support, the EOS banner offers "Check for updates",
+/// whatever the update mode.
+const EOS_CHECK_WINDOW: Duration = Duration::from_secs(14 * 86_400);
 
 /// The command that starts the Prometheus and Grafana stack, shown when no Grafana URL is set.
 const OBSERVABILITY_HINT: &str = "docker compose -f docs/observability/docker-compose.yml up -d";
@@ -17,22 +24,65 @@ const GRAFANA_EXAMPLE_URL: &str = "http://127.0.0.1:3000/d/zebra-overview";
 pub fn Dashboard() -> impl IntoView {
     let state = AppState::get();
 
-    let eos_banner = move || {
+    let eos_text = move || {
         let (version, eos) = state.stats.with(|stats| {
             let stats = stats.as_ref()?;
             Some((stats.zebrad_version.clone(), stats.eos.clone()?))
         })?;
         let when = relative(eos.estimated_time, state.now.get());
-        Some(view! {
-            <div class="banner banner-warn" role="status">
-                <strong>"End of support approaching. "</strong>
-                {format!(
-                    "zebrad {version} stops working at block {} (estimated {}, {when}). Update the launcher before then.",
-                    thousands(eos.block_height),
-                    clock::local_string(eos.estimated_time),
-                )}
-            </div>
+        Some(format!(
+            "zebrad {version} stops working at block {} (estimated {}, {when}). Update the launcher before then.",
+            thousands(eos.block_height),
+            clock::local_string(eos.estimated_time),
+        ))
+    };
+    let eos_soon = Memo::new(move |_| {
+        let now = state.now.get();
+        state.stats.with(|stats| {
+            stats
+                .as_ref()
+                .and_then(|stats| stats.eos.as_ref())
+                .is_some_and(|eos| {
+                    eos.estimated_time
+                        .duration_since(now)
+                        .map_or(true, |left| left < EOS_CHECK_WINDOW)
+                })
         })
+    });
+    let halted = Memo::new(move |_| {
+        state.status.with(|status| {
+            status.phase
+                == Phase::Failed {
+                    class: ExitClass::EosHalt,
+                }
+        })
+    });
+    // Separate from the text, which changes every second, so the button keeps its state.
+    let eos_banner = view! {
+        <Show when=move || eos_text().is_some()>
+            <div class="banner banner-warn eos-banner" role="status">
+                <span>
+                    <strong>"End of support approaching. "</strong>
+                    {eos_text}
+                </span>
+                <Show when=move || eos_soon.get()>
+                    <div class="buttons">
+                        <CheckForUpdate />
+                    </div>
+                </Show>
+            </div>
+        </Show>
+        <Show when=move || halted.get()>
+            <div class="banner banner-error eos-banner" role="alert">
+                <span>
+                    <strong>"This zebrad release is past its end of support. "</strong>
+                    "It refuses to run, and restarting cannot help. A launcher update brings a newer zebrad."
+                </span>
+                <div class="buttons">
+                    <CheckForUpdate />
+                </div>
+            </div>
+        </Show>
     };
 
     let node_rows = move || {
