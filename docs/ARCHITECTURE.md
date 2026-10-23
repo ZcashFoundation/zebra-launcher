@@ -71,17 +71,32 @@ with `log_history` replaces the marker.
 Commands (`src-tauri/src/commands.rs`) return `launcher-types` structs; errors are strings,
 except `apply_config`, which rejects with an `ApplyError {kind, message}`. Events carry
 changes the UI did not ask for: `status` (every `Status` change), `node_stats` (every
-`Option<NodeStats>` change) and `stale_process` (a zebrad from an earlier launcher run
-blocked the start at launch).
+`Option<NodeStats>` change), `stale_process` (a zebrad from an earlier launcher run
+blocked the start at launch), and for the updater `update_info` (every `UpdateInfo`
+change), `update_state` (its `UpdateState`, when that changed) and
+`update_health_failed` (an `UpdateHealthFailure` after an update that did not come back
+healthy).
 
 At startup the UI subscribes first and then fetches a snapshot (`get_status`,
-`get_node_stats`, `log_history`), so no change falls between the two. An event that
-arrives while a snapshot request is in flight is newer than the snapshot, so the UI drops
-the `get_status` and `get_node_stats` snapshots once an event of the same kind has
-arrived. Log batches and history are merged by `seq`, so their order does not matter.
+`get_node_stats`, `get_update_info`, `log_history`), so no change falls between the two.
+An event that arrives while a snapshot request is in flight is newer than the snapshot,
+so the UI drops the `get_status`, `get_node_stats` and `get_update_info` snapshots once
+an event of the same kind has arrived (for the updater: `update_info`; an
+`update_state` that arrives before any `update_info` replaces the snapshot's state).
+Log batches and history are merged by `seq`, so their order does not matter.
 `stale_process` may be emitted before the UI listens, so the stale-process banner is
-driven by `status.stale`, which the snapshot carries. A payload that does not deserialize
-is shown in the UI's error banner (the first one per event or channel), not only logged.
+driven by `status.stale`, which the snapshot carries; likewise `update_health_failed`
+is also in `UpdateInfo.health_failure`. A payload that does not deserialize is shown in
+the UI's error banner (the first one per event or channel), not only logged.
+
+The updater UI: a header banner while an update is available, downloading, ready,
+counting down (not dismissible) or installing (not dismissible), or failed; Settings →
+Updates with the mode, "Check now" (every mode, Off included), the stale-check warning
+and the post-update recovery panel (open logs; how to reset `zebrad.toml`, as there is
+no `reset_config` command; the releases page); and "Check for updates" on the
+dashboard's end-of-support banner once the halt is under 14 days away or zebrad halted.
+Where `UpdateInfo.can_install` is false (`.deb`, development builds) the UI offers
+"Open releases page" instead of Install.
 
 **Spawning** happens on one dedicated, long-lived OS thread (the spawner) with
 `std::process::Command`, then `tokio::process::Child::from_std`. It must not be a tokio

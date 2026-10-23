@@ -131,7 +131,10 @@ first signed release still has to confirm it on real assets (see
 
 Not covered by the signature: `latest.json` itself (notes, date, URLs; only the TLS
 connection to GitHub protects them), and anything that happens before the user opted
-into updates (Off mode makes no requests).
+into updates (Off mode makes no requests). The UI therefore treats the release notes as
+untrusted text: it shows a plain-text excerpt (no HTML, no links), and the only page it
+opens about an update is the fixed releases page (`open_path("releases_page")`), never
+a URL from the manifest.
 
 ## Rollback policy
 
