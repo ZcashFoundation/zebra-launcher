@@ -1,0 +1,62 @@
+# Prometheus + Grafana for a zebrad run by Zebra Launcher.
+#
+# The launcher binds zebrad's metrics to 127.0.0.1:9999. A container on the Docker
+# bridge cannot reach a host port bound to 127.0.0.1, so:
+#   - Docker Desktop (macOS, Windows): use this file as is. Prometheus scrapes
+#     host.docker.internal:9999 (whether that reaches a 127.0.0.1-bound port is to
+#     verify in M7; see docs/GRAFANA.md).
+#   - Linux (Docker Engine): add docker-compose.linux.yml, which puts Prometheus and
+#     Grafana on the host network.
+#
+#   docker compose -f docs/observability/docker-compose.yml up -d
+#   docker compose -f docs/observability/docker-compose.yml -f docs/observability/docker-compose.linux.yml up -d
+#
+# Grafana: http://127.0.0.1:3000 (anonymous Viewer; admin/admin to edit)
+# Launcher embed URL: http://127.0.0.1:3000/d/zebra-overview?kiosk&theme=dark
+
+name: zebra-launcher-observability
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      # Read by grafana/provisioning/datasources/datasources.yml.
+      PROMETHEUS_URL: http://prometheus:9090
+      # The launcher shows the overview dashboard in an iframe.
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      # Viewing needs no login; editing still does (admin/admin on first login,
+      # or set GF_SECURITY_ADMIN_PASSWORD in a .env file next to this file).
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/zebra_overview.json
+      # A local desktop stack has no reason to phone home.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  prometheus-data:
+  grafana-data:

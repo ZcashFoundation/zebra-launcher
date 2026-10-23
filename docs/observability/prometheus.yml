@@ -1,0 +1,20 @@
+# Scrapes the zebrad started by Zebra Launcher (metrics.endpoint_addr = 127.0.0.1:9999)
+# from a container on Docker Desktop. On Linux, docker-compose.linux.yml mounts
+# prometheus.linux.yml instead.
+#
+# If the launcher moved the metrics port (port-in-use remediation), change the port
+# here and in prometheus.linux.yml to match the launcher's zebrad.toml.
+#
+# Zebra's dashboards use rate(...[1m]) windows, which need a scrape interval of
+# 30 s or less.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: zebra
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9999"]
