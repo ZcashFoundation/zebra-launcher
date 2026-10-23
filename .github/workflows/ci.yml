@@ -27,7 +27,16 @@ jobs:
           # The toolchain comes from rust-toolchain.toml.
           cache: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install the WebKitGTK and tray libraries Tauri builds against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
+            libxdo-dev libssl-dev patchelf
       - run: cargo fmt --all --check
+      # tauri-build requires the sidecar file named in bundle.externalBin.
+      - name: Install fake-zebrad as the sidecar
+        run: scripts/dev-sidecar.sh
       - run: cargo clippy --workspace --all-targets --locked
       - run: cargo test --workspace --locked
 
@@ -53,5 +62,13 @@ jobs:
         with:
           cache: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # tauri-build requires the sidecar file named in bundle.externalBin.
+      - name: Install fake-zebrad as the sidecar (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/dev-sidecar.ps1
+      - name: Install fake-zebrad as the sidecar (macOS)
+        if: runner.os == 'macOS'
+        run: scripts/dev-sidecar.sh
       - run: cargo clippy --workspace --all-targets --locked
       - run: cargo test --workspace --locked
