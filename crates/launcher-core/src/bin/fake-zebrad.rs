@@ -23,15 +23,34 @@
 //! `FAKE_ZEBRAD_HEARTBEAT_MS` sets the heartbeat interval (default 500 ms).
 //! `start --shutdown-on-stdin-close` also shuts down when stdin reaches EOF,
 //! mirroring the flag proposed for zebrad.
+//!
+//! When the `-c` config sets `rpc.listen_addr`, the fake also serves a minimal
+//! JSON-RPC endpoint there (port 0 picks a free port, and the bound address is
+//! printed in the `Opened RPC endpoint at` line). With `rpc.cookie_dir` set and
+//! `rpc.enable_cookie_auth` not `false`, it writes a random cookie to
+//! `<cookie_dir>/.cookie` in zebrad's format and answers `401` to requests
+//! without the matching Basic credentials. It answers `getblockchaininfo`,
+//! `getinfo`, `getmempoolinfo`, `getpeerinfo` and `getdeprecationinfo` with
+//! canned values (see [`canned`]), `fakegetcallcounts` with the number of calls
+//! per method so far, and `-32601` to anything else.
 
 use std::{
+    hash::{BuildHasher, Hasher, RandomState},
     io::{Read, Write},
-    path::PathBuf,
+    net::SocketAddr,
+    path::{Path, PathBuf},
     process::ExitCode,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tokio::sync::oneshot;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde_json::{Value, json};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream},
+    sync::oneshot,
+};
 
 const VERSION: &str = "7.0.0";
 const RPC_ADDR: &str = "127.0.0.1:8232";
@@ -197,17 +216,31 @@ async fn run(
         "zebra_network::peer_set::initialize",
         "Opened Zcash protocol endpoint at 127.0.0.1:18233",
     );
-    log(
-        "INFO",
-        None,
-        "zebra_rpc::server::cookie",
-        "RPC auth cookie written to disk",
-    );
+    let (rpc_addr, cookie_written) = match config.as_deref().and_then(rpc_config) {
+        Some(rpc) => match start_rpc_server(rpc).await {
+            Ok(started) => started,
+            Err(err) => panic_and_abort(
+                "zebra-rpc/src/server.rs:1:1",
+                &format!("Unexpected error starting RPC server: {err}"),
+            ),
+        },
+        // Without a configured listener, only print the lines the log
+        // detectors key on.
+        None => (RPC_ADDR.to_string(), true),
+    };
+    if cookie_written {
+        log(
+            "INFO",
+            None,
+            "zebra_rpc::server::cookie",
+            "RPC auth cookie written to disk",
+        );
+    }
     log(
         "INFO",
         None,
         "zebra_rpc::server",
-        &format!("Opened RPC endpoint at {RPC_ADDR}"),
+        &format!("Opened RPC endpoint at {rpc_addr}"),
     );
     log(
         "INFO",
@@ -290,6 +323,224 @@ async fn run(
                 }
             }
         }
+    }
+}
+
+/// The `[rpc]` settings the fake RPC server uses.
+struct RpcConfig {
+    listen_addr: SocketAddr,
+    /// Where to write the cookie; `None` disables authentication.
+    cookie_dir: Option<PathBuf>,
+}
+
+/// Reads `rpc.listen_addr`, `rpc.cookie_dir` and `rpc.enable_cookie_auth`.
+/// Returns `None` when the file is unreadable or sets no listener.
+fn rpc_config(path: &Path) -> Option<RpcConfig> {
+    let doc: toml_edit::DocumentMut = std::fs::read_to_string(path).ok()?.parse().ok()?;
+    let rpc = doc.get("rpc")?.as_table_like()?;
+    let listen_addr = rpc.get("listen_addr")?.as_str()?.parse().ok()?;
+    let auth = rpc
+        .get("enable_cookie_auth")
+        .and_then(|item| item.as_bool())
+        .unwrap_or(true);
+    let cookie_dir = rpc
+        .get("cookie_dir")
+        .and_then(|item| item.as_str())
+        .filter(|_| auth)
+        .map(PathBuf::from);
+    Some(RpcConfig {
+        listen_addr,
+        cookie_dir,
+    })
+}
+
+/// Binds the RPC listener, writes the cookie, and serves requests in the
+/// background. Returns the bound address and whether a cookie was written.
+async fn start_rpc_server(config: RpcConfig) -> std::io::Result<(String, bool)> {
+    let listener = TcpListener::bind(config.listen_addr).await?;
+    let addr = listener.local_addr()?;
+    let expected_auth = match &config.cookie_dir {
+        Some(dir) => {
+            let credentials = format!("__cookie__:{}", random_cookie());
+            std::fs::create_dir_all(dir)?;
+            std::fs::write(dir.join(".cookie"), &credentials)?;
+            Some(format!("Basic {}", STANDARD.encode(credentials)))
+        }
+        None => None,
+    };
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let expected_auth = expected_auth.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(10),
+                            serve_connection(stream, expected_auth),
+                        )
+                        .await;
+                    });
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    });
+    Ok((addr.to_string(), config.cookie_dir.is_some()))
+}
+
+/// 32 random bytes in base64, like zebrad's cookie, without a `rand` dependency.
+fn random_cookie() -> String {
+    let state = RandomState::new();
+    let mut bytes = Vec::with_capacity(32);
+    for i in 0..4u64 {
+        let mut hasher = state.build_hasher();
+        hasher.write_u64(i);
+        hasher.write_u128(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+        );
+        bytes.extend_from_slice(&hasher.finish().to_le_bytes());
+    }
+    STANDARD.encode(bytes)
+}
+
+/// Serves one HTTP/1.1 request, then closes the connection.
+async fn serve_connection(stream: TcpStream, expected_auth: Option<String>) -> std::io::Result<()> {
+    const MAX_HEADER_LINES: usize = 100;
+    const MAX_BODY: usize = 1024 * 1024;
+
+    let (read, mut write) = stream.into_split();
+    let mut reader = BufReader::new(read);
+    let mut line = String::new();
+    if reader.read_line(&mut line).await? == 0 {
+        return Ok(());
+    }
+    let mut content_length = 0usize;
+    let mut authorization = None;
+    for _ in 0..MAX_HEADER_LINES {
+        line.clear();
+        if reader.read_line(&mut line).await? == 0 {
+            return Ok(());
+        }
+        let header = line.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            let value = value.trim();
+            match name.trim().to_ascii_lowercase().as_str() {
+                "content-length" => content_length = value.parse().unwrap_or(usize::MAX),
+                "authorization" => authorization = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+
+    let (status, body) = if content_length > MAX_BODY {
+        ("413 Payload Too Large", String::new())
+    } else if expected_auth.is_some() && authorization != expected_auth {
+        ("401 Unauthorized", String::new())
+    } else {
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).await?;
+        ("200 OK", handle_rpc(&body).to_string())
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    write.write_all(response.as_bytes()).await?;
+    write.shutdown().await
+}
+
+/// The methods the fake answers, in the order of [`CALL_COUNTS`].
+const METHODS: [&str; 5] = [
+    "getblockchaininfo",
+    "getinfo",
+    "getmempoolinfo",
+    "getpeerinfo",
+    "getdeprecationinfo",
+];
+
+/// How often each of [`METHODS`] was called.
+static CALL_COUNTS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+
+/// Answers one JSON-RPC request body.
+fn handle_rpc(body: &[u8]) -> Value {
+    let Ok(request) = serde_json::from_slice::<Value>(body) else {
+        return json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "Parse error" } });
+    };
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+    if method == "fakegetcallcounts" {
+        let counts: serde_json::Map<String, Value> = METHODS
+            .iter()
+            .zip(&CALL_COUNTS)
+            .map(|(m, c)| (m.to_string(), json!(c.load(Ordering::Relaxed))))
+            .collect();
+        return json!({ "jsonrpc": "2.0", "id": id, "result": counts });
+    }
+    match METHODS.iter().position(|m| *m == method) {
+        Some(i) => {
+            CALL_COUNTS[i].fetch_add(1, Ordering::Relaxed);
+            json!({ "jsonrpc": "2.0", "id": id, "result": canned(method) })
+        }
+        None => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": "Method not found" },
+        }),
+    }
+}
+
+/// zebrad-shaped responses, trimmed to a plausible subset of fields.
+fn canned(method: &str) -> Value {
+    match method {
+        "getblockchaininfo" => json!({
+            "chain": "main",
+            "blocks": 2_500_000,
+            "headers": 2_500_000,
+            "difficulty": 1.0,
+            "verificationprogress": 0.8333,
+            "chainwork": 0,
+            "pruned": false,
+            "size_on_disk": 0,
+            "commitments": 0,
+            "bestblockhash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "estimatedheight": 3_000_000,
+        }),
+        "getinfo" => json!({
+            "version": 7_000_050,
+            "build": format!("v{VERSION}"),
+            "subversion": format!("/Zebra:{VERSION}/"),
+            "protocolversion": 170_140,
+            "blocks": 2_500_000,
+            "connections": 8,
+            "difficulty": 1.0,
+            "testnet": false,
+            "paytxfee": 0.0,
+            "relayfee": 0.000001,
+            "errors": "no errors",
+            "errorstimestamp": 0,
+        }),
+        "getmempoolinfo" => json!({ "size": 42, "bytes": 32_500, "usage": 41_000 }),
+        "getpeerinfo" => Value::Array(
+            (0..8)
+                .map(|i| {
+                    json!({
+                        "addr": format!("192.0.2.{i}:8233"),
+                        "inbound": false,
+                        "connection_state": "connected",
+                    })
+                })
+                .collect(),
+        ),
+        "getdeprecationinfo" => json!({
+            "end_of_service": { "block_height": 3_706_000, "estimated_time": 1_800_000_000 },
+        }),
+        _ => Value::Null,
     }
 }
 
