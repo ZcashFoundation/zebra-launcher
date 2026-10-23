@@ -94,8 +94,18 @@ expect the second to fail without it:
 
 ```sh
 (cd ui && trunk build --release)          # 1. the frontend, into ui/dist
-cargo tauri build --debug                 # 2. the app and its bundles
+# 2. the app and its bundles; without the updater key, skip the updater artifacts
+cargo tauri build --debug --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
+
+`tauri.conf.json` sets `bundle.createUpdaterArtifacts`, which needs
+`TAURI_SIGNING_PRIVATE_KEY`; only the release workflow has it.
+
+To try the updater against your own `latest.json`, run a debug build with
+`LAUNCHER_UPDATE_ENDPOINT=http://127.0.0.1:8000/latest.json` (debug builds only;
+release builds ignore it). Updates install only from a bundle (AppImage, NSIS, macOS
+app), not from `cargo tauri dev`. The steps are in
+[RELEASING.md](RELEASING.md#update-rehearsal).
 
 Plain `cargo build`/`cargo clippy` of the app (no `custom-protocol` feature) do not
 embed the frontend and work without `ui/dist`, which is what CI relies on.

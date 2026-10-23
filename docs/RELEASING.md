@@ -66,19 +66,28 @@ Windows zebrad builds are cold.
    ```
 
 6. **Smoke-test** each OS with the checklist below.
-7. **Rehearse the update** (once the updater ships, M11): on every target, update from
-   the previous rc to this one, using a build with the build-time endpoint override.
-8. **Publish:**
+7. **Check the updater signatures** (releases with the updater): see
+   [Before publishing a release with the updater](#before-publishing-a-release-with-the-updater).
+8. **Publish as a prerelease, then rehearse the update.** Draft assets cannot be
+   downloaded anonymously, so the rehearsal needs the release published; as a
+   prerelease it does not move "latest", so no user is offered it yet:
 
    ```sh
-   gh release edit "$TAG" --draft=false --latest          # vX.Y.Z on the current line
-   gh release edit "$TAG" --draft=false --prerelease      # vX.Y.Z-rc.N
-   gh release edit "$TAG" --draft=false --latest=false    # hotfix of an older line
+   gh release edit "$TAG" --draft=false --prerelease
    ```
 
-   Publishing is what makes `latest.json` live. Then check:
+   Then follow [Update rehearsal](#update-rehearsal) on every target. If it fails, do
+   not promote the release; fix forward with the next rc.
+9. **Promote** (final releases only; an rc stays a prerelease):
+
+   ```sh
+   gh release edit "$TAG" --prerelease=false --latest          # vX.Y.Z on the current line
+   gh release edit "$TAG" --prerelease=false --latest=false    # hotfix of an older line
+   ```
+
+   Becoming "latest" is what makes `latest.json` live for users. Then check:
    `curl -sL https://github.com/ZcashFoundation/zebra-launcher/releases/latest/download/latest.json | jq .version`.
-9. **Announce** the release in the usual Zcash Foundation channels, with the release
+10. **Announce** the release in the usual Zcash Foundation channels, with the release
    link.
 
 ### Smoke-test checklist
@@ -105,9 +114,107 @@ Windows zebrad builds are cold.
       Running.
 - [ ] **Every OS**: with close-to-tray on, closing the window keeps the node running;
       tray Quit leaves no `zebra-launcher-zebrad` process.
-- [ ] **Updater (M11 and later)**: the update from the previous rc to this rc works on
-      every target.
+- [ ] **Updater (M11 and later)**: every `.sig` names this version (see below), and
+      the [update rehearsal](#update-rehearsal) from the previous rc to this release
+      works on every target; the `.deb` shows the release link instead of installing.
 <!-- smoke-checklist:end -->
+
+## The updater gate (`UPDATER_ENABLED`)
+
+The repository variable `UPDATER_ENABLED` says whether releases ship the updater:
+
+- unset or anything but `false` (the default from M11 on): `bundle_sign` must produce
+  updater artifacts and `.sig` files, `manifest` must assemble a `latest.json` with all
+  five platform keys, and `scripts/check-versions.sh` (in the `verify` job) fails while
+  `plugins.updater.pubkey` in `src-tauri/tauri.conf.json` is still the placeholder
+  `REPLACE_WITH_MINISIGN_PUBLIC_KEY`.
+- `false`: only for releases cut before the updater key exists (the M10 signing
+  rehearsal). No `latest.json` is required and the placeholder key is accepted. Such a
+  release cannot update itself; its users install the next one by hand.
+
+To turn the updater on: run the key ceremony
+([SECURITY.md](SECURITY.md#updater-key-custody-and-rotation)), merge the public key into
+`tauri.conf.json`, store the private key and password as `release` secrets, then delete
+the variable (or set it to `true`).
+
+## Before publishing a release with the updater
+
+`requireSignedVersion` makes every installed launcher refuse a signature that does not
+name the version `latest.json` announces. Check the draft before publishing; for the
+first signed release this is also the check that tauri-cli writes the version (the
+tauri-cli 2.12 source does; see [SECURITY.md](SECURITY.md#what-the-updater-verifies)):
+
+```sh
+VERSION=0.2.0   # without the leading v
+jq -r '.platforms | to_entries[] | "\(.key) \(.value.signature)"' latest.json |
+  while read -r key sig; do
+    comment="$(printf '%s' "$sig" | base64 -d | sed -n 3p)"
+    case "$comment" in
+      *"version:${VERSION}") echo "ok   $key" ;;
+      *) echo "FAIL $key: $comment" ;;
+    esac
+  done
+```
+
+The third line of a decoded signature is its trusted comment, for example
+`trusted comment: timestamp:1793000000<TAB>file:zebra-launcher_0.2.0_x86_64.AppImage<TAB>version:0.2.0`.
+Every key must print `ok`.
+
+## Update rehearsal
+
+Each release is rehearsed by updating to it from the previous rc on all five targets.
+The "from" app must look for the new release instead of `releases/latest`, which a
+prerelease never becomes, so it is a build of the previous rc's tag with a
+**build-time** endpoint override. Release builds ignore runtime overrides by design;
+the override is baked in with `--config`, or with the `TAURI_CONFIG` environment
+variable, which takes the same JSON.
+
+For a rehearsal from `v0.2.0-rc.2` to `v0.2.0-rc.3`, save as `rehearsal.json`:
+
+```json
+{
+  "bundle": { "createUpdaterArtifacts": false },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/ZcashFoundation/zebra-launcher/releases/download/v0.2.0-rc.3/latest.json"
+      ]
+    }
+  }
+}
+```
+
+`endpoints` replaces the configured list (arrays are not merged); everything else,
+including the public key, comes from the tag's `tauri.conf.json`. The "from" build
+needs no updater artifacts of its own, hence `createUpdaterArtifacts: false` (and no
+signing key). On each target, with the sidecar in place as for any local build
+([DEVELOPMENT.md](DEVELOPMENT.md#release-build)), check out `v0.2.0-rc.2` and run:
+
+```sh
+cargo tauri build --config rehearsal.json
+# or: TAURI_CONFIG="$(cat rehearsal.json)" cargo tauri build
+```
+
+Then, with `v0.2.0-rc.3` published as a prerelease:
+
+1. Install the rehearsal build, start it, let the node reach Running, and set updates
+   to Notify. Within a minute (or with *Check for updates*) it offers `0.2.0-rc.3`.
+2. Install it. The zebrad log shows the graceful shutdown (`stopping zebrad`), the
+   launcher relaunches as `0.2.0-rc.3` (About), and the node reaches Running within
+   5 minutes with no recovery screen.
+3. On Debian, the `.deb` build shows the release link instead of an Install button.
+
+The refusals are checked with a debug bundle (`cargo tauri build --debug --config
+rehearsal.json`), which reads `LAUNCHER_UPDATE_ENDPOINT` and accepts `http://`, pointed
+at a local copy of `latest.json` served from a scratch directory (for example with
+`python3 -m http.server`):
+
+- a `.sig` of another file, or one changed byte in the signature: the update fails
+  with a signature error and zebrad keeps running;
+- a `latest.json` whose `version` is lower than the running one: "up to date";
+- a `latest.json` that announces a higher version with an older release's `url` and
+  `signature`: refused (the signed version does not match);
+- updates Off: the local server's access log stays empty for the whole session.
 
 ## Bad-release runbook
 
