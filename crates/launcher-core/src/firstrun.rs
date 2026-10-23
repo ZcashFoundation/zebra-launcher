@@ -289,10 +289,10 @@ fn import_with(
             ),
         ));
     }
-    match fs::symlink_metadata(&target) {
-        Ok(meta) if meta.is_dir() && fs::read_dir(&target)?.next().is_none() => {
-            fs::remove_dir(&target)?;
-        }
+    // An empty target (left by an earlier run) is replaced, but only removed
+    // right before the rename, and put back if the rename fails.
+    let empty_target = match fs::symlink_metadata(&target) {
+        Ok(meta) if meta.is_dir() && fs::read_dir(&target)?.next().is_none() => true,
         Ok(_) => {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -302,11 +302,22 @@ fn import_with(
                 ),
             ));
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => false,
         Err(err) => return Err(err),
-    }
+    };
     fs::create_dir_all(to)?;
-    match rename(&source, &target) {
+    // Renaming onto an empty directory fails on some platforms.
+    if empty_target {
+        fs::remove_dir(&target)?;
+    }
+    let renamed = rename(&source, &target);
+    if renamed.is_err()
+        && empty_target
+        && let Err(err) = fs::create_dir(&target)
+    {
+        tracing::warn!(%err, dir = %target.display(), "could not restore the empty state directory");
+    }
+    match renamed {
         Ok(()) => {
             tracing::info!(from = %source.display(), to = %target.display(), "moved the alpha.4 chain state");
             Ok(ImportOutcome {
@@ -602,6 +613,21 @@ mod tests {
             from.join("state/a").exists(),
             "nothing was copied or removed"
         );
+
+        // An empty target directory is still there after a failed rename.
+        fs::create_dir_all(to.join("state")).expect("mkdir");
+        let err = import_with(&from, &to, |_, target| {
+            assert!(
+                !target.exists(),
+                "the empty target is removed for the rename"
+            );
+            Err(io::Error::from(io::ErrorKind::CrossesDevices))
+        })
+        .expect_err("cross-device");
+        assert_eq!(err.kind(), io::ErrorKind::CrossesDevices);
+        assert!(to.join("state").is_dir(), "the empty target was restored");
+        assert_eq!(fs::read_dir(to.join("state")).expect("list").count(), 0);
+        assert!(from.join("state/a").exists());
 
         #[cfg(unix)]
         let raw = io::Error::from_raw_os_error(nix::errno::Errno::EXDEV as i32);
