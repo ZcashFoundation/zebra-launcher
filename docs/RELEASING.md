@@ -22,8 +22,12 @@ custody are in [SECURITY.md](SECURITY.md).
 2. Open the release PR:
    - set `[workspace.package] version` in `Cargo.toml`, then run
      `cargo update --workspace` so `Cargo.lock` matches;
-   - add a `CHANGELOG.md` section whose `## ` heading contains the version (for example
-     `## 0.2.0 - 2026-11-02`). The draft's release notes are taken from that section.
+   - add a `CHANGELOG.md` section whose `## ` heading starts with the exact version,
+     optionally as `v0.2.0` or `[0.2.0]` (for example `## 0.2.0 - 2026-11-02`). The
+     draft's release notes are taken from that section
+     ([`changelog-section.sh`](../scripts/changelog-section.sh)); `## 0.2.0-rc.1` is a
+     different version and never supplies the notes for `0.2.0`. Without a section the
+     notes say so in one line and the run shows a warning.
 3. Merge the PR.
 
 ## Release-day runbook

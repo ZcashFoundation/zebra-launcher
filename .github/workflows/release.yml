@@ -130,22 +130,28 @@ jobs:
         with:
           persist-credentials: false
 
-      # The CHANGELOG.md section for this version when there is one, then how
-      # to verify the downloads.
+      # The CHANGELOG.md section for exactly this version (never another
+      # version's, e.g. 0.2.0-rc.1's for 0.2.0), or a one-line note when there
+      # is none; then how to verify the downloads.
       - name: Write the release notes
         shell: bash
         run: |
           set -euo pipefail
           notes="${RUNNER_TEMP}/notes.md"
+          status=0
+          changes="$(scripts/changelog-section.sh "${VERSION}" CHANGELOG.md)" || status=$?
+          case "${status}" in
+            0) ;;
+            1)
+              echo "::warning::CHANGELOG.md has no section for ${VERSION}"
+              changes="No CHANGELOG.md entry for ${VERSION}."
+              ;;
+            *) exit "${status}" ;;
+          esac
           {
             echo "Zebra Launcher ${VERSION}, bundling zebrad ${ZEBRAD_VERSION}."
             echo
-            if [ -f CHANGELOG.md ]; then
-              awk -v v="${VERSION}" '
-                /^## / { if (found) exit; if (index($0, v)) { found = 1; next } }
-                found { print }
-              ' CHANGELOG.md
-            fi
+            printf '%s\n' "${changes}"
             echo
             echo "## Verifying the downloads"
             echo
