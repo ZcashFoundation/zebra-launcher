@@ -40,7 +40,7 @@ checked:
 | GitHub Actions | `uses:` lines | pinned by commit SHA |
 | rustup-init (Linux container) | static.rust-lang.org | sha256 in [`setup-tauri`](../.github/actions/setup-tauri/action.yml) |
 | Rust toolchain | static.rust-lang.org | rustup's signed channel manifest |
-| tauri-cli, trunk | their GitHub releases | sha256 per platform in [`.github/tool-versions.env`](../.github/tool-versions.env) |
+| tauri-cli (and trunk, in `build` only) | their GitHub releases | sha256 per platform in [`.github/tool-versions.env`](../.github/tool-versions.env) |
 | Artifact Signing client (Windows) | nuget.org | sha256 in `release.yml` |
 | zebrad sidecars | `zebrad-sidecars.yml` artifacts | cosign and attestations on Linux, built from the pinned commit elsewhere ([SIDECARS.md](SIDECARS.md)) |
 | AppRun, linuxdeploy (Linux AppImage) | tauri-apps/binary-releases, fetched by tauri-bundler | **nothing**; they never see the updater key (below) |
@@ -69,15 +69,28 @@ is never in that process's environment, on any OS:
   the updater's `requireSignedVersion` check reads. The script checks every new
   signature for that version and for the key ID of `plugins.updater.pubkey`.
 
-A compromised AppImage tool can still tamper with the AppImage it builds, which is then
-signed; that is covered only by building from a clean runner and by the release
-smoke test, not by the key separation.
+This keeps the key from those tools, not the AppImage: a compromised AppImage tool can
+still tamper with the AppImage it builds, which is then signed.
 
 The platform signing stays inside `cargo tauri bundle`, so its credentials do share
 the bundler's environment: macOS codesign and notarization (macOS bundling downloads
 nothing) and the Windows `signCommand` through Azure OIDC (the only Windows downloads,
 NSIS and `nsis_tauri_utils.dll`, are checked against SHA-1 hashes hard-coded in
 tauri-bundler; SHA-1 is collision-prone but not known to allow a second preimage).
+
+The unprivileged `build` job has no secrets, but what it compiles is what gets signed.
+Besides the first table's Actions, rustup-init, toolchain, tauri-cli and trunk rows, it
+runs two tools on the frontend that is embedded in the app:
+
+| What | From | Checked by |
+| --- | --- | --- |
+| wasm-bindgen CLI, at the `wasm-bindgen` version in `Cargo.lock` | its GitHub release, installed by `setup-tauri` | sha256 per platform in [`.github/tool-versions.env`](../.github/tool-versions.env); `check-versions.sh` checks the pin against `Cargo.lock` |
+| wasm-opt (binaryen `version_131`, trunk 0.22.0's default) | its GitHub release, installed by `setup-tauri` | sha256 per platform in `.github/tool-versions.env` |
+
+trunk itself would otherwise download both, without a hash check. `setup-tauri` puts the
+pinned ones first on `PATH` and sets `TRUNK_OFFLINE=true` and `TRUNK_TOOLS_WASM_OPT`: in
+offline mode trunk downloads nothing and accepts a tool only at exactly the version it
+requires, so the build fails rather than fetch a different one.
 
 ## Code signing
 
