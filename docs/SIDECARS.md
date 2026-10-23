@@ -2,7 +2,10 @@
 
 Zebra Launcher ships zebrad as a Tauri sidecar. Tauri looks for it at
 `src-tauri/binaries/zebra-launcher-zebrad-<target triple>` (with `.exe` on
-Windows). That directory is git-ignored, so the binary always comes from one of
+Windows). This prefixed name takes effect with the rewritten app
+crate (milestone M5); until it lands, the old `src-tauri/tauri.conf.json` still
+names the sidecar `binaries/zebrad`, so `cargo tauri build` does not find the
+files these scripts install. That directory is git-ignored, so the binary always comes from one of
 the scripts below and is never committed. The `zebra-launcher-` prefix keeps the
 Linux `.deb` from shadowing a system `/usr/bin/zebrad`.
 
@@ -97,7 +100,7 @@ gh attestation verify zebra-launcher-zebrad-aarch64-apple-darwin \
 `scripts/dev-sidecar.sh` (or `scripts/dev-sidecar.ps1` on Windows) builds the
 workspace's `fake-zebrad` test binary and installs it as the host's sidecar.
 After that, `cargo tauri dev` and `cargo tauri build` work without the real
-node. Never ship a bundle built this way. Replace the fake with the real
+node, once the rewritten app crate (M5) expects the prefixed sidecar name. Never ship a bundle built this way. Replace the fake with the real
 zebrad first:
 
 ```sh

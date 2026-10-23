@@ -45,7 +45,9 @@ WebView2 runtime (preinstalled on Windows 11). See Tauri's
 
 The Tauri build needs a sidecar file at
 `src-tauri/binaries/zebra-launcher-zebrad-<host target triple>` (`.exe` on Windows).
-Binaries are never committed.
+Binaries are never committed. The prefixed name takes effect with the rewritten app
+crate (milestone M5); until then the old `src-tauri/tauri.conf.json` still expects
+`binaries/zebrad-<triple>`.
 
 - **Fake sidecar:** `scripts/dev-sidecar.sh` builds `fake-zebrad` and copies it into
   place. It starts fast, needs no chain state, and can be scripted into failure modes
