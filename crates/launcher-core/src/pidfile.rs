@@ -115,12 +115,7 @@ pub fn is_alive(pid: u32) -> bool {
 pub fn terminate(pid: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
-        use nix::{
-            sys::signal::{Signal, kill},
-            unistd::Pid,
-        };
-        let pid = i32::try_from(pid).map_err(|_| io::Error::other("pid out of range"))?;
-        kill(Pid::from_raw(pid), Signal::SIGTERM).map_err(io::Error::from)
+        crate::process::unix::terminate(pid)
     }
     #[cfg(windows)]
     {

@@ -32,13 +32,13 @@ fn pid(pid: u32) -> io::Result<Pid> {
 }
 
 /// Sends `SIGTERM` to zebrad.
-pub(super) fn terminate(raw: u32) -> io::Result<()> {
+pub(crate) fn terminate(raw: u32) -> io::Result<()> {
     kill(pid(raw)?, Signal::SIGTERM).map_err(io::Error::from)
 }
 
 /// Sends `SIGKILL` to zebrad's process group and to zebrad itself. A process
 /// that is already gone is not an error.
-pub(super) fn kill_group(raw: u32) -> io::Result<()> {
+pub(crate) fn kill_group(raw: u32) -> io::Result<()> {
     let pid = pid(raw)?;
     let ignore_gone = |result: nix::Result<()>| match result {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
