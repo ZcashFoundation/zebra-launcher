@@ -297,7 +297,7 @@ pub async fn import_legacy_state() -> ApiResult<ImportOutcome> {
 /// failed.
 pub async fn delete_node_data() -> ApiResult<u64> {
     if !is_tauri() {
-        return mock::delete_node_data().await.map_err(ApiError);
+        return Ok(wire(mock::delete_node_data().await.map_err(ApiError)?)?);
     }
     Ok(tauri::invoke0("delete_node_data").await?)
 }
@@ -305,7 +305,7 @@ pub async fn delete_node_data() -> ApiResult<u64> {
 /// The diagnostics text for a bug report.
 pub async fn copy_diagnostics() -> ApiResult<String> {
     if !is_tauri() {
-        return Ok(mock::copy_diagnostics().await);
+        return Ok(wire(mock::copy_diagnostics().await)?);
     }
     Ok(tauri::invoke0("copy_diagnostics").await?)
 }
@@ -313,8 +313,7 @@ pub async fn copy_diagnostics() -> ApiResult<String> {
 /// Records that the first-run flow is done; zebrad starts at launch from now on.
 pub async fn complete_first_run() -> ApiResult<()> {
     if !is_tauri() {
-        mock::complete_first_run().await;
-        return Ok(());
+        return Ok(wire(mock::complete_first_run().await)?);
     }
     Ok(tauri::invoke0("complete_first_run").await?)
 }
