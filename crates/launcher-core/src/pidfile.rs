@@ -11,6 +11,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::fsutil;
+
 /// A zebrad process recorded by a previous launcher run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaleProcess {
@@ -25,17 +27,12 @@ pub fn write(path: &Path, pid: u32, binary: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("pid.tmp");
-    fs::write(&tmp, format!("{pid}\n{}\n", binary.display()))?;
-    fs::rename(&tmp, path)
+    fsutil::write_atomic(path, format!("{pid}\n{}\n", binary.display()).as_bytes())
 }
 
 /// Removes the pid file. A missing file is not an error.
 pub fn remove(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        other => other,
-    }
+    fsutil::remove_if_exists(path)
 }
 
 /// Reads the pid file and returns the recorded process if it is still running.
