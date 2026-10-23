@@ -7,8 +7,8 @@ use leptos::{prelude::*, task::spawn_local};
 use crate::{api, app::AppState, format::data_change_allowed};
 
 /// The reset button, its confirmation and the outcome. The backend only resets while zebrad
-/// is stopped or failed, so the button is disabled otherwise. The new file goes to
-/// [`AppState::config_reset`]; `disabled` blocks the button while the caller is busy (an edit
+/// is stopped or failed, so the button is disabled otherwise. A reset bumps
+/// [`AppState::config_changed`]; `disabled` blocks the button while the caller is busy (an edit
 /// or a save in progress).
 #[component]
 pub fn ResetConfigButton(#[prop(into, optional)] disabled: Signal<bool>) -> impl IntoView {
@@ -33,7 +33,7 @@ pub fn ResetConfigButton(#[prop(into, optional)] disabled: Signal<bool>) -> impl
                 Ok(document) => {
                     let message =
                         format!("Reset. The previous file is kept as {}.bak.", document.path);
-                    state.config_reset.set(Some(document));
+                    state.config_changed.update(|n| *n += 1);
                     Ok(message)
                 }
                 Err(error) => Err(format!("Could not reset the config: {error}")),
