@@ -3,8 +3,9 @@
 # Publishing is what makes latest.json, and so the in-app updater, live.
 #
 #   verify       tag == [workspace.package] version, tool version checks
+#   sidecars     zebrad-sidecars.yml: verified/attested zebrad per target; also
+#                resolves and validates ZEBRAD_VERSION (its `version` output)
 #   draft        creates the draft release once; the matrix jobs upload to it
-#   sidecars     zebrad-sidecars.yml: verified/attested zebrad per target
 #   build        UNPRIVILEGED, no secrets: compiles the app (`--no-bundle`)
 #   bundle_sign  environment `release` (required reviewer), NO caches:
 #                `cargo tauri bundle` packages and signs the compiled app,
@@ -59,15 +60,16 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.versions.outputs.version }}
-      zebrad_version: ${{ steps.versions.outputs.zebrad_version }}
       prerelease: ${{ steps.versions.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # The one launcher-version grammar check. zebrad's version is checked
+      # by zebrad-sidecars.yml.
       - id: versions
-        name: Check the tag against Cargo.toml and ZEBRAD_VERSION
+        name: Check the tag against Cargo.toml
         shell: bash
         run: |
           set -euo pipefail
@@ -80,21 +82,15 @@ jobs:
             echo "::error::${version} is not X.Y.Z or X.Y.Z-rc.N"
             exit 1
           fi
-          zebrad_version="$(tr -d '[:space:]' < ZEBRAD_VERSION)"
-          if ! printf '%s\n' "${zebrad_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
-            echo "::error::ZEBRAD_VERSION '${zebrad_version}' is not of the form X.Y.Z"
-            exit 1
-          fi
           case "${version}" in
             *-*) prerelease=true ;;
             *) prerelease=false ;;
           esac
           {
             echo "version=${version}"
-            echo "zebrad_version=${zebrad_version}"
             echo "prerelease=${prerelease}"
           } >> "${GITHUB_OUTPUT}"
-          echo "Zebra Launcher ${version} (zebrad ${zebrad_version}), prerelease: ${prerelease}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Zebra Launcher ${version}, prerelease: ${prerelease}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Check tool versions
         shell: bash
@@ -106,7 +102,7 @@ jobs:
   # ---------------------------------------------------------------------------
   draft:
     name: Create the draft release
-    needs: verify
+    needs: [verify, sidecars]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -117,7 +113,8 @@ jobs:
       html_url: ${{ steps.release.outputs.html_url }}
     env:
       VERSION: ${{ needs.verify.outputs.version }}
-      ZEBRAD_VERSION: ${{ needs.verify.outputs.zebrad_version }}
+      ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
+      ZEBRAD_COMMIT: ${{ needs.sidecars.outputs.commit }}
       PRERELEASE: ${{ needs.verify.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -143,7 +140,7 @@ jobs:
             *) exit "${status}" ;;
           esac
           {
-            echo "Zebra Launcher ${VERSION}, bundling zebrad ${ZEBRAD_VERSION}."
+            echo "Zebra Launcher ${VERSION}, bundling zebrad ${ZEBRAD_VERSION} (Zebra commit ${ZEBRAD_COMMIT})."
             echo
             printf '%s\n' "${changes}"
             echo
@@ -202,7 +199,9 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
   # ---------------------------------------------------------------------------
-  # sidecars: zebrad for each target (unsigned; signed later by the bundler).
+  # sidecars: zebrad for each target (unsigned; signed later by the bundler),
+  # at ZEBRAD_VERSION/ZEBRAD_COMMIT, which it validates. After verify, so a
+  # bad tag fails before the long zebrad builds.
   # ---------------------------------------------------------------------------
   sidecars:
     name: zebrad sidecars
@@ -212,8 +211,6 @@ jobs:
       id-token: write # sidecar build provenance
       attestations: write # sidecar build provenance
     uses: ./.github/workflows/zebrad-sidecars.yml
-    with:
-      version: ${{ needs.verify.outputs.zebrad_version }}
 
   # ---------------------------------------------------------------------------
   # build: UNPRIVILEGED compile. No secrets, read-only token, no caches.
@@ -560,7 +557,7 @@ jobs:
   # ---------------------------------------------------------------------------
   manifest:
     name: Manifest, checksums and attestations
-    needs: [verify, draft, bundle_sign]
+    needs: [verify, sidecars, draft, bundle_sign]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -569,7 +566,7 @@ jobs:
       attestations: write # store the attestations
     env:
       VERSION: ${{ needs.verify.outputs.version }}
-      ZEBRAD_VERSION: ${{ needs.verify.outputs.zebrad_version }}
+      ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
       RELEASE_ID: ${{ needs.draft.outputs.release_id }}
       UPLOAD_URL: ${{ needs.draft.outputs.upload_url }}
       REQUIRE_UPDATER: ${{ vars.UPDATER_ENABLED != 'false' }}

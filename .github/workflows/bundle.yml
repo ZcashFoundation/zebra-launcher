@@ -52,52 +52,24 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Resolve the zebrad version once, from ZEBRAD_VERSION.
-  # ---------------------------------------------------------------------------
-  resolve:
-    name: Resolve the zebrad version
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    outputs:
-      version: ${{ steps.resolve.outputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - id: resolve
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(tr -d '[:space:]' < ZEBRAD_VERSION)"
-          if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
-            echo "::error::ZEBRAD_VERSION '${version}' is not of the form X.Y.Z (no leading v)"
-            exit 1
-          fi
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "zebrad ${version}" >> "${GITHUB_STEP_SUMMARY}"
-
-  # ---------------------------------------------------------------------------
   # zebrad sidecars: verified Linux downloads, macOS/Windows builds, attested.
+  # Resolves and validates ZEBRAD_VERSION/ZEBRAD_COMMIT; its `version` output
+  # is the zebrad version used below.
   # ---------------------------------------------------------------------------
   sidecars:
     name: zebrad sidecars
-    needs: resolve
     permissions:
       contents: read
       id-token: write # sidecar build provenance
       attestations: write # sidecar build provenance
     uses: ./.github/workflows/zebrad-sidecars.yml
-    with:
-      version: ${{ needs.resolve.outputs.version }}
 
   # ---------------------------------------------------------------------------
   # Unsigned bundles, five targets.
   # ---------------------------------------------------------------------------
   bundle:
     name: Bundle (${{ matrix.target }})
-    needs: [resolve, sidecars]
+    needs: sidecars
     runs-on: ${{ matrix.runner }}
     # Empty for macOS and Windows: the job then runs directly on the runner.
     container: ${{ matrix.container }}
@@ -130,7 +102,7 @@ jobs:
         shell: bash
     env:
       TARGET: ${{ matrix.target }}
-      ZEBRAD_VERSION: ${{ needs.resolve.outputs.version }}
+      ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
       # linuxdeploy (AppImage) cannot use FUSE inside a container.
       APPIMAGE_EXTRACT_AND_RUN: 1
       EXE_SUFFIX: ${{ startsWith(matrix.target, 'x86_64-pc-windows') && '.exe' || '' }}

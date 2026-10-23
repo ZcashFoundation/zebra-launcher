@@ -14,7 +14,9 @@
 # environment, through the Tauri bundler. See docs/SIDECARS.md.
 #
 # Callers must grant `contents: read`, `id-token: write` and
-# `attestations: write`.
+# `attestations: write`. The `version` and `commit` outputs are the resolved,
+# validated zebrad version and Zebra commit; callers use them instead of
+# reading ZEBRAD_VERSION themselves.
 name: zebrad sidecars
 
 on:
@@ -30,6 +32,13 @@ on:
         required: false
         type: string
         default: ""
+    outputs:
+      version:
+        description: the zebrad version the sidecars were built from (X.Y.Z, no leading v)
+        value: ${{ jobs.version.outputs.version }}
+      commit:
+        description: the full Zebra commit SHA of tag v<version>
+        value: ${{ jobs.version.outputs.commit }}
   workflow_dispatch:
     inputs:
       version:
