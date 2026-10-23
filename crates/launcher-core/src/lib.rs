@@ -4,6 +4,8 @@
 //! the handles exposed here, so everything in this crate is testable with plain
 //! `cargo test` against the `fake-zebrad` binary.
 
+pub mod config;
+mod fsutil;
 pub mod logfile;
 pub mod logs;
 pub mod paths;
