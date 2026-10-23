@@ -889,9 +889,9 @@ struct InstallJob<B: UpdateBackend, N> {
     events: mpsc::UnboundedSender<Event<B::Release>>,
 }
 
-/// verify → marker → stop zebrad → install → restart. On failure the marker
-/// is removed, zebrad is started again if it was running, and the actor is
-/// told.
+/// verify → stop zebrad → marker → install → restart. On failure the marker
+/// is removed, zebrad is started again if it was running (once any stop has
+/// finished), and the actor is told.
 async fn install<B: UpdateBackend, N: NodeControl>(job: InstallJob<B, N>) {
     let InstallJob {
         id,
@@ -908,15 +908,7 @@ async fn install<B: UpdateBackend, N: NodeControl>(job: InstallJob<B, N>) {
     let fail = |message: String| {
         let _ = events.send(Event::InstallFailed { job: id, message });
     };
-    let clear = || {
-        if let Some(marker) = &marker
-            && let Err(err) = clear_marker(marker)
-        {
-            tracing::warn!(%err, "could not remove the pending-update marker");
-        }
-    };
-    let undo = async || {
-        clear();
+    let start_again = async || {
         if was_running {
             tracing::info!("starting zebrad again after the failed update");
             if let Err(err) = node.start().await {
@@ -937,13 +929,6 @@ async fn install<B: UpdateBackend, N: NodeControl>(job: InstallJob<B, N>) {
         fail(format!("the update's signature did not verify: {err}"));
         return;
     }
-    if let Some(marker) = &marker
-        && let Err(err) = write_marker(marker, &pending)
-    {
-        // The update can still go ahead; only the post-update check is lost.
-        tracing::warn!(%err, "could not write the pending-update marker");
-    }
-
     tracing::info!("stopping zebrad before installing the update");
     let stop = node.stop();
     tokio::pin!(stop);
@@ -959,9 +944,8 @@ async fn install<B: UpdateBackend, N: NodeControl>(job: InstallJob<B, N>) {
                 "zebrad did not stop in time; waiting for the stop to finish"
             );
             if tokio::time::timeout(stop_cap, &mut stop).await.is_ok() {
-                undo().await;
+                start_again().await;
             } else {
-                clear();
                 tracing::error!("zebrad is still stopping; not starting it again");
             }
             fail(format!(
@@ -971,11 +955,19 @@ async fn install<B: UpdateBackend, N: NodeControl>(job: InstallJob<B, N>) {
         }
     };
     if let Err(err) = stopped {
-        undo().await;
+        start_again().await;
         fail(format!("zebrad could not be stopped for the update: {err}"));
         return;
     }
 
+    // Written only now, right before the install, so a crash or failure
+    // before this point never makes the next launch run the health gate.
+    if let Some(marker) = &marker
+        && let Err(err) = write_marker(marker, &pending)
+    {
+        // The update can still go ahead; only the post-update check is lost.
+        tracing::warn!(%err, "could not write the pending-update marker");
+    }
     match backend.install(&release, bytes).await {
         Ok(()) => {
             let _ = events.send(Event::Installed { job: id });
@@ -983,7 +975,12 @@ async fn install<B: UpdateBackend, N: NodeControl>(job: InstallJob<B, N>) {
             backend.restart();
         }
         Err(err) => {
-            undo().await;
+            if let Some(marker) = &marker
+                && let Err(err) = clear_marker(marker)
+            {
+                tracing::warn!(%err, "could not remove the pending-update marker");
+            }
+            start_again().await;
             fail(format!("the update could not be installed: {err}"));
         }
     }
@@ -1682,5 +1679,18 @@ mod tests {
             .expect("check");
         assert_eq!(answered, first);
         assert!(h.handle.info().last_successful_check.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_marker_is_written_only_after_zebrad_stopped() {
+        let h = harness(UpdateMode::Notify, FakeBackend::with_latest(Some("0.2.0")));
+        h.node.stop_delay_secs.store(30, Ordering::SeqCst);
+        check_and_install(&h).await;
+        idle(Duration::from_secs(10)).await;
+        assert_eq!(h.node.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(read_marker(&h.marker).expect("read"), None);
+        idle(Duration::from_secs(30)).await;
+        assert_eq!(h.backend.count(|i| &i.installs), 1);
+        assert!(read_marker(&h.marker).expect("read").is_some());
     }
 }
