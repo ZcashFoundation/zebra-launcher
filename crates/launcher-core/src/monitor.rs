@@ -18,6 +18,9 @@ use crate::rpc::{RpcClient, RpcError};
 
 /// The default polling interval.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(5);
+/// The JSON-RPC error code for an unknown method.
+const METHOD_NOT_FOUND: i64 = -32601;
+
 /// The default interval between `getdeprecationinfo` calls.
 pub const DEFAULT_EOS_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
@@ -164,15 +167,26 @@ async fn poll(run: &mut Run, eos_interval: Duration) -> Result<NodeStats, RpcErr
         .eos_checked
         .is_none_or(|checked| checked.elapsed() >= eos_interval);
     if chain.chain == "main" && eos_due {
-        run.eos_checked = Some(Instant::now());
         match client.get_deprecation_info().await {
             Ok(info) => {
+                run.eos_checked = Some(Instant::now());
                 run.eos = info.end_of_service.map(|eos| EosInfo {
                     block_height: eos.block_height,
                     estimated_time: unix_time(eos.estimated_time),
                 });
             }
-            // An older zebrad without the method: no countdown, but keep polling.
+            // An older zebrad without the method: no countdown, and no point
+            // asking again before the next interval.
+            Err(
+                err @ RpcError::Rpc {
+                    code: METHOD_NOT_FOUND,
+                    ..
+                },
+            ) => {
+                run.eos_checked = Some(Instant::now());
+                tracing::debug!(%err, "zebrad has no getdeprecationinfo");
+            }
+            // Anything else may be transient: retry on the next poll.
             Err(err) => tracing::debug!(%err, "getdeprecationinfo failed"),
         }
     }

@@ -33,6 +33,9 @@
 //! `getinfo`, `getmempoolinfo`, `getpeerinfo` and `getdeprecationinfo` with
 //! canned values (see [`canned`]), `fakegetcallcounts` with the number of calls
 //! per method so far, and `-32601` to anything else.
+//! `FAKE_ZEBRAD_DEPRECATION_FAILURES=N` makes the first `N` `getdeprecationinfo`
+//! calls fail with the JSON-RPC error code in
+//! `FAKE_ZEBRAD_DEPRECATION_ERROR_CODE` (default `-32000`).
 
 use std::{
     hash::{BuildHasher, Hasher, RandomState},
@@ -524,7 +527,20 @@ fn handle_rpc(body: &[u8]) -> Value {
     }
     match METHODS.iter().position(|m| *m == method) {
         Some(i) => {
-            CALL_COUNTS[i].fetch_add(1, Ordering::Relaxed);
+            let previous = CALL_COUNTS[i].fetch_add(1, Ordering::Relaxed);
+            if method == "getdeprecationinfo"
+                && previous < env_u64("FAKE_ZEBRAD_DEPRECATION_FAILURES", 0)
+            {
+                let code = std::env::var("FAKE_ZEBRAD_DEPRECATION_ERROR_CODE")
+                    .ok()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(-32000);
+                return json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": code, "message": "simulated failure" },
+                });
+            }
             json!({ "jsonrpc": "2.0", "id": id, "result": canned(method) })
         }
         None => json!({
@@ -671,12 +687,14 @@ fn panic_and_abort(location: &str, message: &str) -> ! {
 }
 
 fn env_millis(name: &str, default: u64) -> Duration {
-    Duration::from_millis(
-        std::env::var(name)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(default),
-    )
+    Duration::from_millis(env_u64(name, default))
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// RFC 3339 UTC with microseconds, like `tracing-subscriber`'s default timer.

@@ -26,6 +26,11 @@ struct Fake {
 }
 
 async fn spawn_fake() -> Fake {
+    spawn_fake_with(&[]).await
+}
+
+/// Like [`spawn_fake`], with extra environment variables for the fake.
+async fn spawn_fake_with(env: &[(&str, &str)]) -> Fake {
     let dir = tempfile::tempdir().expect("tempdir");
     let cookie_dir = dir.path().join("rpc");
     let config = dir.path().join("zebrad.toml");
@@ -41,6 +46,7 @@ async fn spawn_fake() -> Fake {
         .arg(&config)
         .arg("start")
         .env("FAKE_ZEBRAD_HEARTBEAT_MS", "60000")
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -278,4 +284,69 @@ async fn monitor_follows_the_supervisor_status() {
     drop(status_tx);
     let closed = timeout(T, stats.changed()).await.expect("in time");
     assert!(closed.is_err(), "the monitor task ended");
+}
+
+/// How often the fake answered `getdeprecationinfo`.
+async fn deprecation_calls(fake: &Fake) -> u64 {
+    let client = RpcClient::new(fake.addr, fake.cookie_file.clone()).expect("client");
+    let counts: Value = timeout(T, client.call("fakegetcallcounts", json!([])))
+        .await
+        .expect("in time")
+        .expect("call counts");
+    counts["getdeprecationinfo"].as_u64().expect("count")
+}
+
+/// Starts a monitor that polls `fake` every 100 ms with hourly EOS checks.
+fn monitor_for(fake: &Fake) -> (watch::Sender<Status>, watch::Receiver<Option<NodeStats>>) {
+    let (status_tx, status_rx) = watch::channel(Status::default());
+    let stats = Monitor::spawn_with(
+        status_rx,
+        MonitorConfig {
+            cookie_file: fake.cookie_file.clone(),
+            interval: Duration::from_millis(100),
+            eos_interval: Duration::from_secs(3600),
+        },
+    );
+    status_tx.send_modify(|s| {
+        s.phase = Phase::Running;
+        s.rpc_addr = Some(fake.addr);
+    });
+    (status_tx, stats)
+}
+
+#[tokio::test]
+async fn a_transient_end_of_support_failure_is_retried_on_the_next_poll() {
+    let fake = spawn_fake_with(&[("FAKE_ZEBRAD_DEPRECATION_FAILURES", "2")]).await;
+    let (_status_tx, mut stats) = monitor_for(&fake);
+    let stats = wait_for(&mut stats, "the end-of-support countdown", |s| {
+        s.as_ref().is_some_and(|s| s.eos.is_some())
+    })
+    .await
+    .expect("some");
+    assert_eq!(stats.eos.expect("eos").block_height, 3_706_000);
+    assert_eq!(deprecation_calls(&fake).await, 3);
+}
+
+#[tokio::test]
+async fn a_zebrad_without_getdeprecationinfo_is_asked_once_per_interval() {
+    let fake = spawn_fake_with(&[
+        ("FAKE_ZEBRAD_DEPRECATION_FAILURES", "1000"),
+        ("FAKE_ZEBRAD_DEPRECATION_ERROR_CODE", "-32601"),
+    ])
+    .await;
+    let (_status_tx, mut stats) = monitor_for(&fake);
+    let first = wait_for(&mut stats, "stats", Option::is_some)
+        .await
+        .expect("some");
+    let mut seen = first.updated_at;
+    for _ in 0..3 {
+        let next = wait_for(&mut stats, "a newer poll", |s| {
+            s.as_ref().is_some_and(|s| s.updated_at > seen)
+        })
+        .await
+        .expect("some");
+        assert_eq!(next.eos, None);
+        seen = next.updated_at;
+    }
+    assert_eq!(deprecation_calls(&fake).await, 1);
 }
