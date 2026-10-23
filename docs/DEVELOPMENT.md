@@ -124,6 +124,25 @@ Re-capture them when the pinned zebrad changes its log wording, normally as part
 5. Run `cargo test -p launcher-core`. A failing classifier test means zebrad changed a
    line the supervisor relies on: update the classifier and `fake-zebrad` together.
 
+## Real-zebrad contract tests
+
+`crates/launcher-core/tests/real_zebrad.rs` runs a real zebrad through the supervisor
+on Regtest, with every listener on loopback and all state in a temporary directory. It
+checks the startup events in order, the reported RPC and metrics addresses, the RPC
+cookie file, a clean `SIGTERM` stop with zebrad's shutdown lines, and that a second
+zebrad on the same state fails as `DbLocked` and is not retried.
+
+The tests are skipped (they pass after printing a note) unless `ZEBRAD_BIN` names a
+zebrad binary, so `cargo test` needs no zebrad and no network. Run them locally against
+the zebrad you are about to pin:
+
+```sh
+ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-core --test real_zebrad -- --nocapture
+```
+
+They take a few seconds. On failure they print zebrad's whole output. Run them on every
+`ZEBRAD_VERSION` bump, next to re-capturing the [log fixtures](#log-fixtures).
+
 ## Observability stack
 
 `docs/observability/` is a Prometheus and Grafana compose stack for manual testing and

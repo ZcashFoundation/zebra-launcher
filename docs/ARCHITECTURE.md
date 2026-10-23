@@ -113,6 +113,23 @@ forced; `ZEBRA_TRACING__PROGRESS_BAR` and `ZEBRA_TRACING__LOG_FILE` are unset.
   (hash-checked, per launcher version) and run from there, so zebrad survives the mount
   going away.
 
+### Measured shutdown times
+
+`zebrad 7.0.0-rc.0` (release build, Linux x86_64 under WSL2, 2026-10-23), from `SIGTERM`
+to process exit, timed with `date +%s%N`, two runs each:
+
+| Node | Run 1 | Run 2 | Exit code |
+| --- | --- | --- | --- |
+| Regtest, idle, RPC open for 10 s | 8 ms | 8 ms | 0 |
+| Testnet, default peers, ~90 s into its initial checkpoint sync (tips at heights 39 600 and 10 400) | 37 ms | 34 ms | 0 |
+
+In every run zebrad logged `received SIGTERM, starting shutdown`, `shutting down Zebra`
+and `stopping zebrad`, and none came near zebrad's 20 s task shutdown timeout. The 60 s
+stop grace therefore only matters for a zebrad that hangs. Not measured yet: a node at
+the chain tip with a large non-finalized state, and macOS and Windows. The opt-in
+contract tests in `crates/launcher-core/tests/real_zebrad.rs` print the stop time of
+every run (see [DEVELOPMENT.md](DEVELOPMENT.md#real-zebrad-contract-tests)).
+
 ## Config protocol
 
 The launcher writes a **minimal** `zebrad.toml`: the keys it manages plus the user's
