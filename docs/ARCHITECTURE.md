@@ -213,7 +213,9 @@ directories; the commands in `src-tauri/src/commands.rs` call it off the async r
 | `copy_diagnostics` | `String` | versions, OS, status, settings (URL credentials redacted), `zebrad.toml`, last 200 lines of each log; never the RPC cookie |
 | `complete_first_run` | `()` | sets `first_run_done`; from then on zebrad starts at launch |
 
-zebrad is not started at launch before the first run is complete. The data commands run
+zebrad is not started before the first run is complete: `firstrun::start_allowed` is the
+one rule, checked at launch, by the tray (whose Start item stays disabled until then) and
+by `start_zebrad`, `start_zebrad_killing_stale` and `restart_zebrad`. The data commands run
 only while zebrad is `Stopped` or `Failed`. A semaphore in `AppState` keeps them apart
 from starts: each start (UI, tray, launch, the restart inside `apply_config`) holds one
 permit until it finishes, and a data change holds all of them, so zebrad cannot start

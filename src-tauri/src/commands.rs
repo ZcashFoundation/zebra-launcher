@@ -82,16 +82,20 @@ pub async fn log_history(state: State<'_, AppState>, since: u64) -> Result<Vec<L
 
 /// Starts zebrad and waits until it accepted its configuration. Fails when a
 /// zebrad from an earlier launcher run is still alive (see `status.stale`);
-/// `start_zebrad_killing_stale` handles that case.
+/// `start_zebrad_killing_stale` handles that case. Fails before the first
+/// run is done ([`firstrun::start_allowed`]).
 #[tauri::command]
 pub async fn start_zebrad(state: State<'_, AppState>) -> Result<(), String> {
+    firstrun::start_allowed(&state.settings.current())?;
     let _permit = state.start_permit()?;
     state.supervisor.start().await.map_err(message)
 }
 
 /// Terminates a zebrad left behind by an earlier launcher run, then starts.
+/// Fails before the first run is done, without terminating anything.
 #[tauri::command]
 pub async fn start_zebrad_killing_stale(state: State<'_, AppState>) -> Result<(), String> {
+    firstrun::start_allowed(&state.settings.current())?;
     let _permit = state.start_permit()?;
     state
         .supervisor
@@ -106,9 +110,11 @@ pub async fn stop_zebrad(state: State<'_, AppState>) -> Result<(), String> {
     state.supervisor.stop().await.map_err(message)
 }
 
-/// Stops zebrad, then starts it again.
+/// Stops zebrad, then starts it again. Like `start_zebrad`, fails before
+/// the first run is done.
 #[tauri::command]
 pub async fn restart_zebrad(state: State<'_, AppState>) -> Result<(), String> {
+    firstrun::start_allowed(&state.settings.current())?;
     let _permit = state.start_permit()?;
     state.supervisor.restart().await.map_err(message)
 }

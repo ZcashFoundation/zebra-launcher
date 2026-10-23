@@ -18,7 +18,7 @@ pub mod tray;
 use std::time::Duration;
 
 use launcher_core::{
-    config,
+    config, firstrun,
     logfile::RotatingLogConfig,
     monitor::{self, Monitor},
     process::ZebradCommand,
@@ -127,7 +127,7 @@ fn setup(app: &AppHandle) {
             // Until the first-run flow is done the user has not chosen where
             // the chain state goes, so zebrad waits for them.
             let settings = state.settings.current();
-            if settings.start_node_on_launch && settings.first_run_done {
+            if settings.start_node_on_launch && firstrun::start_allowed(&settings).is_ok() {
                 tauri::async_runtime::spawn(start_in_background(app.clone(), state));
             }
         }
@@ -249,8 +249,13 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
 
 /// Starts zebrad without a UI request waiting for the result: at launch
 /// when `start_node_on_launch` is set, and from the tray. A zebrad left by an
-/// earlier run is reported to the UI with [`STALE_PROCESS_EVENT`].
+/// earlier run is reported to the UI with [`STALE_PROCESS_EVENT`]. Nothing
+/// starts before the first run is done ([`firstrun::start_allowed`]).
 pub(crate) async fn start_in_background(app: AppHandle, state: AppState) {
+    if let Err(err) = firstrun::start_allowed(&state.settings.current()) {
+        tracing::warn!(%err, "zebrad was not started");
+        return;
+    }
     let _permit = match state.start_permit() {
         Ok(permit) => permit,
         Err(err) => {

@@ -45,6 +45,19 @@ pub fn first_run_info(
     }
 }
 
+/// Whether zebrad may be started: not before the first-run flow is done,
+/// because until then the user has not chosen where the chain state goes.
+///
+/// The one rule for every start: at launch, from the tray, and the start
+/// commands.
+pub fn start_allowed(settings: &Settings) -> Result<(), String> {
+    if settings.first_run_done {
+        Ok(())
+    } else {
+        Err("finish the first-run setup before starting zebrad".to_string())
+    }
+}
+
 /// The bytes available to this user on the volume holding `path`.
 ///
 /// `path` does not need to exist yet: the nearest existing ancestor is
@@ -389,6 +402,16 @@ mod tests {
             ..Settings::default()
         };
         assert!(!first_run_info(&paths, &done, None).is_first_run);
+    }
+
+    #[test]
+    fn starts_wait_for_the_first_run() {
+        assert!(start_allowed(&Settings::default()).is_err());
+        let done = Settings {
+            first_run_done: true,
+            ..Settings::default()
+        };
+        assert_eq!(start_allowed(&done), Ok(()));
     }
 
     #[test]
