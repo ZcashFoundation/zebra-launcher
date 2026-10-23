@@ -1,0 +1,257 @@
+# Produces the zebrad sidecar binaries that the launcher bundles, one workflow
+# artifact per target, named `zebrad-<target triple>`, each holding
+# `zebra-launcher-zebrad-<target triple>[.exe]` (the name Tauri expects in
+# src-tauri/binaries/).
+#
+# - Linux (x86_64, aarch64): Zebra's own release tarballs, verified with cosign
+#   and GitHub attestations by scripts/fetch-zebrad-linux.sh.
+# - macOS (aarch64, x86_64) and Windows (x86_64): built from the Zebra release
+#   tag by scripts/build-zebrad.sh / build-zebrad.ps1, because Zebra publishes
+#   only Linux binaries.
+#
+# Every binary gets a build-provenance attestation from this workflow. The
+# binaries are unsigned: code signing happens later, in the release
+# environment, through the Tauri bundler. See docs/SIDECARS.md.
+#
+# Callers must grant `contents: read`, `id-token: write` and
+# `attestations: write`.
+name: zebrad sidecars
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: zebrad version without a leading "v" (empty uses ZEBRAD_VERSION)
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      version:
+        description: zebrad version without a leading "v" (empty uses ZEBRAD_VERSION)
+        required: false
+        type: string
+        default: ""
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Resolves the version once: the input when given, otherwise ZEBRAD_VERSION
+  # from the checked-out commit.
+  version:
+    name: Resolve the zebrad version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION:-$(tr -d '[:space:]' < ZEBRAD_VERSION)}"
+          if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::'${version}' is not a zebrad version of the form X.Y.Z (no leading v)"
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "zebrad ${version}" >> "${GITHUB_STEP_SUMMARY}"
+
+  linux:
+    name: Fetch zebrad (${{ matrix.target }})
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          # Native arm64 runner, so the --version smoke test runs the binary.
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      id-token: write # sign the build provenance
+      attestations: write # store the build provenance
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      SIDECAR: dist/zebra-launcher-zebrad-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Verifies the cosign signature on SHA256SUMS, the tarball checksum and
+      # Zebra's attestation (the runner's gh supports `gh attestation`), then
+      # checks `zebrad --version`.
+      - name: Download and verify zebrad
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/fetch-zebrad-linux.sh --version "${VERSION}" --target "${TARGET}" --out "${SIDECAR}"
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          "${SIDECAR}" generate -o "${RUNNER_TEMP}/zebrad.toml"
+          test -s "${RUNNER_TEMP}/zebrad.toml"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ env.SIDECAR }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zebrad-${{ matrix.target }}
+          path: ${{ env.SIDECAR }}
+          if-no-files-found: error
+
+  macos:
+    name: Build zebrad (${{ matrix.target }})
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          # Native Intel runner, so the --version smoke test runs the binary.
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+    permissions:
+      contents: read
+      id-token: write # sign the build provenance
+      attestations: write # store the build provenance
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      SIDECAR: dist/zebra-launcher-zebrad-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Cloned before rust-cache so the cache sees Zebra's Cargo.lock. The
+      # build script checks that the checkout is exactly the release tag.
+      - name: Clone Zebra ${{ needs.version.outputs.version }}
+        run: |
+          git -c advice.detachedHead=false clone --depth 1 --branch "v${VERSION}" \
+            https://github.com/ZcashFoundation/zebra zebra-src
+
+      # Installs the toolchain from Zebra's rust-toolchain.toml.
+      - name: Install Zebra's Rust toolchain
+        working-directory: zebra-src
+        run: rustup toolchain install --profile minimal
+
+      # Xcode's command line tools on the runner provide clang and libclang;
+      # cmake is preinstalled.
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ github.token }}
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: zebra-src -> target
+          key: zebrad-${{ needs.version.outputs.version }}-${{ matrix.target }}
+
+      - name: Build zebrad
+        run: scripts/build-zebrad.sh --version "${VERSION}" --target "${TARGET}" --src-dir zebra-src --out "${SIDECAR}"
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          "${SIDECAR}" generate -o "${RUNNER_TEMP}/zebrad.toml"
+          test -s "${RUNNER_TEMP}/zebrad.toml"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ env.SIDECAR }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zebrad-${{ matrix.target }}
+          path: ${{ env.SIDECAR }}
+          if-no-files-found: error
+
+  windows:
+    name: Build zebrad (x86_64-pc-windows-msvc)
+    needs: version
+    runs-on: windows-2025
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write # sign the build provenance
+      attestations: write # store the build provenance
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: x86_64-pc-windows-msvc
+      SIDECAR: dist/zebra-launcher-zebrad-x86_64-pc-windows-msvc.exe
+      # bindgen's libclang: the runner image preinstalls LLVM here.
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Clone Zebra ${{ needs.version.outputs.version }}
+        run: |
+          git -c advice.detachedHead=false clone --depth 1 --branch "v$env:VERSION" `
+            https://github.com/ZcashFoundation/zebra zebra-src
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install Zebra's Rust toolchain
+        working-directory: zebra-src
+        run: rustup toolchain install --profile minimal
+
+      - name: Check LLVM
+        run: |
+          if (-not (Test-Path (Join-Path $env:LIBCLANG_PATH 'libclang.dll'))) {
+            Write-Output "::error::libclang.dll not found in $env:LIBCLANG_PATH"
+            exit 1
+          }
+
+      - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ github.token }}
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: zebra-src -> target
+          key: zebrad-${{ needs.version.outputs.version }}-x86_64-pc-windows-msvc
+
+      - name: Build zebrad
+        run: ./scripts/build-zebrad.ps1 -Version $env:VERSION -Target $env:TARGET -SrcDir zebra-src -Out $env:SIDECAR
+
+      - name: Smoke test
+        run: |
+          & $env:SIDECAR generate -o "$env:RUNNER_TEMP/zebrad.toml"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ((Get-Item "$env:RUNNER_TEMP/zebrad.toml").Length -eq 0) { exit 1 }
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ env.SIDECAR }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zebrad-x86_64-pc-windows-msvc
+          path: ${{ env.SIDECAR }}
+          if-no-files-found: error
