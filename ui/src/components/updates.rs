@@ -1,6 +1,8 @@
 //! Launcher updates: the header banner, the update buttons, "Check for updates", and the
 //! recovery options after an update that did not come back healthy.
 
+use std::time::SystemTime;
+
 use launcher_types::{RecoveryAction, UpdateInfo, UpdateState};
 use leptos::{prelude::*, task::spawn_local};
 
@@ -47,6 +49,69 @@ fn banner_kind(state: &UpdateState) -> BannerKind {
     }
 }
 
+/// What the banner headline says, without the parts that change while it shows (download
+/// progress, countdown seconds, relative times).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Headline {
+    Available {
+        version: String,
+        current: String,
+        pub_date: Option<SystemTime>,
+    },
+    Downloading {
+        version: String,
+    },
+    Ready {
+        version: String,
+    },
+    Countdown {
+        version: String,
+    },
+    Installing {
+        version: String,
+    },
+    Error {
+        message: String,
+        at: SystemTime,
+    },
+}
+
+fn headline_for(info: &UpdateInfo) -> Option<Headline> {
+    let version = |version: &String| version.clone();
+    Some(match &info.state {
+        UpdateState::Available {
+            version, pub_date, ..
+        } => Headline::Available {
+            version: version.clone(),
+            current: info.current_version.clone(),
+            pub_date: *pub_date,
+        },
+        UpdateState::Downloading { version: v, .. } => Headline::Downloading {
+            version: version(v),
+        },
+        UpdateState::ReadyToInstall {
+            version: v,
+            countdown_secs: None,
+        } => Headline::Ready {
+            version: version(v),
+        },
+        UpdateState::ReadyToInstall {
+            version: v,
+            countdown_secs: Some(_),
+        } => Headline::Countdown {
+            version: version(v),
+        },
+        UpdateState::Installing { version: v } => Headline::Installing {
+            version: version(v),
+        },
+        UpdateState::Error { message, at } => Headline::Error {
+            message: message.clone(),
+            at: *at,
+        },
+        UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate { .. } => return None,
+    })
+}
+
 /// While one of these runs, "Check for updates" would not change anything.
 fn check_blocked(state: &UpdateState) -> bool {
     matches!(
@@ -89,69 +154,70 @@ pub fn UpdateBanner() -> impl IntoView {
         })
     };
 
+    // The headline is rebuilt only when its kind or wording changes; the download progress,
+    // the countdown and "published 2 days ago" are reactive text inside it, so the aria-live
+    // countdown span stays in place and the clock is only read where a text needs it.
+    let headline_kind = Memo::new(move |_| with_info(state, |info| headline_for(info?)));
     let headline = move || {
-        let now = state.now.get();
-        with_info(state, |info| {
-            let info = info?;
-            let current = &info.current_version;
-            Some(match &info.state {
-                UpdateState::Available {
-                    version, pub_date, ..
-                } => view! {
-                    <strong>{format!("Zebra Launcher {version} is available")}</strong>
-                    {format!(
-                        " (this is {current}{}).",
-                        pub_date
-                            .map(|date| format!(", published {}", relative(date, now)))
-                            .unwrap_or_default(),
-                    )}
-                }
-                .into_any(),
-                UpdateState::Downloading {
-                    version,
-                    downloaded,
-                    total,
-                } => view! {
-                    <strong>{format!("Downloading Zebra Launcher {version}")}</strong>
-                    {format!(": {}.", download_progress(*downloaded, *total))}
-                }
-                .into_any(),
-                UpdateState::ReadyToInstall {
-                    version,
-                    countdown_secs: None,
-                } => view! {
-                    <strong>{format!("Zebra Launcher {version} is ready to install.")}</strong>
-                    " It is downloaded and its signature verified. Installing stops the node and restarts the launcher."
-                }
-                .into_any(),
-                UpdateState::ReadyToInstall {
-                    version,
-                    countdown_secs: Some(secs),
-                } => view! {
-                    <strong>
-                        {format!("Zebra Launcher {version} installs automatically in ")}
-                        <span class="countdown" aria-live="polite">
-                            {format!("{secs} s")}
-                        </span>
-                        "."
-                    </strong>
-                    " This zebrad release is near its end of support. The node will be stopped and the launcher restarts. Cancel to install later."
-                }
-                .into_any(),
-                UpdateState::Installing { version } => view! {
-                    <strong>{format!("Installing Zebra Launcher {version}…")}</strong>
-                    " The node is being stopped; the launcher restarts next."
-                }
-                .into_any(),
-                UpdateState::Error { message, at } => view! {
-                    <strong>"Launcher update failed"</strong>
-                    {format!(" ({}): {message}", relative(*at, now))}
-                }
-                .into_any(),
-                UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate { .. } => {
-                    return None;
-                }
-            })
+        Some(match headline_kind.get()? {
+            Headline::Available {
+                version,
+                current,
+                pub_date,
+            } => view! {
+                <strong>{format!("Zebra Launcher {version} is available")}</strong>
+                {format!(" (this is {current}")}
+                {pub_date
+                    .map(|date| move || format!(", published {}", relative(date, state.now.get())))}
+                ")."
+            }
+            .into_any(),
+            Headline::Downloading { version } => view! {
+                <strong>{format!("Downloading Zebra Launcher {version}")}</strong>
+                {move || {
+                    with_info(state, |info| match info.map(|info| &info.state) {
+                        Some(UpdateState::Downloading {
+                            downloaded, total, ..
+                        }) => format!(": {}.", download_progress(*downloaded, *total)),
+                        _ => String::new(),
+                    })
+                }}
+            }
+            .into_any(),
+            Headline::Ready { version } => view! {
+                <strong>{format!("Zebra Launcher {version} is ready to install.")}</strong>
+                " It is downloaded and its signature verified. Installing stops the node and restarts the launcher."
+            }
+            .into_any(),
+            Headline::Countdown { version } => view! {
+                <strong>
+                    {format!("Zebra Launcher {version} installs automatically in ")}
+                    <span class="countdown" aria-live="polite">
+                        {move || {
+                            with_info(state, |info| match info.map(|info| &info.state) {
+                                Some(UpdateState::ReadyToInstall {
+                                    countdown_secs: Some(secs),
+                                    ..
+                                }) => format!("{secs} s"),
+                                _ => String::new(),
+                            })
+                        }}
+                    </span>
+                    "."
+                </strong>
+                " This zebrad release is near its end of support. The node will be stopped and the launcher restarts. Cancel to install later."
+            }
+            .into_any(),
+            Headline::Installing { version } => view! {
+                <strong>{format!("Installing Zebra Launcher {version}…")}</strong>
+                " The node is being stopped; the launcher restarts next."
+            }
+            .into_any(),
+            Headline::Error { message, at } => view! {
+                <strong>"Launcher update failed"</strong>
+                {move || format!(" ({}): {message}", relative(at, state.now.get()))}
+            }
+            .into_any(),
         })
     };
     let progress = move || {
