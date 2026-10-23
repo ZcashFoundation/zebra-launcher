@@ -237,7 +237,8 @@ Show / second launch (single-instance) / macOS dock -> show + focus the window
   request passes through once the shutdown finished; `RunEvent::Exit` blocks on the
   shutdown as a last resort.
 - If startup fails (paths, settings, supervisor), the window is hidden and a native error
-  dialog names the error and the log directory; dismissing it exits with code 1. A
+  dialog names the error and the log directory; dismissing it exits with code 1, and so
+  does a dialog that could not be shown or got no answer within 60 s. A
   `zebrad.toml` that cannot be updated is not fatal: zebrad reports it and the editor can
   fix it.
 
