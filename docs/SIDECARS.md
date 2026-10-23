@@ -152,6 +152,37 @@ tarball makes step 2 fail.
 
 ## Bumping ZEBRAD_VERSION
 
+[`zebrad-watch.yml`](../.github/workflows/zebrad-watch.yml) does steps 1–3
+for you. Every day at 05:17 UTC, and when run by hand, it finds Zebra's
+highest `vX.Y.Z` release that has `SHA256SUMS.sigstore.json` (release
+candidates and releases without signed binaries are skipped; the
+`releases/latest` endpoint and the prerelease flag are not used, because
+Zebra published `v7.0.0-rc.0` as a non-prerelease). If that release is newer
+than `ZEBRAD_VERSION`, it resolves the tag to its commit, runs
+[`scripts/bump-zebrad.sh`](../scripts/bump-zebrad.sh) `<ver> <commit>` and
+opens a pull request titled `build: bump zebrad to <ver>` from branch
+`bump/zebrad-<ver>`, with this checklist in its body. Later runs update the
+pull request's body but never rewrite the branch, so you can push fixes to
+it. If the pull request was closed without merging, the watcher only warns.
+
+The pull request is pushed with a GitHub App token, because pull requests
+opened with `GITHUB_TOKEN` do not trigger CI. It needs two repository
+secrets for an App installed on this repository with **Contents** and **Pull
+requests** read/write (ZF already runs such an App for the zebra repo):
+
+| Secret | Value |
+| --- | --- |
+| `ZEBRA_LAUNCHER_APP_ID` | the App's ID |
+| `ZEBRA_LAUNCHER_APP_PRIVATE_KEY` | a private key of the App, in PEM form |
+
+Without them, the watcher opens (or updates) an issue titled
+`Bump zebrad to <ver>`, labelled `release-blocker`, instead. To try the
+watcher without secrets, run it from the Actions tab with `dry_run` checked:
+it prints the diff it would commit. Set `version` to force a release, for
+example an older one to get a non-empty diff.
+
+To bump by hand, or to finish the watcher's pull request:
+
 1. Wait for the Zebra release to be published with its Linux assets: the two
    tarballs, `SHA256SUMS` and `SHA256SUMS.sigstore.json`.
 2. Update `ZEBRAD_VERSION` and `ZEBRAD_COMMIT` together, in the same commit.
@@ -172,6 +203,8 @@ tarball makes step 2 fail.
      Check the result against the commit shown on the GitHub release page.
 3. Update `VERSION` in `crates/launcher-core/src/bin/fake-zebrad.rs` so the
    fake reports the same version. Then run `scripts/check-versions.sh`.
+   `scripts/bump-zebrad.sh <ver> <commit>` does steps 2 and 3 and runs the
+   check.
 4. Check the new Linux release locally:
    `scripts/fetch-zebrad-linux.sh --out /tmp/zebrad-check/zebrad`. The cosign
    and attestation checks fail if `ZEBRAD_COMMIT` is not the commit that
