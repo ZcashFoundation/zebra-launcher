@@ -15,6 +15,7 @@ serde_json = { workspace = true }
 toml_edit = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
+dirs = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
     "rt-multi-thread",
@@ -30,7 +31,7 @@ tokio = { workspace = true, features = [
 tracing = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["signal", "process"] }
+nix = { workspace = true, features = ["signal", "process", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
@@ -38,6 +39,7 @@ windows-sys = { workspace = true, features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Storage_FileSystem",
 ] }
 
 [dev-dependencies]

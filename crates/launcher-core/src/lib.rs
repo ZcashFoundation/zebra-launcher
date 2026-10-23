@@ -5,6 +5,7 @@
 //! `cargo test` against the `fake-zebrad` binary.
 
 pub mod config;
+pub mod firstrun;
 mod fsutil;
 pub mod logfile;
 pub mod logs;

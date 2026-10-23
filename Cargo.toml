@@ -25,6 +25,8 @@ toml_edit = "0.25"
 # Loopback JSON-RPC only: plain HTTP, no TLS stack.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 base64 = "0.22"
+# Platform directories, for zebrad's default cache dir (alpha.4 leftovers).
+dirs = "7"
 
 [workspace.lints.clippy]
 # Shared state uses channels, `watch`, atomics or semaphores. See clippy.toml.
