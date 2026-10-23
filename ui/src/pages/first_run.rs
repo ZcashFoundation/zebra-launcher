@@ -113,6 +113,29 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
         });
     };
 
+    // A folder chosen in an earlier, unfinished run of the wizard: there is no read-only query
+    // for the free space of an arbitrary folder, so choose it again (which changes nothing) for
+    // the free space there. Until that answers, or if it fails, the space shows as unknown.
+    let refresh_stored_dir = move |dir: String| {
+        busy.set(true);
+        spawn_local(async move {
+            if let Ok(choice) = api::choose_data_dir(dir.clone()).await {
+                // Unless another folder was chosen meanwhile.
+                if chosen.with_untracked(|c| c.as_ref().is_some_and(|(d, _)| *d == dir)) {
+                    chosen.set(
+                        choice
+                            .settings
+                            .data_dir
+                            .clone()
+                            .map(|dir| (dir, choice.free_bytes)),
+                    );
+                    state.settings.set(Some(choice.settings));
+                }
+            }
+            busy.set(false);
+        });
+    };
+
     // Open once the settings say the flow is due, starting from the stored choices.
     Effect::new(move |_| {
         let due = state
@@ -122,9 +145,12 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
             && !open.get_untracked()
         {
             network.set(settings.network);
-            chosen.set(settings.data_dir.map(|dir| (dir, None)));
+            chosen.set(settings.data_dir.clone().map(|dir| (dir, None)));
             open.set(true);
             load_info();
+            if let Some(dir) = settings.data_dir {
+                refresh_stored_dir(dir);
+            }
         }
     });
 

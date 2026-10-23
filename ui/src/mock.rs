@@ -34,6 +34,13 @@ const FREE_AT_DEFAULT: u64 = 212_400_000_000;
 /// Free space at [`PICKED_DATA_DIR`].
 const FREE_AT_PICKED: u64 = 1_834_500_000_000;
 
+/// The data directory `?firstrun&storeddir` starts with, as if chosen in an earlier, unfinished
+/// first run.
+const STORED_DATA_DIR: &str = "/media/small-disk/zebra";
+
+/// Free space at any other folder, such as [`STORED_DATA_DIR`]: below the warning.
+const FREE_ELSEWHERE: u64 = 120_000_000_000;
+
 /// The size of the chain state outside first-run mode.
 const SYNCED_STATE_BYTES: u64 = 248_300_000_000;
 
@@ -268,6 +275,7 @@ impl Mock {
             stats: ArcRwSignal::new(None),
             settings: ArcRwSignal::new(Settings {
                 first_run_done: !first_run,
+                data_dir: url_flag("storeddir").then(|| STORED_DATA_DIR.into()),
                 ..Settings::default()
             }),
             config: ArcRwSignal::new(ConfigDocument {
@@ -626,13 +634,13 @@ pub async fn choose_data_dir(path: String) -> Result<DataDirChoice, String> {
     }
     let is_default = chosen == DEFAULT_DATA_DIR;
     mock.settings
-        .update(|settings| settings.data_dir = (!is_default).then_some(chosen));
+        .update(|settings| settings.data_dir = (!is_default).then(|| chosen.clone()));
     Ok(DataDirChoice {
         settings: mock.settings.get_untracked(),
-        free_bytes: Some(if is_default {
-            FREE_AT_DEFAULT
-        } else {
-            FREE_AT_PICKED
+        free_bytes: Some(match chosen.as_str() {
+            DEFAULT_DATA_DIR => FREE_AT_DEFAULT,
+            PICKED_DATA_DIR => FREE_AT_PICKED,
+            _ => FREE_ELSEWHERE,
         }),
     })
 }
