@@ -7,7 +7,7 @@ use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
     api, clock,
-    components::{nav::Nav, status_strip::StatusStrip},
+    components::{nav::Nav, stale_banner::StaleBanner, status_strip::StatusStrip},
     log_view::LogBuffer,
     pages::{configure::Configure, dashboard::Dashboard, logs::Logs, settings::SettingsPage},
 };
@@ -81,25 +81,48 @@ pub fn App() -> impl IntoView {
 
     set_interval(move || state.now.set(clock::now()), Duration::from_secs(1));
 
-    // Subscribe before fetching, so no update falls between the fetch and the subscription.
+    // Subscribe before fetching, so no update falls between the fetch and the subscription. An
+    // event that arrives while the fetch is in flight is newer than the fetched snapshot, so the
+    // snapshot is only applied when no event has arrived yet.
     spawn_local(async move {
+        let event_seen = StoredValue::new(false);
         let result = api::on_status(
-            move |status| state.status.set(status),
+            move |status| {
+                event_seen.set_value(true);
+                state.status.set(status);
+            },
             state.payload_error(),
         )
         .await;
         state.report("Listening for status", result);
+        // `stale_process` may have been emitted before this listener existed; the snapshot's
+        // `stale` covers that case.
+        let result = api::on_stale_process(
+            move |stale| state.status.update(|status| status.stale = Some(stale)),
+            state.payload_error(),
+        )
+        .await;
+        state.report("Listening for stale processes", result);
         match api::get_status().await {
-            Ok(status) => state.status.set(status),
+            Ok(status) if !event_seen.get_value() => state.status.set(status),
+            Ok(_) => {}
             Err(error) => state.report("Reading status", Err(error)),
         }
     });
     spawn_local(async move {
-        let result =
-            api::on_node_stats(move |stats| state.stats.set(stats), state.payload_error()).await;
+        let event_seen = StoredValue::new(false);
+        let result = api::on_node_stats(
+            move |stats| {
+                event_seen.set_value(true);
+                state.stats.set(stats);
+            },
+            state.payload_error(),
+        )
+        .await;
         state.report("Listening for node stats", result);
         match api::get_node_stats().await {
-            Ok(stats) => state.stats.set(stats),
+            Ok(stats) if !event_seen.get_value() => state.stats.set(stats),
+            Ok(_) => {}
             Err(error) => state.report("Reading node stats", Err(error)),
         }
     });
@@ -131,6 +154,7 @@ pub fn App() -> impl IntoView {
             <header class="app-header">
                 <Nav />
                 <StatusStrip />
+                <StaleBanner />
                 {move || {
                     state
                         .backend_error

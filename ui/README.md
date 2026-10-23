@@ -33,6 +33,8 @@ backend that makes every page demoable:
 - node stats tick while Running, with an end-of-support date so the EOS banner shows;
 - Configure: a config containing `bogus` is "rejected" and rolled back with zebrad's real error
   text; a config containing the line `# simulate-conflict` gets the "file changed on disk" error;
+- open `http://localhost:1420/?stale` to simulate a zebrad left behind by an earlier launcher run:
+  the stale-process banner shows, Start fails, and "Stop it and start" clears it;
 - Settings are kept in memory; set the Grafana URL to see the iframe (it stays blank unless Grafana
   runs on that address).
 

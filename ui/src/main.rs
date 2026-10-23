@@ -19,6 +19,7 @@ mod tauri;
 
 mod components {
     pub mod nav;
+    pub mod stale_banner;
     pub mod status_strip;
 }
 

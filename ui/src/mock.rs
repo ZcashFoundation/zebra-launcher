@@ -15,7 +15,7 @@ use std::{
 
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, EosInfo, ExitClass, ExitInfo,
-    LogLevel, LogLine, LogStream, NodeStats, Phase, Settings, Status,
+    LogLevel, LogLine, LogStream, NodeStats, Phase, Settings, StaleProcessInfo, Status,
 };
 use leptos::prelude::*;
 
@@ -234,7 +234,20 @@ impl Mock {
             generation: Arc::new(AtomicU64::new(0)),
             next_pid: Arc::new(AtomicU32::new(4242)),
         };
-        mock.start();
+        // `?stale` in the page URL simulates a zebrad left behind by an earlier launcher run.
+        let stale = web_sys::window()
+            .and_then(|window| window.location().search().ok())
+            .is_some_and(|search| search.contains("stale"));
+        if stale {
+            mock.status.update(|status| {
+                status.stale = Some(StaleProcessInfo {
+                    pid: 1234,
+                    binary: "/opt/zebra-launcher/zebrad".into(),
+                })
+            });
+        } else {
+            mock.start();
+        }
         let ticker = mock.clone();
         set_interval(move || ticker.tick_stats(), Duration::from_secs(1));
         mock
@@ -374,9 +387,28 @@ pub async fn get_status() -> Status {
     mock().status.get_untracked()
 }
 
-pub async fn start_zebrad() {
+pub async fn start_zebrad() -> Result<(), String> {
     sleep(100).await;
     let mock = mock();
+    if let Some(stale) = mock.status.with_untracked(|status| status.stale.clone()) {
+        return Err(format!(
+            "a zebrad from an earlier launcher run is still running (pid {})",
+            stale.pid
+        ));
+    }
+    if matches!(
+        mock.phase(),
+        Phase::Stopped | Phase::Failed { .. } | Phase::Backoff { .. }
+    ) {
+        mock.start();
+    }
+    Ok(())
+}
+
+pub async fn start_zebrad_killing_stale() {
+    sleep(500).await;
+    let mock = mock();
+    mock.status.update(|status| status.stale = None);
     if matches!(
         mock.phase(),
         Phase::Stopped | Phase::Failed { .. } | Phase::Backoff { .. }

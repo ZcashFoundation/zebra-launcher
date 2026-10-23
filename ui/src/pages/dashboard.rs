@@ -35,22 +35,6 @@ pub fn Dashboard() -> impl IntoView {
         })
     };
 
-    let stale_banner = move || {
-        state.status.with(|status| {
-            status.stale.as_ref().map(|stale| {
-                view! {
-                    <div class="banner banner-warn" role="status">
-                        {format!(
-                            "A zebrad from an earlier launcher run is still running (pid {}, {}).",
-                            stale.pid,
-                            stale.binary,
-                        )}
-                    </div>
-                }
-            })
-        })
-    };
-
     let node_rows = move || {
         let now = state.now.get();
         state.status.with(|status| {
@@ -150,7 +134,6 @@ pub fn Dashboard() -> impl IntoView {
     view! {
         <div class="dashboard">
             {eos_banner}
-            {stale_banner}
             <div class="cards">
                 <div class="card">
                     <h3>"Node"</h3>

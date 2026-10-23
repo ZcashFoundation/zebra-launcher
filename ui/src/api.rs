@@ -4,7 +4,8 @@
 use std::{cell::Cell, fmt};
 
 use launcher_types::{
-    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, LogLine, NodeStats, Settings, Status,
+    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, LogLine, NodeStats, Settings,
+    StaleProcessInfo, Status,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
@@ -78,12 +79,21 @@ pub async fn get_status() -> ApiResult<Status> {
     Ok(tauri::invoke0("get_status").await?)
 }
 
+/// Fails when a zebrad from an earlier launcher run is still alive (`status.stale`).
 pub async fn start_zebrad() -> ApiResult<()> {
     if !is_tauri() {
-        mock::start_zebrad().await;
-        return Ok(());
+        return mock::start_zebrad().await.map_err(ApiError);
     }
     Ok(tauri::invoke0("start_zebrad").await?)
+}
+
+/// Terminates the zebrad left behind by an earlier launcher run, then starts.
+pub async fn start_zebrad_killing_stale() -> ApiResult<()> {
+    if !is_tauri() {
+        mock::start_zebrad_killing_stale().await;
+        return Ok(());
+    }
+    Ok(tauri::invoke0("start_zebrad_killing_stale").await?)
 }
 
 pub async fn stop_zebrad() -> ApiResult<()> {
@@ -113,6 +123,19 @@ pub async fn on_status(
         return Ok(());
     }
     Ok(tauri::listen("status", on_status, on_error).await?)
+}
+
+/// Calls `on_stale` when the backend reports, at launch, that a zebrad from an earlier launcher
+/// run is still alive. It may fire before the UI listens, so `get_status().stale` is read too.
+pub async fn on_stale_process(
+    on_stale: impl Fn(StaleProcessInfo) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        // The mock reports a stale process through `status.stale` only.
+        return Ok(());
+    }
+    Ok(tauri::listen("stale_process", on_stale, on_error).await?)
 }
 
 /// Calls `on_stats` with every `node_stats` event for the rest of the page's life.
