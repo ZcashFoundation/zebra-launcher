@@ -18,3 +18,4 @@ pub mod process;
 pub mod rpc;
 pub mod settings;
 pub mod supervisor;
+pub mod updates;

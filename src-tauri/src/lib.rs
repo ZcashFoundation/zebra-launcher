@@ -14,6 +14,7 @@ pub mod logging;
 pub mod paths;
 pub mod sidecar;
 pub mod tray;
+pub mod updater;
 
 use std::time::Duration;
 
@@ -61,6 +62,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        // Rust-side only: the UI gets no updater permissions; see updater.rs.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Keep in sync with build.rs and capabilities/main.json.
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
@@ -83,6 +86,11 @@ pub fn run() {
             commands::delete_node_data,
             commands::copy_diagnostics,
             commands::complete_first_run,
+            commands::get_update_state,
+            commands::get_update_info,
+            commands::check_for_update,
+            commands::install_update,
+            commands::cancel_update,
         ])
         .setup(|app| {
             setup(app.handle());
@@ -121,6 +129,7 @@ fn setup(app: &AppHandle) {
     match tauri::async_runtime::block_on(start(app)) {
         Ok(state) => {
             app.manage(state.clone());
+            app.manage(updater::start(app, &state));
             bridge::forward_status(app.clone(), state.supervisor.watch_status());
             bridge::forward_node_stats(app.clone(), state.node_stats.clone());
             tray::install(app, &state);

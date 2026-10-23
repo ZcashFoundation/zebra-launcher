@@ -36,6 +36,12 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# The Mozilla CA root list (`webpki-root-certs`), via reqwest's rustls
+# platform verifier in tauri-plugin-updater. A permissive data licence.
+[[licenses.exceptions]]
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
