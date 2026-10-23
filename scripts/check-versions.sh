@@ -15,6 +15,10 @@
 #      and its updater pubkey is not the placeholder, unless the environment
 #      variable UPDATER_ENABLED is "false". Skipped while UPDATER_ENABLED is
 #      unset (CI on pull requests); release.yml sets it.
+#   6. The wasm-bindgen CLI pin, `WASM_BINDGEN_VERSION=` in
+#      .github/tool-versions.env, equals the `wasm-bindgen` crate in Cargo.lock
+#      (read by scripts/cargo-lock-version.sh): trunk runs the CLI only at
+#      exactly that version. Skipped if nothing pins it.
 #
 # Runs every check and reports each one, then exits 1 if any failed.
 # Requires: bash, grep, sed.
@@ -144,6 +148,24 @@ elif [ "${UPDATER_ENABLED}" = "false" ]; then
     ok "${conf} has the placeholder updater public key, and UPDATER_ENABLED=false"
 else
     fail "${conf} has the placeholder updater public key, but UPDATER_ENABLED is '${UPDATER_ENABLED}': replace it (docs/SECURITY.md) or set the repository variable UPDATER_ENABLED=false"
+fi
+
+# 6. wasm-bindgen CLI pin vs. the wasm-bindgen crate
+wb_pin_line="$(grep -nE '^WASM_BINDGEN_VERSION=' "${root}/.github/tool-versions.env" 2>/dev/null || true)"
+if [ -z "${wb_pin_line}" ]; then
+    skip "nothing sets WASM_BINDGEN_VERSION, so the wasm-bindgen check does not apply"
+elif [ "$(printf '%s\n' "${wb_pin_line}" | wc -l)" -ne 1 ]; then
+    fail ".github/tool-versions.env sets WASM_BINDGEN_VERSION more than once"
+else
+    wb_pin="${wb_pin_line#*=}"
+    wb_pin="${wb_pin%$'\r'}"
+    if ! wb_lock="$("$(dirname "${BASH_SOURCE[0]}")/cargo-lock-version.sh" wasm-bindgen "${root}/Cargo.lock" 2>&1)"; then
+        fail "WASM_BINDGEN_VERSION is ${wb_pin}, but: ${wb_lock}"
+    elif [ "${wb_pin}" = "${wb_lock}" ]; then
+        ok ".github/tool-versions.env:${wb_pin_line%%:*} wasm-bindgen CLI ${wb_pin} matches the wasm-bindgen crate (Cargo.lock)"
+    else
+        fail ".github/tool-versions.env:${wb_pin_line%%:*} wasm-bindgen CLI ${wb_pin} is not the wasm-bindgen crate's ${wb_lock} (Cargo.lock); trunk needs them equal"
+    fi
 fi
 
 if [ "${failures}" -gt 0 ]; then

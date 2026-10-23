@@ -40,11 +40,11 @@ checked:
 | GitHub Actions | `uses:` lines | pinned by commit SHA |
 | rustup-init (Linux container) | static.rust-lang.org | sha256 in [`setup-tauri`](../.github/actions/setup-tauri/action.yml) |
 | Rust toolchain | static.rust-lang.org | rustup's signed channel manifest |
-| tauri-cli, trunk | their GitHub releases | sha256 per platform in [`.github/tool-versions.env`](../.github/tool-versions.env) |
+| tauri-cli (and trunk, in `build` only) | their GitHub releases | sha256 per platform in [`.github/tool-versions.env`](../.github/tool-versions.env) |
 | Artifact Signing client (Windows) | nuget.org | sha256 in `release.yml` |
 | zebrad sidecars | `zebrad-sidecars.yml` artifacts | cosign and attestations on Linux, built from the pinned commit elsewhere ([SIDECARS.md](SIDECARS.md)) |
-| AppRun, linuxdeploy (Linux AppImage) | tauri-apps/binary-releases, fetched by tauri-bundler | **nothing** |
-| linuxdeploy-plugin-appimage (Linux AppImage) | the moving `continuous` release of linuxdeploy/linuxdeploy-plugin-appimage, fetched by tauri-bundler | **nothing**; if the download fails, linuxdeploy uses its built-in copy |
+| AppRun, linuxdeploy (Linux AppImage) | tauri-apps/binary-releases, fetched by tauri-bundler | **nothing**; they never see the updater key (below) |
+| linuxdeploy-plugin-appimage (Linux AppImage) | the moving `continuous` release of linuxdeploy/linuxdeploy-plugin-appimage, fetched by tauri-bundler | **nothing**; if the download fails, linuxdeploy uses its built-in copy; never sees the updater key |
 | NSIS 3.13 and nsis_tauri_utils.dll (Windows) | tauri-apps/binary-releases, tauri-apps/nsis-tauri-utils, fetched by tauri-bundler | SHA-1 hard-coded in tauri-bundler |
 | WebView2 bootstrapper | not downloaded at bundle time | the installer fetches it from Microsoft on the user's machine (default `downloadBootstrapper` mode) |
 
@@ -52,12 +52,45 @@ The tauri-bundler rows are from the tauri-bundler 2.10.4 source, the version tau
 2.12.4 pins; re-check them when `TAURI_CLI_VERSION` changes. macOS bundling downloads
 nothing.
 
-The unverified Linux AppImage tools run inside `cargo tauri bundle`, whose environment
-holds `TAURI_SIGNING_PRIVATE_KEY`. A compromised tauri-apps/binary-releases or
-linuxdeploy-plugin-appimage release could therefore read the updater key.
-TODO(M10): close this, either by placing hash-checked copies in tauri-bundler's tools
-directory before bundling (it skips the download when the file exists) or by signing
-the updater artifacts in a separate step that is the only one to see the key.
+The unverified Linux AppImage tools run inside `cargo tauri bundle`, so the updater key
+is never in that process's environment, on any OS:
+
+- `cargo tauri bundle` gets a throwaway minisign key generated in the job. (With
+  `bundle.createUpdaterArtifacts`, tauri-cli signs the updater artifacts itself and fails
+  without a key.) Its `.sig` files only record which files to sign.
+- The "Sign the updater artifacts" step is the only step with `TAURI_SIGNING_PRIVATE_KEY`
+  and its password. It runs only the sha256-pinned cargo-tauri,
+  [`scripts/sign-updater-artifacts.sh`](../scripts/sign-updater-artifacts.sh) calling
+  `cargo tauri signer sign --private-key-path <file> --app-version <version>` for each
+  of those files (Linux AppImage and `.deb`, macOS `.app.tar.gz`, Windows NSIS
+  `-setup.exe`). The key file is written with mode 0600 and deleted afterwards, and the
+  password goes in the environment, not on the command line. `--app-version` writes the
+  trusted comment the bundler writes (`timestamp:…\tfile:…\tversion:<version>`), which
+  the updater's `requireSignedVersion` check reads. The script checks every new
+  signature for that version and for the key ID of `plugins.updater.pubkey`.
+
+This keeps the key from those tools, not the AppImage: a compromised AppImage tool can
+still tamper with the AppImage it builds, which is then signed.
+
+The platform signing stays inside `cargo tauri bundle`, so its credentials do share
+the bundler's environment: macOS codesign and notarization (macOS bundling downloads
+nothing) and the Windows `signCommand` through Azure OIDC (the only Windows downloads,
+NSIS and `nsis_tauri_utils.dll`, are checked against SHA-1 hashes hard-coded in
+tauri-bundler; SHA-1 is collision-prone but not known to allow a second preimage).
+
+The unprivileged `build` job has no secrets, but what it compiles is what gets signed.
+Besides the first table's Actions, rustup-init, toolchain, tauri-cli and trunk rows, it
+runs two tools on the frontend that is embedded in the app:
+
+| What | From | Checked by |
+| --- | --- | --- |
+| wasm-bindgen CLI, at the `wasm-bindgen` version in `Cargo.lock` | its GitHub release, installed by `setup-tauri` | sha256 per platform in [`.github/tool-versions.env`](../.github/tool-versions.env); `check-versions.sh` checks the pin against `Cargo.lock` |
+| wasm-opt (binaryen `version_131`, trunk 0.22.0's default) | its GitHub release, installed by `setup-tauri` | sha256 per platform in `.github/tool-versions.env` |
+
+trunk itself would otherwise download both, without a hash check. `setup-tauri` puts the
+pinned ones first on `PATH` and sets `TRUNK_OFFLINE=true` and `TRUNK_TOOLS_WASM_OPT`: in
+offline mode trunk downloads nothing and accepts a tool only at exactly the version it
+requires, so the build fails rather than fetch a different one.
 
 ## Code signing
 
