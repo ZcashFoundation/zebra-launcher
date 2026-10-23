@@ -9,7 +9,7 @@ use crate::{
     api,
     app::AppState,
     clipboard::copy_to_clipboard,
-    components::update_mode_choice::UpdateModeChoice,
+    components::{update_mode_choice::UpdateModeChoice, updates::UpdateStatus},
     format::{bytes, data_change_allowed, is_low_space, state_dir},
 };
 
@@ -205,6 +205,7 @@ pub fn SettingsPage() -> impl IntoView {
                             result.set(None);
                         })
                     />
+                    <UpdateStatus />
                 </fieldset>
 
                 <fieldset>

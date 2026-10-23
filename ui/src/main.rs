@@ -23,6 +23,7 @@ mod components {
     pub mod stale_banner;
     pub mod status_strip;
     pub mod update_mode_choice;
+    pub mod updates;
 }
 
 mod pages {

@@ -655,3 +655,90 @@ details.diagnostics pre {
   padding-top: 12px;
   border-top: 1px solid var(--border);
 }
+
+/* Launcher updates */
+
+.banner-update {
+  border-color: var(--accent);
+  background: #2c2717;
+}
+
+.update-banner .update-body,
+.eos-banner > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.update-banner p {
+  margin: 0;
+}
+
+.update-banner .buttons,
+.eos-banner .buttons,
+.health-banner .buttons {
+  flex: 0 1 auto;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.health-banner > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.update-notes {
+  color: var(--muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  margin: 6px 0 0;
+}
+
+.update-progress {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+  margin: 6px 0 0;
+  accent-color: var(--accent);
+}
+
+.countdown {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.update-status {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.update-status p {
+  margin: 4px 0;
+}
+
+.update-status .banner {
+  margin: 8px 0 0;
+}
+
+.update-result {
+  align-self: center;
+}
+
+.health-panel .rows {
+  margin: 6px 0;
+}
+
+.health-panel ul.recovery {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 0;
+}
+
+.health-panel ul.recovery li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+}

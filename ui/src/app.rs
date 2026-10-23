@@ -3,12 +3,17 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::{NodeStats, Settings, Status};
+use launcher_types::{NodeStats, Settings, Status, UpdateHealthFailure, UpdateInfo, UpdateState};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
     api, clock,
-    components::{nav::Nav, stale_banner::StaleBanner, status_strip::StatusStrip},
+    components::{
+        nav::Nav,
+        stale_banner::StaleBanner,
+        status_strip::StatusStrip,
+        updates::{HealthFailureBanner, UpdateBanner},
+    },
     log_view::LogBuffer,
     pages::{
         configure::Configure, dashboard::Dashboard, first_run::FirstRun, logs::Logs,
@@ -51,6 +56,11 @@ pub struct AppState {
     pub now: RwSignal<SystemTime>,
     /// The last error from loading or subscribing, shown under the header.
     pub backend_error: RwSignal<Option<String>>,
+    /// What the updater is doing, `None` until loaded.
+    pub update: RwSignal<Option<UpdateInfo>>,
+    /// An `update_health_failed` event. The same failure is usually in
+    /// `update.health_failure` too; see [`AppState::health_failure`].
+    pub update_health: RwSignal<Option<UpdateHealthFailure>>,
 }
 
 impl AppState {
@@ -68,6 +78,14 @@ impl AppState {
     fn payload_error(self) -> impl Fn(String) + 'static {
         move |message| self.backend_error.set(Some(message))
     }
+
+    /// The post-update health failure, from the event or the update info.
+    pub fn health_failure(&self) -> Option<UpdateHealthFailure> {
+        self.update_health.get().or_else(|| {
+            self.update
+                .with(|info| info.as_ref().and_then(|info| info.health_failure.clone()))
+        })
+    }
 }
 
 #[component]
@@ -80,6 +98,8 @@ pub fn App() -> impl IntoView {
         logs: RwSignal::new(LogBuffer::default()),
         now: RwSignal::new(clock::now()),
         backend_error: RwSignal::new(None),
+        update: RwSignal::new(None),
+        update_health: RwSignal::new(None),
     };
     provide_context(state);
 
@@ -130,6 +150,54 @@ pub fn App() -> impl IntoView {
             Err(error) => state.report("Reading node stats", Err(error)),
         }
     });
+    // The same rule for the updater. `update_info` carries the state too, and the backend sends
+    // it right after each `update_state`; a state that arrives before any info is kept and
+    // applied to the snapshot.
+    spawn_local(async move {
+        let info_seen = StoredValue::new(false);
+        let early_state = StoredValue::new(None::<UpdateState>);
+        let result = api::on_update_info(
+            move |info| {
+                info_seen.set_value(true);
+                state.update.set(Some(info));
+            },
+            state.payload_error(),
+        )
+        .await;
+        state.report("Listening for updates", result);
+        let result = api::on_update_state(
+            move |update_state| {
+                if state.update.with_untracked(Option::is_some) {
+                    state.update.update(|info| {
+                        if let Some(info) = info {
+                            info.state = update_state;
+                        }
+                    });
+                } else {
+                    early_state.set_value(Some(update_state));
+                }
+            },
+            state.payload_error(),
+        )
+        .await;
+        state.report("Listening for update states", result);
+        let result = api::on_update_health_failed(
+            move |failure| state.update_health.set(Some(failure)),
+            state.payload_error(),
+        )
+        .await;
+        state.report("Listening for update health", result);
+        match api::get_update_info().await {
+            Ok(mut info) if !info_seen.get_value() => {
+                if let Some(newer) = early_state.get_value() {
+                    info.state = newer;
+                }
+                state.update.set(Some(info));
+            }
+            Ok(_) => {}
+            Err(error) => state.report("Reading the update state", Err(error)),
+        }
+    });
     spawn_local(async move {
         match api::get_settings().await {
             Ok(settings) => state.settings.set(Some(settings)),
@@ -161,6 +229,8 @@ pub fn App() -> impl IntoView {
                 <Nav />
                 <StatusStrip />
                 <StaleBanner />
+                <UpdateBanner />
+                <HealthFailureBanner />
                 {move || {
                     state
                         .backend_error
