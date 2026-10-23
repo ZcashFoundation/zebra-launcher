@@ -100,6 +100,70 @@ gh attestation verify zebra-launcher-zebrad-aarch64-apple-darwin \
   --signer-workflow ZcashFoundation/zebra-launcher/.github/workflows/zebrad-sidecars.yml
 ```
 
+## Development builds from a Zebra git ref
+
+To try the launcher with an unreleased Zebra, such as `main`, a pull request
+or one commit, run the **Bundle** workflow with the `zebrad_ref` input. For
+example, a Windows-only build with zebrad from Zebra's `main`:
+
+```sh
+gh workflow run bundle.yml -f zebrad_ref=main -f targets=x86_64-pc-windows-msvc --ref <branch>
+```
+
+- `--ref <branch>` is the zebra-launcher branch whose workflows and launcher
+  code are built.
+- `zebrad_ref` is a Zebra branch (`main`), tag (`v7.0.0`), pull request head
+  (`refs/pull/<number>/head`) or full 40-character commit SHA. An abbreviated
+  SHA cannot be fetched.
+- `targets` is a comma-separated list of triples from
+  [`.github/targets.json`](../.github/targets.json). Leave it empty for all
+  five. Without `zebrad_ref`, it narrows a regular run in the same way.
+
+The first job resolves `zebrad_ref` to one commit, so every target builds the
+same code even if the branch moves during the run. Every selected target then
+builds zebrad from source at that commit, Linux included, with
+`build-zebrad.sh --ref` or `build-zebrad.ps1 -Ref` and the same flags as a
+release build. A Linux build runs on the ubuntu-24.04 runners with clang,
+libclang, cmake and protoc installed for it. No Zebra release is downloaded,
+and no cosign, attestation, `ZEBRAD_VERSION` or `ZEBRAD_COMMIT` check
+applies: the `--version` smoke test only checks that the binary reports
+`zebrad <something>`.
+
+The run uploads these artifacts:
+
+| Artifact | Contents |
+| --- | --- |
+| `zebrad-<triple>` | `zebra-launcher-zebrad-<triple>[.exe]` and `zebrad-build-info.txt` |
+| `bundles-<triple>-dev-<short commit>` | the installers that `collect-bundles.sh` collects (Windows: `zebra-launcher_<ver>_x86_64-setup.exe`), `raw/zebra-launcher[.exe]` with `raw/zebra-launcher-zebrad[.exe]` beside it, and `zebrad-build-info.txt` |
+
+`zebrad-build-info.txt` names the ref, the resolved commit, the
+`zebrad --version` output, the target and the workflow run, under an
+"UNVERIFIED DEVELOPMENT BUILD" warning. Each bundle job's summary shows the
+same, with a warning that the build is unsigned and unverified. Download an
+artifact with `gh run download <run id> -n <artifact>`. On Windows, either run
+the NSIS installer, which SmartScreen flags because it is unsigned, or run
+`raw/zebra-launcher.exe` directly, keeping `zebra-launcher-zebrad.exe` in the
+same directory, because the launcher looks for zebrad next to itself.
+
+On Linux, the development zebrad needs the glibc of the ubuntu-24.04 runner
+it was built on, not the 2.35 floor of the release bundles. The bundle job
+checks the floor for the launcher binary only. If the sidecar does not run
+in the ubuntu:22.04 container, the job skips the install smoke tests with a
+warning, and the bundles only work on systems with that newer glibc.
+
+**Development builds are never released or signed.** `release.yml` has no
+`zebrad_ref` input and always ships the verified `ZEBRAD_VERSION`.
+`bundle.yml` uses no secrets and signs nothing. macOS bundles are ad-hoc
+signed and Windows binaries are unsigned. The sidecars still get a
+build-provenance attestation from `zebrad-sidecars.yml`. Its recorded
+workflow inputs include `zebrad_ref`, so it shows where the binary was built,
+not that Zebra released it.
+
+You can also run `zebrad-sidecars.yml` alone with the same two inputs, or
+build locally with `scripts/build-zebrad.sh --ref main` (or
+`scripts/build-zebrad.ps1 -Ref main`). Add `--dry-run` (`-DryRun`) to print
+the commands without running them.
+
 ## Local development without zebrad
 
 `scripts/dev-sidecar.sh` (or `scripts/dev-sidecar.ps1` on Windows) builds the

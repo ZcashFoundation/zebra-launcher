@@ -13,12 +13,34 @@
 # signed, updater artifacts are disabled, Windows binaries are unsigned. The
 # signed pipeline is release.yml.
 #
+# Development builds (dispatch only): `zebrad_ref` builds the bundled zebrad
+# from that Zebra branch, tag or full commit SHA on every selected target
+# instead of the verified release, and `targets` (comma-separated triples,
+# empty for all five) selects the targets, for the sidecars and the bundles
+# alike (scripts/select-targets.sh). A development build uploads
+# `bundles-<triple>-dev-<short commit>` artifacts holding the bundles, the raw
+# launcher and zebrad binaries (raw/) and zebrad-build-info.txt; its sidecar
+# is exempt from the glibc floor and the Linux smoke tests run only if it runs
+# in the ubuntu:22.04 container. Such builds are unverified and are never
+# released. See docs/SIDECARS.md, "Development builds from a Zebra git ref".
+#
 # Callers of the workflow_call trigger must grant `contents: read`,
 # `id-token: write` and `attestations: write` (the sidecar attestations).
 name: Bundle
 
 on:
   workflow_dispatch:
+    inputs:
+      zebrad_ref:
+        description: DEVELOPMENT BUILD, never released. Zebra branch, tag or full commit SHA to build the bundled zebrad from (empty uses the verified ZEBRAD_VERSION)
+        required: false
+        type: string
+        default: ""
+      targets:
+        description: comma-separated target triples from .github/targets.json (empty builds all five)
+        required: false
+        type: string
+        default: ""
   workflow_call:
   schedule:
     # Weekly, Monday 04:17 UTC, to catch Tier-3 zebrad build breakage early.
@@ -30,7 +52,9 @@ permissions: {}
 
 concurrency:
   # A literal prefix: under workflow_call, github.workflow is the caller's name.
-  group: bundle-${{ github.ref }}
+  # A development build gets its own group per ref and target selection, so it
+  # neither cancels nor is cancelled by the regular run on the same branch.
+  group: bundle-${{ github.ref }}${{ inputs.zebrad_ref && format('-dev-{0}-{1}', inputs.zebrad_ref, inputs.targets) || '' }}
   cancel-in-progress: true
 
 # Tool pins, APP_BIN, GLIBC_FLOOR and LINUX_PACKAGES come from
@@ -56,16 +80,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The five-target matrix, from .github/targets.json.
+      # The five-target matrix from .github/targets.json, or the targets the
+      # `targets` input selects (the sidecars workflow selects the same).
       - id: targets
         name: Read the target matrix
         shell: bash
-        run: echo "matrix=$(jq -c . .github/targets.json)" >> "${GITHUB_OUTPUT}"
+        env:
+          INPUT_TARGETS: ${{ inputs.targets }}
+        run: |
+          set -euo pipefail
+          matrix="$(scripts/select-targets.sh --targets "${INPUT_TARGETS}")"
+          echo "${matrix}"
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
 
   # ---------------------------------------------------------------------------
   # zebrad sidecars: verified Linux downloads, macOS/Windows builds, attested.
   # Resolves and validates ZEBRAD_VERSION/ZEBRAD_COMMIT; its `version` output
-  # is the zebrad version used below.
+  # is the zebrad version used below. For a development build it builds
+  # zebrad from `zebrad_ref` on every selected target instead, and its
+  # `zebrad_ref`/`zebrad_commit` outputs are set (`version` is empty).
   # ---------------------------------------------------------------------------
   sidecars:
     name: zebrad sidecars
@@ -74,6 +107,9 @@ jobs:
       id-token: write # sidecar build provenance
       attestations: write # sidecar build provenance
     uses: ./.github/workflows/zebrad-sidecars.yml
+    with:
+      zebrad_ref: ${{ inputs.zebrad_ref || '' }}
+      targets: ${{ inputs.targets || '' }}
 
   # ---------------------------------------------------------------------------
   # Unsigned bundles, five targets.
@@ -96,6 +132,9 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
+      # Set only for a development build.
+      ZEBRAD_REF: ${{ needs.sidecars.outputs.zebrad_ref }}
+      ZEBRAD_COMMIT: ${{ needs.sidecars.outputs.zebrad_commit }}
       # linuxdeploy (AppImage) cannot use FUSE inside a container.
       APPIMAGE_EXTRACT_AND_RUN: 1
       EXE_SUFFIX: ${{ matrix.exe_suffix }}
@@ -131,6 +170,7 @@ jobs:
 
       # Artifacts lose the executable bit. Also checks it is the pinned zebrad.
       - name: Install the zebrad sidecar
+        if: needs.sidecars.outputs.zebrad_ref == ''
         run: |
           set -euo pipefail
           sidecar="src-tauri/binaries/zebra-launcher-zebrad-${TARGET}${EXE_SUFFIX}"
@@ -138,6 +178,55 @@ jobs:
           "${sidecar}" --version | tee "${RUNNER_TEMP}/zebrad-version.txt"
           grep -q "zebrad ${ZEBRAD_VERSION}" "${RUNNER_TEMP}/zebrad-version.txt" \
             || { echo "::error::sidecar is not zebrad ${ZEBRAD_VERSION}"; exit 1; }
+
+      # Development build: there is no expected version, and the artifact
+      # carries zebrad-build-info.txt. A Linux sidecar was built on the
+      # ubuntu-24.04 runner and may need a newer glibc than this ubuntu:22.04
+      # container has; if it does not run here, it is not checked here (the
+      # sidecars job ran it on its runner) and the install smoke tests are
+      # skipped (`runs` output).
+      - id: devsidecar
+        name: Install the zebrad sidecar (development build)
+        if: needs.sidecars.outputs.zebrad_ref != ''
+        run: |
+          set -euo pipefail
+          sidecar="src-tauri/binaries/zebra-launcher-zebrad-${TARGET}${EXE_SUFFIX}"
+          info=src-tauri/binaries/zebrad-build-info.txt
+          chmod +x "${sidecar}"
+          test -s "${info}" || { echo "::error::the zebrad-${TARGET} artifact has no zebrad-build-info.txt"; exit 1; }
+          cat "${info}"
+          grep -qx "zebrad_commit=${ZEBRAD_COMMIT}" "${info}" \
+            || { echo "::error::zebrad-build-info.txt is not for Zebra commit ${ZEBRAD_COMMIT}"; exit 1; }
+          if "${sidecar}" --version > "${RUNNER_TEMP}/zebrad-version.txt" 2>&1; then
+            cat "${RUNNER_TEMP}/zebrad-version.txt"
+            grep -q '^zebrad ' "${RUNNER_TEMP}/zebrad-version.txt" \
+              || { echo "::error::sidecar does not report 'zebrad <version>'"; exit 1; }
+            runs=true
+          elif [ "${RUNNER_OS}" = Linux ]; then
+            cat "${RUNNER_TEMP}/zebrad-version.txt"
+            echo "::warning::the development zebrad does not run in this ubuntu:22.04 container (probably a newer glibc; see above); the Linux install smoke tests are skipped"
+            runs=false
+          else
+            cat "${RUNNER_TEMP}/zebrad-version.txt"
+            echo "::error::the development zebrad does not run"
+            exit 1
+          fi
+          echo "runs=${runs}" >> "${GITHUB_OUTPUT}"
+          echo "short=${ZEBRAD_COMMIT:0:7}" >> "${GITHUB_OUTPUT}"
+          version_string="$(sed -n 's/^zebrad_version=//p' "${info}")"
+          echo "::warning title=Development build::zebrad from ${ZEBRAD_REF} @ ${ZEBRAD_COMMIT} (${version_string}): unsigned and unverified, never release it"
+          {
+            echo "## DEV BUILD (${TARGET}): unsigned and unverified"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| zebrad ref | \`${ZEBRAD_REF}\` |"
+            echo "| Zebra commit | [\`${ZEBRAD_COMMIT}\`](https://github.com/ZcashFoundation/zebra/commit/${ZEBRAD_COMMIT}) |"
+            echo "| zebrad --version | \`${version_string}\` |"
+            echo
+            echo "> [!WARNING]"
+            echo "> The bundled zebrad was built from a Zebra git ref, not from a verified Zebra release, and nothing in this build is signed. Use it for testing only; never release or distribute it."
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       # Unsigned: no updater artifacts (they would need TAURI_SIGNING_PRIVATE_KEY),
       # and an ad-hoc signature on macOS so the app opens via "Open Anyway".
@@ -164,34 +253,69 @@ jobs:
             --config "${RUNNER_TEMP}/tauri.unsigned.json"
 
       - name: Check the glibc floor
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && needs.sidecars.outputs.zebrad_ref == ''
         run: |
           scripts/check-glibc.sh --floor "${GLIBC_FLOOR}" \
             "target/${TARGET}/release/${APP_BIN}" \
             "src-tauri/binaries/zebra-launcher-zebrad-${TARGET}"
 
+      # Development build: the launcher binary is still held to the floor; the
+      # sidecar, built on the ubuntu-24.04 runner, is not.
+      - name: Check the glibc floor (development build, launcher only)
+        if: runner.os == 'Linux' && needs.sidecars.outputs.zebrad_ref != ''
+        run: |
+          scripts/check-glibc.sh --floor "${GLIBC_FLOOR}" "target/${TARGET}/release/${APP_BIN}"
+          echo "Not checked: the development zebrad sidecar (built on the runner's newer glibc)"
+
       - name: Collect bundles
         run: scripts/collect-bundles.sh --target "${TARGET}" --out dist
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: needs.sidecars.outputs.zebrad_ref == ''
         with:
           name: bundle-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+      # Development build: besides the installers, the raw launcher binary with
+      # the sidecar next to it under the name the launcher looks for
+      # (src-tauri/src/sidecar.rs), so either can be run without installing,
+      # and zebrad-build-info.txt.
+      - name: Add the raw binaries and build info (development build)
+        if: needs.sidecars.outputs.zebrad_ref != ''
+        run: |
+          set -euo pipefail
+          mkdir -p dist/raw
+          cp "target/${TARGET}/release/${APP_BIN}${EXE_SUFFIX}" "dist/raw/${APP_BIN}${EXE_SUFFIX}"
+          cp "src-tauri/binaries/zebra-launcher-zebrad-${TARGET}${EXE_SUFFIX}" "dist/raw/zebra-launcher-zebrad${EXE_SUFFIX}"
+          cp src-tauri/binaries/zebrad-build-info.txt dist/zebrad-build-info.txt
+          ls -lR dist
+
+      - name: Upload bundles (development build)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: needs.sidecars.outputs.zebrad_ref != ''
+        with:
+          name: bundles-${{ matrix.target }}-dev-${{ steps.devsidecar.outputs.short }}
           path: dist/
           if-no-files-found: error
 
       # -----------------------------------------------------------------------
       # Linux x86_64 install smoke tests. Each step fails on its own, so the
       # failing step names the broken bundle. The real zebrad is the sidecar.
+      # A development build runs them only if its zebrad runs in this
+      # container (see "Install the zebrad sidecar (development build)").
       # -----------------------------------------------------------------------
       - name: "Smoke: install smoke-test packages"
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && (needs.sidecars.outputs.zebrad_ref == '' || steps.devsidecar.outputs.runs == 'true')
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           apt-get install -y --no-install-recommends xvfb xauth dbus dbus-x11 procps
 
+      # ZEBRAD_VERSION is empty for a development build, so the check is then
+      # only that the sidecar reports `zebrad <something>`.
       - name: "Smoke: install the .deb"
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && (needs.sidecars.outputs.zebrad_ref == '' || steps.devsidecar.outputs.runs == 'true')
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
@@ -200,11 +324,11 @@ jobs:
           /usr/bin/zebra-launcher-zebrad --version | grep -q "zebrad ${ZEBRAD_VERSION}"
 
       - name: "Smoke: run the .deb install"
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && (needs.sidecars.outputs.zebrad_ref == '' || steps.devsidecar.outputs.runs == 'true')
         continue-on-error: false
         run: scripts/smoke-linux.sh --deb
 
       - name: "Smoke: run the AppImage"
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && (needs.sidecars.outputs.zebrad_ref == '' || steps.devsidecar.outputs.runs == 'true')
         continue-on-error: false
         run: scripts/smoke-linux.sh --appimage dist/zebra-launcher_*_x86_64.AppImage
