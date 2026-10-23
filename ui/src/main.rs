@@ -10,6 +10,8 @@
 
 mod api;
 mod clock;
+mod format;
+mod log_view;
 mod mock;
 mod tauri;
 mod types;
