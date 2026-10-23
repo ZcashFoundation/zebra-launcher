@@ -431,9 +431,80 @@ pub struct ConfigDocument {
     pub path: String,
 }
 
+/// The result of saving an edited `zebrad.toml` (`apply_config`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApplyOutcome {
+    /// zebrad started with the new file, which is now kept.
+    Applied,
+    /// zebrad refused the new file: the previous file was restored and
+    /// zebrad restarted with it.
+    RolledBack {
+        /// zebrad's description of what is wrong with the new file.
+        error: String,
+    },
+}
+
+/// Why an edited `zebrad.toml` was not saved at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyErrorKind {
+    /// The text is not valid TOML.
+    InvalidToml,
+    /// A key has a value the launcher does not allow, such as a non-loopback
+    /// RPC address.
+    Forbidden,
+    /// The file changed since it was read; reload it and edit again.
+    Conflict,
+    /// Another configuration change is still being applied.
+    ApplyInProgress,
+    /// Reading or writing the file failed.
+    Io,
+}
+
+/// The rejection returned by `apply_config` when the new file was not saved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyError {
+    /// What kind of problem it is.
+    pub kind: ApplyErrorKind,
+    /// A message for the user.
+    pub message: String,
+}
+
+impl fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApplyError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_payload_shapes() {
+        assert_eq!(
+            serde_json::to_value(ApplyOutcome::Applied).unwrap(),
+            serde_json::json!({"kind": "applied"})
+        );
+        assert_eq!(
+            serde_json::to_value(ApplyOutcome::RolledBack {
+                error: "bad key".into()
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "rolled_back", "error": "bad key"})
+        );
+        assert_eq!(
+            serde_json::to_value(ApplyError {
+                kind: ApplyErrorKind::ApplyInProgress,
+                message: "busy".into()
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "apply_in_progress", "message": "busy"})
+        );
+    }
 
     #[test]
     fn loopback_urls() {

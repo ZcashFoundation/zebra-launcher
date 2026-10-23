@@ -1,28 +1,46 @@
 {
-  "productName": "Zebra",
-  "version": "0.0.0",
-  "identifier": "zebra.app",
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Zebra Launcher",
+  "mainBinaryName": "zebra-launcher",
+  "identifier": "org.zfnd.zebra-launcher",
   "build": {
-    "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
-    "frontendDist": "../dist"
+    "frontendDist": "../ui/dist",
+    "beforeDevCommand": {
+      "script": "trunk serve",
+      "cwd": "../ui",
+      "wait": false
+    },
+    "beforeBuildCommand": {
+      "script": "trunk build --release",
+      "cwd": "../ui"
+    }
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Zebra",
+        "label": "main",
+        "title": "Zebra Launcher",
         "width": 1000,
         "height": 800
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self' 'wasm-unsafe-eval'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost",
+        "frame-src": "http://127.0.0.1:* http://localhost:*",
+        "object-src": "'none'"
+      }
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["appimage", "deb", "nsis", "app", "dmg"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -30,8 +48,19 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "binaries/zebrad"
-    ]
+    "externalBin": ["binaries/zebra-launcher-zebrad"],
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libayatana-appindicator3-1"]
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
   }
 }

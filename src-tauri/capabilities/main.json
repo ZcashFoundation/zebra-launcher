@@ -1,16 +1,25 @@
 {
-  "$schema": "./schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "Capability for the main window",
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "What the launcher UI in the main window may call. The Grafana iframe gets nothing.",
   "windows": ["main"],
   "permissions": [
-    "path:default",
-    "event:default",
-    "window:default",
-    "app:default",
-    "resources:default",
-    "menu:default",
-    "tray:default",
-    "shell:allow-open"
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "allow-get-status",
+    "allow-subscribe-logs",
+    "allow-log-history",
+    "allow-start-zebrad",
+    "allow-start-zebrad-killing-stale",
+    "allow-stop-zebrad",
+    "allow-restart-zebrad",
+    "allow-read-config",
+    "allow-apply-config",
+    "allow-get-settings",
+    "allow-set-settings",
+    "allow-get-node-stats",
+    "allow-open-path"
   ]
 }
