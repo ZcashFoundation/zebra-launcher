@@ -19,7 +19,7 @@ All platforms:
   CI installs the versions pinned in
   [`.github/tool-versions.env`](../.github/tool-versions.env) from their release
   binaries, checked against recorded sha256 hashes; `tauri-cli` must match the minor
-  version of the `tauri` crate.
+  version of the `tauri` crate. See [Bumping the pinned tools](#bumping-the-pinned-tools).
 - `cargo install --locked cargo-deny` to run the license and advisory checks locally.
 
 No Node, npm or pnpm is needed once M5 lands.
@@ -154,6 +154,29 @@ Use instead:
 - `tokio::sync::broadcast` for streams with several subscribers;
 - atomics for flags and counters;
 - `tokio::sync::Semaphore` to reserve a slot.
+
+## Bumping the pinned tools
+
+Dependabot bumps the crates (the `tauri` and `wasm` groups in
+[`.github/dependabot.yml`](../.github/dependabot.yml)) but not the CLI tools CI downloads:
+tauri-cli, trunk, wasm-bindgen and wasm-opt (binaryen), pinned with a sha256 per
+platform in [`.github/tool-versions.env`](../.github/tool-versions.env). A Dependabot PR
+that moves the `wasm-bindgen` crate fails `scripts/check-versions.sh` until
+`WASM_BINDGEN_VERSION` follows it, and a `tauri` minor bump needs a matching tauri-cli.
+Refresh a pin with
+[`scripts/refresh-tool-pins.sh`](../scripts/refresh-tool-pins.sh):
+
+```sh
+scripts/refresh-tool-pins.sh wasm-bindgen 0.2.130          # dry run: prints the new lines
+scripts/refresh-tool-pins.sh --write wasm-bindgen 0.2.130  # rewrites the version and hashes
+```
+
+It takes `wasm-bindgen`, `binaryen`, `tauri-cli` or `trunk` and a version, downloads the
+release asset for every platform the file already pins, hashes it, and, with `gh`
+installed, checks each hash against the `digest` GitHub reports for the asset; it writes
+nothing unless every platform downloaded and matched. Then update the comments above the
+lines (the date the hashes were computed, notes such as trunk's default wasm-opt
+version) and run `scripts/check-versions.sh`.
 
 ## Log fixtures
 
