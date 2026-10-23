@@ -551,6 +551,41 @@ input.invalid {
   overflow-wrap: anywhere;
 }
 
+.settings .buttons {
+  flex-wrap: wrap;
+}
+
+/* A fieldset is as wide as its widest line by default; let the diagnostics scroll instead. */
+.settings fieldset {
+  min-width: 0;
+}
+
+button.danger {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.delete-confirm {
+  margin: 8px 0 0;
+}
+
+.delete-confirm p {
+  margin: 0 0 4px;
+}
+
+details.diagnostics {
+  margin-top: 8px;
+}
+
+details.diagnostics pre {
+  max-height: 40vh;
+  overflow: auto;
+  padding: 8px;
+  background: var(--panel);
+  border-radius: 4px;
+  user-select: text;
+}
+
 /* First-run wizard */
 
 .modal-backdrop {

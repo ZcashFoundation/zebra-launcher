@@ -1,9 +1,19 @@
-//! The launcher settings form. Save sends the whole settings object to `set_settings`.
+//! The launcher settings form, plus the data directory, diagnostics and "Delete node data".
+//! Save sends the whole settings object to `set_settings`; the data directory is changed only
+//! through `choose_data_dir`, so Save always sends the stored one.
 
 use launcher_types::{Network, Settings, UpdateMode, is_loopback_http_url};
 use leptos::{prelude::*, task::spawn_local};
 
-use crate::{api, app::AppState};
+use crate::{
+    api,
+    app::AppState,
+    format::{bytes, data_change_allowed, is_low_space, update_mode_text},
+    pages::logs::copy_to_clipboard,
+};
+
+/// The word to type before node data is deleted.
+const DELETE_WORD: &str = "delete";
 
 const STOP_GRACE_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 
@@ -69,11 +79,30 @@ pub fn SettingsPage() -> impl IntoView {
         );
         draft.set(loaded);
     };
-    // Fill the form once the settings arrive.
-    Effect::new(move |_| {
-        if state.settings.with(Option::is_some) && draft.with_untracked(Option::is_none) {
+    // The form's current values as settings, for comparing with what is stored.
+    let edited = move || {
+        let mut edited = draft.get()?;
+        let f = fields.get();
+        edited.grafana_url = parse_grafana_url(&f.grafana_url).ok().flatten();
+        edited.stop_grace_secs = parse_stop_grace(&f.stop_grace_secs).unwrap_or(0);
+        Some(edited)
+    };
+    // Fill the form when the settings arrive, and again when they change elsewhere (the
+    // first-run flow, the data folder) while the form is not edited. The data folder is not a
+    // form field, so it does not count as an edit.
+    Effect::new(move |previous: Option<Option<Settings>>| {
+        let loaded = state.settings.get();
+        let untouched = match previous.flatten() {
+            None => true,
+            Some(previous) => untrack(edited).is_none_or(|mut edited| {
+                edited.data_dir = previous.data_dir.clone();
+                edited == previous
+            }),
+        };
+        if loaded.is_some() && untouched {
             reset();
         }
+        loaded
     });
 
     let grafana_error =
@@ -81,12 +110,9 @@ pub fn SettingsPage() -> impl IntoView {
     let grace_error =
         Memo::new(move |_| fields.with(|f| parse_stop_grace(&f.stop_grace_secs).err()));
     let dirty = move || {
-        let Some(mut edited) = draft.get() else {
+        let Some(edited) = edited() else {
             return false;
         };
-        let f = fields.get();
-        edited.grafana_url = parse_grafana_url(&f.grafana_url).ok().flatten();
-        edited.stop_grace_secs = parse_stop_grace(&f.stop_grace_secs).unwrap_or(0);
         state
             .settings
             .with(|loaded| loaded.as_ref() != Some(&edited))
@@ -110,6 +136,10 @@ pub fn SettingsPage() -> impl IntoView {
         };
         settings.grafana_url = grafana_url;
         settings.stop_grace_secs = stop_grace_secs;
+        // `set_settings` saves `data_dir` as sent; never send one older than the stored one.
+        settings.data_dir = state
+            .settings
+            .with_untracked(|stored| stored.as_ref().and_then(|s| s.data_dir.clone()));
         saving.set(true);
         result.set(None);
         spawn_local(async move {
@@ -136,7 +166,8 @@ pub fn SettingsPage() -> impl IntoView {
     let read = move |pick: fn(&Settings) -> bool| {
         move || draft.with(|draft| draft.as_ref().is_some_and(pick))
     };
-    let update_mode_radio = move |mode: UpdateMode, label: &'static str, hint: &'static str| {
+    let update_mode_radio = move |mode: UpdateMode| {
+        let (label, hint) = update_mode_text(mode);
         view! {
             <label class="radio">
                 <input
@@ -170,9 +201,9 @@ pub fn SettingsPage() -> impl IntoView {
 
                 <fieldset>
                     <legend>"Updates"</legend>
-                    {update_mode_radio(UpdateMode::Off, "Off", "never check for launcher updates")}
-                    {update_mode_radio(UpdateMode::Notify, "Notify", "check, and ask before installing")}
-                    {update_mode_radio(UpdateMode::Auto, "Automatic", "install updates when they are published")}
+                    {update_mode_radio(UpdateMode::Off)}
+                    {update_mode_radio(UpdateMode::Notify)}
+                    {update_mode_radio(UpdateMode::Auto)}
                 </fieldset>
 
                 <fieldset>
@@ -246,16 +277,7 @@ pub fn SettingsPage() -> impl IntoView {
                             <option value="testnet">"Testnet"</option>
                         </select>
                     </label>
-                    <div class="field">
-                        <span>"Data directory"</span>
-                        <code class="readonly">
-                            {move || {
-                                draft
-                                    .with(|d| d.as_ref().and_then(|d| d.data_dir.clone()))
-                                    .unwrap_or_else(|| "the default location".into())
-                            }}
-                        </code>
-                    </div>
+                    <DataDirRow draft />
                 </fieldset>
 
                 <fieldset>
@@ -310,7 +332,297 @@ pub fn SettingsPage() -> impl IntoView {
                     }}
                 </div>
             </form>
+            <section class="settings">
+                <Diagnostics />
+                <DeleteNodeData />
+            </section>
         </Show>
+    }
+}
+
+/// True while the backend accepts data changes (zebrad stopped or failed).
+fn data_change_open(state: AppState) -> impl Fn() -> bool + Copy {
+    move || {
+        state
+            .status
+            .with(|status| data_change_allowed(&status.phase))
+    }
+}
+
+/// The data directory, with "Change…" (folder picker, then `choose_data_dir`). It is saved
+/// right away, not by the form's Save; `draft` follows so the form does not look edited.
+#[component]
+fn DataDirRow(draft: RwSignal<Option<Settings>>) -> impl IntoView {
+    let state = AppState::get();
+    let allowed = data_change_open(state);
+    let busy = RwSignal::new(false);
+    let result = RwSignal::new(None::<Result<Option<u64>, String>>);
+
+    let change = move |_| {
+        busy.set(true);
+        result.set(None);
+        spawn_local(async move {
+            let outcome = match api::pick_data_dir().await {
+                Ok(None) => None,
+                Ok(Some(path)) => Some(match api::choose_data_dir(path).await {
+                    Ok(choice) => {
+                        let data_dir = choice.settings.data_dir.clone();
+                        state.settings.set(Some(choice.settings));
+                        draft.update(|draft| {
+                            if let Some(draft) = draft {
+                                draft.data_dir = data_dir;
+                            }
+                        });
+                        Ok(choice.free_bytes)
+                    }
+                    Err(error) => Err(format!("Could not use that folder: {error}")),
+                }),
+                Err(error) => Some(Err(format!("Could not open the folder picker: {error}"))),
+            };
+            result.set(outcome);
+            busy.set(false);
+        });
+    };
+
+    view! {
+        <div class="field data-dir-row">
+            <span>"Data folder"</span>
+            <code class="readonly">
+                {move || {
+                    state
+                        .settings
+                        .with(|s| s.as_ref().and_then(|s| s.data_dir.clone()))
+                        .unwrap_or_else(|| "default (the launcher's data folder)".into())
+                }}
+            </code>
+            <div class="buttons">
+                <button
+                    type="button"
+                    disabled=move || busy.get() || !allowed()
+                    on:click=change
+                >
+                    "Change…"
+                </button>
+                <span class="muted">
+                    {move || {
+                        if allowed() {
+                            "The chain state goes into its state folder. Changing it does not move the state already synced; that stays in the old folder until you delete it."
+                        } else {
+                            "Stop the node to change it."
+                        }
+                    }}
+                </span>
+            </div>
+            {move || {
+                result
+                    .get()
+                    .map(|result| match result {
+                        Ok(free) => {
+                            view! {
+                                <span class="ok">
+                                    {match free {
+                                        Some(free) => format!("Saved. {} free there.", bytes(free)),
+                                        None => "Saved. The free space there could not be read.".into(),
+                                    }}
+                                </span>
+                                {is_low_space(free)
+                                    .then(|| {
+                                        view! {
+                                            <span class="error">
+                                                "Mainnet needs hundreds of GB; this drive may fill up."
+                                            </span>
+                                        }
+                                    })}
+                            }
+                                .into_any()
+                        }
+                        Err(error) => view! { <span class="error">{error}</span> }.into_any(),
+                    })
+            }}
+        </div>
+    }
+}
+
+/// "Copy diagnostics": collects the text and copies it, or shows it when the clipboard is
+/// denied.
+#[component]
+fn Diagnostics() -> impl IntoView {
+    let busy = RwSignal::new(false);
+    let note = RwSignal::new(None::<Result<String, String>>);
+    let fallback = RwSignal::new(None::<String>);
+
+    let copy = move |_| {
+        busy.set(true);
+        note.set(None);
+        fallback.set(None);
+        spawn_local(async move {
+            match api::copy_diagnostics().await {
+                Ok(text) => match copy_to_clipboard(&text).await {
+                    Ok(()) => note.set(Some(Ok(
+                        "Copied to the clipboard, ready to paste into an issue.".into(),
+                    ))),
+                    Err(error) => {
+                        note.set(Some(Err(format!(
+                            "Could not copy to the clipboard ({error}). Select the text below and copy it by hand."
+                        ))));
+                        fallback.set(Some(text));
+                    }
+                },
+                Err(error) => {
+                    note.set(Some(Err(format!("Could not collect diagnostics: {error}"))))
+                }
+            }
+            busy.set(false);
+        });
+    };
+
+    view! {
+        <fieldset>
+            <legend>"Diagnostics"</legend>
+            <p class="muted">
+                "Versions, the node status, the settings, zebrad.toml and the last lines of the logs, for a bug report. The RPC cookie is never included."
+            </p>
+            <div class="buttons">
+                <button type="button" disabled=move || busy.get() on:click=copy>
+                    "Copy diagnostics"
+                </button>
+                {move || {
+                    note.get()
+                        .map(|note| match note {
+                            Ok(text) => {
+                                view! { <span class="ok diagnostics-note">{text}</span> }.into_any()
+                            }
+                            Err(text) => {
+                                view! { <span class="error diagnostics-note">{text}</span> }
+                                    .into_any()
+                            }
+                        })
+                }}
+            </div>
+            {move || {
+                fallback
+                    .get()
+                    .map(|text| {
+                        let lines = text.lines().count();
+                        view! {
+                            <details class="diagnostics" open>
+                                <summary>{format!("Diagnostics ({lines} lines)")}</summary>
+                                <pre>{text}</pre>
+                            </details>
+                        }
+                    })
+            }}
+        </fieldset>
+    }
+}
+
+/// "Delete node data": deletes the chain state after the user types [`DELETE_WORD`]. Only while
+/// zebrad is stopped or failed.
+#[component]
+fn DeleteNodeData() -> impl IntoView {
+    let state = AppState::get();
+    let allowed = data_change_open(state);
+    let confirming = RwSignal::new(false);
+    let typed = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let result = RwSignal::new(None::<Result<String, String>>);
+
+    let state_dir = move || {
+        state
+            .settings
+            .with(|s| s.as_ref().and_then(|s| s.data_dir.clone()))
+            .map(|dir| {
+                let separator = if dir.contains('\\') { '\\' } else { '/' };
+                format!("{}{separator}state", dir.trim_end_matches(['/', '\\']))
+            })
+            .unwrap_or_else(|| "the state folder in the launcher's data folder".into())
+    };
+    let delete = move |_| {
+        busy.set(true);
+        result.set(None);
+        spawn_local(async move {
+            result.set(Some(match api::delete_node_data().await {
+                Ok(freed) => Ok(format!("Deleted the node data, freeing {}.", bytes(freed))),
+                Err(error) => Err(format!("Could not delete the node data: {error}")),
+            }));
+            busy.set(false);
+            confirming.set(false);
+            typed.set(String::new());
+        });
+    };
+
+    view! {
+        <fieldset>
+            <legend>"Node data"</legend>
+            <div class="buttons">
+                <button
+                    type="button"
+                    disabled=move || busy.get() || confirming.get() || !allowed()
+                    on:click=move |_| {
+                        result.set(None);
+                        confirming.set(true);
+                    }
+                >
+                    "Delete node data…"
+                </button>
+                <span class="muted">
+                    {move || {
+                        if allowed() {
+                            "Frees the disk space the chain uses. The next start syncs from scratch."
+                        } else {
+                            "Stop the node to delete its data."
+                        }
+                    }}
+                </span>
+            </div>
+            <Show when=move || confirming.get()>
+                <div class="delete-confirm banner banner-warn">
+                    <p>
+                        "This deletes the chain state in " <code>{state_dir}</code>
+                        " and nothing else: zebrad.toml, the launcher settings, the logs and the RPC cookie stay. The next start syncs the chain from scratch, which takes a day or more on Mainnet."
+                    </p>
+                    <label class="field">
+                        <span>"Type " <code>{DELETE_WORD}</code> " to confirm"</span>
+                        <input
+                            type="text"
+                            autocomplete="off"
+                            prop:value=move || typed.get()
+                            on:input=move |event| typed.set(event_target_value(&event))
+                        />
+                    </label>
+                    <div class="buttons">
+                        <button
+                            type="button"
+                            class="danger"
+                            disabled=move || {
+                                busy.get() || !allowed() || typed.with(|t| t.trim() != DELETE_WORD)
+                            }
+                            on:click=delete
+                        >
+                            {move || if busy.get() { "Deleting…" } else { "Delete" }}
+                        </button>
+                        <button
+                            type="button"
+                            disabled=move || busy.get()
+                            on:click=move |_| {
+                                confirming.set(false);
+                                typed.set(String::new());
+                            }
+                        >
+                            "Cancel"
+                        </button>
+                    </div>
+                </div>
+            </Show>
+            {move || {
+                result
+                    .get()
+                    .map(|result| match result {
+                        Ok(text) => view! { <p class="ok delete-result">{text}</p> }.into_any(),
+                        Err(text) => view! { <p class="error delete-result">{text}</p> }.into_any(),
+                    })
+            }}
+        </fieldset>
     }
 }
 
