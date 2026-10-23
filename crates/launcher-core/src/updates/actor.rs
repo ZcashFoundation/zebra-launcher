@@ -193,6 +193,7 @@ pub fn spawn<B: UpdateBackend, N: NodeControl>(
         eos: None,
         eos_halted: false,
         state: UpdateState::Idle,
+        before_check: None,
         found: None,
         bytes: None,
         install_after_download: false,
@@ -292,6 +293,8 @@ struct Actor<B: UpdateBackend, N: NodeControl> {
     eos_halted: bool,
 
     state: UpdateState,
+    /// The state before the running check, restored if it is cancelled.
+    before_check: Option<UpdateState>,
     found: Option<FoundUpdate<B::Release>>,
     /// The verified package for `found`.
     bytes: Option<Arc<Vec<u8>>>,
@@ -408,7 +411,10 @@ impl<B: UpdateBackend, N: NodeControl> Actor<B, N> {
                 self.abort_job();
                 self.last_attempt = Some(Instant::now());
                 self.reschedule();
-                self.state = self.resting_state().unwrap_or_default();
+                // Back to what was shown before the check (up to date, or
+                // the last error), not to Idle.
+                let before = self.before_check.take();
+                self.state = self.resting_state().or(before).unwrap_or_default();
                 self.reply_waiters();
             }
             Some(JobKind::Download) => {
@@ -658,6 +664,7 @@ impl<B: UpdateBackend, N: NodeControl> Actor<B, N> {
             handle,
         });
         self.next_check = None;
+        self.before_check = Some(self.current_state());
         self.state = UpdateState::Checking;
     }
 
@@ -1008,6 +1015,7 @@ mod tests {
         bad_signature: AtomicBool,
         install_fails: AtomicBool,
         download_delay_secs: AtomicUsize,
+        check_delay_secs: AtomicUsize,
         checks: AtomicUsize,
         downloads: AtomicUsize,
         verifies: AtomicUsize,
@@ -1041,6 +1049,8 @@ mod tests {
 
         async fn check(&self) -> Result<Option<FoundUpdate<String>>, String> {
             self.inner.checks.fetch_add(1, Ordering::SeqCst);
+            let delay = self.inner.check_delay_secs.load(Ordering::SeqCst) as u64;
+            tokio::time::sleep(Duration::from_secs(delay)).await;
             Ok(self
                 .inner
                 .latest
@@ -1642,5 +1652,35 @@ mod tests {
         .await;
         assert_eq!(h.node.starts.load(Ordering::SeqCst), 0);
         assert_eq!(h.backend.count(|i| &i.installs), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_check_restores_the_previous_state() {
+        let h = harness(UpdateMode::Notify, FakeBackend::with_latest(None));
+        let first = tokio::time::timeout(T, h.handle.check())
+            .await
+            .expect("in time")
+            .expect("check");
+        assert!(matches!(first, UpdateState::UpToDate { .. }));
+
+        h.backend
+            .inner
+            .check_delay_secs
+            .store(3600, Ordering::SeqCst);
+        let handle = h.handle.clone();
+        let check = tokio::spawn(async move { handle.check().await });
+        wait_for(&h.handle, "checking", |i| i.state == UpdateState::Checking).await;
+        tokio::time::timeout(T, h.handle.cancel())
+            .await
+            .expect("in time")
+            .expect("cancel");
+        assert_eq!(h.handle.state(), first);
+        let answered = tokio::time::timeout(T, check)
+            .await
+            .expect("in time")
+            .expect("join")
+            .expect("check");
+        assert_eq!(answered, first);
+        assert!(h.handle.info().last_successful_check.is_some());
     }
 }
