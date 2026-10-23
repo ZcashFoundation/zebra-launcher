@@ -46,6 +46,8 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `test-util`: paused clocks for the updater's 6-hour schedules.
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bin]]
 name = "fake-zebrad"
