@@ -1,8 +1,6 @@
 //! The dashboard: node details, the end-of-support banner, and the embedded Grafana dashboard.
 
-use std::time::Duration;
-
-use launcher_types::{ExitClass, Phase};
+use launcher_types::{EOS_WARNING_WINDOW, ExitClass, Phase, eos_within};
 use leptos::prelude::*;
 
 use crate::{
@@ -11,10 +9,6 @@ use crate::{
     components::{status_strip::phase_detail, updates::CheckForUpdate},
     format::{exit_class_text, kiosk_url, percent, phase_label, relative, thousands},
 };
-
-/// Inside this window before the end of support, the EOS banner offers "Check for updates",
-/// whatever the update mode.
-const EOS_CHECK_WINDOW: Duration = Duration::from_secs(14 * 86_400);
 
 /// The command that starts the Prometheus and Grafana stack, shown when no Grafana URL is set.
 const OBSERVABILITY_HINT: &str = "docker compose -f docs/observability/docker-compose.yml up -d";
@@ -42,11 +36,9 @@ pub fn Dashboard() -> impl IntoView {
             stats
                 .as_ref()
                 .and_then(|stats| stats.eos.as_ref())
-                .is_some_and(|eos| {
-                    eos.estimated_time
-                        .duration_since(now)
-                        .map_or(true, |left| left < EOS_CHECK_WINDOW)
-                })
+                // Inside the backend's warning window, the banner offers "Check for updates",
+                // whatever the update mode.
+                .is_some_and(|eos| eos_within(eos.estimated_time, now, EOS_WARNING_WINDOW))
         })
     });
     let halted = Memo::new(move |_| {
