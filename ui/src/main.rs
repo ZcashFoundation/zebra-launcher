@@ -26,6 +26,7 @@ mod components {
 mod pages {
     pub mod configure;
     pub mod dashboard;
+    pub mod first_run;
     pub mod logs;
     pub mod settings;
 }
