@@ -4,21 +4,30 @@
 //! them; payloads are the `launcher-types` structs. Errors are strings,
 //! except for `apply_config`, which rejects with an [`ApplyError`].
 
-use std::{fmt::Display, path::Path, sync::atomic::Ordering, time::Duration};
+use std::{
+    fmt::Display,
+    path::{Path, PathBuf},
+    sync::atomic::Ordering,
+    time::Duration,
+};
 
 use launcher_core::{
     config::{self, ConfigEditError},
+    diagnostics,
+    firstrun::{self, LegacyLocations},
     supervisor::{StartOptions, SupervisorError},
 };
 use launcher_types::{
-    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, ExitClass, LogLine, NodeStats,
-    Settings, Status,
+    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, ExitClass,
+    FirstRunInfo, ImportOutcome, LogLine, NodeStats, Phase, Settings, Status,
 };
 use tauri::{AppHandle, Runtime, State, ipc::Channel};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
+use tokio::sync::oneshot;
 
 use crate::{
-    app_state::{AppState, managed_keys},
+    app_state::{AppState, managed_keys, state_dir},
     bridge,
 };
 
@@ -76,12 +85,14 @@ pub async fn log_history(state: State<'_, AppState>, since: u64) -> Result<Vec<L
 /// `start_zebrad_killing_stale` handles that case.
 #[tauri::command]
 pub async fn start_zebrad(state: State<'_, AppState>) -> Result<(), String> {
+    let _permit = state.start_permit()?;
     state.supervisor.start().await.map_err(message)
 }
 
 /// Terminates a zebrad left behind by an earlier launcher run, then starts.
 #[tauri::command]
 pub async fn start_zebrad_killing_stale(state: State<'_, AppState>) -> Result<(), String> {
+    let _permit = state.start_permit()?;
     state
         .supervisor
         .start_with(StartOptions { kill_stale: true })
@@ -98,6 +109,7 @@ pub async fn stop_zebrad(state: State<'_, AppState>) -> Result<(), String> {
 /// Stops zebrad, then starts it again.
 #[tauri::command]
 pub async fn restart_zebrad(state: State<'_, AppState>) -> Result<(), String> {
+    let _permit = state.start_permit()?;
     state.supervisor.restart().await.map_err(message)
 }
 
@@ -121,6 +133,15 @@ fn io_error(err: impl Display) -> ApplyError {
     apply_error(ApplyErrorKind::Io, err)
 }
 
+/// Whether `apply_config` restarts zebrad: it is running, starting, or about
+/// to be restarted after a crash. A stopping zebrad is left stopped.
+fn was_running(phase: &Phase) -> bool {
+    matches!(
+        phase,
+        Phase::Starting | Phase::Running | Phase::Backoff { .. }
+    )
+}
+
 fn edit_error(err: ConfigEditError) -> ApplyError {
     let kind = match &err {
         ConfigEditError::InvalidToml(_) => ApplyErrorKind::InvalidToml,
@@ -132,10 +153,15 @@ fn edit_error(err: ConfigEditError) -> ApplyError {
     apply_error(kind, err)
 }
 
-/// Saves `text` as `zebrad.toml` and restarts zebrad with it.
+/// Saves `text` as `zebrad.toml` and, if zebrad was running, restarts it
+/// with the new file.
 ///
-/// `token` is the one `read_config` returned. If zebrad refuses the file as
-/// a configuration error, the previous file is restored, zebrad is started
+/// `token` is the one `read_config` returned. The launcher-managed keys are
+/// set to the launcher's values before the file is checked and written.
+/// When zebrad is not running (stopped, or failed and waiting for the user)
+/// the file is saved and the outcome is `applied`; zebrad reads it on its
+/// next start. Otherwise zebrad is restarted: if it refuses the file as a
+/// configuration error, the previous file is restored, zebrad is started
 /// with it, and the outcome is `rolled_back` with zebrad's message. Any
 /// other start failure keeps the new file (zebrad got past loading it) and
 /// shows up in the status. Rejections leave the file unchanged.
@@ -157,11 +183,30 @@ pub async fn apply_config(
         })?;
 
     let paths = state.paths.clone();
-    let pending = blocking(move || config::begin_apply(&paths, &text, &token))
+    let keys = managed_keys(&state.settings.current(), &paths);
+    let pending = blocking(move || config::begin_apply_with_managed(&paths, &text, &token, &keys))
         .await
         .map_err(io_error)?
         .map_err(edit_error)?;
 
+    if !was_running(&state.supervisor.status().phase) {
+        blocking(move || pending.commit())
+            .await
+            .map_err(io_error)?
+            .map_err(io_error)?;
+        tracing::info!("saved the new configuration; zebrad uses it on its next start");
+        return Ok(ApplyOutcome::Applied);
+    }
+
+    // Held across the stop and the start, so the node data cannot change
+    // while zebrad is briefly stopped.
+    let _start = match state.start_permit() {
+        Ok(permit) => permit,
+        Err(err) => {
+            let _ = blocking(move || pending.rollback()).await;
+            return Err(io_error(err));
+        }
+    };
     if let Err(err) = state.supervisor.stop().await {
         // The launcher is exiting. Restore the file now; if that fails, the
         // pending marker makes the next launch do it.
@@ -224,14 +269,18 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 /// Managed `zebrad.toml` keys that depend on the settings (network, data
 /// directory) are updated right away and take effect on the next zebrad
 /// start; the stop grace period takes effect on the next launch.
+/// `first_run_done` is kept as it is: only `complete_first_run` sets it.
 #[tauri::command]
 pub async fn set_settings(
     state: State<'_, AppState>,
-    settings: Settings,
+    mut settings: Settings,
 ) -> Result<Settings, String> {
     let saved = state
         .settings
-        .update(move |current| *current = settings)
+        .update(move |current| {
+            settings.first_run_done = current.first_run_done;
+            *current = settings;
+        })
         .await
         .map_err(message)?;
 
@@ -286,4 +335,172 @@ pub fn open_path<R: Runtime>(
         other => return Err(format!("cannot open {other:?}")),
     };
     result.map_err(message)
+}
+
+/// What the first-run flow shows: whether it is due, the default data
+/// directory with its free space, and any alpha.4 leftovers.
+#[tauri::command]
+pub async fn get_first_run_info(state: State<'_, AppState>) -> Result<FirstRunInfo, String> {
+    let paths = state.paths.clone();
+    let settings = state.settings.current();
+    blocking(move || {
+        let legacy =
+            firstrun::detect_legacy(&LegacyLocations::current(), &state_dir(&settings, &paths));
+        firstrun::first_run_info(&paths, &settings, legacy)
+    })
+    .await
+}
+
+/// Opens the system's folder picker for the data directory. `None` when
+/// the user cancelled.
+#[tauri::command]
+pub async fn pick_data_dir<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+    let (tx, rx) = oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Choose where Zebra Launcher keeps the chain state")
+        .set_can_create_directories(true)
+        .pick_folder(move |folder| {
+            let _ = tx.send(folder);
+        });
+    let folder = rx.await.map_err(message)?;
+    folder
+        .map(|folder| {
+            folder
+                .into_path()
+                .map(|path| path.display().to_string())
+                .map_err(message)
+        })
+        .transpose()
+}
+
+/// Makes `path` the data directory: the chain state then lives in
+/// `<path>/state`. The directory is created if needed and must be writable;
+/// choosing the launcher's own data directory restores the default.
+///
+/// Only while zebrad is stopped. The managed `state.cache_dir` in
+/// `zebrad.toml` is updated right away. State in the previous location is
+/// left where it is. Returns the saved settings and the free space at `path`;
+/// warning about too little space is up to the UI.
+#[tauri::command]
+pub async fn choose_data_dir(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<DataDirChoice, String> {
+    let _data = state.data_change_permit()?;
+    let _config = state
+        .config_writer
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "a configuration change is being applied; try again".to_string())?;
+
+    let chosen = path.trim().to_string();
+    let dir = PathBuf::from(&chosen);
+    let default = state.paths.data_dir().to_path_buf();
+    let (free_bytes, is_default) = blocking(move || -> Result<_, String> {
+        firstrun::check_writable_dir(&dir)
+            .map_err(|err| format!("cannot use {} as the data directory: {err}", dir.display()))?;
+        let free = firstrun::free_space(&dir).ok();
+        Ok((free, same_dir(&dir, &default)))
+    })
+    .await??;
+    let data_dir = (!is_default).then_some(chosen);
+
+    let saved = state
+        .settings
+        .update(move |settings| settings.data_dir = data_dir)
+        .await
+        .map_err(message)?;
+    let paths = state.paths.clone();
+    let keys = managed_keys(&saved, &paths);
+    blocking(move || config::ensure(&paths, &keys))
+        .await?
+        .map_err(|err| {
+            format!("the data directory was saved, but zebrad.toml could not be updated: {err}")
+        })?;
+    tracing::info!(data_dir = ?saved.data_dir, "data directory chosen");
+    Ok(DataDirChoice {
+        settings: saved,
+        free_bytes,
+    })
+}
+
+/// Whether two directories are the same after resolving links.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Moves the alpha.4 chain state from zebrad's default cache directory into
+/// the current state directory. Only while zebrad is stopped; fails without
+/// copying anything when the two are on different volumes.
+#[tauri::command]
+pub async fn import_legacy_state(state: State<'_, AppState>) -> Result<ImportOutcome, String> {
+    let _data = state.data_change_permit()?;
+    let paths = state.paths.clone();
+    let settings = state.settings.current();
+    blocking(move || {
+        let legacy = LegacyLocations::current()
+            .zebra_cache_dir
+            .ok_or_else(|| "this system has no default cache directory".to_string())?;
+        firstrun::import_legacy_state(&legacy, &state_dir(&settings, &paths)).map_err(message)
+    })
+    .await?
+}
+
+/// Deletes the chain state (config, logs and the RPC cookie stay) and
+/// returns the bytes freed. Only while zebrad is stopped; the UI asks for
+/// confirmation first.
+#[tauri::command]
+pub async fn delete_node_data(state: State<'_, AppState>) -> Result<u64, String> {
+    let _data = state.data_change_permit()?;
+    let settings = state.settings.current();
+    let roots = state.data_roots(&settings);
+    let dir = state_dir(&settings, &state.paths);
+    blocking(move || {
+        let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+        firstrun::delete_node_data(&dir, &roots)
+    })
+    .await?
+    .map_err(message)
+}
+
+/// The diagnostics text for a bug report: versions, OS, status, settings,
+/// `zebrad.toml` and the last lines of both logs. The UI copies it to the
+/// clipboard.
+#[tauri::command]
+pub async fn copy_diagnostics(state: State<'_, AppState>) -> Result<String, String> {
+    let paths = state.paths.clone();
+    let status = state.supervisor.status();
+    let settings = state.settings.current();
+    blocking(move || {
+        let launcher = log_tail(diagnostics::latest_launcher_log(&paths.launcher_log()));
+        let zebrad = log_tail(Some(paths.zebrad_log()));
+        diagnostics::diagnostics_bundle(&paths, &status, &settings, &launcher, &zebrad)
+    })
+    .await
+}
+
+fn log_tail(path: Option<PathBuf>) -> String {
+    let Some(path) = path else {
+        return "(no log file yet)\n".to_string();
+    };
+    match diagnostics::tail_lines(&path, diagnostics::TAIL_LINES) {
+        Ok(tail) => tail,
+        Err(err) => format!("(could not read {}: {err})\n", path.display()),
+    }
+}
+
+/// Records that the first-run flow is done, so it is not shown again and
+/// zebrad starts at launch from now on (if `start_node_on_launch` is set).
+#[tauri::command]
+pub async fn complete_first_run(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .settings
+        .update(|settings| settings.first_run_done = true)
+        .await
+        .map(|_| ())
+        .map_err(message)
 }

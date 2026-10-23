@@ -303,6 +303,9 @@ pub struct Settings {
     pub network: Network,
     /// How long a graceful stop may take before zebrad is killed, in seconds.
     pub stop_grace_secs: u64,
+    /// The first-run flow was completed (`complete_first_run`). Until then
+    /// the UI shows it and zebrad is not started at launch.
+    pub first_run_done: bool,
 }
 
 impl Settings {
@@ -321,6 +324,7 @@ impl Default for Settings {
             data_dir: None,
             network: Network::Mainnet,
             stop_grace_secs: 60,
+            first_run_done: false,
         }
     }
 }
@@ -465,6 +469,58 @@ impl fmt::Display for ApplyError {
 }
 
 impl std::error::Error for ApplyError {}
+
+/// What the first-run flow shows (`get_first_run_info`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstRunInfo {
+    /// True until the first-run flow was completed (`complete_first_run`),
+    /// so always true while there is no `launcher.json` yet.
+    pub is_first_run: bool,
+    /// The launcher's own data directory. The chain state goes into its
+    /// `state` subdirectory unless the user chooses another data directory.
+    pub default_data_dir: String,
+    /// Free space on the volume holding [`Self::default_data_dir`], if it
+    /// could be read. Mainnet state needs hundreds of GB.
+    pub free_bytes_at_default: Option<u64>,
+    /// Files left by the v0.0.0-alpha.4 prototype, if any were found.
+    pub legacy: Option<LegacyInstall>,
+}
+
+/// Files left by the v0.0.0-alpha.4 prototype.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyInstall {
+    /// A `zebrad.toml` next to the launcher executable, if present. It is
+    /// only reported; the launcher never reads it.
+    pub config_file: Option<String>,
+    /// zebrad's default cache directory (`~/.cache/zebra` on Linux,
+    /// `~/Library/Caches/zebra` on macOS, `%LOCALAPPDATA%\zebra` on Windows),
+    /// when it holds a `state` directory. A zebrad run from a terminal uses
+    /// the same directory.
+    pub state_dir: Option<String>,
+    /// The size of `<state_dir>/state` in bytes, as far as it was counted.
+    pub state_bytes: u64,
+    /// True when counting stopped early, so [`Self::state_bytes`] is a lower bound.
+    pub state_bytes_is_lower_bound: bool,
+}
+
+/// What `import_legacy_state` moved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportOutcome {
+    /// The directory that was moved.
+    pub from: String,
+    /// Where it is now.
+    pub to: String,
+}
+
+/// The result of `choose_data_dir`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataDirChoice {
+    /// The saved settings, with the new `data_dir`.
+    pub settings: Settings,
+    /// Free space on the chosen volume, if it could be read. Warning about
+    /// too little space is up to the UI.
+    pub free_bytes: Option<u64>,
+}
 
 #[cfg(test)]
 mod tests {

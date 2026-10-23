@@ -13,6 +13,7 @@ pub mod exit;
 pub mod logging;
 pub mod paths;
 pub mod sidecar;
+pub mod tray;
 
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use launcher_core::{
 };
 use launcher_types::StaleProcessInfo;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::app_state::{AppState, managed_keys};
 
@@ -56,6 +58,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         // Keep in sync with build.rs and capabilities/main.json.
@@ -73,6 +76,13 @@ pub fn run() {
             commands::set_settings,
             commands::get_node_stats,
             commands::open_path,
+            commands::get_first_run_info,
+            commands::pick_data_dir,
+            commands::choose_data_dir,
+            commands::import_legacy_state,
+            commands::delete_node_data,
+            commands::copy_diagnostics,
+            commands::complete_first_run,
         ])
         .setup(|app| {
             setup(app.handle());
@@ -89,7 +99,9 @@ pub fn run() {
     }
 }
 
-fn show_main_window(app: &AppHandle) {
+/// Shows, unminimises and focuses the main window: from the tray, a second
+/// launch, or the macOS dock.
+pub(crate) fn show_main_window<R: tauri::Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
@@ -97,24 +109,56 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
-/// Starts everything. A failure is logged and ends the app with exit code 1
-/// rather than panicking inside the event loop.
+/// The app state, once startup succeeded.
+pub(crate) fn try_state<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<AppState> {
+    app.try_state::<AppState>()
+        .map(|state| state.inner().clone())
+}
+
+/// Starts everything. A failure is logged, shown in an error dialog, and ends
+/// the app with exit code 1 rather than panicking inside the event loop.
 fn setup(app: &AppHandle) {
     match tauri::async_runtime::block_on(start(app)) {
         Ok(state) => {
             app.manage(state.clone());
             bridge::forward_status(app.clone(), state.supervisor.watch_status());
             bridge::forward_node_stats(app.clone(), state.node_stats.clone());
-            if state.settings.current().start_node_on_launch {
-                tauri::async_runtime::spawn(start_on_launch(app.clone(), state));
+            tray::install(app, &state);
+            // Until the first-run flow is done the user has not chosen where
+            // the chain state goes, so zebrad waits for them.
+            let settings = state.settings.current();
+            if settings.start_node_on_launch && settings.first_run_done {
+                tauri::async_runtime::spawn(start_in_background(app.clone(), state));
             }
         }
         Err(err) => {
             tracing::error!(%err, "Zebra Launcher could not start");
             eprintln!("Zebra Launcher could not start: {err}");
-            app.exit(1);
+            show_startup_error(app, &err);
         }
     }
+}
+
+/// Tells the user why startup failed and where the log is, then exits with
+/// code 1 once the dialog is dismissed. The dialog is not modal to the event
+/// loop: `setup` runs on the main thread, where a blocking dialog must not.
+fn show_startup_error(app: &AppHandle, err: &StartupError) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+    let log_hint = match app.path().app_log_dir() {
+        Ok(dir) => format!("\n\nThe launcher log is in {}.", dir.display()),
+        Err(_) => String::new(),
+    };
+    let handle = app.clone();
+    app.dialog()
+        .message(format!(
+            "Zebra Launcher could not start:\n\n{err}{log_hint}"
+        ))
+        .title("Zebra Launcher")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| handle.exit(1));
 }
 
 /// The startup sequence up to a running supervisor. Runs inside the Tokio
@@ -167,8 +211,17 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     Ok(AppState::new(paths, supervisor, settings, node_stats))
 }
 
-/// Starts zebrad because `start_node_on_launch` is set.
-async fn start_on_launch(app: AppHandle, state: AppState) {
+/// Starts zebrad without a UI request waiting for the result: at launch
+/// when `start_node_on_launch` is set, and from the tray. A zebrad left by an
+/// earlier run is reported to the UI with [`STALE_PROCESS_EVENT`].
+pub(crate) async fn start_in_background(app: AppHandle, state: AppState) {
+    let _permit = match state.start_permit() {
+        Ok(permit) => permit,
+        Err(err) => {
+            tracing::warn!(%err, "zebrad was not started");
+            return;
+        }
+    };
     match state.supervisor.start().await {
         Ok(()) => {}
         Err(SupervisorError::StaleProcess(stale)) => {
