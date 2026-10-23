@@ -130,26 +130,25 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
         });
     };
 
-    // A folder chosen in an earlier, unfinished run of the wizard: there is no read-only query
-    // for the free space of an arbitrary folder, so choose it again (which changes nothing) for
-    // the free space there. Until that answers, or if it fails, the space shows as unknown.
+    // True while the free space of a folder chosen in an earlier run is being read.
+    let probing = RwSignal::new(false);
+    // A folder chosen in an earlier, unfinished run of the wizard: read the free space there
+    // (read-only, creating nothing). Nothing waits for it; until it answers, or if it fails,
+    // the space shows as unknown.
     let refresh_stored_dir = move |dir: String| {
-        busy.set(true);
+        probing.set(true);
         spawn_local(async move {
-            if let Ok(choice) = api::choose_data_dir(dir.clone()).await {
-                // Unless another folder was chosen meanwhile.
-                if chosen.with_untracked(|c| c.as_ref().is_some_and(|(d, _)| *d == dir)) {
-                    chosen.set(
-                        choice
-                            .settings
-                            .data_dir
-                            .clone()
-                            .map(|dir| (dir, choice.free_bytes)),
-                    );
-                    state.settings.set(Some(choice.settings));
+            let free = api::free_space(dir.clone()).await.ok().flatten();
+            // Unless another folder was chosen meanwhile.
+            chosen.update(|current| {
+                if let Some((current_dir, current_free)) = current
+                    && *current_dir == dir
+                    && current_free.is_none()
+                {
+                    *current_free = free;
                 }
-            }
-            busy.set(false);
+            });
+            probing.set(false);
         });
     };
 
@@ -319,7 +318,13 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                                                 <code>{state_dir(&dir)}</code>
                                             </dd>
                                             <dt>"Space"</dt>
-                                            <dd class="free-space">{free_text(free)}</dd>
+                                            <dd class="free-space">
+                                                {if free.is_none() && probing.get() {
+                                                    "checking the free space…".to_owned()
+                                                } else {
+                                                    free_text(free)
+                                                }}
+                                            </dd>
                                         </dl>
                                         {low_space_warning(free)}
                                     }

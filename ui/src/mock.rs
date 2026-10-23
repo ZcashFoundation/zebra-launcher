@@ -1003,6 +1003,18 @@ pub async fn choose_data_dir(path: String) -> Result<DataDirChoice, String> {
     })
 }
 
+pub async fn free_space(path: String) -> Option<u64> {
+    // Slower than most commands, so the wizard's "checking" state can be seen.
+    sleep(700).await;
+    let path = path.trim().trim_end_matches('/');
+    match path {
+        DEFAULT_DATA_DIR => Some(FREE_AT_DEFAULT),
+        PICKED_DATA_DIR => Some(FREE_AT_PICKED),
+        _ if path.starts_with('/') => Some(FREE_ELSEWHERE),
+        _ => None,
+    }
+}
+
 pub async fn import_legacy_state() -> Result<ImportOutcome, String> {
     sleep(800).await;
     let mock = mock();

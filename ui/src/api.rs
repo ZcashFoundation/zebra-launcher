@@ -294,6 +294,20 @@ pub async fn choose_data_dir(path: String) -> ApiResult<DataDirChoice> {
     Ok(tauri::invoke("choose_data_dir", &ChooseDataDirArgs { path: &path }).await?)
 }
 
+#[derive(Serialize)]
+struct FreeSpaceArgs<'a> {
+    path: &'a str,
+}
+
+/// The free space at `path` (or its nearest existing ancestor). Read-only: nothing is created
+/// or saved. `None` when it cannot be read.
+pub async fn free_space(path: String) -> ApiResult<Option<u64>> {
+    if !is_tauri() {
+        return Ok(wire(mock::free_space(path).await)?);
+    }
+    Ok(tauri::invoke("free_space", &FreeSpaceArgs { path: &path }).await?)
+}
+
 /// Moves the alpha.4 state into the current state directory: a rename on the same volume,
 /// only while zebrad is stopped or failed.
 pub async fn import_legacy_state() -> ApiResult<ImportOutcome> {
