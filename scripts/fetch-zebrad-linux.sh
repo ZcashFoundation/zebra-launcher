@@ -104,18 +104,28 @@ for tool in curl cosign tar gzip sha256sum; do
     command -v "${tool}" >/dev/null 2>&1 || die "${tool} is required but not on PATH"
 done
 
-# A gh on PATH must be able to pin the attestation to the tag and commit;
-# checked before downloading anything. The help goes through a variable, as
-# `gh ... | grep -q` could fail with SIGPIPE under pipefail.
+# The attestation check is defence in depth on top of cosign and sha256. It
+# needs a gh that can pin the attestation to the tag and commit. Without one
+# the check is skipped with a notice, unless REQUIRE_ATTESTATION=1 (CI sets it),
+# in which case a missing or old gh is an error. Checked before downloading
+# anything. The help goes through a variable, as `gh ... | grep -q` could fail
+# with SIGPIPE under pipefail.
 use_gh=false
+gh_skip_reason=""
 if command -v gh >/dev/null 2>&1; then
     gh_help="$(gh attestation verify --help 2>&1)" || gh_help=""
-    if ! grep -q -- '--source-digest' <<<"${gh_help}"; then
+    if grep -q -- '--source-digest' <<<"${gh_help}"; then
+        use_gh=true
+    else
         gh_version="$(gh --version 2>/dev/null)" || gh_version=""
         gh_version="${gh_version%%$'\n'*}"
-        die "${gh_version:-gh} on PATH lacks 'gh attestation verify --source-digest'; the attestation check needs gh >= ${MIN_GH_VERSION}. Upgrade gh, or take it off PATH to skip the check"
+        gh_skip_reason="${gh_version:-gh} on PATH lacks 'gh attestation verify --source-digest' (needs gh >= ${MIN_GH_VERSION})"
     fi
-    use_gh=true
+else
+    gh_skip_reason="gh is not on PATH (the check needs gh >= ${MIN_GH_VERSION})"
+fi
+if [ "${use_gh}" = false ] && [ "${REQUIRE_ATTESTATION:-0}" = "1" ]; then
+    die "REQUIRE_ATTESTATION=1 but the attestation check cannot run: ${gh_skip_reason}"
 fi
 
 tag="v${version}"
@@ -174,7 +184,7 @@ if [ "${use_gh}" = true ]; then
         die "gh attestation verify failed for ${asset}"
     attestation="verified"
 else
-    echo "Skipping the GitHub attestation check: gh is not on PATH (the check needs gh >= ${MIN_GH_VERSION})"
+    echo "Skipping the GitHub attestation check: ${gh_skip_reason}"
 fi
 
 echo "Extracting zebrad"

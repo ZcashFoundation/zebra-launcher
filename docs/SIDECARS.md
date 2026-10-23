@@ -52,9 +52,10 @@ to install anything unless all of these checks pass:
    same workflow, and was built from `refs/tags/v<ver>` (`--source-ref`) at the
    pinned commit (`--source-digest`). This check needs `gh` 2.68.0 or newer,
    the first release with those two flags, and a logged-in `gh` (or
-   `GH_TOKEN`). If no `gh` is on `PATH`, the script says it skipped this check.
-   If an older `gh` is on `PATH`, the script stops with an error naming the
-   minimum version before it downloads anything.
+   `GH_TOKEN`). If no `gh` or an older `gh` is on `PATH`, the script says it
+   skipped this check and names the minimum version; the cosign and sha256
+   checks still apply. CI sets `REQUIRE_ATTESTATION=1`, which turns a skipped
+   attestation check into an error before anything is downloaded.
 4. The extracted binary prints `zebrad <ver>` for `--version`.
 
 **macOS and Windows.** `build-zebrad.sh` and `build-zebrad.ps1` clone Zebra at

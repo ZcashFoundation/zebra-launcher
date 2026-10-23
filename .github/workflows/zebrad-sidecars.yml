@@ -134,6 +134,8 @@ jobs:
       - name: Download and verify zebrad
         env:
           GH_TOKEN: ${{ github.token }}
+          # CI must never skip the attestation check.
+          REQUIRE_ATTESTATION: "1"
         run: scripts/fetch-zebrad-linux.sh --version "${VERSION}" --commit "${COMMIT}" --target "${TARGET}" --out "${SIDECAR}"
 
       - name: Smoke test
