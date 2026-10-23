@@ -196,6 +196,9 @@ try {
     Write-Host "+ `$env:LIBCLANG_PATH = '$env:LIBCLANG_PATH'"
     if (-not $DryRun) {
         if (-not $env:LIBCLANG_PATH) { throw 'libclang.dll not found: install LLVM or set LIBCLANG_PATH' }
+        if (-not (Test-Path (Join-Path $env:LIBCLANG_PATH 'libclang.dll'))) {
+            throw "libclang.dll not found in LIBCLANG_PATH ($env:LIBCLANG_PATH)"
+        }
         if (-not (Get-Command protoc -ErrorAction SilentlyContinue)) { throw 'protoc is not on PATH' }
     }
 
