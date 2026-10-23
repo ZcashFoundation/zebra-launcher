@@ -427,6 +427,18 @@ pub async fn health_gate(
                 let status = status.borrow_and_update();
                 match &status.phase {
                     Phase::Running if status.rpc_addr.is_some() => return Ok(()),
+                    // Not a configuration problem: only a newer release helps.
+                    Phase::Failed {
+                        class: ExitClass::EosHalt,
+                    } => {
+                        return Err(health_failure(
+                            pending,
+                            current_version,
+                            releases_url,
+                            "zebrad is past its end of support; update required.".to_string(),
+                            vec![RecoveryAction::OpenReleasesPage],
+                        ));
+                    }
                     Phase::Failed { class } => {
                         return Err(fail(failed_message(*class, status.last_exit.as_ref())));
                     }
@@ -743,6 +755,35 @@ mod tests {
             ]
         );
         assert!(failure.message.contains("5 minutes"), "{}", failure.message);
+    }
+
+    #[tokio::test]
+    async fn gate_reports_an_eos_halt_without_reset_config() {
+        let (_tx, rx) = watch::channel(Status {
+            phase: Phase::Failed {
+                class: ExitClass::EosHalt,
+            },
+            ..Status::default()
+        });
+        let failure = tokio::time::timeout(
+            T,
+            health_gate(
+                &pending("0.2.0", true),
+                "0.2.0",
+                rx,
+                HEALTH_GATE_TIMEOUT,
+                "u",
+            ),
+        )
+        .await
+        .expect("in time")
+        .expect_err("halted");
+        assert!(
+            failure.message.contains("end of support"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(failure.recovery, vec![RecoveryAction::OpenReleasesPage]);
     }
 
     #[tokio::test]
