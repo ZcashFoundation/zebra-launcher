@@ -38,6 +38,7 @@ pub fn exit_class_text(class: ExitClass) -> &'static str {
         ExitClass::EosHalt => "this zebrad release is past its end of support",
         ExitClass::DbLocked => "another zebrad is using the state database",
         ExitClass::PortInUse => "a port zebrad needs is already in use",
+        ExitClass::SpawnFailed => "zebrad could not be started",
         ExitClass::Crash => "zebrad crashed",
     }
 }
