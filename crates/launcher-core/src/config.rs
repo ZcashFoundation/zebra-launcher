@@ -441,12 +441,6 @@ fn restore_backup(paths: &Paths) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// The read-only reference shown next to the editor: zebrad's own
-/// `zebrad generate` output, listing every option with its default.
-pub fn reference_text(zebrad_generate_output: &str) -> String {
-    zebrad_generate_output.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,7 +559,6 @@ tx_cost_limit = 1000
     #[test]
     fn validate_accepts_the_generated_reference() {
         validate(GENERATED).expect("zebrad generate output is valid");
-        assert_eq!(reference_text(GENERATED), GENERATED);
         validate("").expect("an empty file is valid");
         validate(
             "[rpc]\nlisten_addr = \"[::1]:8232\"\n[health]\nlisten_addr = \"127.0.0.1:8080\"\n",
