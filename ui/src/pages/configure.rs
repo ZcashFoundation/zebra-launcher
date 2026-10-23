@@ -264,7 +264,12 @@ pub fn Configure() -> impl IntoView {
             {load_error_view}
             {body}
             <section class="config-reset">
-                <ResetConfigButton disabled=Signal::derive(move || mode.get() != Mode::Viewing) />
+                // Also when the file cannot be read, the main case a reset is for.
+                <ResetConfigButton disabled=Signal::derive(move || match mode.get() {
+                    Mode::Viewing => false,
+                    Mode::Loading => load_error.with(Option::is_none),
+                    Mode::Editing | Mode::Applying => true,
+                }) />
             </section>
         </div>
     }

@@ -38,7 +38,8 @@ backend that makes every page demoable:
   text; a config containing the line `# simulate-conflict` gets the "file changed on disk" error;
   one containing `# simulate-read-failure` makes the reload after Save fail (add `bogus` too to
   see a rollback followed by a failed reload). "Reset to managed defaults…" works once the node is
-  stopped and replaces the text with the launcher's minimal file;
+  stopped and replaces the text with the launcher's minimal file. `?configfail` makes the first
+  read of the config fail, as for an unreadable file; Reset stays available then;
 - open `http://localhost:1420/?stale` to simulate a zebrad left behind by an earlier launcher run:
   the stale-process banner shows, Start fails, and "Stop it and start" clears it;
 - open `http://localhost:1420/?firstrun` for the first-run wizard: zebrad stays stopped until

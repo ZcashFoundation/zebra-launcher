@@ -468,7 +468,8 @@ impl Mock {
             next_seq: Arc::new(AtomicU64::new(0)),
             generation: Arc::new(AtomicU64::new(0)),
             next_pid: Arc::new(AtomicU32::new(4242)),
-            fail_next_read: Arc::new(AtomicBool::new(false)),
+            // `?configfail`: the first `read_config` fails, as for an unreadable file.
+            fail_next_read: Arc::new(AtomicBool::new(url_flag("configfail"))),
             legacy: ArcRwSignal::new(first_run.then(sample_legacy)),
             state_bytes: Arc::new(AtomicU64::new(if first_run {
                 0
