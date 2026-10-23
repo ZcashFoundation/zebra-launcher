@@ -404,6 +404,59 @@ pub fn delete_node_data(
     allowed_roots: &[&Path],
     sizes: &SizeCache,
 ) -> io::Result<u64> {
+    delete_state_dir(
+        state_dir,
+        allowed_roots,
+        sizes,
+        "the launcher's data directories",
+    )
+}
+
+/// Deletes the alpha.4 chain state, `<zebra_cache_dir>/state`, and returns
+/// how many bytes it held as far as `sizes` knows them (0 for unknown), like
+/// [`delete_node_data`]. The rest of the zebra cache directory (the peer
+/// cache) stays.
+///
+/// The same safety rules as [`delete_node_data`] apply, with
+/// `zebra_cache_dir` (zebrad's default cache directory) as the only allowed
+/// root: the directory must be named `state` and lie strictly inside it after
+/// resolving symbolic links. It also refuses when `current_state_dir`, the
+/// launcher's own `state.cache_dir`, lies inside the zebra cache directory or
+/// contains the state to delete: that state is the launcher's, which
+/// [`detect_legacy`] does not report as a leftover either. A missing directory
+/// frees 0 bytes. The caller makes sure zebrad is stopped.
+pub fn delete_legacy_state(
+    zebra_cache_dir: &Path,
+    current_state_dir: &Path,
+    sizes: &SizeCache,
+) -> io::Result<u64> {
+    let state_dir = zebra_cache_dir.join(STATE_DIR_NAME);
+    let current = resolve(current_state_dir);
+    if current.starts_with(resolve(zebra_cache_dir)) || resolve(&state_dir).starts_with(&current) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to delete {}: the launcher keeps its own chain state there",
+                state_dir.display()
+            ),
+        ));
+    }
+    delete_state_dir(
+        &state_dir,
+        &[zebra_cache_dir],
+        sizes,
+        "zebrad's default cache directory",
+    )
+}
+
+/// Deletes `state_dir` if it is a `state` directory strictly inside one of
+/// `allowed_roots` (described as `roots_text` in the refusal).
+fn delete_state_dir(
+    state_dir: &Path,
+    allowed_roots: &[&Path],
+    sizes: &SizeCache,
+    roots_text: &str,
+) -> io::Result<u64> {
     match fs::symlink_metadata(state_dir) {
         Ok(_) => {}
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -413,7 +466,7 @@ pub fn delete_node_data(
         io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "refusing to delete {}: it is not a state directory inside the launcher's data directories",
+                "refusing to delete {}: it is not a state directory inside {roots_text}",
                 state_dir.display()
             ),
         )
@@ -434,7 +487,7 @@ pub fn delete_node_data(
         .or_else(|| sizes.cached(&resolved))
         .map_or(0, |(bytes, _)| bytes);
     fs::remove_dir_all(&resolved)?;
-    tracing::info!(dir = %resolved.display(), bytes, "deleted the node data");
+    tracing::info!(dir = %resolved.display(), bytes, "deleted a chain state directory");
     Ok(bytes)
 }
 
@@ -735,6 +788,88 @@ mod tests {
             delete_node_data(&state, &[paths.data_dir()], &sizes).expect("again"),
             0
         );
+    }
+
+    #[test]
+    fn delete_legacy_removes_only_the_old_state() {
+        let dir = tempdir();
+        let cache = dir.path().join("cache/zebra");
+        let ours = dir.path().join("launcher/data/state");
+        write_file(&cache.join("state/v27/mainnet/000001.sst"), 100);
+        write_file(&cache.join("network/mainnet.peers"), 5);
+        write_file(&ours.join("v27/mainnet/a.sst"), 1);
+        let locations = LegacyLocations {
+            exe_dir: None,
+            zebra_cache_dir: Some(cache.clone()),
+        };
+
+        // The size measured by the detection is what is reported.
+        let sizes = SizeCache::default();
+        let found = detect_legacy(&locations, &ours, &sizes).expect("found");
+        assert_eq!(found.state_bytes, 100);
+        assert_eq!(
+            delete_legacy_state(&cache, &ours, &sizes).expect("delete"),
+            100
+        );
+        assert!(!cache.join("state").exists());
+        assert!(cache.join("network/mainnet.peers").exists());
+        assert!(ours.join("v27/mainnet/a.sst").exists());
+        assert_eq!(detect_legacy(&locations, &ours, &sizes), None);
+
+        // Already gone; without a measured size the bytes are unknown (0).
+        assert_eq!(
+            delete_legacy_state(&cache, &ours, &sizes).expect("again"),
+            0
+        );
+        write_file(&cache.join("state/x"), 3);
+        assert_eq!(
+            delete_legacy_state(&cache, &ours, &SizeCache::default()).expect("unmeasured"),
+            0
+        );
+        assert!(!cache.join("state").exists());
+    }
+
+    #[test]
+    fn delete_legacy_refuses_the_launchers_own_state() {
+        let dir = tempdir();
+        let sizes = SizeCache::default();
+        let cache = dir.path().join("cache/zebra");
+        write_file(&cache.join("state/a"), 1);
+
+        // The launcher's data directory is the zebra cache dir, or inside it.
+        for ours in [cache.join("state"), cache.join("mine/state")] {
+            let err = delete_legacy_state(&cache, &ours, &sizes).expect_err("ours");
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            assert!(cache.join("state/a").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_legacy_resolves_links() {
+        let dir = tempdir();
+        let sizes = SizeCache::default();
+        let cache = dir.path().join("cache/zebra");
+        let ours = dir.path().join("data/state");
+        fs::create_dir_all(&cache).expect("mkdir");
+
+        // `state` is a link out of the cache dir: refused, nothing deleted.
+        let elsewhere = dir.path().join("elsewhere/state");
+        write_file(&elsewhere.join("a"), 1);
+        std::os::unix::fs::symlink(&elsewhere, cache.join("state")).expect("symlink");
+        let err = delete_legacy_state(&cache, &ours, &sizes).expect_err("link out");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(elsewhere.join("a").exists());
+        fs::remove_file(cache.join("state")).expect("unlink");
+
+        // The launcher's data dir is a link to the zebra cache dir.
+        write_file(&cache.join("state/b"), 1);
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&cache, &link).expect("symlink");
+        let err =
+            delete_legacy_state(&cache, &link.join("state"), &sizes).expect_err("ours via link");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(cache.join("state/b").exists());
     }
 
     #[test]
