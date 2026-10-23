@@ -23,8 +23,17 @@ eventually stops every user's node.
 Triggers:
 
 1. Primary: the Zebra release checklist includes bumping the launcher.
-2. Backstop: `zebrad-watch.yml` (daily and on dispatch) compares Zebra's latest
-   `vX.Y.Z` release with `ZEBRAD_VERSION` and opens a bump PR with a GitHub App token.
+2. Backstop: [`zebrad-watch.yml`](../.github/workflows/zebrad-watch.yml) (daily at
+   05:17 UTC and on dispatch) compares Zebra's latest `vX.Y.Z` release that has signed
+   binaries with `ZEBRAD_VERSION` and opens a bump PR (`bump/zebrad-<ver>`) with a
+   GitHub App token, since PRs opened with `GITHUB_TOKEN` do not trigger CI. It needs
+   the `ZEBRA_LAUNCHER_APP_ID` and `ZEBRA_LAUNCHER_APP_PRIVATE_KEY` secrets; without
+   them it opens a `release-blocker` issue instead. See
+   [SIDECARS.md](SIDECARS.md#bumping-zebrad_version).
+
+GitHub pauses scheduled workflows after 60 days without repository activity, which
+is why the watcher is only the backstop. If the Actions tab shows **zebrad watch** as
+disabled, re-enable it and run it once by hand.
 
 Bump PR checklist:
 
