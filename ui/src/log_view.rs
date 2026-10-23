@@ -167,10 +167,16 @@ pub fn time_of_day(timestamp: &str) -> &str {
         return timestamp;
     };
     let time = time.trim_end_matches('Z');
-    match time.find('.') {
-        Some(dot) => &time[..(dot + 4).min(time.len())],
-        None => time,
-    }
+    let Some(dot) = time.find('.') else {
+        return time;
+    };
+    // The dot and three characters after it, counted in characters so that a non-ASCII
+    // timestamp cannot split a code point.
+    let end = time[dot..]
+        .char_indices()
+        .nth(4)
+        .map_or(time.len(), |(offset, _)| dot + offset);
+    &time[..end]
 }
 
 #[cfg(test)]
@@ -330,5 +336,10 @@ mod tests {
         assert_eq!(time_of_day("2026-10-23T18:35:01.937583Z"), "18:35:01.937");
         assert_eq!(time_of_day("2026-10-23T18:35:01Z"), "18:35:01");
         assert_eq!(time_of_day("garbage"), "garbage");
+        assert_eq!(time_of_day("2026-10-23T18:35:01.9Z"), "18:35:01.9");
+        // Multi-byte characters right after the dot must not panic.
+        assert_eq!(time_of_day("xT01.éèêëZ"), "01.éèê");
+        assert_eq!(time_of_day("T.€"), ".€");
+        assert_eq!(time_of_day("日本T時.間"), "時.間");
     }
 }
