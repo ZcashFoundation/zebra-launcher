@@ -7,7 +7,22 @@ the scripts below and is never committed. The `zebra-launcher-` prefix keeps the
 Linux `.deb` from shadowing a system `/usr/bin/zebrad`.
 
 The zebrad version is pinned in [`ZEBRAD_VERSION`](../ZEBRAD_VERSION), written
-without a leading `v` (for example `7.0.0`).
+without a leading `v` (for example `7.0.0`). The Zebra commit that tag
+`v<ver>` points to is pinned next to it in [`ZEBRAD_COMMIT`](../ZEBRAD_COMMIT),
+as the full 40-character lowercase SHA. A Git tag can be moved, but a commit SHA
+cannot, so every script checks the release against the commit and not just the
+tag. The two files describe one release and change together (see
+[Bumping ZEBRAD_VERSION](#bumping-zebrad_version)).
+[`scripts/check-versions.sh`](../scripts/check-versions.sh), which CI runs,
+checks that both files are well formed and that `fake-zebrad` reports the same
+version. Once a workflow pins tauri-cli in a `TAURI_CLI_VERSION` env entry, it
+also checks that the pin has the same minor version as the `tauri` crate in
+`Cargo.lock`. No workflow pins tauri-cli yet, so the script skips that check.
+
+The scripts read both files by default. `ZEBRAD_COMMIT` applies only to the
+version in `ZEBRAD_VERSION`. To build any other version, pass its commit as well
+(`--commit` or `-Commit`). The build scripts refuse to run without one, and
+`fetch-zebrad-linux.sh` still checks the tag but does not pin the commit.
 
 ## Where each platform's zebrad comes from
 
@@ -27,17 +42,21 @@ Windows binaries are built from source.
 to install anything unless all of these checks pass:
 
 1. The cosign signature on `SHA256SUMS` is valid and was made by Zebra's
-   `zfnd-release-binaries.yml` workflow running for tag `v<ver>`.
+   `zfnd-release-binaries.yml` workflow running for tag `v<ver>` at the pinned
+   commit (`--certificate-github-workflow-sha`).
 2. The tarball matches its line in the signed `SHA256SUMS`.
 3. The tarball's GitHub build-provenance attestation is valid, comes from the
-   same workflow, and was built from `refs/tags/v<ver>`. This check needs
+   same workflow, and was built from `refs/tags/v<ver>` (`--source-ref`) at the
+   pinned commit (`--source-digest`). This check needs
    `gh` 2.49 or newer and a logged-in `gh` (or `GH_TOKEN`). With an older `gh`,
    or none, the script says it skipped this check. If `gh` is new enough, the
    check is required.
 4. The extracted binary prints `zebrad <ver>` for `--version`.
 
 **macOS and Windows.** `build-zebrad.sh` and `build-zebrad.ps1` clone Zebra at
-tag `v<ver>` and build it the way Zebra's release workflow builds its Linux
+tag `v<ver>`, or reuse an existing checkout with `--src-dir`. They refuse to
+build unless HEAD is the tag and the tag resolves to exactly the pinned commit.
+Then they build zebrad the way Zebra's release workflow builds its Linux
 binaries:
 
 - the toolchain pinned in Zebra's `rust-toolchain.toml`, through `RUSTUP_TOOLCHAIN`
@@ -53,7 +72,9 @@ cmake` and rustup. On Windows it is the VS 2022 C++ build tools, LLVM, protoc
 and rustup.
 
 **CI.** [`zebrad-sidecars.yml`](../.github/workflows/zebrad-sidecars.yml) runs
-the scripts on native runners for all five targets. It smoke-tests each binary
+the scripts on native runners for all five targets. Its first job reads
+`ZEBRAD_VERSION` and `ZEBRAD_COMMIT`, or the `version` and `commit` inputs, and
+passes both to every script. It smoke-tests each binary
 (`--version` and `generate`), attests its provenance with
 `actions/attest-build-provenance`, and uploads it as the workflow artifact
 `zebrad-<target triple>`. You can run it by hand (Actions → zebrad sidecars →
@@ -91,17 +112,20 @@ and, for step 3, `gh` 2.49 or newer.
 
 ```sh
 VER=7.0.0
+COMMIT=e8db87eb69254e0d4eedd058eadd48bdfa09065a   # ZEBRAD_COMMIT
 TARGET=x86_64-unknown-linux-gnu
 BASE=https://github.com/ZcashFoundation/zebra/releases/download/v$VER
 curl -fLO "$BASE/zebrad-$VER-$TARGET.tar.gz"
 curl -fLO "$BASE/SHA256SUMS"
 curl -fLO "$BASE/SHA256SUMS.sigstore.json"
 
-# 1. The checksum list was signed by Zebra's release workflow for this tag.
+# 1. The checksum list was signed by Zebra's release workflow for this tag,
+#    running at the pinned commit.
 cosign verify-blob SHA256SUMS \
   --bundle SHA256SUMS.sigstore.json \
   --certificate-identity "https://github.com/ZcashFoundation/zebra/.github/workflows/zfnd-release-binaries.yml@refs/tags/v$VER" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-github-workflow-sha "$COMMIT"
 # Expect: Verified OK
 
 # 2. The tarball matches the signed list.
@@ -112,7 +136,8 @@ sha256sum -c --ignore-missing SHA256SUMS
 gh attestation verify "zebrad-$VER-$TARGET.tar.gz" \
   --repo ZcashFoundation/zebra \
   --signer-workflow ZcashFoundation/zebra/.github/workflows/zfnd-release-binaries.yml \
-  --source-ref "refs/tags/v$VER"
+  --source-ref "refs/tags/v$VER" \
+  --source-digest "$COMMIT"
 
 # 4. The binary is the expected version.
 tar -xzf "zebrad-$VER-$TARGET.tar.gz" zebrad
@@ -129,11 +154,28 @@ tarball makes step 2 fail.
 
 1. Wait for the Zebra release to be published with its Linux assets: the two
    tarballs, `SHA256SUMS` and `SHA256SUMS.sigstore.json`.
-2. Write the new version, without `v`, to `ZEBRAD_VERSION`.
+2. Update `ZEBRAD_VERSION` and `ZEBRAD_COMMIT` together, in the same commit.
+   Never change one without the other.
+   - Write the new version, without `v`, to `ZEBRAD_VERSION`.
+   - Write the commit that the new tag points to, as the full 40-character
+     lowercase SHA, to `ZEBRAD_COMMIT`. Zebra's tags are annotated, so the
+     tag object's SHA is not the commit's SHA. Resolve the tag to its commit
+     with either of these:
+
+     ```sh
+     VER=7.0.0
+     git ls-remote https://github.com/ZcashFoundation/zebra "refs/tags/v$VER^{}"
+     # or, in a Zebra checkout that has the tag:
+     git rev-parse "v$VER^{commit}"
+     ```
+
+     Check the result against the commit shown on the GitHub release page.
 3. Update `VERSION` in `crates/launcher-core/src/bin/fake-zebrad.rs` so the
-   fake reports the same version.
+   fake reports the same version. Then run `scripts/check-versions.sh`.
 4. Check the new Linux release locally:
-   `scripts/fetch-zebrad-linux.sh --out /tmp/zebrad-check/zebrad`.
+   `scripts/fetch-zebrad-linux.sh --out /tmp/zebrad-check/zebrad`. The cosign
+   and attestation checks fail if `ZEBRAD_COMMIT` is not the commit that
+   Zebra's release workflow ran at.
 5. Run the **zebrad sidecars** workflow from your branch with an empty
    `version` input. All five jobs must pass. The macOS and Windows jobs build
    with the new tag's toolchain, and the first run after a bump takes 30–60

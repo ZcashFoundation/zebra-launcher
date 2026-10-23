@@ -11,16 +11,17 @@
 #
 # This script checks, in order:
 #   1. the cosign signature on SHA256SUMS, pinned to Zebra's release workflow
-#      at the release tag;
+#      at the release tag and, when the commit is known, at that commit;
 #   2. the tarball's checksum against the signed SHA256SUMS;
 #   3. the GitHub attestation of the tarball, when `gh attestation` exists
-#      (gh >= 2.49; it needs `gh auth login` or GH_TOKEN);
+#      (gh >= 2.49; it needs `gh auth login` or GH_TOKEN), pinned to the tag
+#      and, when the commit is known, to that commit;
 #   4. that the extracted binary reports the requested version.
 #
 # Requires: bash, curl, cosign, tar, gzip, sha256sum; optionally gh.
 #
-# Usage: scripts/fetch-zebrad-linux.sh [--target TRIPLE] [--version X.Y.Z] [--out PATH]
-#                                      [--from-dir DIR]
+# Usage: scripts/fetch-zebrad-linux.sh [--target TRIPLE] [--version X.Y.Z] [--commit SHA]
+#                                      [--out PATH] [--from-dir DIR]
 
 set -euo pipefail
 
@@ -35,11 +36,16 @@ die() {
 
 usage() {
     cat <<'EOF'
-Usage: fetch-zebrad-linux.sh [--target TRIPLE] [--version X.Y.Z] [--out PATH] [--from-dir DIR]
+Usage: fetch-zebrad-linux.sh [--target TRIPLE] [--version X.Y.Z] [--commit SHA] [--out PATH]
+                             [--from-dir DIR]
 
   --target    x86_64-unknown-linux-gnu or aarch64-unknown-linux-gnu
               (default: the host)
   --version   zebrad version without a leading "v" (default: ZEBRAD_VERSION)
+  --commit    full 40-hex Zebra commit that tag v<version> points to; the
+              signature and attestation must come from it (default:
+              ZEBRAD_COMMIT when the version is ZEBRAD_VERSION; for any
+              other version the commit is not pinned unless given)
   --out       where to install the binary
               (default: src-tauri/binaries/zebra-launcher-zebrad-<target>)
   --from-dir  verify and install the three release files from DIR instead of
@@ -51,6 +57,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 target=""
 version=""
+commit=""
 out=""
 from_dir=""
 
@@ -58,6 +65,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --target) [ $# -ge 2 ] || die "--target needs a value"; target="$2"; shift 2 ;;
         --version) [ $# -ge 2 ] || die "--version needs a value"; version="$2"; shift 2 ;;
+        --commit) [ $# -ge 2 ] || die "--commit needs a value"; commit="$2"; shift 2 ;;
         --out) [ $# -ge 2 ] || die "--out needs a value"; out="$2"; shift 2 ;;
         --from-dir) [ $# -ge 2 ] || die "--from-dir needs a value"; from_dir="$2"; shift 2 ;;
         -h | --help) usage; exit 0 ;;
@@ -80,6 +88,14 @@ esac
 if [ -z "${version}" ]; then
     [ -f "${repo_root}/ZEBRAD_VERSION" ] || die "no --version given and ${repo_root}/ZEBRAD_VERSION is missing"
     version="$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_VERSION")"
+fi
+# ZEBRAD_COMMIT pins the commit of ZEBRAD_VERSION, so it only applies to it.
+if [ -z "${commit}" ] && [ -f "${repo_root}/ZEBRAD_COMMIT" ] &&
+    [ "${version}" = "$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_VERSION" 2>/dev/null)" ]; then
+    commit="$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_COMMIT")"
+fi
+if [ -n "${commit}" ] && ! printf '%s\n' "${commit}" | grep -Eq '^[0-9a-f]{40}$'; then
+    die "commit '${commit}' is not a full 40-character lowercase hex SHA"
 fi
 case "${version}" in
     v* | V*) die "version '${version}' must not start with 'v' (asset names are zebrad-<X.Y.Z>-<target>.tar.gz)" ;;
@@ -119,10 +135,16 @@ fi
 
 echo "Verifying the cosign signature on SHA256SUMS"
 echo "  certificate identity: ${cert_identity}"
-cosign verify-blob "${work}/SHA256SUMS" \
-    --bundle "${work}/SHA256SUMS.sigstore.json" \
-    --certificate-identity "${cert_identity}" \
-    --certificate-oidc-issuer "${OIDC_ISSUER}" ||
+cosign_args=(
+    --bundle "${work}/SHA256SUMS.sigstore.json"
+    --certificate-identity "${cert_identity}"
+    --certificate-oidc-issuer "${OIDC_ISSUER}"
+)
+if [ -n "${commit}" ]; then
+    echo "  workflow commit: ${commit}"
+    cosign_args+=(--certificate-github-workflow-sha "${commit}")
+fi
+cosign verify-blob "${work}/SHA256SUMS" "${cosign_args[@]}" ||
     die "cosign could not verify SHA256SUMS; refusing to use this release"
 
 echo "Checking ${asset} against SHA256SUMS"
@@ -135,10 +157,13 @@ awk -v a="${asset}" '$2 == a || $2 == "*" a { found = 1 } END { exit !found }' \
 attestation="skipped"
 if command -v gh >/dev/null 2>&1 && gh attestation verify --help >/dev/null 2>&1; then
     echo "Verifying the GitHub build-provenance attestation of ${asset}"
-    gh attestation verify "${work}/${asset}" \
-        --repo "${REPO}" \
-        --signer-workflow "${SIGNER_WORKFLOW}" \
-        --source-ref "refs/tags/${tag}" ||
+    gh_args=(
+        --repo "${REPO}"
+        --signer-workflow "${SIGNER_WORKFLOW}"
+        --source-ref "refs/tags/${tag}"
+    )
+    [ -z "${commit}" ] || gh_args+=(--source-digest "${commit}")
+    gh attestation verify "${work}/${asset}" "${gh_args[@]}" ||
         die "gh attestation verify failed for ${asset}"
     attestation="verified"
 else
@@ -168,4 +193,4 @@ case "${reported}" in
 esac
 mv -f "${out}.tmp" "${out}"
 
-echo "zebrad ${version} (${target}): cosign verified, sha256 ok, attestation ${attestation}, installed at ${out}"
+echo "zebrad ${version} (${target}, commit ${commit:-not pinned}): cosign verified, sha256 ok, attestation ${attestation}, installed at ${out}"

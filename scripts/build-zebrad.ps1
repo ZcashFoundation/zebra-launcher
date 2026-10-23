@@ -15,9 +15,15 @@
 #   - rustup and git. The toolchain named in Zebra's rust-toolchain.toml is
 #     installed on demand.
 #
-# Usage: scripts/build-zebrad.ps1 [-Version X.Y.Z] [-Target TRIPLE] [-Out PATH]
-#                                 [-SrcDir DIR] [-DryRun]
+# The tag must resolve to the pinned commit (ZEBRAD_COMMIT, or -Commit), so a
+# moved tag cannot change what gets built.
+#
+# Usage: scripts/build-zebrad.ps1 [-Version X.Y.Z] [-Commit SHA] [-Target TRIPLE]
+#                                 [-Out PATH] [-SrcDir DIR] [-DryRun]
 #   -Version  zebrad version without a leading "v" (default: ZEBRAD_VERSION)
+#   -Commit   full 40-hex Zebra commit that tag v<version> must point to
+#             (default: ZEBRAD_COMMIT when the version is ZEBRAD_VERSION;
+#             required for any other version)
 #   -Target   Rust target triple (default: the host)
 #   -Out      where to install the binary
 #             (default: src-tauri\binaries\zebra-launcher-zebrad-<target>.exe)
@@ -28,6 +34,7 @@
 [CmdletBinding()]
 param(
     [string]$Version,
+    [string]$Commit,
     [string]$Target,
     [string]$Out,
     [string]$SrcDir,
@@ -61,6 +68,21 @@ if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$') {
 }
 $tag = "v$Version"
 
+# ZEBRAD_COMMIT pins the commit of ZEBRAD_VERSION, so it only applies to it.
+if (-not $Commit) {
+    $versionFile = Join-Path $repoRoot 'ZEBRAD_VERSION'
+    $pinnedVersion = if (Test-Path $versionFile) { (Get-Content -Raw $versionFile).Trim() } else { '' }
+    if ($Version -ne $pinnedVersion) {
+        throw "version $Version is not ZEBRAD_VERSION ($pinnedVersion); pass -Commit"
+    }
+    $commitFile = Join-Path $repoRoot 'ZEBRAD_COMMIT'
+    if (-not (Test-Path $commitFile)) { throw "$commitFile is missing; pass -Commit" }
+    $Commit = (Get-Content -Raw $commitFile).Trim()
+}
+if ($Commit -cnotmatch '^[0-9a-f]{40}$') {
+    throw "commit '$Commit' is not a full 40-character lowercase hex SHA"
+}
+
 $hostTriple = ((rustc -vV) | Select-String '^host: (.+)$').Matches[0].Groups[1].Value
 if (-not $Target) { $Target = $hostTriple }
 $exe = if ($Target -like '*-windows-*') { '.exe' } else { '' }
@@ -78,15 +100,22 @@ $SrcDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPat
 $Out = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Out)
 
 try {
-    # 1. Check out the release tag.
+    # 1. Check out the release tag, and check that it is the pinned commit.
     if (Test-Path (Join-Path $SrcDir '.git')) {
         Write-Host "Using the existing checkout in $SrcDir"
+    } else {
+        Invoke-Step git @('-c', 'advice.detachedHead=false', 'clone', '--depth', '1', '--branch', $tag, $ZebraGit, $SrcDir)
+    }
+    if (Test-Path (Join-Path $SrcDir '.git')) {
         $head = (git -C $SrcDir rev-parse HEAD).Trim()
         $tagCommit = (git -C $SrcDir rev-parse "refs/tags/$tag^{commit}")
         if ($LASTEXITCODE -ne 0) { throw "$SrcDir has no tag $tag" }
-        if ($head -ne $tagCommit.Trim()) { throw "$SrcDir is at $head, not at $tag ($tagCommit)" }
+        $tagCommit = $tagCommit.Trim()
+        if ($head -ne $tagCommit) { throw "$SrcDir is at $head, not at $tag ($tagCommit)" }
+        if ($tagCommit -cne $Commit) { throw "$tag is commit $tagCommit, but the pinned commit is $Commit" }
+        Write-Host "$tag is the pinned commit $Commit"
     } else {
-        Invoke-Step git @('-c', 'advice.detachedHead=false', 'clone', '--depth', '1', '--branch', $tag, $ZebraGit, $SrcDir)
+        Write-Host "+ check that $tag and HEAD are the pinned commit $Commit"
     }
 
     # 2. Use the toolchain Zebra pins for this release.
@@ -169,7 +198,7 @@ try {
     }
     Move-Item -Force $tmp $Out
 
-    Write-Host "zebrad $Version ($Target): built from $tag with $toolchain, installed at $Out"
+    Write-Host "zebrad $Version ($Target): built from $tag ($Commit) with $toolchain, installed at $Out"
 } finally {
     if ($tempRoot -and (Test-Path $tempRoot)) { Remove-Item -Recurse -Force $tempRoot }
 }
