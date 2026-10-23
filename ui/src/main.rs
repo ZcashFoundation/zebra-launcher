@@ -5,6 +5,14 @@
 //! it; the native binary does nothing.
 
 #![forbid(unsafe_code)]
+// Natively nothing mounts the app, so most of it is unused there.
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
+mod api;
+mod clock;
+mod mock;
+mod tauri;
+mod types;
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
