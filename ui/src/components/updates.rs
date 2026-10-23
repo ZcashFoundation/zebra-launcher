@@ -267,68 +267,91 @@ pub fn UpdateActions() -> impl IntoView {
         .into_any()
     };
 
-    let buttons = move || {
-        with_info(state, |info| {
-            let Some(info) = info else {
-                return Vec::new();
-            };
-            match &info.state {
-                UpdateState::Available { .. }
-                | UpdateState::ReadyToInstall {
-                    countdown_secs: None,
-                    ..
-                } => {
-                    if info.can_install {
-                        vec![button(
-                            "Install",
-                            "install the update",
-                            Action::Install,
-                            true,
-                        )]
-                    } else {
-                        vec![button(
-                            "Open releases page",
-                            "open the releases page",
-                            Action::OpenReleases,
-                            true,
-                        )]
-                    }
-                }
-                UpdateState::Downloading { .. } => vec![button(
-                    "Cancel download",
-                    "cancel the download",
-                    Action::Cancel,
-                    false,
-                )],
-                UpdateState::ReadyToInstall {
-                    countdown_secs: Some(_),
-                    ..
-                } => vec![
-                    button("Install now", "install the update", Action::Install, true),
-                    button(
-                        "Cancel",
-                        "cancel the automatic install",
-                        Action::Cancel,
-                        false,
-                    ),
-                ],
-                UpdateState::Error { .. } => vec![button(
-                    "Check again",
-                    "check for updates",
-                    Action::Check,
-                    false,
-                )],
-                UpdateState::Idle
-                | UpdateState::Checking
-                | UpdateState::Installing { .. }
-                | UpdateState::UpToDate { .. } => Vec::new(),
-            }
-        })
+    // Only the button set, so a progress or countdown event does not rebuild the buttons.
+    let buttons_kind = Memo::new(move |_| with_info(state, buttons_for));
+    let buttons = move || match buttons_kind.get() {
+        Buttons::None => Vec::new(),
+        Buttons::Install => vec![button(
+            "Install",
+            "install the update",
+            Action::Install,
+            true,
+        )],
+        Buttons::OpenReleases => vec![button(
+            "Open releases page",
+            "open the releases page",
+            Action::OpenReleases,
+            true,
+        )],
+        Buttons::CancelDownload => vec![button(
+            "Cancel download",
+            "cancel the download",
+            Action::Cancel,
+            false,
+        )],
+        Buttons::Countdown => vec![
+            button("Install now", "install the update", Action::Install, true),
+            button(
+                "Cancel",
+                "cancel the automatic install",
+                Action::Cancel,
+                false,
+            ),
+        ],
+        Buttons::CheckAgain => vec![button(
+            "Check again",
+            "check for updates",
+            Action::Check,
+            false,
+        )],
     };
 
     view! {
         {buttons}
         {move || error.get().map(|error| view! { <span class="error">{error}</span> })}
+    }
+}
+
+/// The update buttons a state shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Buttons {
+    None,
+    /// Install, where this installation can update itself.
+    Install,
+    /// Where it cannot.
+    OpenReleases,
+    CancelDownload,
+    /// "Install now" and "Cancel" during an automatic-install countdown.
+    Countdown,
+    CheckAgain,
+}
+
+fn buttons_for(info: Option<&UpdateInfo>) -> Buttons {
+    let Some(info) = info else {
+        return Buttons::None;
+    };
+    match &info.state {
+        UpdateState::Available { .. }
+        | UpdateState::ReadyToInstall {
+            countdown_secs: None,
+            ..
+        } => {
+            if info.can_install {
+                Buttons::Install
+            } else {
+                Buttons::OpenReleases
+            }
+        }
+        UpdateState::Downloading { .. } => Buttons::CancelDownload,
+        UpdateState::ReadyToInstall {
+            countdown_secs: Some(_),
+            ..
+        } => Buttons::Countdown,
+        UpdateState::Error { .. } => Buttons::CheckAgain,
+        UpdateState::Idle
+        | UpdateState::Checking
+        | UpdateState::Installing { .. }
+        | UpdateState::UpToDate { .. } => Buttons::None,
     }
 }
 
@@ -663,5 +686,50 @@ mod tests {
         }
         assert!(check_blocked(&downloading));
         assert!(!check_blocked(&available));
+    }
+
+    #[test]
+    fn buttons_change_with_the_kind_only() {
+        let info = |state, can_install| UpdateInfo {
+            state,
+            mode: launcher_types::UpdateMode::Auto,
+            current_version: "0.1.0".into(),
+            last_successful_check: None,
+            stale_check_warning: false,
+            can_install,
+            releases_url: String::new(),
+            health_failure: None,
+        };
+        let downloading = |downloaded| UpdateState::Downloading {
+            version: "0.2.0".into(),
+            downloaded,
+            total: Some(100),
+        };
+        let countdown = |secs| UpdateState::ReadyToInstall {
+            version: "0.2.0".into(),
+            countdown_secs: Some(secs),
+        };
+        assert_eq!(buttons_for(None), Buttons::None);
+        assert_eq!(
+            buttons_for(Some(&info(downloading(1), true))),
+            buttons_for(Some(&info(downloading(99), true))),
+        );
+        assert_eq!(
+            buttons_for(Some(&info(countdown(60), true))),
+            buttons_for(Some(&info(countdown(3), true))),
+        );
+        let available = UpdateState::Available {
+            version: "0.2.0".into(),
+            notes: None,
+            pub_date: None,
+        };
+        assert_eq!(
+            buttons_for(Some(&info(available.clone(), true))),
+            Buttons::Install
+        );
+        assert_eq!(
+            buttons_for(Some(&info(available, false))),
+            Buttons::OpenReleases
+        );
     }
 }
