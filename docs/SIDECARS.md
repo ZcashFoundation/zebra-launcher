@@ -50,10 +50,11 @@ to install anything unless all of these checks pass:
 2. The tarball matches its line in the signed `SHA256SUMS`.
 3. The tarball's GitHub build-provenance attestation is valid, comes from the
    same workflow, and was built from `refs/tags/v<ver>` (`--source-ref`) at the
-   pinned commit (`--source-digest`). This check needs
-   `gh` 2.49 or newer and a logged-in `gh` (or `GH_TOKEN`). With an older `gh`,
-   or none, the script says it skipped this check. If `gh` is new enough, the
-   check is required.
+   pinned commit (`--source-digest`). This check needs `gh` 2.68.0 or newer,
+   the first release with those two flags, and a logged-in `gh` (or
+   `GH_TOKEN`). If no `gh` is on `PATH`, the script says it skipped this check.
+   If an older `gh` is on `PATH`, the script stops with an error naming the
+   minimum version before it downloads anything.
 4. The extracted binary prints `zebrad <ver>` for `--version`.
 
 **macOS and Windows.** `build-zebrad.sh` and `build-zebrad.ps1` clone Zebra at
@@ -111,7 +112,7 @@ scripts/build-zebrad.sh                   # macOS host (takes a while)
 ## Verifying a Zebra tarball by hand
 
 You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
-and, for step 3, `gh` 2.49 or newer.
+and, for step 3, `gh` 2.68.0 or newer.
 
 ```sh
 VER=7.0.0

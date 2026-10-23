@@ -13,9 +13,11 @@
 #   1. the cosign signature on SHA256SUMS, pinned to Zebra's release workflow
 #      at the release tag and, when the commit is known, at that commit;
 #   2. the tarball's checksum against the signed SHA256SUMS;
-#   3. the GitHub attestation of the tarball, when `gh attestation` exists
-#      (gh >= 2.49; it needs `gh auth login` or GH_TOKEN), pinned to the tag
-#      and, when the commit is known, to that commit;
+#   3. the GitHub attestation of the tarball, when gh is on PATH, pinned to
+#      the tag and, when the commit is known, to that commit. This needs
+#      gh >= 2.68.0, the first release with `gh attestation verify
+#      --source-ref/--source-digest`, and `gh auth login` or GH_TOKEN. An older
+#      gh is an error, not a reason to skip the check;
 #   4. that the extracted binary reports the requested version.
 #
 # Requires: bash, curl, cosign, tar, gzip, sha256sum; optionally gh.
@@ -28,6 +30,8 @@ set -euo pipefail
 readonly REPO="ZcashFoundation/zebra"
 readonly SIGNER_WORKFLOW="${REPO}/.github/workflows/zfnd-release-binaries.yml"
 readonly OIDC_ISSUER="https://token.actions.githubusercontent.com"
+# The first gh with `gh attestation verify --source-ref/--source-digest`.
+readonly MIN_GH_VERSION="2.68.0"
 
 die() {
     echo "fetch-zebrad-linux: error: $*" >&2
@@ -100,6 +104,20 @@ for tool in curl cosign tar gzip sha256sum; do
     command -v "${tool}" >/dev/null 2>&1 || die "${tool} is required but not on PATH"
 done
 
+# A gh on PATH must be able to pin the attestation to the tag and commit;
+# checked before downloading anything. The help goes through a variable, as
+# `gh ... | grep -q` could fail with SIGPIPE under pipefail.
+use_gh=false
+if command -v gh >/dev/null 2>&1; then
+    gh_help="$(gh attestation verify --help 2>&1)" || gh_help=""
+    if ! grep -q -- '--source-digest' <<<"${gh_help}"; then
+        gh_version="$(gh --version 2>/dev/null)" || gh_version=""
+        gh_version="${gh_version%%$'\n'*}"
+        die "${gh_version:-gh} on PATH lacks 'gh attestation verify --source-digest'; the attestation check needs gh >= ${MIN_GH_VERSION}. Upgrade gh, or take it off PATH to skip the check"
+    fi
+    use_gh=true
+fi
+
 tag="v${version}"
 asset="zebrad-${version}-${target}.tar.gz"
 base_url="https://github.com/${REPO}/releases/download/${tag}"
@@ -144,7 +162,7 @@ awk -v a="${asset}" '$2 == a || $2 == "*" a { found = 1 } END { exit !found }' \
     die "checksum mismatch for ${asset}"
 
 attestation="skipped"
-if command -v gh >/dev/null 2>&1 && gh attestation verify --help >/dev/null 2>&1; then
+if [ "${use_gh}" = true ]; then
     echo "Verifying the GitHub build-provenance attestation of ${asset}"
     gh_args=(
         --repo "${REPO}"
@@ -156,7 +174,7 @@ if command -v gh >/dev/null 2>&1 && gh attestation verify --help >/dev/null 2>&1
         die "gh attestation verify failed for ${asset}"
     attestation="verified"
 else
-    echo "Skipping the GitHub attestation check: gh >= 2.49 with 'gh attestation' is not available"
+    echo "Skipping the GitHub attestation check: gh is not on PATH (the check needs gh >= ${MIN_GH_VERSION})"
 fi
 
 echo "Extracting zebrad"
