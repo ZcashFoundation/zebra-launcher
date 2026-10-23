@@ -29,6 +29,36 @@ security (user-run).
 
 TODO(M10): table of assets, threats and mitigations.
 
+## Release pipeline downloads
+
+What the privileged `bundle_sign` job of
+[`release.yml`](../.github/workflows/release.yml) downloads and runs, and how each item is
+checked:
+
+| What | From | Checked by |
+| --- | --- | --- |
+| GitHub Actions | `uses:` lines | pinned by commit SHA |
+| rustup-init (Linux container) | static.rust-lang.org | sha256 in [`setup-tauri`](../.github/actions/setup-tauri/action.yml) |
+| Rust toolchain | static.rust-lang.org | rustup's signed channel manifest |
+| tauri-cli, trunk | their GitHub releases | sha256 per platform in [`.github/tool-versions.env`](../.github/tool-versions.env) |
+| Artifact Signing client (Windows) | nuget.org | sha256 in `release.yml` |
+| zebrad sidecars | `zebrad-sidecars.yml` artifacts | cosign and attestations on Linux, built from the pinned commit elsewhere ([SIDECARS.md](SIDECARS.md)) |
+| AppRun, linuxdeploy (Linux AppImage) | tauri-apps/binary-releases, fetched by tauri-bundler | **nothing** |
+| linuxdeploy-plugin-appimage (Linux AppImage) | the moving `continuous` release of linuxdeploy/linuxdeploy-plugin-appimage, fetched by tauri-bundler | **nothing**; if the download fails, linuxdeploy uses its built-in copy |
+| NSIS 3.13 and nsis_tauri_utils.dll (Windows) | tauri-apps/binary-releases, tauri-apps/nsis-tauri-utils, fetched by tauri-bundler | SHA-1 hard-coded in tauri-bundler |
+| WebView2 bootstrapper | not downloaded at bundle time | the installer fetches it from Microsoft on the user's machine (default `downloadBootstrapper` mode) |
+
+The tauri-bundler rows are from the tauri-bundler 2.10.4 source, the version tauri-cli
+2.12.4 pins; re-check them when `TAURI_CLI_VERSION` changes. macOS bundling downloads
+nothing.
+
+The unverified Linux AppImage tools run inside `cargo tauri bundle`, whose environment
+holds `TAURI_SIGNING_PRIVATE_KEY`. A compromised tauri-apps/binary-releases or
+linuxdeploy-plugin-appimage release could therefore read the updater key.
+TODO(M10): close this, either by placing hash-checked copies in tauri-bundler's tools
+directory before bundling (it skips the download when the file exists) or by signing
+the updater artifacts in a separate step that is the only one to see the key.
+
 ## Code signing
 
 - macOS: Apple Developer ID, hardened runtime, notarization; sidecars are signed by the

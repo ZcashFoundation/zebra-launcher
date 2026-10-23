@@ -19,6 +19,21 @@
 # which has no secrets and read-only contents. No job restores a cache: the
 # signed bundle is made from binaries compiled from scratch in this run.
 #
+# Downloads in bundle_sign. tauri-cli and trunk are sha256-pinned in
+# .github/tool-versions.env, but tauri-cli's bundler (tauri-bundler 2.10.4 for
+# tauri-cli 2.12.4) also fetches helper tools itself while it bundles, with
+# the signing secrets in its environment:
+#   - Linux AppImage: AppRun and linuxdeploy from tauri-apps/binary-releases,
+#     and linuxdeploy-plugin-appimage from the moving `continuous` release of
+#     linuxdeploy/linuxdeploy-plugin-appimage. tauri-bundler checks NO hash
+#     for any of them, and runs them.
+#   - Windows NSIS: nsis-3.13.zip and the nsis_tauri_utils.dll plugin, each
+#     checked against a SHA-1 hard-coded in tauri-bundler.
+#   - WebView2: nothing at bundle time (the default downloadBootstrapper mode
+#     makes the installer fetch Microsoft's bootstrapper on the user's machine).
+#   - macOS: nothing.
+# See docs/SECURITY.md#release-pipeline-downloads.
+#
 # Secrets and variables live in the `release` environment; see
 # docs/RELEASING.md#secrets-inventory.
 name: Release
