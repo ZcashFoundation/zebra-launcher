@@ -23,6 +23,7 @@ use std::{
 
 use launcher_core::{
     firstrun,
+    supervisor::SupervisorError,
     updates::{
         self, FoundUpdate, NodeControl, OnChunk, UpdateBackend, UpdaterConfig, UpdaterHandle,
     },
@@ -45,9 +46,13 @@ pub const UPDATE_INFO_EVENT: &str = "update_info";
 /// [`launcher_types::UpdateHealthFailure`].
 pub const UPDATE_HEALTH_FAILED_EVENT: &str = "update_health_failed";
 
-/// How long a check may take. Downloads have no timeout; they can be
-/// cancelled.
+/// How long a check may take.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a download may take in total. The plugin copies the builder's
+/// timeout into the `Update` and applies it to the download request as an
+/// overall limit, so the check's 30 s would end any large download; the
+/// download gets this instead. The user can cancel it sooner.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// Development only: replaces the configured endpoints. Not read by release
 /// builds.
@@ -96,10 +101,31 @@ fn dev_endpoints() -> Result<Option<Vec<tauri::Url>>, String> {
 /// Whether this installation can replace itself: the AppImage, the NSIS
 /// installer and the macOS app can. The `.deb` cannot (its updates need root
 /// and the package manager), and neither can a development build.
+///
+/// On macOS `bundle_type()` reports `App` for any build, bundled or not, so
+/// the running executable must also be inside a `.app` bundle, and a debug
+/// build never counts.
 fn can_self_update() -> bool {
+    match bundle_type() {
+        Some(BundleType::AppImage | BundleType::Nsis) => true,
+        Some(BundleType::App) => {
+            !cfg!(debug_assertions)
+                && std::env::current_exe().is_ok_and(|exe| is_in_app_bundle(&exe))
+        }
+        _ => false,
+    }
+}
+
+/// `exe` is the main executable of a macOS `.app` bundle
+/// (`<name>.app/Contents/MacOS/<exe>`).
+fn is_in_app_bundle(exe: &std::path::Path) -> bool {
+    let mut dirs = exe.ancestors().skip(1).map(std::path::Path::file_name);
     matches!(
-        bundle_type(),
-        Some(BundleType::AppImage | BundleType::Nsis | BundleType::App)
+        (dirs.next(), dirs.next(), dirs.next()),
+        (Some(Some(macos)), Some(Some(contents)), Some(Some(app)))
+            if macos == "MacOS"
+                && contents == "Contents"
+                && std::path::Path::new(app).extension().is_some_and(|ext| ext == "app")
     )
 }
 
@@ -126,6 +152,9 @@ impl<R: Runtime> UpdateBackend for PluginBackend<R> {
     }
 
     async fn download(&self, release: &Update, on_chunk: OnChunk) -> Result<Vec<u8>, String> {
+        // The check's timeout came along in `release.timeout`; replace it.
+        let mut release = release.clone();
+        release.timeout = Some(DOWNLOAD_TIMEOUT);
         release.download(on_chunk, || {}).await.map_err(message)
     }
 
@@ -153,12 +182,24 @@ impl<R: Runtime> UpdateBackend for PluginBackend<R> {
 /// supervisor, but starts (the health gate's, and the restart after a failed
 /// install) follow the same rules as every other start:
 /// [`firstrun::start_allowed`], and not while the node data is being changed.
-#[derive(Clone)]
-struct GatedNode {
+/// A zebrad left by an earlier run is reported to the UI like at launch
+/// (`stale_process`); the health gate waits for the user to resolve it.
+struct GatedNode<R: Runtime> {
+    app: AppHandle<R>,
     state: AppState,
 }
 
-impl NodeControl for GatedNode {
+// Not derived: that would require `R: Clone`.
+impl<R: Runtime> Clone for GatedNode<R> {
+    fn clone(&self) -> Self {
+        Self {
+            app: self.app.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<R: Runtime> NodeControl for GatedNode<R> {
     fn watch_status(&self) -> watch::Receiver<Status> {
         self.state.supervisor.watch_status()
     }
@@ -170,7 +211,14 @@ impl NodeControl for GatedNode {
     async fn start(&self) -> Result<(), String> {
         firstrun::start_allowed(&self.state.settings.current())?;
         let _permit = self.state.start_permit()?;
-        NodeControl::start(&self.state.supervisor).await
+        match self.state.supervisor.start().await {
+            Ok(()) => Ok(()),
+            Err(SupervisorError::StaleProcess(stale)) => {
+                crate::report_stale_process(&self.app, &stale);
+                Err(SupervisorError::StaleProcess(stale).to_string())
+            }
+            Err(err) => Err(err.to_string()),
+        }
     }
 }
 
@@ -202,6 +250,7 @@ pub fn start<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> UpdaterHandle 
     let backend = PluginBackend { app: app.clone() };
     // The actor is spawned with `tokio::spawn`, so enter the runtime.
     let node = GatedNode {
+        app: app.clone(),
         state: state.clone(),
     };
     let handle = tauri::async_runtime::block_on(async {
@@ -258,5 +307,28 @@ async fn forward<R: Runtime>(app: AppHandle<R>, mut rx: watch::Receiver<UpdateIn
         if rx.changed().await.is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::is_in_app_bundle;
+
+    #[test]
+    fn app_bundle_detection() {
+        assert!(is_in_app_bundle(Path::new(
+            "/Applications/Zebra Launcher.app/Contents/MacOS/zebra-launcher"
+        )));
+        assert!(!is_in_app_bundle(Path::new(
+            "/Users/me/zebra-launcher/target/debug/zebra-launcher"
+        )));
+        assert!(!is_in_app_bundle(Path::new(
+            "/Applications/Zebra Launcher.app/Contents/Resources/zebra-launcher"
+        )));
+        assert!(!is_in_app_bundle(Path::new(
+            "/Contents/MacOS/zebra-launcher"
+        )));
     }
 }

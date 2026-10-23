@@ -18,15 +18,10 @@ use std::{
     time::Duration,
 };
 
+use launcher_core::supervisor;
 use tauri::{AppHandle, Manager, RunEvent, Runtime, WindowEvent};
 
 use crate::app_state::AppState;
-
-/// Extra time on top of the stop grace period before giving up on a clean
-/// shutdown: 70 s in total with the default 60 s grace.
-const SHUTDOWN_MARGIN: Duration = Duration::from_secs(10);
-/// The shutdown cap is never shorter than this.
-const MIN_SHUTDOWN_CAP: Duration = Duration::from_secs(70);
 
 /// Records the progress of the exit flow. Atomics only: the flow runs on the
 /// event loop thread and in one task.
@@ -104,7 +99,7 @@ pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
 /// Stops zebrad and the supervisor, giving up after the cap.
 async fn shutdown(state: &AppState) {
     let grace = Duration::from_secs(state.settings.current().stop_grace_secs);
-    let cap = (grace + SHUTDOWN_MARGIN).max(MIN_SHUTDOWN_CAP);
+    let cap = supervisor::shutdown_cap(grace);
     tracing::info!(cap_secs = cap.as_secs(), "stopping zebrad before exit");
     match tokio::time::timeout(cap, state.supervisor.shutdown()).await {
         // `Closed` means an earlier shutdown already ended the actor.

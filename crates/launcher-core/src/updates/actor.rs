@@ -20,15 +20,14 @@ use tokio::{
     time::Instant,
 };
 
+use crate::supervisor;
+
 use super::{
     FoundUpdate, Jitter, NodeControl, PendingUpdate, UpdateBackend, UpdaterRecord, clear_marker,
     eos_warning_active, next_check, node_is_running, save_record, should_auto_download,
     should_auto_install, stale_check_warning, write_marker,
 };
 
-/// Extra time on top of the stop grace period before an install gives up on
-/// stopping zebrad.
-const STOP_MARGIN: Duration = Duration::from_secs(10);
 /// Download progress is published at most this often.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -194,6 +193,7 @@ pub fn spawn<B: UpdateBackend, N: NodeControl>(
         eos: None,
         eos_halted: false,
         state: UpdateState::Idle,
+        before_check: None,
         found: None,
         bytes: None,
         install_after_download: false,
@@ -293,6 +293,8 @@ struct Actor<B: UpdateBackend, N: NodeControl> {
     eos_halted: bool,
 
     state: UpdateState,
+    /// The state before the running check, restored if it is cancelled.
+    before_check: Option<UpdateState>,
     found: Option<FoundUpdate<B::Release>>,
     /// The verified package for `found`.
     bytes: Option<Arc<Vec<u8>>>,
@@ -409,7 +411,10 @@ impl<B: UpdateBackend, N: NodeControl> Actor<B, N> {
                 self.abort_job();
                 self.last_attempt = Some(Instant::now());
                 self.reschedule();
-                self.state = self.resting_state().unwrap_or_default();
+                // Back to what was shown before the check (up to date, or
+                // the last error), not to Idle.
+                let before = self.before_check.take();
+                self.state = self.resting_state().or(before).unwrap_or_default();
                 self.reply_waiters();
             }
             Some(JobKind::Download) => {
@@ -659,6 +664,7 @@ impl<B: UpdateBackend, N: NodeControl> Actor<B, N> {
             handle,
         });
         self.next_check = None;
+        self.before_check = Some(self.current_state());
         self.state = UpdateState::Checking;
     }
 
@@ -686,16 +692,8 @@ impl<B: UpdateBackend, N: NodeControl> Actor<B, N> {
                     });
                 }
             });
-            let result = backend
-                .download(&release, on_chunk)
-                .await
-                .and_then(|bytes| {
-                    // Never hand over a package that does not verify.
-                    backend
-                        .verify(&release, &bytes)
-                        .map(|()| bytes)
-                        .map_err(|err| format!("the update's signature did not verify: {err}"))
-                });
+            // The install job verifies the package before zebrad is touched.
+            let result = backend.download(&release, on_chunk).await;
             let _ = events.send(Event::Downloaded { job: id, result });
         });
         self.job = Some(Job {
@@ -723,7 +721,8 @@ impl<B: UpdateBackend, N: NodeControl> Actor<B, N> {
             zebrad_was_running: node_is_running(&self.status.borrow()),
             written_at: SystemTime::now(),
         };
-        let stop_cap = Duration::from_secs(self.settings.borrow().stop_grace_secs) + STOP_MARGIN;
+        let stop_cap =
+            supervisor::shutdown_cap(Duration::from_secs(self.settings.borrow().stop_grace_secs));
         let id = self.new_job_id();
         let handle = tokio::spawn(install(InstallJob {
             id,
@@ -890,9 +889,9 @@ struct InstallJob<B: UpdateBackend, N> {
     events: mpsc::UnboundedSender<Event<B::Release>>,
 }
 
-/// verify → marker → stop zebrad → install → restart. On failure the marker
-/// is removed, zebrad is started again if it was running, and the actor is
-/// told.
+/// verify → stop zebrad → marker → install → restart. On failure the marker
+/// is removed, zebrad is started again if it was running (once any stop has
+/// finished), and the actor is told.
 async fn install<B: UpdateBackend, N: NodeControl>(job: InstallJob<B, N>) {
     let InstallJob {
         id,
@@ -909,12 +908,7 @@ async fn install<B: UpdateBackend, N: NodeControl>(job: InstallJob<B, N>) {
     let fail = |message: String| {
         let _ = events.send(Event::InstallFailed { job: id, message });
     };
-    let undo = async || {
-        if let Some(marker) = &marker
-            && let Err(err) = clear_marker(marker)
-        {
-            tracing::warn!(%err, "could not remove the pending-update marker");
-        }
+    let start_again = async || {
         if was_running {
             tracing::info!("starting zebrad again after the failed update");
             if let Err(err) = node.start().await {
@@ -923,32 +917,57 @@ async fn install<B: UpdateBackend, N: NodeControl>(job: InstallJob<B, N>) {
         }
     };
 
-    // Verify before zebrad is touched.
-    if let Err(err) = backend.verify(&release, &bytes) {
+    // Verify before zebrad is touched. Hashing the whole package is CPU
+    // work, so it runs on the blocking pool.
+    let verified = {
+        let (backend, release, bytes) = (backend.clone(), release.clone(), bytes.clone());
+        tokio::task::spawn_blocking(move || backend.verify(&release, &bytes))
+            .await
+            .unwrap_or_else(|err| Err(format!("the verification task failed: {err}")))
+    };
+    if let Err(err) = verified {
         fail(format!("the update's signature did not verify: {err}"));
         return;
     }
+    tracing::info!("stopping zebrad before installing the update");
+    let stop = node.stop();
+    tokio::pin!(stop);
+    let stopped = match tokio::time::timeout(stop_cap, &mut stop).await {
+        Ok(result) => result,
+        Err(_) => {
+            let secs = stop_cap.as_secs();
+            // Never start zebrad on top of a stop that is still under way:
+            // wait for it to finish (the supervisor kills zebrad after the
+            // grace period) before bringing zebrad back.
+            tracing::warn!(
+                secs,
+                "zebrad did not stop in time; waiting for the stop to finish"
+            );
+            if tokio::time::timeout(stop_cap, &mut stop).await.is_ok() {
+                start_again().await;
+            } else {
+                tracing::error!("zebrad is still stopping; not starting it again");
+            }
+            fail(format!(
+                "zebrad could not be stopped for the update: it did not stop within {secs} seconds"
+            ));
+            return;
+        }
+    };
+    if let Err(err) = stopped {
+        start_again().await;
+        fail(format!("zebrad could not be stopped for the update: {err}"));
+        return;
+    }
+
+    // Written only now, right before the install, so a crash or failure
+    // before this point never makes the next launch run the health gate.
     if let Some(marker) = &marker
         && let Err(err) = write_marker(marker, &pending)
     {
         // The update can still go ahead; only the post-update check is lost.
         tracing::warn!(%err, "could not write the pending-update marker");
     }
-
-    tracing::info!("stopping zebrad before installing the update");
-    let stopped = match tokio::time::timeout(stop_cap, node.stop()).await {
-        Ok(result) => result,
-        Err(_) => Err(format!(
-            "zebrad did not stop within {} seconds",
-            stop_cap.as_secs()
-        )),
-    };
-    if let Err(err) = stopped {
-        undo().await;
-        fail(format!("zebrad could not be stopped for the update: {err}"));
-        return;
-    }
-
     match backend.install(&release, bytes).await {
         Ok(()) => {
             let _ = events.send(Event::Installed { job: id });
@@ -956,7 +975,12 @@ async fn install<B: UpdateBackend, N: NodeControl>(job: InstallJob<B, N>) {
             backend.restart();
         }
         Err(err) => {
-            undo().await;
+            if let Some(marker) = &marker
+                && let Err(err) = clear_marker(marker)
+            {
+                tracing::warn!(%err, "could not remove the pending-update marker");
+            }
+            start_again().await;
             fail(format!("the update could not be installed: {err}"));
         }
     }
@@ -988,8 +1012,10 @@ mod tests {
         bad_signature: AtomicBool,
         install_fails: AtomicBool,
         download_delay_secs: AtomicUsize,
+        check_delay_secs: AtomicUsize,
         checks: AtomicUsize,
         downloads: AtomicUsize,
+        verifies: AtomicUsize,
         installs: AtomicUsize,
         restarts: AtomicUsize,
     }
@@ -1020,6 +1046,8 @@ mod tests {
 
         async fn check(&self) -> Result<Option<FoundUpdate<String>>, String> {
             self.inner.checks.fetch_add(1, Ordering::SeqCst);
+            let delay = self.inner.check_delay_secs.load(Ordering::SeqCst) as u64;
+            tokio::time::sleep(Duration::from_secs(delay)).await;
             Ok(self
                 .inner
                 .latest
@@ -1046,6 +1074,7 @@ mod tests {
         }
 
         fn verify(&self, release: &String, bytes: &[u8]) -> Result<(), String> {
+            self.inner.verifies.fetch_add(1, Ordering::SeqCst);
             if self.inner.bad_signature.load(Ordering::SeqCst) || bytes != release.as_bytes() {
                 Err("signature mismatch".into())
             } else {
@@ -1072,6 +1101,12 @@ mod tests {
         status: Arc<watch::Sender<Status>>,
         stops: Arc<AtomicUsize>,
         starts: Arc<AtomicUsize>,
+        /// How long `stop` takes, in seconds.
+        stop_delay_secs: Arc<AtomicUsize>,
+        /// Set while a stop is under way.
+        stopping: Arc<AtomicBool>,
+        /// A start arrived while a stop was under way.
+        started_while_stopping: Arc<AtomicBool>,
     }
 
     fn running() -> Status {
@@ -1088,6 +1123,9 @@ mod tests {
                 status: Arc::new(watch::channel(status).0),
                 stops: Arc::default(),
                 starts: Arc::default(),
+                stop_delay_secs: Arc::default(),
+                stopping: Arc::default(),
+                started_while_stopping: Arc::default(),
             }
         }
     }
@@ -1098,10 +1136,17 @@ mod tests {
         }
         async fn stop(&self) -> Result<(), String> {
             self.stops.fetch_add(1, Ordering::SeqCst);
+            self.stopping.store(true, Ordering::SeqCst);
+            let delay = self.stop_delay_secs.load(Ordering::SeqCst) as u64;
+            tokio::time::sleep(Duration::from_secs(delay)).await;
             self.status.send_replace(Status::default());
+            self.stopping.store(false, Ordering::SeqCst);
             Ok(())
         }
         async fn start(&self) -> Result<(), String> {
+            if self.stopping.load(Ordering::SeqCst) {
+                self.started_while_stopping.store(true, Ordering::SeqCst);
+            }
             self.starts.fetch_add(1, Ordering::SeqCst);
             self.status.send_replace(running());
             Ok(())
@@ -1291,6 +1336,8 @@ mod tests {
         assert_eq!(h.backend.count(|i| &i.restarts), 1);
         assert_eq!(h.node.stops.load(Ordering::SeqCst), 1);
         assert_eq!(h.backend.count(|i| &i.installs), 1);
+        // One verification, before zebrad was stopped.
+        assert_eq!(h.backend.count(|i| &i.verifies), 1);
         let pending = read_marker(&h.marker)
             .expect("read")
             .expect("marker written");
@@ -1536,5 +1583,114 @@ mod tests {
                 .expect("in time"),
             Err(UpdaterError::NoUpdate)
         );
+    }
+
+    async fn check_and_install(h: &Harness) {
+        tokio::time::timeout(T, h.handle.check())
+            .await
+            .expect("in time")
+            .expect("check");
+        tokio::time::timeout(T, h.handle.install())
+            .await
+            .expect("in time")
+            .expect("install starts");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_stop_cap_has_a_floor() {
+        let h = harness(UpdateMode::Notify, FakeBackend::with_latest(Some("0.2.0")));
+        h.settings.send_modify(|s| s.stop_grace_secs = 5);
+        // The supervisor takes 40 s to stop: more than grace + margin, less
+        // than the 70 s floor.
+        h.node.stop_delay_secs.store(40, Ordering::SeqCst);
+        check_and_install(&h).await;
+        idle(Duration::from_secs(41)).await;
+        assert_eq!(h.backend.count(|i| &i.installs), 1);
+        assert_eq!(h.node.starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_stop_is_waited_for_before_zebrad_starts_again() {
+        let h = harness(UpdateMode::Notify, FakeBackend::with_latest(Some("0.2.0")));
+        let cap = supervisor::shutdown_cap(Duration::from_secs(60));
+        h.node
+            .stop_delay_secs
+            .store((cap.as_secs() + 30) as usize, Ordering::SeqCst);
+        check_and_install(&h).await;
+        idle(cap + Duration::from_secs(10)).await;
+        // Past the cap, the stop is still under way: nothing starts yet.
+        assert_eq!(h.node.starts.load(Ordering::SeqCst), 0);
+        assert!(matches!(h.handle.state(), UpdateState::Installing { .. }));
+        let info = wait_for(&h.handle, "error", |i| {
+            matches!(i.state, UpdateState::Error { .. })
+        })
+        .await;
+        assert!(
+            matches!(info.state, UpdateState::Error { ref message, .. } if message.contains("did not stop")),
+            "{:?}",
+            info.state
+        );
+        assert_eq!(h.node.starts.load(Ordering::SeqCst), 1);
+        assert!(!h.node.started_while_stopping.load(Ordering::SeqCst));
+        assert_eq!(h.backend.count(|i| &i.installs), 0);
+        assert_eq!(read_marker(&h.marker).expect("read"), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_that_never_finishes_does_not_start_zebrad_again() {
+        let h = harness(UpdateMode::Notify, FakeBackend::with_latest(Some("0.2.0")));
+        h.node.stop_delay_secs.store(100_000, Ordering::SeqCst);
+        check_and_install(&h).await;
+        // The cap, then as long again for the stop to finish.
+        idle(supervisor::shutdown_cap(Duration::from_secs(60)) * 2).await;
+        wait_for(&h.handle, "error", |i| {
+            matches!(i.state, UpdateState::Error { .. })
+        })
+        .await;
+        assert_eq!(h.node.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(h.backend.count(|i| &i.installs), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_a_check_restores_the_previous_state() {
+        let h = harness(UpdateMode::Notify, FakeBackend::with_latest(None));
+        let first = tokio::time::timeout(T, h.handle.check())
+            .await
+            .expect("in time")
+            .expect("check");
+        assert!(matches!(first, UpdateState::UpToDate { .. }));
+
+        h.backend
+            .inner
+            .check_delay_secs
+            .store(3600, Ordering::SeqCst);
+        let handle = h.handle.clone();
+        let check = tokio::spawn(async move { handle.check().await });
+        wait_for(&h.handle, "checking", |i| i.state == UpdateState::Checking).await;
+        tokio::time::timeout(T, h.handle.cancel())
+            .await
+            .expect("in time")
+            .expect("cancel");
+        assert_eq!(h.handle.state(), first);
+        let answered = tokio::time::timeout(T, check)
+            .await
+            .expect("in time")
+            .expect("join")
+            .expect("check");
+        assert_eq!(answered, first);
+        assert!(h.handle.info().last_successful_check.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_marker_is_written_only_after_zebrad_stopped() {
+        let h = harness(UpdateMode::Notify, FakeBackend::with_latest(Some("0.2.0")));
+        h.node.stop_delay_secs.store(30, Ordering::SeqCst);
+        check_and_install(&h).await;
+        idle(Duration::from_secs(10)).await;
+        assert_eq!(h.node.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(read_marker(&h.marker).expect("read"), None);
+        idle(Duration::from_secs(30)).await;
+        assert_eq!(h.backend.count(|i| &i.installs), 1);
+        assert!(read_marker(&h.marker).expect("read").is_some());
     }
 }

@@ -25,6 +25,18 @@ use crate::{
 
 mod actor;
 
+/// Extra time on top of the stop grace period before giving up on a clean
+/// shutdown: 70 s in total with the default 60 s grace.
+const SHUTDOWN_MARGIN: Duration = Duration::from_secs(10);
+/// The shutdown cap is never shorter than this.
+const MIN_SHUTDOWN_CAP: Duration = Duration::from_secs(70);
+
+/// How long to wait for zebrad to stop, given the stop grace period, before
+/// giving up on a clean shutdown.
+pub fn shutdown_cap(grace: Duration) -> Duration {
+    (grace + SHUTDOWN_MARGIN).max(MIN_SHUTDOWN_CAP)
+}
+
 /// How the supervisor runs zebrad.
 #[derive(Clone, Debug)]
 pub struct SupervisorConfig {

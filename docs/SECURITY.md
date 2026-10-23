@@ -150,9 +150,10 @@ matching this platform it then checks, before anything is installed:
    This stops a tampered `latest.json` from pairing a new version number with an older,
    validly signed artifact (a downgrade). Signatures without a version are refused.
 
-The launcher checks the signature when the download finishes, again before it stops
-zebrad, and the plugin checks once more inside `install`. A package that fails is
-discarded and zebrad is never stopped for it.
+The plugin checks the signature when the download finishes, the launcher checks it
+again (on a blocking thread) right before it stops zebrad, and the plugin checks once
+more inside `install`. A package that fails is discarded and zebrad is never stopped
+for it.
 
 `requireSignedVersion` puts a requirement on how artifacts are signed: the signing tool
 must write the version into the trusted comment. Verified in the tauri-cli 2.12.0 and

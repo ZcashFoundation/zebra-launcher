@@ -27,7 +27,8 @@ use std::{
 };
 
 use launcher_types::{
-    EosInfo, ExitClass, Phase, RecoveryAction, Status, UpdateHealthFailure, UpdateMode,
+    EosInfo, ExitClass, Phase, RecoveryAction, StaleProcessInfo, Status, UpdateHealthFailure,
+    UpdateMode,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{sync::watch, time::Instant};
@@ -298,7 +299,9 @@ pub trait UpdateBackend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Vec<u8>, String>> + Send;
 
     /// Checks the package's signature against the public key built into
-    /// the app (and, when configured, the signed version).
+    /// the app (and, when configured, the signed version). This hashes the
+    /// whole package, so the actor calls it on the blocking pool, once per
+    /// install, before zebrad is stopped.
     fn verify(&self, release: &Self::Release, bytes: &[u8]) -> Result<(), String>;
 
     /// Installs the package. On Windows this ends the process when the
@@ -360,23 +363,39 @@ fn health_failure(
     current_version: &str,
     releases_url: &str,
     message: String,
+    recovery: Vec<RecoveryAction>,
 ) -> UpdateHealthFailure {
     UpdateHealthFailure {
         expected_version: pending.to_version.clone(),
         running_version: current_version.to_string(),
         message,
-        recovery: vec![
-            RecoveryAction::OpenLogs,
-            RecoveryAction::ResetConfig,
-            RecoveryAction::OpenReleasesPage,
-        ],
+        recovery,
         releases_url: releases_url.to_string(),
     }
+}
+
+/// What to offer when zebrad is unhealthy on the new version: its
+/// configuration may no longer suit it.
+fn unhealthy_recovery() -> Vec<RecoveryAction> {
+    vec![
+        RecoveryAction::OpenLogs,
+        RecoveryAction::ResetConfig,
+        RecoveryAction::OpenReleasesPage,
+    ]
 }
 
 /// Checks that the launcher came back healthy after the update in `pending`:
 /// it runs the new version and, if zebrad was running before, zebrad reaches
 /// `Running` with an RPC address within `timeout`.
+///
+/// A zebrad left by an earlier launcher run (`Status::stale`) is not a
+/// failure of the update: the gate waits for the user to resolve it, and the
+/// time limit restarts once it is gone. If it is still there at the limit,
+/// the failure names it and offers only the logs.
+///
+/// A launcher still on the old version means the install did not complete
+/// (the marker is written right before it): that is reported with the logs
+/// and the releases page only, since zebrad's configuration is not the cause.
 pub async fn health_gate(
     pending: &PendingUpdate,
     current_version: &str,
@@ -384,41 +403,89 @@ pub async fn health_gate(
     timeout: Duration,
     releases_url: &str,
 ) -> Result<(), UpdateHealthFailure> {
-    let fail = |message: String| health_failure(pending, current_version, releases_url, message);
+    let fail = |message: String| {
+        health_failure(
+            pending,
+            current_version,
+            releases_url,
+            message,
+            unhealthy_recovery(),
+        )
+    };
     if !versions_match(&pending.to_version, current_version) {
-        return Err(fail(format!(
-            "The update to {} did not install; Zebra Launcher {current_version} is still running.",
-            pending.to_version
-        )));
+        return Err(health_failure(
+            pending,
+            current_version,
+            releases_url,
+            format!(
+                "The update to {} did not complete; Zebra Launcher {current_version} is still running.",
+                pending.to_version
+            ),
+            vec![RecoveryAction::OpenLogs, RecoveryAction::OpenReleasesPage],
+        ));
     }
     if !pending.zebrad_was_running {
         return Ok(());
     }
-    let wait = async {
-        loop {
-            {
-                let status = status.borrow_and_update();
-                match &status.phase {
-                    Phase::Running if status.rpc_addr.is_some() => return Ok(()),
-                    Phase::Failed { class } => {
-                        return Err(fail(failed_message(*class, status.last_exit.as_ref())));
-                    }
-                    _ => {}
+    let mut deadline = Instant::now() + timeout;
+    let mut stale: Option<StaleProcessInfo> = None;
+    loop {
+        {
+            let status = status.borrow_and_update();
+            match &status.phase {
+                Phase::Running if status.rpc_addr.is_some() => return Ok(()),
+                // Not a configuration problem: only a newer release helps.
+                Phase::Failed {
+                    class: ExitClass::EosHalt,
+                } => {
+                    return Err(health_failure(
+                        pending,
+                        current_version,
+                        releases_url,
+                        "zebrad is past its end of support; update required.".to_string(),
+                        vec![RecoveryAction::OpenReleasesPage],
+                    ));
                 }
+                Phase::Failed { class } => {
+                    return Err(fail(failed_message(*class, status.last_exit.as_ref())));
+                }
+                _ => {}
             }
-            if status.changed().await.is_err() {
+            // A zebrad from an earlier launcher run blocks the start. That is
+            // not the update's fault: the user was told (`stale_process`) and
+            // decides. Once it is resolved, zebrad gets the full time again.
+            if stale.is_some() && status.stale.is_none() {
+                deadline = Instant::now() + timeout;
+            }
+            stale = status.stale.clone();
+        }
+        tokio::select! {
+            changed = status.changed() => if changed.is_err() {
                 return Err(fail(
                     "The zebrad supervisor stopped before zebrad was running.".to_string(),
                 ));
+            },
+            () = tokio::time::sleep_until(deadline) => {
+                return Err(match &stale {
+                    Some(stale) => health_failure(
+                        pending,
+                        current_version,
+                        releases_url,
+                        format!(
+                            "zebrad could not start after the update: a zebrad from an earlier \
+                             launcher run is still running (pid {}, {}). Stop it, or start zebrad \
+                             and let the launcher stop it.",
+                            stale.pid, stale.binary
+                        ),
+                        vec![RecoveryAction::OpenLogs],
+                    ),
+                    None => fail(format!(
+                        "zebrad did not reach Running with RPC within {} minutes after the update.",
+                        timeout.as_secs() / 60
+                    )),
+                });
             }
         }
-    };
-    match tokio::time::timeout(timeout, wait).await {
-        Ok(result) => result,
-        Err(_) => Err(fail(format!(
-            "zebrad did not reach Running with RPC within {} minutes after the update.",
-            timeout.as_secs() / 60
-        ))),
     }
 }
 
@@ -437,8 +504,9 @@ fn failed_message(class: ExitClass, exit: Option<&launcher_types::ExitInfo>) -> 
 /// Runs the health gate if the marker at `marker` exists, then removes it.
 ///
 /// When zebrad was running before the update and `start_node` is set (the
-/// launcher will not start it by itself), zebrad is started first. Returns
-/// `None` when there was no marker.
+/// launcher will not start it by itself), zebrad is started first, also when
+/// the update did not complete, since the update stopped it. Returns `None`
+/// when there was no marker.
 pub async fn run_health_gate<N: NodeControl>(
     marker: &Path,
     current_version: &str,
@@ -461,10 +529,7 @@ pub async fn run_health_gate<N: NodeControl>(
         to = %pending.to_version,
         "checking the launcher's health after an update"
     );
-    if start_node
-        && pending.zebrad_was_running
-        && versions_match(&pending.to_version, current_version)
-    {
+    if start_node && pending.zebrad_was_running {
         // The gate below reports a failure to reach Running.
         let node = node.clone();
         tokio::spawn(async move {
@@ -720,6 +785,103 @@ mod tests {
         assert!(failure.message.contains("5 minutes"), "{}", failure.message);
     }
 
+    fn stale_info() -> StaleProcessInfo {
+        StaleProcessInfo {
+            pid: 4242,
+            binary: "/old/zebrad".into(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gate_waits_for_a_stale_process_to_be_resolved() {
+        let (tx, rx) = watch::channel(Status {
+            stale: Some(stale_info()),
+            ..Status::default()
+        });
+        let gate = tokio::spawn(async move {
+            health_gate(
+                &pending("0.2.0", true),
+                "0.2.0",
+                rx,
+                HEALTH_GATE_TIMEOUT,
+                "u",
+            )
+            .await
+        });
+        // The user resolves it near the end of the time limit...
+        tokio::time::sleep(HEALTH_GATE_TIMEOUT - Duration::from_secs(10)).await;
+        tx.send_replace(Status {
+            phase: Phase::Starting,
+            ..Status::default()
+        });
+        // ...and zebrad still gets the full time to come up.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(!gate.is_finished());
+        tx.send_replace(running());
+        let result = tokio::time::timeout(T, gate)
+            .await
+            .expect("in time")
+            .expect("join");
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gate_names_an_unresolved_stale_process_without_reset_config() {
+        let (_tx, rx) = watch::channel(Status {
+            stale: Some(stale_info()),
+            ..Status::default()
+        });
+        let failure = tokio::time::timeout(
+            HEALTH_GATE_TIMEOUT + T,
+            health_gate(
+                &pending("0.2.0", true),
+                "0.2.0",
+                rx,
+                HEALTH_GATE_TIMEOUT,
+                "u",
+            ),
+        )
+        .await
+        .expect("in time")
+        .expect_err("still stale");
+        assert!(failure.message.contains("4242"), "{}", failure.message);
+        assert!(
+            failure.message.contains("/old/zebrad"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(failure.recovery, vec![RecoveryAction::OpenLogs]);
+    }
+
+    #[tokio::test]
+    async fn gate_reports_an_eos_halt_without_reset_config() {
+        let (_tx, rx) = watch::channel(Status {
+            phase: Phase::Failed {
+                class: ExitClass::EosHalt,
+            },
+            ..Status::default()
+        });
+        let failure = tokio::time::timeout(
+            T,
+            health_gate(
+                &pending("0.2.0", true),
+                "0.2.0",
+                rx,
+                HEALTH_GATE_TIMEOUT,
+                "u",
+            ),
+        )
+        .await
+        .expect("in time")
+        .expect_err("halted");
+        assert!(
+            failure.message.contains("end of support"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(failure.recovery, vec![RecoveryAction::OpenReleasesPage]);
+    }
+
     #[tokio::test]
     async fn gate_fails_fast_on_a_failed_zebrad_or_wrong_version() {
         let (_tx, rx) = watch::channel(Status {
@@ -753,6 +915,8 @@ mod tests {
             "{}",
             failure.message
         );
+        // The new version runs but zebrad fails: its configuration may be why.
+        assert!(failure.recovery.contains(&RecoveryAction::ResetConfig));
 
         let failure = tokio::time::timeout(
             T,
@@ -768,6 +932,16 @@ mod tests {
         .expect("in time")
         .expect_err("wrong version");
         assert_eq!(failure.running_version, "0.1.0");
+        // The install did not complete: zebrad's configuration is not to blame.
+        assert!(
+            failure.message.contains("did not complete"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(
+            failure.recovery,
+            vec![RecoveryAction::OpenLogs, RecoveryAction::OpenReleasesPage]
+        );
 
         // zebrad was not running before: only the version matters.
         let ok = tokio::time::timeout(
@@ -836,6 +1010,25 @@ mod tests {
         .expect("in time");
         assert_eq!(result, Some(Ok(())));
         assert_eq!(node.starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!marker.exists());
+
+        // The install did not complete (still 0.2.0): zebrad, which the
+        // update stopped, is started again anyway.
+        write_marker(&marker, &pending("0.3.0", true)).expect("write");
+        let result = tokio::time::timeout(
+            T,
+            run_health_gate(&marker, "0.2.0", &node, true, HEALTH_GATE_TIMEOUT, "u"),
+        )
+        .await
+        .expect("in time");
+        assert!(matches!(result, Some(Err(_))), "{result:?}");
+        tokio::time::timeout(T, async {
+            while node.starts.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("zebrad started again");
         assert!(!marker.exists());
 
         fs::write(&marker, b"garbage").expect("corrupt marker");
