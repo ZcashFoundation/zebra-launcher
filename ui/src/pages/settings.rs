@@ -62,12 +62,23 @@ fn parse_grafana_url(input: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// A change in flight on this page. Only one runs at a time: Save sends the whole settings
+/// object, so a Save racing a data folder change could store the folder it read before the
+/// change, and neither should run while node data is being deleted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mutation {
+    Save,
+    DataDir,
+    DeleteNodeData,
+}
+
 #[component]
 pub fn SettingsPage() -> impl IntoView {
     let state = AppState::get();
     let draft = RwSignal::new(None::<Settings>);
     let fields = RwSignal::new(TextFields::default());
-    let saving = RwSignal::new(false);
+    let busy = RwSignal::new(None::<Mutation>);
+    let saving = move || busy.get() == Some(Mutation::Save);
     let result = RwSignal::new(None::<Result<(), String>>);
 
     let reset = move || {
@@ -121,6 +132,9 @@ pub fn SettingsPage() -> impl IntoView {
 
     let save = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
+        if busy.get_untracked().is_some() {
+            return;
+        }
         let Some(mut settings) = draft.get_untracked() else {
             return;
         };
@@ -137,11 +151,11 @@ pub fn SettingsPage() -> impl IntoView {
         };
         settings.grafana_url = grafana_url;
         settings.stop_grace_secs = stop_grace_secs;
-        // `set_settings` saves `data_dir` as sent; never send one older than the stored one.
+        // `set_settings` keeps the stored `data_dir` whatever is sent; send that one anyway.
         settings.data_dir = state
             .settings
             .with_untracked(|stored| stored.as_ref().and_then(|s| s.data_dir.clone()));
-        saving.set(true);
+        busy.set(Some(Mutation::Save));
         result.set(None);
         spawn_local(async move {
             match api::set_settings(settings).await {
@@ -152,7 +166,7 @@ pub fn SettingsPage() -> impl IntoView {
                 }
                 Err(error) => result.set(Some(Err(format!("Could not save: {error}")))),
             }
-            saving.set(false);
+            busy.set(None);
         });
     };
 
@@ -264,7 +278,7 @@ pub fn SettingsPage() -> impl IntoView {
                             <option value="testnet">"Testnet"</option>
                         </select>
                     </label>
-                    <DataDirRow draft />
+                    <DataDirRow draft busy />
                 </fieldset>
 
                 <fieldset>
@@ -291,7 +305,7 @@ pub fn SettingsPage() -> impl IntoView {
                 <div class="buttons">
                     <button
                         type="button"
-                        disabled=move || saving.get() || !dirty()
+                        disabled=move || busy.get().is_some() || !dirty()
                         on:click=move |_| {
                             reset();
                             result.set(None);
@@ -303,11 +317,11 @@ pub fn SettingsPage() -> impl IntoView {
                         type="submit"
                         class="primary"
                         disabled=move || {
-                            saving.get() || !dirty() || grafana_error.get().is_some()
+                            busy.get().is_some() || !dirty() || grafana_error.get().is_some()
                                 || grace_error.get().is_some()
                         }
                     >
-                        {move || if saving.get() { "Saving…" } else { "Save" }}
+                        {move || if saving() { "Saving…" } else { "Save" }}
                     </button>
                     {move || {
                         result
@@ -321,7 +335,7 @@ pub fn SettingsPage() -> impl IntoView {
             </form>
             <section class="settings">
                 <Diagnostics />
-                <DeleteNodeData />
+                <DeleteNodeData busy />
             </section>
         </Show>
     }
@@ -339,14 +353,19 @@ fn data_change_open(state: AppState) -> impl Fn() -> bool + Copy {
 /// The data directory, with "Change…" (folder picker, then `choose_data_dir`). It is saved
 /// right away, not by the form's Save; `draft` follows so the form does not look edited.
 #[component]
-fn DataDirRow(draft: RwSignal<Option<Settings>>) -> impl IntoView {
+fn DataDirRow(
+    draft: RwSignal<Option<Settings>>,
+    busy: RwSignal<Option<Mutation>>,
+) -> impl IntoView {
     let state = AppState::get();
     let allowed = data_change_open(state);
-    let busy = RwSignal::new(false);
     let result = RwSignal::new(None::<Result<Option<u64>, String>>);
 
     let change = move |_| {
-        busy.set(true);
+        if busy.get_untracked().is_some() {
+            return;
+        }
+        busy.set(Some(Mutation::DataDir));
         result.set(None);
         spawn_local(async move {
             let outcome = match api::pick_data_dir().await {
@@ -367,7 +386,7 @@ fn DataDirRow(draft: RwSignal<Option<Settings>>) -> impl IntoView {
                 Err(error) => Some(Err(format!("Could not open the folder picker: {error}"))),
             };
             result.set(outcome);
-            busy.set(false);
+            busy.set(None);
         });
     };
 
@@ -385,7 +404,7 @@ fn DataDirRow(draft: RwSignal<Option<Settings>>) -> impl IntoView {
             <div class="buttons">
                 <button
                     type="button"
-                    disabled=move || busy.get() || !allowed()
+                    disabled=move || busy.get().is_some() || !allowed()
                     on:click=change
                 >
                     "Change…"
@@ -506,12 +525,12 @@ fn Diagnostics() -> impl IntoView {
 /// "Delete node data": deletes the chain state after the user types [`DELETE_WORD`]. Only while
 /// zebrad is stopped or failed.
 #[component]
-fn DeleteNodeData() -> impl IntoView {
+fn DeleteNodeData(busy: RwSignal<Option<Mutation>>) -> impl IntoView {
     let state = AppState::get();
     let allowed = data_change_open(state);
     let confirming = RwSignal::new(false);
     let typed = RwSignal::new(String::new());
-    let busy = RwSignal::new(false);
+    let deleting = move || busy.get() == Some(Mutation::DeleteNodeData);
     let result = RwSignal::new(None::<Result<String, String>>);
 
     let state_folder = move || {
@@ -522,14 +541,17 @@ fn DeleteNodeData() -> impl IntoView {
             .unwrap_or_else(|| "the state folder in the launcher's data folder".into())
     };
     let delete = move |_| {
-        busy.set(true);
+        if busy.get_untracked().is_some() {
+            return;
+        }
+        busy.set(Some(Mutation::DeleteNodeData));
         result.set(None);
         spawn_local(async move {
             result.set(Some(match api::delete_node_data().await {
                 Ok(freed) => Ok(format!("Deleted the node data, freeing {}.", bytes(freed))),
                 Err(error) => Err(format!("Could not delete the node data: {error}")),
             }));
-            busy.set(false);
+            busy.set(None);
             confirming.set(false);
             typed.set(String::new());
         });
@@ -541,7 +563,7 @@ fn DeleteNodeData() -> impl IntoView {
             <div class="buttons">
                 <button
                     type="button"
-                    disabled=move || busy.get() || confirming.get() || !allowed()
+                    disabled=move || busy.get().is_some() || confirming.get() || !allowed()
                     on:click=move |_| {
                         result.set(None);
                         confirming.set(true);
@@ -579,15 +601,16 @@ fn DeleteNodeData() -> impl IntoView {
                             type="button"
                             class="danger"
                             disabled=move || {
-                                busy.get() || !allowed() || typed.with(|t| t.trim() != DELETE_WORD)
+                                busy.get().is_some() || !allowed()
+                                    || typed.with(|t| t.trim() != DELETE_WORD)
                             }
                             on:click=delete
                         >
-                            {move || if busy.get() { "Deleting…" } else { "Delete" }}
+                            {move || if deleting() { "Deleting…" } else { "Delete" }}
                         </button>
                         <button
                             type="button"
-                            disabled=move || busy.get()
+                            disabled=deleting
                             on:click=move |_| {
                                 confirming.set(false);
                                 typed.set(String::new());
