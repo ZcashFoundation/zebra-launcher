@@ -298,7 +298,9 @@ pub trait UpdateBackend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Vec<u8>, String>> + Send;
 
     /// Checks the package's signature against the public key built into
-    /// the app (and, when configured, the signed version).
+    /// the app (and, when configured, the signed version). This hashes the
+    /// whole package, so the actor calls it on the blocking pool, once per
+    /// install, before zebrad is stopped.
     fn verify(&self, release: &Self::Release, bytes: &[u8]) -> Result<(), String>;
 
     /// Installs the package. On Windows this ends the process when the

@@ -685,16 +685,8 @@ impl<B: UpdateBackend, N: NodeControl> Actor<B, N> {
                     });
                 }
             });
-            let result = backend
-                .download(&release, on_chunk)
-                .await
-                .and_then(|bytes| {
-                    // Never hand over a package that does not verify.
-                    backend
-                        .verify(&release, &bytes)
-                        .map(|()| bytes)
-                        .map_err(|err| format!("the update's signature did not verify: {err}"))
-                });
+            // The install job verifies the package before zebrad is touched.
+            let result = backend.download(&release, on_chunk).await;
             let _ = events.send(Event::Downloaded { job: id, result });
         });
         self.job = Some(Job {
@@ -926,8 +918,15 @@ async fn install<B: UpdateBackend, N: NodeControl>(job: InstallJob<B, N>) {
         }
     };
 
-    // Verify before zebrad is touched.
-    if let Err(err) = backend.verify(&release, &bytes) {
+    // Verify before zebrad is touched. Hashing the whole package is CPU
+    // work, so it runs on the blocking pool.
+    let verified = {
+        let (backend, release, bytes) = (backend.clone(), release.clone(), bytes.clone());
+        tokio::task::spawn_blocking(move || backend.verify(&release, &bytes))
+            .await
+            .unwrap_or_else(|err| Err(format!("the verification task failed: {err}")))
+    };
+    if let Err(err) = verified {
         fail(format!("the update's signature did not verify: {err}"));
         return;
     }
@@ -1011,6 +1010,7 @@ mod tests {
         download_delay_secs: AtomicUsize,
         checks: AtomicUsize,
         downloads: AtomicUsize,
+        verifies: AtomicUsize,
         installs: AtomicUsize,
         restarts: AtomicUsize,
     }
@@ -1067,6 +1067,7 @@ mod tests {
         }
 
         fn verify(&self, release: &String, bytes: &[u8]) -> Result<(), String> {
+            self.inner.verifies.fetch_add(1, Ordering::SeqCst);
             if self.inner.bad_signature.load(Ordering::SeqCst) || bytes != release.as_bytes() {
                 Err("signature mismatch".into())
             } else {
@@ -1328,6 +1329,8 @@ mod tests {
         assert_eq!(h.backend.count(|i| &i.restarts), 1);
         assert_eq!(h.node.stops.load(Ordering::SeqCst), 1);
         assert_eq!(h.backend.count(|i| &i.installs), 1);
+        // One verification, before zebrad was stopped.
+        assert_eq!(h.backend.count(|i| &i.verifies), 1);
         let pending = read_marker(&h.marker)
             .expect("read")
             .expect("marker written");
