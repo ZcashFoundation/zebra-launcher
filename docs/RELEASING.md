@@ -139,6 +139,11 @@ The repository variable `UPDATER_ENABLED` says whether releases ship the updater
   rehearsal). No `latest.json` is required and the placeholder key is accepted. Such a
   release cannot update itself; its users install the next one by hand.
 
+The `verify` job decides this once, in its `updater` step (`require_updater`, from the
+variable and `bundle.createUpdaterArtifacts`), and runs `check-versions.sh` after it with
+`UPDATER_ENABLED` set to that decision, so the public-key check and the artifacts always
+agree.
+
 To turn the updater on: run the key ceremony
 ([SECURITY.md](SECURITY.md#updater-key-custody-and-rotation)), merge the public key into
 `tauri.conf.json`, store the private key and password as `release` secrets, then delete

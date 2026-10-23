@@ -113,14 +113,6 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           echo "Zebra Launcher ${version}, prerelease: ${prerelease}" >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Check tool versions
-        shell: bash
-        env:
-          # "false" only while the repository variable says so; an unset
-          # variable means the updater is on and needs the real public key.
-          UPDATER_ENABLED: ${{ vars.UPDATER_ENABLED != 'false' }}
-        run: scripts/check-versions.sh
-
       # The five-target matrix, from .github/targets.json.
       - id: targets
         name: Read the target matrix
@@ -170,6 +162,14 @@ jobs:
           esac
           echo "require_updater=${require}" >> "${GITHUB_OUTPUT}"
           echo "Updater artifacts required: ${require} (createUpdaterArtifacts: ${configured}, UPDATER_ENABLED: '${UPDATER_ENABLED}')" >> "${GITHUB_STEP_SUMMARY}"
+
+      # After the updater decision, so the public-key check and the artifacts
+      # agree: the real key is required exactly when updater artifacts are.
+      - name: Check tool versions
+        shell: bash
+        env:
+          UPDATER_ENABLED: ${{ steps.updater.outputs.require_updater }}
+        run: scripts/check-versions.sh
 
   # ---------------------------------------------------------------------------
   # draft: one draft release, created once, so parallel jobs cannot race to
