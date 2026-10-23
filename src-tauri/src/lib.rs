@@ -76,6 +76,7 @@ pub fn run() {
             commands::restart_zebrad,
             commands::read_config,
             commands::apply_config,
+            commands::reset_config,
             commands::get_settings,
             commands::set_settings,
             commands::get_node_stats,

@@ -17,6 +17,7 @@
     "allow-restart-zebrad",
     "allow-read-config",
     "allow-apply-config",
+    "allow-reset-config",
     "allow-get-settings",
     "allow-set-settings",
     "allow-get-node-stats",

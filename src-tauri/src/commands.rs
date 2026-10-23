@@ -128,6 +128,26 @@ pub async fn read_config(state: State<'_, AppState>) -> Result<ConfigDocument, S
         .map_err(message)
 }
 
+/// Replaces `zebrad.toml` with a fresh minimal file holding only the managed
+/// keys, keeping the old file as `zebrad.toml.bak`, and returns the new
+/// document. Only while zebrad is stopped or failed: it holds the same gate as
+/// the data changes, so zebrad cannot start in the middle, and refuses while
+/// a configuration change is being applied.
+#[tauri::command]
+pub async fn reset_config(state: State<'_, AppState>) -> Result<ConfigDocument, String> {
+    let _data = state.data_change_permit()?;
+    let _config = state
+        .config_writer
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "a configuration change is being applied; try again".to_string())?;
+    let paths = state.paths.clone();
+    let keys = managed_keys(&state.settings.current(), &paths);
+    blocking(move || config::reset(&paths, &keys))
+        .await?
+        .map_err(|err| format!("could not reset zebrad.toml: {err}"))
+}
+
 fn apply_error(kind: ApplyErrorKind, message: impl Display) -> ApplyError {
     ApplyError {
         kind,

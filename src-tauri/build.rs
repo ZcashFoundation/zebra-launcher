@@ -16,6 +16,7 @@ const COMMANDS: &[&str] = &[
     "restart_zebrad",
     "read_config",
     "apply_config",
+    "reset_config",
     "get_settings",
     "set_settings",
     "get_node_stats",

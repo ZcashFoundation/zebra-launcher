@@ -92,8 +92,9 @@ the UI's error banner (the first one per event or channel), not only logged.
 The updater UI: a header banner while an update is available, downloading, ready,
 counting down (not dismissible) or installing (not dismissible), or failed; Settings →
 Updates with the mode, "Check now" (every mode, Off included), the stale-check warning
-and the post-update recovery panel (open logs; how to reset `zebrad.toml`, as there is
-no `reset_config` command; the releases page); and "Check for updates" on the
+and the post-update recovery panel (open logs; reset `zebrad.toml` with `reset_config`
+while zebrad is stopped or failed, with the manual steps as a fallback while it runs; the
+releases page); and "Check for updates" on the
 dashboard's end-of-support banner once the halt is under 14 days away or zebrad halted.
 Where `UpdateInfo.can_install` is false (`.deb`, development builds) the UI offers
 "Open releases page" instead of Install.
@@ -201,6 +202,12 @@ Applying an edit:
    watched for 20 s. On `ConfigError` the `.bak` is restored, zebrad is restarted, and
    the UI shows zebrad's stderr plus "rolled back". A crash mid-apply rolls back on the
    next launch via the marker.
+
+`reset_config` (Configure → "Reset to managed defaults", and the post-update recovery
+panel) replaces the file with the minimal one `config::ensure` creates, keeping the old
+file as the same `zebrad.toml.bak`, and returns the new `ConfigDocument`. It runs only
+while zebrad is `Stopped` or `Failed`, holding the data-change gate (see below) so zebrad
+cannot start meanwhile, and refuses while an apply is in flight or its marker is pending.
 
 When the bundled zebrad version changes, the config is validated with a 10 s probe run
 first; on failure the managed keys are regenerated, the user's other keys kept, and the
