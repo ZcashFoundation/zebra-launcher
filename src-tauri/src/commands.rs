@@ -27,7 +27,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::sync::oneshot;
 
 use crate::{
-    app_state::{AppState, managed_keys, state_dir},
+    app_state::{AppState, legacy_cache_dir, managed_keys, state_dir},
     bridge,
 };
 
@@ -136,11 +136,7 @@ pub async fn read_config(state: State<'_, AppState>) -> Result<ConfigDocument, S
 #[tauri::command]
 pub async fn reset_config(state: State<'_, AppState>) -> Result<ConfigDocument, String> {
     let _data = state.data_change_permit()?;
-    let _config = state
-        .config_writer
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| "a configuration change is being applied; try again".to_string())?;
+    let _config = state.try_config_permit()?;
     let paths = state.paths.clone();
     let keys = managed_keys(&state.settings.current(), &paths);
     blocking(move || config::reset(&paths, &keys))
@@ -433,11 +429,7 @@ pub async fn choose_data_dir(
     path: String,
 ) -> Result<DataDirChoice, String> {
     let _data = state.data_change_permit()?;
-    let _config = state
-        .config_writer
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| "a configuration change is being applied; try again".to_string())?;
+    let _config = state.try_config_permit()?;
 
     let chosen = path.trim().to_string();
     let dir = PathBuf::from(&chosen);
@@ -487,9 +479,7 @@ pub async fn import_legacy_state(state: State<'_, AppState>) -> Result<ImportOut
     let paths = state.paths.clone();
     let settings = state.settings.current();
     blocking(move || {
-        let legacy = LegacyLocations::current()
-            .zebra_cache_dir
-            .ok_or_else(|| "this system has no default cache directory".to_string())?;
+        let legacy = legacy_cache_dir()?;
         firstrun::import_legacy_state(&legacy, &state_dir(&settings, &paths)).map_err(message)
     })
     .await?
@@ -508,9 +498,7 @@ pub async fn delete_legacy_state(state: State<'_, AppState>) -> Result<u64, Stri
     let settings = state.settings.current();
     let sizes = state.sizes.clone();
     blocking(move || {
-        let legacy = LegacyLocations::current()
-            .zebra_cache_dir
-            .ok_or_else(|| "this system has no default cache directory".to_string())?;
+        let legacy = legacy_cache_dir()?;
         firstrun::delete_legacy_state(&legacy, &state_dir(&settings, &paths), &sizes)
             .map_err(message)
     })
