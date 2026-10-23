@@ -2,7 +2,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::{ExitClass, Phase};
+use launcher_types::{ExitClass, Phase, UpdateMode};
 
 /// A short label for a phase, for the badge.
 pub fn phase_label(phase: &Phase) -> &'static str {
@@ -124,6 +124,57 @@ pub fn kiosk_url(url: &str) -> String {
         return url.to_owned();
     }
     format!("{base}{separator}kiosk{fragment}")
+}
+
+/// Below this much free space the data location gets a warning: Mainnet state is hundreds of GB.
+pub const LOW_SPACE_BYTES: u64 = 300_000_000_000;
+
+/// A size in decimal units, as disks are sold, with one decimal: `512 bytes`, `1.5 kB`,
+/// `12.3 MB`, `1,834.5 GB`.
+pub fn bytes(value: u64) -> String {
+    const UNITS: [(u128, &str); 3] = [(1_000_000_000, "GB"), (1_000_000, "MB"), (1_000, "kB")];
+    for (unit, name) in UNITS {
+        let tenths = (u128::from(value) * 10 + unit / 2) / unit;
+        if tenths >= 10 {
+            let whole = u64::try_from(tenths / 10).unwrap_or(u64::MAX);
+            return format!("{}.{} {name}", thousands(whole), tenths % 10);
+        }
+    }
+    match value {
+        1 => "1 byte".to_owned(),
+        _ => format!("{value} bytes"),
+    }
+}
+
+/// True when the free space is known and below [`LOW_SPACE_BYTES`].
+pub fn is_low_space(free_bytes: Option<u64>) -> bool {
+    free_bytes.is_some_and(|free| free < LOW_SPACE_BYTES)
+}
+
+/// Whether the data directory may change or the node data be deleted: the backend allows it
+/// only while zebrad is stopped or failed.
+pub fn data_change_allowed(phase: &Phase) -> bool {
+    matches!(phase, Phase::Stopped | Phase::Failed { .. })
+}
+
+/// The label and explanation of an update mode, shared by the first-run flow and Settings.
+pub fn update_mode_text(mode: UpdateMode) -> (&'static str, &'static str) {
+    match mode {
+        UpdateMode::Off => (
+            "Off",
+            "Never check for launcher updates. The launcher makes no update requests.",
+        ),
+        UpdateMode::Notify => (
+            "Notify",
+            "Check for launcher updates and tell you when one is available. \
+             Nothing is installed until you click Install.",
+        ),
+        UpdateMode::Auto => (
+            "Auto",
+            "Download updates in the background and install when this release is near its \
+             end of support or when you click.",
+        ),
+    }
 }
 
 /// A highlighting class for a span of TOML text.
@@ -255,6 +306,37 @@ mod tests {
             kiosk_url("http://localhost/d/x?kiosk"),
             "http://localhost/d/x?kiosk"
         );
+    }
+
+    #[test]
+    fn byte_sizes() {
+        assert_eq!(bytes(0), "0 bytes");
+        assert_eq!(bytes(1), "1 byte");
+        assert_eq!(bytes(949), "949 bytes");
+        assert_eq!(bytes(1_500), "1.5 kB");
+        assert_eq!(bytes(12_345_678), "12.3 MB");
+        assert_eq!(bytes(999_999_999), "1.0 GB");
+        assert_eq!(bytes(299_960_000_000), "300.0 GB");
+        assert_eq!(bytes(1_834_512_000_000), "1,834.5 GB");
+        assert_eq!(bytes(u64::MAX), "18,446,744,073.7 GB");
+    }
+
+    #[test]
+    fn low_space() {
+        assert!(!is_low_space(None));
+        assert!(is_low_space(Some(LOW_SPACE_BYTES - 1)));
+        assert!(!is_low_space(Some(LOW_SPACE_BYTES)));
+    }
+
+    #[test]
+    fn data_changes_need_a_stopped_node() {
+        assert!(data_change_allowed(&Phase::Stopped));
+        assert!(data_change_allowed(&Phase::Failed {
+            class: ExitClass::DbLocked
+        }));
+        for phase in [Phase::Starting, Phase::Running, Phase::Stopping] {
+            assert!(!data_change_allowed(&phase), "{phase:?}");
+        }
     }
 
     #[test]
