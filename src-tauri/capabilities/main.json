@@ -27,6 +27,7 @@
     "allow-choose-data-dir",
     "allow-import-legacy-state",
     "allow-delete-node-data",
+    "allow-delete-legacy-state",
     "allow-copy-diagnostics",
     "allow-complete-first-run",
     "allow-get-update-state",

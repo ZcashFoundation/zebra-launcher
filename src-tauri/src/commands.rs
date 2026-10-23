@@ -481,6 +481,28 @@ pub async fn import_legacy_state(state: State<'_, AppState>) -> Result<ImportOut
     .await?
 }
 
+/// Deletes the alpha.4 chain state in zebrad's default cache directory
+/// (`dirs::cache_dir()/zebra/state`; the peer cache next to it stays) and
+/// returns the bytes freed, from the size `get_first_run_info` measured, or 0
+/// (unknown). Only while zebrad is stopped; refuses when the launcher's own
+/// state directory is inside the zebra cache directory. The UI asks for
+/// confirmation first.
+#[tauri::command]
+pub async fn delete_legacy_state(state: State<'_, AppState>) -> Result<u64, String> {
+    let _data = state.data_change_permit()?;
+    let paths = state.paths.clone();
+    let settings = state.settings.current();
+    let sizes = state.sizes.clone();
+    blocking(move || {
+        let legacy = LegacyLocations::current()
+            .zebra_cache_dir
+            .ok_or_else(|| "this system has no default cache directory".to_string())?;
+        firstrun::delete_legacy_state(&legacy, &state_dir(&settings, &paths), &sizes)
+            .map_err(message)
+    })
+    .await?
+}
+
 /// Deletes the chain state (config, logs and the RPC cookie stay) and
 /// returns the bytes freed. Only while zebrad is stopped; the UI asks for
 /// confirmation first.
