@@ -104,9 +104,12 @@ pub fn Configure() -> impl IntoView {
             mode.set(Mode::Editing);
         }
     };
+    // Re-reads the file, so a reset or an outside change made while the edit was open shows.
     let discard = move |_| {
-        mode.set(Mode::Viewing);
+        mode.set(Mode::Loading);
         notice.set(None);
+        load_error.set(None);
+        load(false);
     };
     let reload = move |_| {
         notice.set(None);
