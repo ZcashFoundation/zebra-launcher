@@ -50,7 +50,7 @@ backend that makes every page demoable:
   Combine both flags (`?firstrun&stale`) to see Finish report that zebrad did not start.
   `?firstrun&storeddir` starts with a data folder chosen in an earlier, unfinished first run
   (`/media/small-disk/zebra`, 120.0 GB free, so the low-space warning shows; the free space is
-  read with the read-only `free_space`, which answers after 0.7 s while Next stays enabled), and
+  read with the read-only `free_space`, which answers after 1.5 s while Next stays enabled), and
   `?firstrun&running` has zebrad already running with Start failing, which Finish treats as
   success;
 - Settings are kept in memory; set the Grafana URL to see the iframe (it stays blank unless Grafana

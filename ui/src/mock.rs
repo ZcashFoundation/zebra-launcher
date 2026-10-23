@@ -1017,8 +1017,9 @@ pub async fn choose_data_dir(path: String) -> Result<DataDirChoice, String> {
 }
 
 pub async fn free_space(path: String) -> Option<u64> {
-    // Slower than most commands, so the wizard's "checking" state can be seen.
-    sleep(700).await;
+    // Slower than `get_first_run_info`, so the wizard's data step shows "checking" while Next
+    // is already enabled.
+    sleep(1500).await;
     let path = path.trim().trim_end_matches('/');
     match path {
         DEFAULT_DATA_DIR => Some(FREE_AT_DEFAULT),
