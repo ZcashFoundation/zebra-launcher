@@ -1,0 +1,12 @@
+apiVersion: 1
+
+datasources:
+  # Zebra's dashboards reference this uid.
+  - name: Prometheus
+    type: prometheus
+    uid: zebra-prometheus
+    access: proxy
+    # Set by docker-compose.yml (bridge) or docker-compose.linux.yml (host network).
+    url: ${PROMETHEUS_URL}
+    isDefault: true
+    editable: false
