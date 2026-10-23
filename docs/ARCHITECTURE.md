@@ -208,11 +208,11 @@ directories; the commands in `src-tauri/src/commands.rs` call it off the async r
 
 | Command | Returns | Does |
 | --- | --- | --- |
-| `get_first_run_info` | `FirstRunInfo` | first run until `settings.first_run_done`; the default data dir and its free space (`statvfs` / `GetDiskFreeSpaceExW`, at the nearest existing ancestor); alpha.4 leftovers with the state size from a capped walk |
+| `get_first_run_info` | `FirstRunInfo` | first run until `settings.first_run_done`; the default data dir and its free space (`statvfs` / `GetDiskFreeSpaceExW`, at the nearest existing ancestor); alpha.4 leftovers with the state size from a walk capped at 50k entries (then a lower bound), done once per session |
 | `pick_data_dir` | `Option<String>` | the native folder picker |
 | `choose_data_dir(path)` | `DataDirChoice` | checks `path` is absolute and writable, saves `settings.data_dir`, rewrites `state.cache_dir`; returns the free space, the UI decides whether to warn |
 | `import_legacy_state` | `ImportOutcome` | renames `dirs::cache_dir()/zebra/state` into the current state dir; across volumes it fails and asks the user to move it by hand, never copying |
-| `delete_node_data` | `u64` (bytes freed) | removes `<data dir>/state` only, and only inside the launcher's data dir or the chosen one |
+| `delete_node_data` | `u64` (bytes freed) | removes `<data dir>/state` only, and only inside the launcher's data dir or the chosen one; the bytes come from a size measured earlier in the session, 0 (unknown) otherwise, never from a walk of the whole state |
 | `copy_diagnostics` | `String` | versions, OS, status, settings (URL credentials redacted), `zebrad.toml`, last 200 lines of each log; never the RPC cookie |
 | `complete_first_run` | `()` | sets `first_run_done`; from then on zebrad starts at launch |
 

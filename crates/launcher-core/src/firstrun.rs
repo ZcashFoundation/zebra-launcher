@@ -17,8 +17,9 @@ use crate::paths::Paths;
 
 /// How many directory entries [`dir_size`] looks at before it gives up and
 /// reports a lower bound. A synced Mainnet state has tens of thousands of
-/// files, so this is only reached by something unexpected.
-pub const SIZE_WALK_LIMIT: usize = 500_000;
+/// files, so a large state may be reported as "at least" its counted size;
+/// the first-run flow only needs the order of magnitude.
+pub const SIZE_WALK_LIMIT: usize = 50_000;
 
 /// The name of the chain state directory, both in zebrad's cache directory
 /// and in the launcher's data directories.
@@ -170,6 +171,40 @@ pub fn dir_size(dir: &Path, limit: usize) -> (u64, bool) {
     (total, false)
 }
 
+/// Remembers the size of one directory for a launcher session, so the
+/// first-run flow does not walk the alpha.4 state on every call.
+///
+/// The first directory measured through [`SizeCache::size`] is kept; other
+/// directories are measured every time. Without locks: a
+/// [`tokio::sync::OnceCell`] is set once, and two concurrent first calls at
+/// worst both walk the directory.
+#[derive(Debug, Default)]
+pub struct SizeCache {
+    cell: tokio::sync::OnceCell<(PathBuf, (u64, bool))>,
+}
+
+impl SizeCache {
+    /// The size of `dir` as [`dir_size`] with [`SIZE_WALK_LIMIT`] reports it,
+    /// from the cache when `dir` was measured before.
+    pub fn size(&self, dir: &Path) -> (u64, bool) {
+        if let Some(size) = self.cached(dir) {
+            return size;
+        }
+        let size = dir_size(dir, SIZE_WALK_LIMIT);
+        // Already holding another directory: this one is not kept.
+        let _ = self.cell.set((dir.to_path_buf(), size));
+        size
+    }
+
+    /// The remembered size of `dir`, if it was measured.
+    pub fn cached(&self, dir: &Path) -> Option<(u64, bool)> {
+        self.cell
+            .get()
+            .filter(|(cached, _)| cached == dir)
+            .map(|(_, size)| *size)
+    }
+}
+
 /// Where the v0.0.0-alpha.4 prototype left its files.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LegacyLocations {
@@ -211,7 +246,7 @@ fn resolve(path: &Path) -> PathBuf {
 
 /// Looks for alpha.4 leftovers: a `zebrad.toml` in `exe_dir`, or a
 /// `zebra_cache_dir` holding a `state` directory. The state size is counted
-/// up to [`SIZE_WALK_LIMIT`] entries.
+/// up to [`SIZE_WALK_LIMIT`] entries, once per `sizes` cache.
 ///
 /// `current_state_dir` is the launcher's own `state.cache_dir`: when it lies
 /// inside the zebra cache directory (the user chose that location, possibly
@@ -220,6 +255,7 @@ fn resolve(path: &Path) -> PathBuf {
 pub fn detect_legacy(
     locations: &LegacyLocations,
     current_state_dir: &Path,
+    sizes: &SizeCache,
 ) -> Option<LegacyInstall> {
     let config_file = locations
         .exe_dir
@@ -237,7 +273,7 @@ pub fn detect_legacy(
         return None;
     }
     let (state_bytes, state_bytes_is_lower_bound) = match &state_dir {
-        Some(dir) => dir_size(&dir.join(STATE_DIR_NAME), SIZE_WALK_LIMIT),
+        Some(dir) => sizes.size(&dir.join(STATE_DIR_NAME)),
         None => (0, false),
     };
     Some(LegacyInstall {
@@ -352,13 +388,22 @@ fn is_cross_device(err: &io::Error) -> bool {
 }
 
 /// Deletes the chain state directory `state_dir` and returns how many bytes
-/// it held. Only the state goes: config, logs and the RPC cookie stay.
+/// it held as far as `sizes` knows them. Only the state goes: config, logs
+/// and the RPC cookie stay.
+///
+/// The directory is not walked just to report its size (a synced state is
+/// hundreds of GB in tens of thousands of files): when `sizes` has not
+/// measured `state_dir`, the result is 0, meaning "unknown".
 ///
 /// Refuses unless `state_dir` is named `state` and lies strictly inside one
 /// of `allowed_roots` (the launcher's data directory and the data directory
 /// chosen in the settings), after resolving symbolic links. A missing
 /// directory frees 0 bytes. The caller makes sure zebrad is stopped.
-pub fn delete_node_data(state_dir: &Path, allowed_roots: &[&Path]) -> io::Result<u64> {
+pub fn delete_node_data(
+    state_dir: &Path,
+    allowed_roots: &[&Path],
+    sizes: &SizeCache,
+) -> io::Result<u64> {
     match fs::symlink_metadata(state_dir) {
         Ok(_) => {}
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -384,7 +429,10 @@ pub fn delete_node_data(state_dir: &Path, allowed_roots: &[&Path]) -> io::Result
     if !inside {
         return Err(refuse());
     }
-    let (bytes, _) = dir_size(&resolved, usize::MAX);
+    let bytes = sizes
+        .cached(state_dir)
+        .or_else(|| sizes.cached(&resolved))
+        .map_or(0, |(bytes, _)| bytes);
     fs::remove_dir_all(&resolved)?;
     tracing::info!(dir = %resolved.display(), bytes, "deleted the node data");
     Ok(bytes)
@@ -483,15 +531,16 @@ mod tests {
             zebra_cache_dir: Some(cache.clone()),
         };
         let ours = dir.path().join("launcher/data/state");
-        assert_eq!(detect_legacy(&locations, &ours), None);
+        let sizes = SizeCache::default();
+        assert_eq!(detect_legacy(&locations, &ours, &sizes), None);
 
         // A cache dir without `state` (only a peer cache) is not reported.
         write_file(&cache.join("network/mainnet.peers"), 5);
-        assert_eq!(detect_legacy(&locations, &ours), None);
+        assert_eq!(detect_legacy(&locations, &ours, &sizes), None);
 
         write_file(&cache.join("state/v27/mainnet/000001.sst"), 100);
         write_file(&exe_dir.join("zebrad.toml"), 3);
-        let found = detect_legacy(&locations, &ours).expect("found");
+        let found = detect_legacy(&locations, &ours, &sizes).expect("found");
         assert_eq!(
             found,
             LegacyInstall {
@@ -502,8 +551,15 @@ mod tests {
             }
         );
 
+        // The size is counted once per cache.
+        write_file(&cache.join("state/v27/mainnet/000002.sst"), 50);
+        let again = detect_legacy(&locations, &ours, &sizes).expect("found");
+        assert_eq!(again.state_bytes, 100);
+        let fresh = detect_legacy(&locations, &ours, &SizeCache::default()).expect("found");
+        assert_eq!(fresh.state_bytes, 150);
+
         // The launcher's own state inside the zebra cache dir is not a leftover.
-        let inside = detect_legacy(&locations, &cache.join("state")).expect("config only");
+        let inside = detect_legacy(&locations, &cache.join("state"), &sizes).expect("config only");
         assert_eq!(inside.state_dir, None);
         assert!(inside.config_file.is_some());
     }
@@ -575,7 +631,8 @@ mod tests {
         // the launcher's own, not a leftover, and cannot be imported.
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&cache, &link).expect("symlink");
-        assert_eq!(detect_legacy(&locations, &link.join("state")), None);
+        let sizes = SizeCache::default();
+        assert_eq!(detect_legacy(&locations, &link.join("state"), &sizes), None);
         let err = import_legacy_state(&cache, &link).expect_err("same directory");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 
@@ -584,14 +641,15 @@ mod tests {
         let into_state = dir.path().join("into-state");
         std::os::unix::fs::symlink(cache.join("state"), &into_state).expect("symlink");
         let to = into_state.join("sub");
-        assert_eq!(detect_legacy(&locations, &to.join("state")), None);
+        assert_eq!(detect_legacy(&locations, &to.join("state"), &sizes), None);
         let err = import_legacy_state(&cache, &to).expect_err("into itself");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(cache.join("state/v27/mainnet/000001.sst").is_file());
         assert!(!cache.join("state/sub").exists());
 
         // A real directory elsewhere still sees the leftover.
-        let found = detect_legacy(&locations, &dir.path().join("data/state")).expect("found");
+        let found =
+            detect_legacy(&locations, &dir.path().join("data/state"), &sizes).expect("found");
         assert_eq!(found.state_dir, Some(cache.display().to_string()));
     }
 
@@ -653,8 +711,20 @@ mod tests {
         write_file(&paths.rpc_cookie_file(), 1);
         write_file(&paths.zebrad_log(), 1);
 
-        let freed = delete_node_data(&state, &[paths.data_dir()]).expect("delete");
-        assert_eq!(freed, 42);
+        // Without a measured size the bytes freed are unknown (0)...
+        let freed =
+            delete_node_data(&state, &[paths.data_dir()], &SizeCache::default()).expect("delete");
+        assert_eq!(freed, 0);
+        assert!(!state.exists());
+        // ...and with one, they are reported without another walk.
+        write_file(&state.join("c"), 5);
+        let sizes = SizeCache::default();
+        assert_eq!(sizes.size(&state), (5, false));
+        write_file(&state.join("d"), 5);
+        assert_eq!(
+            delete_node_data(&state, &[paths.data_dir()], &sizes).expect("delete"),
+            5
+        );
         assert!(!state.exists());
         assert!(paths.zebrad_config().exists());
         assert!(paths.rpc_cookie_file().exists());
@@ -662,7 +732,7 @@ mod tests {
         assert!(paths.data_dir().is_dir());
         // Already gone.
         assert_eq!(
-            delete_node_data(&state, &[paths.data_dir()]).expect("again"),
+            delete_node_data(&state, &[paths.data_dir()], &sizes).expect("again"),
             0
         );
     }
@@ -670,6 +740,7 @@ mod tests {
     #[test]
     fn delete_refuses_outside_the_allowed_roots() {
         let dir = tempdir();
+        let sizes = SizeCache::default();
         let root = dir.path().join("data");
         let chosen = dir.path().join("big-disk");
         let elsewhere = dir.path().join("elsewhere/state");
@@ -678,25 +749,25 @@ mod tests {
         }
         let roots = [root.as_path(), chosen.as_path()];
 
-        let err = delete_node_data(&elsewhere, &roots).expect_err("outside");
+        let err = delete_node_data(&elsewhere, &roots, &sizes).expect_err("outside");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert!(elsewhere.exists());
 
         // A root itself, or a directory not named `state`, is refused too.
-        let err = delete_node_data(&root, &[dir.path()]).expect_err("not a state dir");
+        let err = delete_node_data(&root, &[dir.path()], &sizes).expect_err("not a state dir");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         write_file(&chosen.join("logs/x"), 1);
-        let err = delete_node_data(&chosen.join("logs"), &roots).expect_err("not state");
+        let err = delete_node_data(&chosen.join("logs"), &roots, &sizes).expect_err("not state");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         // `..` does not escape the check.
         let sneaky = root.join("..").join("elsewhere").join("state");
-        let err = delete_node_data(&sneaky, &roots).expect_err("escapes");
+        let err = delete_node_data(&sneaky, &roots, &sizes).expect_err("escapes");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
         assert!(elsewhere.exists());
 
         assert_eq!(
-            delete_node_data(&chosen.join("state"), &roots).expect("chosen"),
-            1
+            delete_node_data(&chosen.join("state"), &roots, &sizes).expect("chosen"),
+            0
         );
         assert!(!chosen.join("state").exists());
         assert!(root.join("state").exists());

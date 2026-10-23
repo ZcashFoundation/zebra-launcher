@@ -344,14 +344,19 @@ pub fn open_path<R: Runtime>(
 }
 
 /// What the first-run flow shows: whether it is due, the default data
-/// directory with its free space, and any alpha.4 leftovers.
+/// directory with its free space, and any alpha.4 leftovers. The alpha.4
+/// state is measured on the first call only (see [`AppState::sizes`]).
 #[tauri::command]
 pub async fn get_first_run_info(state: State<'_, AppState>) -> Result<FirstRunInfo, String> {
     let paths = state.paths.clone();
     let settings = state.settings.current();
+    let sizes = state.sizes.clone();
     blocking(move || {
-        let legacy =
-            firstrun::detect_legacy(&LegacyLocations::current(), &state_dir(&settings, &paths));
+        let legacy = firstrun::detect_legacy(
+            &LegacyLocations::current(),
+            &state_dir(&settings, &paths),
+            &sizes,
+        );
         firstrun::first_run_info(&paths, &settings, legacy)
     })
     .await
@@ -459,15 +464,20 @@ pub async fn import_legacy_state(state: State<'_, AppState>) -> Result<ImportOut
 /// Deletes the chain state (config, logs and the RPC cookie stay) and
 /// returns the bytes freed. Only while zebrad is stopped; the UI asks for
 /// confirmation first.
+///
+/// The state is not walked just to count it: the bytes come from a size
+/// measured earlier this session ([`AppState::sizes`]), and are 0 when none
+/// was, which the UI should show as "unknown".
 #[tauri::command]
 pub async fn delete_node_data(state: State<'_, AppState>) -> Result<u64, String> {
     let _data = state.data_change_permit()?;
     let settings = state.settings.current();
     let roots = state.data_roots(&settings);
     let dir = state_dir(&settings, &state.paths);
+    let sizes = state.sizes.clone();
     blocking(move || {
         let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
-        firstrun::delete_node_data(&dir, &roots)
+        firstrun::delete_node_data(&dir, &roots, &sizes)
     })
     .await?
     .map_err(message)
