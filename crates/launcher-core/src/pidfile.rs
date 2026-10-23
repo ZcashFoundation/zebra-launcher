@@ -54,7 +54,8 @@ pub fn check(path: &Path) -> io::Result<Option<StaleProcess>> {
             binary: PathBuf::from(lines.next().unwrap_or_default().trim()),
         });
     match parsed {
-        Some(stale) if is_alive(stale.pid) => Ok(Some(stale)),
+        // pid 0 and our own pid never name a zebrad left behind.
+        Some(stale) if !is_own_or_group(stale.pid) && is_alive(stale.pid) => Ok(Some(stale)),
         _ => {
             remove(path)?;
             Ok(None)
@@ -62,10 +63,21 @@ pub fn check(path: &Path) -> io::Result<Option<StaleProcess>> {
     }
 }
 
+/// True for pids that never name a recorded zebrad: 0 (which `kill` treats as
+/// the caller's own process group) and the launcher itself.
+fn is_own_or_group(pid: u32) -> bool {
+    pid == 0 || pid == std::process::id()
+}
+
 /// Returns true when a process with `pid` exists.
+///
+/// Always false for pid 0 and for the launcher's own pid.
 #[cfg(unix)]
 pub fn is_alive(pid: u32) -> bool {
     use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
+    if is_own_or_group(pid) {
+        return false;
+    }
     let Ok(pid) = i32::try_from(pid) else {
         return false;
     };
@@ -79,8 +91,13 @@ pub fn is_alive(pid: u32) -> bool {
 }
 
 /// Returns true when a process with `pid` exists and has not exited.
+///
+/// Always false for pid 0 and for the launcher's own pid.
 #[cfg(windows)]
 pub fn is_alive(pid: u32) -> bool {
+    if is_own_or_group(pid) {
+        return false;
+    }
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
 
     use windows_sys::Win32::{
@@ -112,7 +129,16 @@ pub fn is_alive(pid: u32) -> bool {
 ///
 /// On Unix this is `SIGTERM`; on Windows it is `TerminateProcess`, because a
 /// stale process is not in a job the launcher owns.
+///
+/// Refuses pid 0 (on Unix, the launcher's own process group) and the
+/// launcher's own pid.
 pub fn terminate(pid: u32) -> io::Result<()> {
+    if is_own_or_group(pid) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing to terminate pid {pid}: it is not a separate process"),
+        ));
+    }
     #[cfg(unix)]
     {
         crate::process::unix::terminate(pid)
@@ -144,22 +170,51 @@ pub fn terminate(pid: u32) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// A child that stays alive until killed.
+    fn sleeper() -> std::process::Child {
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("30");
+            c
+        };
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("a sleeping child process spawns")
+    }
+
+    #[test]
+    fn own_pid_and_pid_zero_are_never_stale_or_terminated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("zebrad.pid");
+        for pid in [0, std::process::id()] {
+            assert!(!is_alive(pid), "pid {pid}");
+            assert!(terminate(pid).is_err(), "pid {pid}");
+            write(&path, pid, Path::new("/opt/zebrad")).expect("write");
+            assert_eq!(check(&path).expect("read"), None, "pid {pid}");
+            assert!(!path.exists());
+        }
+    }
+
     #[test]
     fn round_trip_and_stale_detection() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("zebrad.pid");
         assert_eq!(check(&path).expect("missing file is fine"), None);
 
-        // Our own pid is certainly alive.
-        let me = std::process::id();
-        write(&path, me, Path::new("/opt/zebrad")).expect("write");
-        assert_eq!(
-            check(&path).expect("read"),
-            Some(StaleProcess {
-                pid: me,
-                binary: PathBuf::from("/opt/zebrad"),
-            })
-        );
+        // A live process is reported.
+        let mut live = sleeper();
+        let pid = live.id();
+        let binary = PathBuf::from("/opt/zebrad");
+        write(&path, pid, &binary).expect("write");
+        let found = check(&path);
+        live.kill().expect("kill");
+        live.wait().expect("reap");
+        assert_eq!(found.expect("read"), Some(StaleProcess { pid, binary }));
 
         // A malformed file is removed.
         fs::write(&path, "not a pid\n").expect("write");
