@@ -145,7 +145,8 @@ pub async fn reset_config(state: State<'_, AppState>) -> Result<ConfigDocument, 
     let keys = managed_keys(&state.settings.current(), &paths);
     blocking(move || config::reset(&paths, &keys))
         .await?
-        .map_err(|err| format!("could not reset zebrad.toml: {err}"))
+        // The UI says what failed ("Could not reset the config"), so only the cause here.
+        .map_err(message)
 }
 
 fn apply_error(kind: ApplyErrorKind, message: impl Display) -> ApplyError {
