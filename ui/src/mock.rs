@@ -1139,7 +1139,7 @@ pub async fn check_for_update() -> UpdateState {
     mock.set_update_state(UpdateState::Checking);
     sleep(1200).await;
     if mock.update_generation.load(Ordering::Relaxed) != generation {
-        // Cancelled, or the mode changed meanwhile.
+        // Cancelled, or the mode changed meanwhile; whatever superseded it set the state.
         return mock.update_state();
     }
     let found = match mock.update_flag {
@@ -1174,9 +1174,11 @@ pub async fn install_update() -> Result<(), String> {
     if !mock.update.with_untracked(|info| info.can_install) {
         return Err("this installation cannot update itself; download the new version from the releases page".into());
     }
-    mock.update_generation.fetch_add(1, Ordering::Relaxed);
+    // Validate first: bumping the generation cancels a running check, which must not happen
+    // for an install that is refused.
     match mock.update_state() {
         UpdateState::Available { version, .. } => {
+            mock.update_generation.fetch_add(1, Ordering::Relaxed);
             mock.install_requested.store(true, Ordering::Relaxed);
             mock.set_update_state(UpdateState::Downloading {
                 version,
@@ -1187,6 +1189,7 @@ pub async fn install_update() -> Result<(), String> {
             Ok(())
         }
         UpdateState::ReadyToInstall { version, .. } => {
+            mock.update_generation.fetch_add(1, Ordering::Relaxed);
             mock.install(version);
             Ok(())
         }
