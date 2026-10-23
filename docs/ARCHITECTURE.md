@@ -146,12 +146,17 @@ edits, never full `zebrad generate` output. Every zebrad section is
 | `state.cache_dir` | `<chosen data dir>/state` |
 | `zcashd_compat` | forced off (unsupported) |
 
+The managed keys are launcher-owned: the supervisor and the RPC monitor rely on them.
+`config::ensure` rewrites them at every start, and `config::begin_apply_with_managed`
+overrides any edit to them before saving, so the editor cannot change them; they change
+only through the launcher (first run, `PortInUse` remediation).
+
 Applying an edit:
 
 1. `read_config` returns the text and a compare-and-swap token.
 2. `apply_config` checks TOML syntax and the token, so an external edit is never silently
-   overwritten. It refuses non-loopback RPC, metrics or health addresses and cookie auth
-   off. It writes atomically (temp file + rename, `.bak` kept) and sets a pending-apply
+   overwritten. It refuses non-loopback RPC (including the indexer and lightwalletd
+   listeners), metrics or health addresses and cookie auth off. It writes atomically (temp file + rename, `.bak` kept) and sets a pending-apply
    marker.
 3. zebrad restarts gracefully and is watched for 20 s. On `ConfigError` the `.bak` is
    restored, zebrad is restarted, and the UI shows zebrad's stderr plus "rolled back". A

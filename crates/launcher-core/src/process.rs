@@ -16,7 +16,7 @@ use tokio::{
 };
 
 #[cfg(unix)]
-mod unix;
+pub(crate) mod unix;
 #[cfg(windows)]
 mod windows;
 
@@ -91,7 +91,7 @@ pub struct ChildHandle {
     pid: u32,
     stdin: Option<ChildStdin>,
     #[cfg(windows)]
-    job: Option<windows::Job>,
+    job: windows::Job,
 }
 
 impl ChildHandle {
@@ -127,10 +127,7 @@ impl ChildHandle {
         }
         #[cfg(windows)]
         {
-            match &self.job {
-                Some(job) => job.terminate(),
-                None => crate::pidfile::terminate(self.pid),
-            }
+            self.job.terminate()
         }
     }
 }
@@ -184,6 +181,15 @@ impl Spawner {
     }
 }
 
+/// Whether `key` is a variable zebrad's config loader reads. The loader
+/// lowercases keys and Windows variable names ignore case, so `zebra_` and
+/// `Zebra_` count too.
+fn is_zebra_env_var(key: &std::ffi::OsStr) -> bool {
+    key.as_encoded_bytes()
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"ZEBRA_"))
+}
+
 /// Spawns on the calling thread. See the module docs for why that matters.
 fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
     let mut cmd = Command::new(&command.binary);
@@ -196,7 +202,7 @@ fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
     }
     cmd.args(&command.extra_args);
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("ZEBRA_") {
+        if is_zebra_env_var(&key) {
             cmd.env_remove(key);
         }
     }
@@ -221,7 +227,7 @@ fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
 
     #[cfg(windows)]
     let job = match windows::attach_job(&child, command.kill_on_launcher_exit) {
-        Ok(job) => Some(job),
+        Ok(job) => job,
         Err(err) => {
             // The child is still suspended; kill_on_drop finishes it off.
             let _ = child.start_kill();
@@ -250,4 +256,26 @@ fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
         stdout,
         stderr,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::is_zebra_env_var;
+
+    #[test]
+    fn zebra_env_vars_match_in_any_case() {
+        for key in [
+            "ZEBRA_NETWORK__NETWORK",
+            "zebra_rpc__listen_addr",
+            "Zebra_X",
+            "ZEBRA_",
+        ] {
+            assert!(is_zebra_env_var(OsStr::new(key)), "{key}");
+        }
+        for key in ["ZEBRA", "ZEBRAD_X", "PATH", "MY_ZEBRA_X", ""] {
+            assert!(!is_zebra_env_var(OsStr::new(key)), "{key}");
+        }
+    }
 }

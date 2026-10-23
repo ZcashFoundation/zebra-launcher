@@ -55,7 +55,8 @@ impl SettingsStore {
     /// Tokio runtime.
     ///
     /// A missing file gives the defaults. A corrupt file is logged, moved to
-    /// `launcher.json.corrupt` and replaced by the defaults on the next update.
+    /// `launcher.json.corrupt` (replacing an older backup) and replaced by the
+    /// defaults on the next update.
     pub fn open(paths: &Paths) -> Result<SettingsHandle, SettingsError> {
         let path = paths.settings_file();
         let settings = load(&path)?;
@@ -162,7 +163,19 @@ fn load(path: &std::path::Path) -> Result<Settings, SettingsError> {
                 backup = %backup.display(),
                 "launcher.json is corrupt; using default settings"
             );
-            fs::rename(path, &backup)?;
+            // A backup from an earlier corruption is replaced; renaming over
+            // an existing file fails on Windows. If the file cannot be moved
+            // aside, the defaults are still used and the next update
+            // overwrites it.
+            if let Err(err) =
+                fsutil::remove_if_exists(&backup).and_then(|()| fs::rename(path, &backup))
+            {
+                tracing::warn!(
+                    %err,
+                    backup = %backup.display(),
+                    "could not move the corrupt launcher.json aside"
+                );
+            }
             Ok(Settings::default())
         }
     }
@@ -246,6 +259,43 @@ mod tests {
             .expect("in time")
             .expect("update");
         assert!(paths.settings_file().exists());
+    }
+
+    #[tokio::test]
+    async fn repeated_corruption_replaces_the_backup() {
+        let (_dir, paths) = paths();
+        fs::create_dir_all(paths.config_dir()).expect("mkdir");
+        let backup = corrupt_path(&paths.settings_file());
+        for content in [&b"{ first"[..], &b"{ second"[..]] {
+            fs::write(paths.settings_file(), content).expect("write");
+            let store = SettingsStore::open(&paths).expect("open");
+            assert_eq!(store.current(), Settings::default());
+            assert!(!paths.settings_file().exists());
+            assert_eq!(fs::read(&backup).expect("backup"), content);
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupt_file_that_cannot_be_moved_still_gives_defaults() {
+        let (_dir, paths) = paths();
+        fs::create_dir_all(paths.config_dir()).expect("mkdir");
+        // A non-empty directory where the backup goes cannot be removed or
+        // renamed over.
+        let backup = corrupt_path(&paths.settings_file());
+        fs::create_dir(&backup).expect("mkdir backup");
+        fs::write(backup.join("inner"), b"x").expect("write inner");
+        fs::write(paths.settings_file(), b"{ not json").expect("write");
+        let store = SettingsStore::open(&paths).expect("open");
+        assert_eq!(store.current(), Settings::default());
+        timeout(T, store.update(|s| s.close_to_tray = false))
+            .await
+            .expect("in time")
+            .expect("update replaces the corrupt file");
+        assert!(
+            !fs::read_to_string(paths.settings_file())
+                .expect("read")
+                .contains("not json")
+        );
     }
 
     #[tokio::test]

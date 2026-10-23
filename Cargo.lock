@@ -2205,6 +2205,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "launcher-types",
+ "libc",
  "nix",
  "reqwest 0.12.28",
  "serde",

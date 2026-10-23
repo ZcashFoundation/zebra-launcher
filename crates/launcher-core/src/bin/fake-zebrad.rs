@@ -33,6 +33,9 @@
 //! `getinfo`, `getmempoolinfo`, `getpeerinfo` and `getdeprecationinfo` with
 //! canned values (see [`canned`]), `fakegetcallcounts` with the number of calls
 //! per method so far, and `-32601` to anything else.
+//! `FAKE_ZEBRAD_DEPRECATION_FAILURES=N` makes the first `N` `getdeprecationinfo`
+//! calls fail with the JSON-RPC error code in
+//! `FAKE_ZEBRAD_DEPRECATION_ERROR_CODE` (default `-32000`).
 
 use std::{
     hash::{BuildHasher, Hasher, RandomState},
@@ -145,6 +148,9 @@ async fn run(
     heartbeat: Duration,
     shutdown_on_stdin_close: bool,
 ) -> ExitCode {
+    // Like zebrad, handle shutdown requests from the very start, so a stop
+    // during start-up takes the graceful `zebrad::signal` path.
+    let mut shutdown = shutdown_requests(shutdown_on_stdin_close);
     log(
         "INFO",
         None,
@@ -203,7 +209,9 @@ async fn run(
         "zebrad::commands::start",
         "opening database, this may take a few minutes",
     );
-    tokio::time::sleep(startup_delay).await;
+    if sleep_unless_shutdown(startup_delay, &mut shutdown, &mode).await {
+        return ExitCode::SUCCESS;
+    }
     if mode == "db-locked" {
         panic_and_abort(
             "zebra-state/src/service/finalized_state/disk_db.rs:1089:83",
@@ -275,55 +283,90 @@ async fn run(
         _ => {}
     }
 
-    let mut shutdown = shutdown_requests(shutdown_on_stdin_close);
     let mut height: u64 = 1_000;
     loop {
-        tokio::select! {
-            request = &mut shutdown => {
-                let request = request.unwrap_or(Shutdown::StdinClosed);
-                if mode == "hang-on-signal" {
-                    log("WARN", None, "fake_zebrad", "shutdown requested, ignoring in hang-on-signal mode");
-                    shutdown = pending_forever();
-                    continue;
-                }
-                match request {
-                    Shutdown::Signal { kind, name } => log(
-                        "INFO",
-                        Some(&format!("sig{{kind=SignalKind({kind}) name=\"{name}\"}}")),
-                        "zebrad::signal",
-                        &format!("received {name}, starting shutdown"),
-                    ),
-                    Shutdown::StdinClosed => log(
-                        "INFO",
-                        None,
-                        "zebrad::signal",
-                        "stdin closed, starting shutdown",
-                    ),
-                }
-                log("INFO", None, "zebrad::components::tokio", "waiting for async tokio tasks to shut down");
-                log("INFO", None, "zebrad::components::tokio", "shutting down Zebra");
-                log("INFO", None, "zebrad::commands::start", "stopping zebrad");
-                return ExitCode::SUCCESS;
-            }
-            _ = tokio::time::sleep(heartbeat) => {
-                height += 1;
-                log(
-                    "INFO",
-                    None,
-                    "zebrad::components::sync::progress",
-                    &format!("estimated progress to chain tip sync_percent=12.345 % current_height=Height({height}) network_upgrade=Nu6 remaining_sync_blocks=2500000 time_since_last_state_block=0s"),
-                );
-                if mode == "eos-warn" {
-                    log(
-                        "WARN",
-                        None,
-                        "zebrad::components::sync::end_of_support",
-                        "Your Zebra release is too old and it will stop running at block 3706000. Hint: Download and install the latest Zebra release from: https://github.com/ZcashFoundation/zebra/releases/latest",
-                    );
-                }
-            }
+        if sleep_unless_shutdown(heartbeat, &mut shutdown, &mode).await {
+            return ExitCode::SUCCESS;
+        }
+        height += 1;
+        log(
+            "INFO",
+            None,
+            "zebrad::components::sync::progress",
+            &format!(
+                "estimated progress to chain tip sync_percent=12.345 % current_height=Height({height}) network_upgrade=Nu6 remaining_sync_blocks=2500000 time_since_last_state_block=0s"
+            ),
+        );
+        if mode == "eos-warn" {
+            log(
+                "WARN",
+                None,
+                "zebrad::components::sync::end_of_support",
+                "Your Zebra release is too old and it will stop running at block 3706000. Hint: Download and install the latest Zebra release from: https://github.com/ZcashFoundation/zebra/releases/latest",
+            );
         }
     }
+}
+
+type ShutdownFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Shutdown, oneshot::error::RecvError>>>,
+>;
+
+/// Sleeps for `duration` unless a shutdown request arrives first. On a request
+/// prints zebrad's shutdown lines and returns true, except in `hang-on-signal`
+/// mode, which ignores requests and keeps sleeping.
+async fn sleep_unless_shutdown(
+    duration: Duration,
+    shutdown: &mut ShutdownFuture,
+    mode: &str,
+) -> bool {
+    let sleep = tokio::time::sleep(duration);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            request = &mut *shutdown => {
+                if mode == "hang-on-signal" {
+                    log("WARN", None, "fake_zebrad", "shutdown requested, ignoring in hang-on-signal mode");
+                    *shutdown = pending_forever();
+                    continue;
+                }
+                log_shutdown(request.unwrap_or(Shutdown::StdinClosed));
+                return true;
+            }
+            _ = &mut sleep => return false,
+        }
+    }
+}
+
+/// Prints the lines zebrad logs while shutting down gracefully.
+fn log_shutdown(request: Shutdown) {
+    match request {
+        Shutdown::Signal { kind, name } => log(
+            "INFO",
+            Some(&format!("sig{{kind=SignalKind({kind}) name=\"{name}\"}}")),
+            "zebrad::signal",
+            &format!("received {name}, starting shutdown"),
+        ),
+        Shutdown::StdinClosed => log(
+            "INFO",
+            None,
+            "zebrad::signal",
+            "stdin closed, starting shutdown",
+        ),
+    }
+    log(
+        "INFO",
+        None,
+        "zebrad::components::tokio",
+        "waiting for async tokio tasks to shut down",
+    );
+    log(
+        "INFO",
+        None,
+        "zebrad::components::tokio",
+        "shutting down Zebra",
+    );
+    log("INFO", None, "zebrad::commands::start", "stopping zebrad");
 }
 
 /// The `[rpc]` settings the fake RPC server uses.
@@ -484,7 +527,20 @@ fn handle_rpc(body: &[u8]) -> Value {
     }
     match METHODS.iter().position(|m| *m == method) {
         Some(i) => {
-            CALL_COUNTS[i].fetch_add(1, Ordering::Relaxed);
+            let previous = CALL_COUNTS[i].fetch_add(1, Ordering::Relaxed);
+            if method == "getdeprecationinfo"
+                && previous < env_u64("FAKE_ZEBRAD_DEPRECATION_FAILURES", 0)
+            {
+                let code = std::env::var("FAKE_ZEBRAD_DEPRECATION_ERROR_CODE")
+                    .ok()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(-32000);
+                return json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": code, "message": "simulated failure" },
+                });
+            }
             json!({ "jsonrpc": "2.0", "id": id, "result": canned(method) })
         }
         None => json!({
@@ -545,13 +601,14 @@ fn canned(method: &str) -> Value {
 }
 
 /// Resolves on the first shutdown request: a signal, or stdin EOF when enabled.
-fn shutdown_requests(
-    shutdown_on_stdin_close: bool,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Shutdown, oneshot::error::RecvError>>>>
-{
+///
+/// The signal handlers are installed before this returns, so a signal sent
+/// any time afterwards is caught rather than taking the default action.
+fn shutdown_requests(shutdown_on_stdin_close: bool) -> ShutdownFuture {
     let (tx, rx) = oneshot::channel();
+    let signal = wait_for_signal();
     tokio::spawn(async move {
-        let request = wait_for_signal().await;
+        let request = signal.await;
         let _ = tx.send(request);
     });
     if shutdown_on_stdin_close {
@@ -579,31 +636,35 @@ fn shutdown_requests(
     Box::pin(rx)
 }
 
-fn pending_forever()
--> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Shutdown, oneshot::error::RecvError>>>>
-{
+fn pending_forever() -> ShutdownFuture {
     Box::pin(std::future::pending())
 }
 
+/// Installs the handlers now and returns a future for the first signal.
 #[cfg(unix)]
-async fn wait_for_signal() -> Shutdown {
+fn wait_for_signal() -> impl std::future::Future<Output = Shutdown> + 'static {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler can be installed");
     let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler can be installed");
-    tokio::select! {
-        _ = term.recv() => Shutdown::Signal { kind: 15, name: "SIGTERM" },
-        _ = int.recv() => Shutdown::Signal { kind: 2, name: "SIGINT" },
+    async move {
+        tokio::select! {
+            _ = term.recv() => Shutdown::Signal { kind: 15, name: "SIGTERM" },
+            _ = int.recv() => Shutdown::Signal { kind: 2, name: "SIGINT" },
+        }
     }
 }
 
+/// Installs the handlers now and returns a future for the first signal.
 #[cfg(windows)]
-async fn wait_for_signal() -> Shutdown {
+fn wait_for_signal() -> impl std::future::Future<Output = Shutdown> + 'static {
     use tokio::signal::windows::{ctrl_break, ctrl_c};
     let mut ctrl_c = ctrl_c().expect("Ctrl-C handler can be installed");
     let mut ctrl_break = ctrl_break().expect("Ctrl-Break handler can be installed");
-    tokio::select! {
-        _ = ctrl_c.recv() => Shutdown::Signal { kind: 0, name: "Ctrl-C" },
-        _ = ctrl_break.recv() => Shutdown::Signal { kind: 1, name: "Ctrl-Break" },
+    async move {
+        tokio::select! {
+            _ = ctrl_c.recv() => Shutdown::Signal { kind: 0, name: "Ctrl-C" },
+            _ = ctrl_break.recv() => Shutdown::Signal { kind: 1, name: "Ctrl-Break" },
+        }
     }
 }
 
@@ -626,12 +687,14 @@ fn panic_and_abort(location: &str, message: &str) -> ! {
 }
 
 fn env_millis(name: &str, default: u64) -> Duration {
-    Duration::from_millis(
-        std::env::var(name)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(default),
-    )
+    Duration::from_millis(env_u64(name, default))
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// RFC 3339 UTC with microseconds, like `tracing-subscriber`'s default timer.
