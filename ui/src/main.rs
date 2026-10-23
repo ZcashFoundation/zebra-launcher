@@ -11,6 +11,7 @@
 
 mod api;
 mod app;
+mod clipboard;
 mod clock;
 mod format;
 mod log_view;

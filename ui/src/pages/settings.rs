@@ -8,8 +8,8 @@ use leptos::{prelude::*, task::spawn_local};
 use crate::{
     api,
     app::AppState,
+    clipboard::copy_to_clipboard,
     format::{bytes, data_change_allowed, is_low_space, update_mode_text},
-    pages::logs::copy_to_clipboard,
 };
 
 /// The word to type before node data is deleted.
