@@ -171,10 +171,11 @@ impl ExitClass {
 }
 
 /// What the supervisor is doing with zebrad.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Phase {
     /// No zebrad is running and none is scheduled.
+    #[default]
     Stopped,
     /// zebrad was spawned and is loading its configuration.
     Starting,
@@ -221,7 +222,7 @@ pub struct StaleProcessInfo {
 }
 
 /// The supervisor's view of zebrad, published on a `watch` channel.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     /// The current phase.
     pub phase: Phase,
@@ -237,20 +238,6 @@ pub struct Status {
     pub last_exit: Option<ExitInfo>,
     /// A zebrad from an earlier launcher run that is still alive, if detected.
     pub stale: Option<StaleProcessInfo>,
-}
-
-impl Default for Status {
-    fn default() -> Self {
-        Self {
-            phase: Phase::Stopped,
-            pid: None,
-            started_at: None,
-            rpc_addr: None,
-            metrics_addr: None,
-            last_exit: None,
-            stale: None,
-        }
-    }
 }
 
 /// The Zcash network zebrad runs on.
@@ -434,6 +421,15 @@ pub struct ConfigDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_status_is_stopped_and_empty() {
+        let status = Status::default();
+        assert_eq!(status.phase, Phase::Stopped);
+        assert_eq!(status.pid, None);
+        assert_eq!(status.last_exit, None);
+        assert_eq!(status.stale, None);
+    }
 
     #[test]
     fn loopback_urls() {
