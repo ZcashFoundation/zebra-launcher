@@ -4,7 +4,7 @@
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
-    ConfigDocument, NodeStats, Settings, Status, UpdateHealthFailure, UpdateInfo, UpdateState,
+    ConfigDocument, NodeStats, Settings, Status, UpdateHealthFailure, UpdateInfo,
 };
 use leptos::{prelude::*, task::spawn_local};
 
@@ -156,12 +156,11 @@ pub fn App() -> impl IntoView {
             Err(error) => state.report("Reading node stats", Err(error)),
         }
     });
-    // The same rule for the updater. `update_info` carries the state too, and the backend sends
-    // it right after each `update_state`; a state that arrives before any info is kept and
-    // applied to the snapshot.
+    // The same rule for the updater: `update_info` carries the state too, and the backend sends
+    // it right after each `update_state`, so the info event and the snapshot are enough. An
+    // `update_state` only moves a loaded info along a little earlier.
     spawn_local(async move {
         let info_seen = StoredValue::new(false);
-        let early_state = StoredValue::new(None::<UpdateState>);
         let result = api::on_update_info(
             move |info| {
                 info_seen.set_value(true);
@@ -179,8 +178,6 @@ pub fn App() -> impl IntoView {
                             info.state = update_state;
                         }
                     });
-                } else {
-                    early_state.set_value(Some(update_state));
                 }
             },
             state.payload_error(),
@@ -194,12 +191,7 @@ pub fn App() -> impl IntoView {
         .await;
         state.report("Listening for update health", result);
         match api::get_update_info().await {
-            Ok(mut info) if !info_seen.get_value() => {
-                if let Some(newer) = early_state.get_value() {
-                    info.state = newer;
-                }
-                state.update.set(Some(info));
-            }
+            Ok(info) if !info_seen.get_value() => state.update.set(Some(info)),
             Ok(_) => {}
             Err(error) => state.report("Reading the update state", Err(error)),
         }
