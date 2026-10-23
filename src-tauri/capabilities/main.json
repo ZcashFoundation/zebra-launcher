@@ -25,6 +25,7 @@
     "allow-get-first-run-info",
     "allow-pick-data-dir",
     "allow-choose-data-dir",
+    "allow-free-space",
     "allow-import-legacy-state",
     "allow-delete-node-data",
     "allow-delete-legacy-state",

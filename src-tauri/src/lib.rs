@@ -84,6 +84,7 @@ pub fn run() {
             commands::get_first_run_info,
             commands::pick_data_dir,
             commands::choose_data_dir,
+            commands::free_space,
             commands::import_legacy_state,
             commands::delete_node_data,
             commands::delete_legacy_state,

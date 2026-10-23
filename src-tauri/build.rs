@@ -24,6 +24,7 @@ const COMMANDS: &[&str] = &[
     "get_first_run_info",
     "pick_data_dir",
     "choose_data_dir",
+    "free_space",
     "import_legacy_state",
     "delete_node_data",
     "delete_legacy_state",

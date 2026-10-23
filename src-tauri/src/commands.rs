@@ -382,6 +382,19 @@ pub async fn get_first_run_info(state: State<'_, AppState>) -> Result<FirstRunIn
     .await
 }
 
+/// The free space, in bytes, on the volume that holds `path`, or of its
+/// closest existing ancestor when `path` does not exist yet. Read-only: it
+/// creates nothing and saves nothing. `None` when `path` is empty or not
+/// absolute, when none of it exists, or when the space cannot be read.
+#[tauri::command]
+pub async fn free_space(path: String) -> Result<Option<u64>, String> {
+    let path = PathBuf::from(path.trim());
+    if !path.is_absolute() {
+        return Ok(None);
+    }
+    blocking(move || firstrun::free_space(&path).ok()).await
+}
+
 /// Opens the system's folder picker for the data directory. `None` when
 /// the user cancelled.
 #[tauri::command]
