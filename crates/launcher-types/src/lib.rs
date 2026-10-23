@@ -466,6 +466,117 @@ impl fmt::Display for ApplyError {
 
 impl std::error::Error for ApplyError {}
 
+/// What the launcher's updater is doing. Sent with every change as the
+/// `update_state` event and returned by `get_update_state`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UpdateState {
+    /// Nothing to report: no check has run yet, or updates were turned off.
+    #[default]
+    Idle,
+    /// Asking the update endpoint for the latest release.
+    Checking,
+    /// A newer release exists; `install_update` downloads and installs it.
+    Available {
+        /// The new launcher version.
+        version: String,
+        /// The release notes, if the manifest has them.
+        notes: Option<String>,
+        /// When the release was published, if the manifest says.
+        pub_date: Option<SystemTime>,
+    },
+    /// The new release is being downloaded.
+    Downloading {
+        /// The version being downloaded.
+        version: String,
+        /// Bytes received so far.
+        downloaded: u64,
+        /// The size of the download, when the server sent it.
+        total: Option<u64>,
+    },
+    /// The new release is downloaded and its signature verified.
+    ReadyToInstall {
+        /// The version that will be installed.
+        version: String,
+        /// Seconds until it installs by itself, while an automatic install
+        /// counts down (Auto mode at the end-of-support warning);
+        /// `cancel_update` stops the countdown. `None`: waits for the user.
+        countdown_secs: Option<u64>,
+    },
+    /// zebrad is being stopped and the update installed; the launcher
+    /// restarts next.
+    Installing {
+        /// The version being installed.
+        version: String,
+    },
+    /// The last check found no newer release.
+    UpToDate {
+        /// When that check finished.
+        checked_at: SystemTime,
+    },
+    /// The last check, download or install failed.
+    Error {
+        /// What went wrong, for the user.
+        message: String,
+        /// When it happened.
+        at: SystemTime,
+    },
+}
+
+/// A recovery the UI offers when the launcher did not come back healthy after
+/// an update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryAction {
+    /// Open the log directory (`open_path("log_dir")`).
+    OpenLogs,
+    /// Restore the default `zebrad.toml`.
+    ResetConfig,
+    /// Open the releases page, to reinstall a previous version by hand.
+    OpenReleasesPage,
+}
+
+/// The launcher did not come back healthy after an update: the
+/// `update_health_failed` event, also kept in [`UpdateInfo::health_failure`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateHealthFailure {
+    /// The version the update was installing.
+    pub expected_version: String,
+    /// The version that is running now.
+    pub running_version: String,
+    /// What went wrong, for the user.
+    pub message: String,
+    /// What the UI should offer, in order.
+    pub recovery: Vec<RecoveryAction>,
+    /// The releases page, where previous installers can be downloaded.
+    pub releases_url: String,
+}
+
+/// Everything the UI shows about launcher updates: the `update_info` event
+/// and `get_update_info`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateInfo {
+    /// What the updater is doing.
+    pub state: UpdateState,
+    /// The mode from the settings.
+    pub mode: UpdateMode,
+    /// The running launcher version.
+    pub current_version: String,
+    /// When a check last reached the update endpoint, across launches.
+    pub last_successful_check: Option<SystemTime>,
+    /// The end of support is near and no check succeeded in the last 14 days:
+    /// the UI suggests checking for an update.
+    pub stale_check_warning: bool,
+    /// False where this install cannot update itself (the `.deb` package, or
+    /// a development build): the UI links to [`UpdateInfo::releases_url`]
+    /// instead of offering to install.
+    pub can_install: bool,
+    /// The releases page.
+    pub releases_url: String,
+    /// Set when this launch followed an update that did not come back healthy.
+    pub health_failure: Option<UpdateHealthFailure>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +646,35 @@ mod tests {
         ] {
             assert!(!is_loopback_http_url(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn update_state_shapes() {
+        assert_eq!(
+            serde_json::to_value(UpdateState::Idle).unwrap(),
+            serde_json::json!({"state": "idle"})
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateState::ReadyToInstall {
+                version: "0.2.0".into(),
+                countdown_secs: Some(42)
+            })
+            .unwrap(),
+            serde_json::json!({"state": "ready_to_install", "version": "0.2.0", "countdown_secs": 42})
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateState::Downloading {
+                version: "0.2.0".into(),
+                downloaded: 10,
+                total: None
+            })
+            .unwrap(),
+            serde_json::json!({"state": "downloading", "version": "0.2.0", "downloaded": 10, "total": null})
+        );
+        assert_eq!(
+            serde_json::to_value(RecoveryAction::OpenReleasesPage).unwrap(),
+            "open_releases_page"
+        );
     }
 
     #[test]
