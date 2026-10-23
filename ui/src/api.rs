@@ -182,7 +182,7 @@ pub async fn log_history(since: u64) -> ApiResult<Vec<LogLine>> {
 
 pub async fn read_config() -> ApiResult<ConfigDocument> {
     if !is_tauri() {
-        return Ok(wire(mock::read_config().await)?);
+        return Ok(wire(mock::read_config().await.map_err(ApiError)?)?);
     }
     Ok(tauri::invoke0("read_config").await?)
 }
