@@ -20,6 +20,16 @@ Note: It currently requires a 64-bit processor, and on macOS, an ARM-based proce
 &nbsp;
 <img src="https://github.com/ZcashFoundation/zebra-app/assets/5491350/564bef27-5b82-4f1e-8e9f-af709bf48528" width="400">
 
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Development](docs/DEVELOPMENT.md)
+- [Grafana dashboards](docs/GRAFANA.md) and the [observability stack](docs/observability/)
+- [Releasing](docs/RELEASING.md)
+- [Security](docs/SECURITY.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Uninstall](docs/UNINSTALL.md)
+
 ## Developer Setup
 
 1. Make sure all of the [Tauri prerequisites](https://beta.tauri.app/guides/prerequisites/) are installed.
