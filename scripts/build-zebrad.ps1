@@ -144,8 +144,9 @@ try {
     Invoke-Step rustup @('target', 'add', '--toolchain', $toolchain, $Target)
 
     # libclang for bindgen: default to the LLVM that the runner (or the LLVM
-    # installer) puts in Program Files.
-    if (-not $env:LIBCLANG_PATH) {
+    # installer) puts in Program Files. ProgramFiles is unset off Windows, where
+    # only -DryRun is useful.
+    if (-not $env:LIBCLANG_PATH -and $env:ProgramFiles) {
         $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
         if (Test-Path (Join-Path $llvmBin 'libclang.dll')) { $env:LIBCLANG_PATH = $llvmBin }
     }
