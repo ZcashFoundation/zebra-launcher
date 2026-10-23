@@ -1,3 +1,5 @@
+#Requires -Version 7
+
 # Builds zebrad from a Zebra release tag and installs it as the Tauri sidecar
 # on Windows. The Windows counterpart of scripts/build-zebrad.sh; see that
 # script for why the sidecar is built from source and how the build mirrors
@@ -14,6 +16,8 @@
 #     `winget install protobuf`, or arduino/setup-protoc in CI.
 #   - rustup and git. The toolchain named in Zebra's rust-toolchain.toml is
 #     installed on demand.
+#   - PowerShell 7 (pwsh). Windows PowerShell 5.1 turns a native command's
+#     stderr into terminating errors under $ErrorActionPreference = 'Stop'.
 #
 # The tag must resolve to the pinned commit (ZEBRAD_COMMIT, or -Commit), so a
 # moved tag cannot change what gets built.
@@ -57,6 +61,33 @@ function Invoke-Step {
     }
 }
 
+# Runs a native command whose failure the caller handles: neither its stderr
+# nor its exit code raises a PowerShell error. Returns its exit code, its
+# trimmed stdout and its trimmed stderr.
+function Invoke-Native {
+    param([string]$Exe, [string[]]$Arguments)
+    if (-not (Get-Command $Exe -ErrorAction SilentlyContinue)) { throw "$Exe is not on PATH" }
+    $ErrorActionPreference = 'Continue'
+    $output = & $Exe @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    $stdout = @($output | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+    $stderr = @($output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
+    [pscustomobject]@{
+        ExitCode = $exitCode
+        Stdout = ($stdout -join "`n").Trim()
+        Stderr = ($stderr -join "`n").Trim()
+    }
+}
+
+# Runs git in the Zebra checkout and returns its trimmed stdout, or throws
+# "${Failure}: <git's stderr>" if git fails.
+function Invoke-Git {
+    param([string[]]$Arguments, [string]$Failure)
+    $result = Invoke-Native git (@('-C', $SrcDir) + $Arguments)
+    if ($result.ExitCode -ne 0) { throw "${Failure}: $($result.Stderr)" }
+    $result.Stdout
+}
+
 if (-not $Version) {
     $versionFile = Join-Path $repoRoot 'ZEBRAD_VERSION'
     if (-not (Test-Path $versionFile)) { throw "no -Version given and $versionFile is missing" }
@@ -83,7 +114,11 @@ if ($Commit -cnotmatch '^[0-9a-f]{40}$') {
     throw "commit '$Commit' is not a full 40-character lowercase hex SHA"
 }
 
-$hostTriple = ((rustc -vV) | Select-String '^host: (.+)$').Matches[0].Groups[1].Value
+$rustcInfo = Invoke-Native rustc @('-vV')
+if ($rustcInfo.ExitCode -ne 0 -or $rustcInfo.Stdout -notmatch '(?m)^host: (\S+)') {
+    throw "rustc -vV failed: $($rustcInfo.Stderr)"
+}
+$hostTriple = $Matches[1]
 if (-not $Target) { $Target = $hostTriple }
 $exe = if ($Target -like '*-windows-*') { '.exe' } else { '' }
 if (-not $Out) {
@@ -99,6 +134,17 @@ if (-not $SrcDir) {
 $SrcDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SrcDir)
 $Out = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Out)
 
+# The build sets these for cargo; they are restored when the script ends, so
+# they do not leak into the caller's session.
+$buildEnvNames = @(
+    'RUSTUP_TOOLCHAIN', 'LIBCLANG_PATH', 'SOURCE_DATE_EPOCH',
+    'CARGO_ENCODED_RUSTFLAGS', 'CARGO_PROFILE_RELEASE_STRIP'
+)
+$savedEnv = @{}
+foreach ($name in $buildEnvNames) {
+    $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name)
+}
+
 try {
     # 1. Check out the release tag, and check that it is the pinned commit.
     if (Test-Path (Join-Path $SrcDir '.git')) {
@@ -107,10 +153,8 @@ try {
         Invoke-Step git @('-c', 'advice.detachedHead=false', 'clone', '--depth', '1', '--branch', $tag, $ZebraGit, $SrcDir)
     }
     if (Test-Path (Join-Path $SrcDir '.git')) {
-        $head = (git -C $SrcDir rev-parse HEAD).Trim()
-        $tagCommit = (git -C $SrcDir rev-parse "refs/tags/$tag^{commit}")
-        if ($LASTEXITCODE -ne 0) { throw "$SrcDir has no tag $tag" }
-        $tagCommit = $tagCommit.Trim()
+        $head = Invoke-Git @('rev-parse', 'HEAD') "cannot read HEAD in $SrcDir"
+        $tagCommit = Invoke-Git @('rev-parse', "refs/tags/$tag^{commit}") "$SrcDir has no tag $tag"
         if ($head -ne $tagCommit) { throw "$SrcDir is at $head, not at $tag ($tagCommit)" }
         if ($tagCommit -cne $Commit) { throw "$tag is commit $tagCommit, but the pinned commit is $Commit" }
         Write-Host "$tag is the pinned commit $Commit"
@@ -124,7 +168,7 @@ try {
         $match = Select-String -Path $toolchainFile -Pattern '^\s*channel\s*=\s*"([^"]+)"' | Select-Object -First 1
         if (-not $match) { throw "no channel in $toolchainFile" }
         $toolchain = $match.Matches[0].Groups[1].Value
-        $sourceDateEpoch = (git -C $SrcDir log -1 --pretty=%ct).Trim()
+        $sourceDateEpoch = Invoke-Git @('log', '-1', '--pretty=%ct') "cannot read the commit time in $SrcDir"
     } elseif ($DryRun) {
         $toolchain = "<channel from $toolchainFile>"
         $sourceDateEpoch = "<commit time of $tag>"
@@ -135,8 +179,7 @@ try {
     Write-Host "+ `$env:RUSTUP_TOOLCHAIN = '$toolchain'"
     $installed = $false
     if (-not $DryRun) {
-        & rustup run $toolchain rustc --version *> $null
-        $installed = ($LASTEXITCODE -eq 0)
+        $installed = ((Invoke-Native rustup @('run', $toolchain, 'rustc', '--version')).ExitCode -eq 0)
     }
     if (-not $installed) {
         Invoke-Step rustup @('toolchain', 'install', $toolchain, '--profile', 'minimal')
@@ -144,24 +187,30 @@ try {
     Invoke-Step rustup @('target', 'add', '--toolchain', $toolchain, $Target)
 
     # libclang for bindgen: default to the LLVM that the runner (or the LLVM
-    # installer) puts in Program Files.
-    if (-not $env:LIBCLANG_PATH) {
+    # installer) puts in Program Files. ProgramFiles is unset off Windows, where
+    # only -DryRun is useful.
+    if (-not $env:LIBCLANG_PATH -and $env:ProgramFiles) {
         $llvmBin = Join-Path $env:ProgramFiles 'LLVM\bin'
         if (Test-Path (Join-Path $llvmBin 'libclang.dll')) { $env:LIBCLANG_PATH = $llvmBin }
     }
     Write-Host "+ `$env:LIBCLANG_PATH = '$env:LIBCLANG_PATH'"
     if (-not $DryRun) {
         if (-not $env:LIBCLANG_PATH) { throw 'libclang.dll not found: install LLVM or set LIBCLANG_PATH' }
+        if (-not (Test-Path (Join-Path $env:LIBCLANG_PATH 'libclang.dll'))) {
+            throw "libclang.dll not found in LIBCLANG_PATH ($env:LIBCLANG_PATH)"
+        }
         if (-not (Get-Command protoc -ErrorAction SilentlyContinue)) { throw 'protoc is not on PATH' }
     }
 
     # 3. Build like Zebra's release workflow does.
     $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
     $env:SOURCE_DATE_EPOCH = $sourceDateEpoch
-    $env:RUSTFLAGS = "--remap-path-prefix=$SrcDir=/zebra --remap-path-prefix=$cargoHome=/cargo"
+    # The flags are separated by 0x1f, not spaces, so paths with spaces survive.
+    $rustFlags = @("--remap-path-prefix=$SrcDir=/zebra", "--remap-path-prefix=$cargoHome=/cargo")
+    $env:CARGO_ENCODED_RUSTFLAGS = $rustFlags -join [char]0x1f
     $env:CARGO_PROFILE_RELEASE_STRIP = 'symbols'
     Write-Host "+ `$env:SOURCE_DATE_EPOCH = '$env:SOURCE_DATE_EPOCH'"
-    Write-Host "+ `$env:RUSTFLAGS = '$env:RUSTFLAGS'"
+    Write-Host "+ `$env:CARGO_ENCODED_RUSTFLAGS = '$($rustFlags -join "' + [char]0x1f + '")'"
     Write-Host "+ `$env:CARGO_PROFILE_RELEASE_STRIP = 'symbols'"
     Invoke-Step cargo @(
         'build', '--manifest-path', (Join-Path $SrcDir 'Cargo.toml'),
@@ -188,7 +237,7 @@ try {
         return
     }
     if ($Target -eq $hostTriple) {
-        $reported = (& $tmp --version | Select-Object -First 1)
+        $reported = ((Invoke-Native $tmp @('--version')).Stdout -split "`n")[0]
         if ($reported -notmatch ('^zebrad ' + [regex]::Escape($Version) + '($|[ +])')) {
             Remove-Item -Force $tmp
             throw "binary reports '$reported', expected 'zebrad $Version'"
@@ -200,5 +249,12 @@ try {
 
     Write-Host "zebrad $Version ($Target): built from $tag ($Commit) with $toolchain, installed at $Out"
 } finally {
+    foreach ($name in $buildEnvNames) {
+        if ($null -eq $savedEnv[$name]) {
+            Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
+        } else {
+            Set-Item -Path "Env:$name" -Value $savedEnv[$name]
+        }
+    }
     if ($tempRoot -and (Test-Path $tempRoot)) { Remove-Item -Recurse -Force $tempRoot }
 }

@@ -13,9 +13,11 @@
 #   1. the cosign signature on SHA256SUMS, pinned to Zebra's release workflow
 #      at the release tag and, when the commit is known, at that commit;
 #   2. the tarball's checksum against the signed SHA256SUMS;
-#   3. the GitHub attestation of the tarball, when `gh attestation` exists
-#      (gh >= 2.49; it needs `gh auth login` or GH_TOKEN), pinned to the tag
-#      and, when the commit is known, to that commit;
+#   3. the GitHub attestation of the tarball, when gh is on PATH, pinned to
+#      the tag and, when the commit is known, to that commit. This needs
+#      gh >= 2.68.0, the first release with `gh attestation verify
+#      --source-ref/--source-digest`, and `gh auth login` or GH_TOKEN. An older
+#      gh is an error, not a reason to skip the check;
 #   4. that the extracted binary reports the requested version.
 #
 # Requires: bash, curl, cosign, tar, gzip, sha256sum; optionally gh.
@@ -28,11 +30,16 @@ set -euo pipefail
 readonly REPO="ZcashFoundation/zebra"
 readonly SIGNER_WORKFLOW="${REPO}/.github/workflows/zfnd-release-binaries.yml"
 readonly OIDC_ISSUER="https://token.actions.githubusercontent.com"
+# The first gh with `gh attestation verify --source-ref/--source-digest`.
+readonly MIN_GH_VERSION="2.68.0"
 
 die() {
     echo "fetch-zebrad-linux: error: $*" >&2
     exit 1
 }
+
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 usage() {
     cat <<'EOF'
@@ -85,31 +92,31 @@ case "${target}" in
     *) die "unsupported target ${target}; Zebra only publishes Linux x86_64 and aarch64 binaries" ;;
 esac
 
-if [ -z "${version}" ]; then
-    [ -f "${repo_root}/ZEBRAD_VERSION" ] || die "no --version given and ${repo_root}/ZEBRAD_VERSION is missing"
-    version="$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_VERSION")"
-fi
+[ -n "${version}" ] || version="$(read_zebrad_version "${repo_root}")"
 # ZEBRAD_COMMIT pins the commit of ZEBRAD_VERSION, so it only applies to it.
-if [ -z "${commit}" ] && [ -f "${repo_root}/ZEBRAD_COMMIT" ] &&
-    [ "${version}" = "$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_VERSION" 2>/dev/null)" ]; then
-    commit="$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_COMMIT")"
-fi
-if [ -n "${commit}" ] && ! printf '%s\n' "${commit}" | grep -Eq '^[0-9a-f]{40}$'; then
-    die "commit '${commit}' is not a full 40-character lowercase hex SHA"
-fi
-case "${version}" in
-    v* | V*) die "version '${version}' must not start with 'v' (asset names are zebrad-<X.Y.Z>-<target>.tar.gz)" ;;
-esac
-# Plain semver, optionally with a pre-release suffix, so it is safe in URLs and patterns.
-if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
-    die "version '${version}' is not of the form X.Y.Z"
-fi
+[ -n "${commit}" ] || commit="$(read_zebrad_commit "${repo_root}" "${version}")"
+[ -z "${commit}" ] || check_commit "${commit}"
+check_zebrad_version "${version}" "(asset names are zebrad-<X.Y.Z>-<target>.tar.gz)"
 
 [ -n "${out}" ] || out="${repo_root}/src-tauri/binaries/zebra-launcher-zebrad-${target}"
 
 for tool in curl cosign tar gzip sha256sum; do
     command -v "${tool}" >/dev/null 2>&1 || die "${tool} is required but not on PATH"
 done
+
+# A gh on PATH must be able to pin the attestation to the tag and commit;
+# checked before downloading anything. The help goes through a variable, as
+# `gh ... | grep -q` could fail with SIGPIPE under pipefail.
+use_gh=false
+if command -v gh >/dev/null 2>&1; then
+    gh_help="$(gh attestation verify --help 2>&1)" || gh_help=""
+    if ! grep -q -- '--source-digest' <<<"${gh_help}"; then
+        gh_version="$(gh --version 2>/dev/null)" || gh_version=""
+        gh_version="${gh_version%%$'\n'*}"
+        die "${gh_version:-gh} on PATH lacks 'gh attestation verify --source-digest'; the attestation check needs gh >= ${MIN_GH_VERSION}. Upgrade gh, or take it off PATH to skip the check"
+    fi
+    use_gh=true
+fi
 
 tag="v${version}"
 asset="zebrad-${version}-${target}.tar.gz"
@@ -155,7 +162,7 @@ awk -v a="${asset}" '$2 == a || $2 == "*" a { found = 1 } END { exit !found }' \
     die "checksum mismatch for ${asset}"
 
 attestation="skipped"
-if command -v gh >/dev/null 2>&1 && gh attestation verify --help >/dev/null 2>&1; then
+if [ "${use_gh}" = true ]; then
     echo "Verifying the GitHub build-provenance attestation of ${asset}"
     gh_args=(
         --repo "${REPO}"
@@ -167,7 +174,7 @@ if command -v gh >/dev/null 2>&1 && gh attestation verify --help >/dev/null 2>&1
         die "gh attestation verify failed for ${asset}"
     attestation="verified"
 else
-    echo "Skipping the GitHub attestation check: gh >= 2.49 with 'gh attestation' is not available"
+    echo "Skipping the GitHub attestation check: gh is not on PATH (the check needs gh >= ${MIN_GH_VERSION})"
 fi
 
 echo "Extracting zebrad"
@@ -178,19 +185,6 @@ if [ ! -f "${work}/extract/zebrad" ] || [ -L "${work}/extract/zebrad" ]; then
     die "zebrad in ${asset} is not a regular file"
 fi
 
-mkdir -p "$(dirname "${out}")"
-# Install through a temporary file so a failed check never leaves a bad sidecar.
-cp "${work}/extract/zebrad" "${out}.tmp"
-chmod +x "${out}.tmp"
-
-reported="$("${out}.tmp" --version 2>/dev/null | head -n 1)" || reported=""
-case "${reported}" in
-    "zebrad ${version}" | "zebrad ${version} "* | "zebrad ${version}+"*) ;;
-    *)
-        rm -f "${out}.tmp"
-        die "binary reports '${reported}', expected 'zebrad ${version}'"
-        ;;
-esac
-mv -f "${out}.tmp" "${out}"
+install_atomic "${work}/extract/zebrad" "${out}" "${version}"
 
 echo "zebrad ${version} (${target}, commit ${commit:-not pinned}): cosign verified, sha256 ok, attestation ${attestation}, installed at ${out}"
