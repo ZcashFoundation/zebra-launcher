@@ -38,6 +38,16 @@ pub fn validate(settings: &Settings) -> Result<(), SettingsError> {
     Ok(())
 }
 
+/// Replaces `current` with settings sent by the UI (`set_settings`), keeping
+/// the fields the UI may not set directly: `first_run_done` (only
+/// `complete_first_run` sets it) and `data_dir` (only `choose_data_dir`
+/// changes it, after its checks).
+pub fn apply_from_ui(current: &mut Settings, mut incoming: Settings) {
+    incoming.first_run_done = current.first_run_done;
+    incoming.data_dir = current.data_dir.take();
+    *current = incoming;
+}
+
 type Edit = Box<dyn FnOnce(&mut Settings) + Send>;
 
 struct Update {
@@ -200,6 +210,25 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = Paths::under(dir.path());
         (dir, paths)
+    }
+
+    #[test]
+    fn ui_settings_keep_the_data_dir_and_first_run_marker() {
+        let mut current = Settings {
+            data_dir: Some("/chosen".into()),
+            first_run_done: true,
+            ..Settings::default()
+        };
+        let stale = Settings {
+            data_dir: None,
+            first_run_done: false,
+            network: Network::Testnet,
+            ..Settings::default()
+        };
+        apply_from_ui(&mut current, stale);
+        assert_eq!(current.data_dir.as_deref(), Some("/chosen"));
+        assert!(current.first_run_done);
+        assert_eq!(current.network, Network::Testnet);
     }
 
     #[tokio::test]

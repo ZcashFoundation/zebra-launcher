@@ -270,17 +270,17 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 /// directory) are updated right away and take effect on the next zebrad
 /// start; the stop grace period takes effect on the next launch.
 /// `first_run_done` is kept as it is: only `complete_first_run` sets it.
+/// `data_dir` is kept as it is too: only `choose_data_dir` changes it, after
+/// checking that zebrad is stopped and the directory is writable, so a stale
+/// copy of the settings in the UI cannot undo a choice.
 #[tauri::command]
 pub async fn set_settings(
     state: State<'_, AppState>,
-    mut settings: Settings,
+    settings: Settings,
 ) -> Result<Settings, String> {
     let saved = state
         .settings
-        .update(move |current| {
-            settings.first_run_done = current.first_run_done;
-            *current = settings;
-        })
+        .update(move |current| launcher_core::settings::apply_from_ui(current, settings))
         .await
         .map_err(message)?;
 

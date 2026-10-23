@@ -193,7 +193,10 @@ change shown. `PortInUse` remediation offers other ports and writes them into th
 keys. The RPC address always comes from the written config, never from log lines.
 
 Launcher settings live in `launcher.json` (with `schema_version`), owned by a settings
-actor.
+actor. `set_settings` saves everything the UI sends except `first_run_done` and
+`data_dir`, which it keeps as stored: only `complete_first_run` and `choose_data_dir`
+change them, so a stale UI copy cannot undo a data directory choice or skip the checks
+`choose_data_dir` makes.
 
 ## First run and node data
 
