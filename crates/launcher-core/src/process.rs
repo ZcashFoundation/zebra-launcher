@@ -184,6 +184,15 @@ impl Spawner {
     }
 }
 
+/// Whether `key` is a variable zebrad's config loader reads. The loader
+/// lowercases keys and Windows variable names ignore case, so `zebra_` and
+/// `Zebra_` count too.
+fn is_zebra_env_var(key: &std::ffi::OsStr) -> bool {
+    key.as_encoded_bytes()
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"ZEBRA_"))
+}
+
 /// Spawns on the calling thread. See the module docs for why that matters.
 fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
     let mut cmd = Command::new(&command.binary);
@@ -196,7 +205,7 @@ fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
     }
     cmd.args(&command.extra_args);
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("ZEBRA_") {
+        if is_zebra_env_var(&key) {
             cmd.env_remove(key);
         }
     }
@@ -250,4 +259,26 @@ fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
         stdout,
         stderr,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::is_zebra_env_var;
+
+    #[test]
+    fn zebra_env_vars_match_in_any_case() {
+        for key in [
+            "ZEBRA_NETWORK__NETWORK",
+            "zebra_rpc__listen_addr",
+            "Zebra_X",
+            "ZEBRA_",
+        ] {
+            assert!(is_zebra_env_var(OsStr::new(key)), "{key}");
+        }
+        for key in ["ZEBRA", "ZEBRAD_X", "PATH", "MY_ZEBRA_X", ""] {
+            assert!(!is_zebra_env_var(OsStr::new(key)), "{key}");
+        }
+    }
 }
