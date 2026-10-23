@@ -2,8 +2,9 @@
 //! be dismissed; Finish records completion (`complete_first_run`) and starts zebrad, which the
 //! backend does not start at launch until then.
 //!
-//! Steps: welcome, data location and network, alpha.4 leftovers (only when some were found),
-//! update mode, and notes (firewall prompt, logs).
+//! Steps: welcome, data location and network, alpha.4 leftovers (only when some were found:
+//! move the old chain state here, delete it, or leave it), update mode, and notes (firewall
+//! prompt, logs).
 
 use launcher_types::{FirstRunInfo, ImportOutcome, Network, Phase, Settings, UpdateMode};
 use leptos::{prelude::*, task::spawn_local};
@@ -14,6 +15,9 @@ use crate::{
     components::update_mode_choice::UpdateModeChoice,
     format::{bytes, is_low_space, state_dir, update_mode_text},
 };
+
+/// The word to type before the alpha.4 chain state is deleted.
+const DELETE_WORD: &str = "delete";
 
 /// One page of the wizard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +110,12 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
     // Legacy step.
     let legacy_ack = RwSignal::new(false);
     let moved = RwSignal::new(None::<ImportOutcome>);
+    // The bytes freed by deleting the alpha.4 state (0 when unknown).
+    let deleted = RwSignal::new(None::<u64>);
+    let confirm_delete = RwSignal::new(false);
+    let delete_typed = RwSignal::new(String::new());
+    // Something was done with the alpha.4 state, so moving on no longer means leaving it.
+    let legacy_done = move || moved.with(Option::is_some) || deleted.with(Option::is_some);
     // Updates step: Notify is preselected.
     let update_mode = RwSignal::new(UpdateMode::Notify);
     // Set when the settings were saved but zebrad did not start.
@@ -385,6 +395,27 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
             bytes(legacy.state_bytes)
         };
         let has_state = legacy.state_dir.is_some();
+        let old_state = legacy
+            .state_dir
+            .as_deref()
+            .map(state_dir)
+            .unwrap_or_default();
+        let delete_size = size.clone();
+        let delete_it = move |_| {
+            busy.set(true);
+            error.set(None);
+            spawn_local(async move {
+                match api::delete_legacy_state().await {
+                    Ok(freed) => {
+                        deleted.set(Some(freed));
+                        confirm_delete.set(false);
+                        delete_typed.set(String::new());
+                    }
+                    Err(failure) => error.set(Some(format!("Could not delete it: {failure}"))),
+                }
+                busy.set(false);
+            });
+        };
         let move_it = move |_| {
             busy.set(true);
             error.set(None);
@@ -432,13 +463,14 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                 view! {
                     <p>
                         "Moving it here saves syncing the chain again. It is moved, not copied, into "
-                        <code>{move || current_dir().map(|(dir, _, _)| state_dir(&dir))}</code> "."
+                        <code>{move || current_dir().map(|(dir, _, _)| state_dir(&dir))}</code>
+                        ". If you do not need it, delete it to free the space, or leave it where it is."
                     </p>
                     <div class="banner banner-warn" role="note">
                         "Quit the old launcher, and any zebrad you started yourself, first. After the move they no longer find this state. The move only works when both folders are on the same drive; otherwise move the folder by hand."
                     </div>
-                    {move || match moved.get() {
-                        Some(outcome) => {
+                    {move || match (moved.get(), deleted.get()) {
+                        (Some(outcome), _) => {
                             view! {
                                 <div class="banner banner-ok" role="status">
                                     {format!("Moved {} to {}.", outcome.from, outcome.to)}
@@ -446,7 +478,22 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                             }
                                 .into_any()
                         }
-                        None => {
+                        (None, Some(freed)) => {
+                            let text = if freed > 0 {
+                                format!("Deleted {}, freeing {}.", old_state, bytes(freed))
+                            } else {
+                                format!("Deleted {}.", old_state)
+                            };
+                            view! {
+                                <div class="banner banner-ok legacy-deleted" role="status">
+                                    {text}
+                                </div>
+                            }
+                                .into_any()
+                        }
+                        (None, None) => {
+                            let old_state = old_state.clone();
+                            let delete_size = delete_size.clone();
                             view! {
                                 <label class="check">
                                     <input
@@ -462,12 +509,78 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                                     <button
                                         type="button"
                                         class="primary"
-                                        disabled=move || busy.get() || !legacy_ack.get()
+                                        disabled=move || {
+                                            busy.get() || !legacy_ack.get() || confirm_delete.get()
+                                        }
                                         on:click=move_it
                                     >
-                                        {move || if busy.get() { "Moving…" } else { "Move it here" }}
+                                        {move || {
+                                            if busy.get() && !confirm_delete.get() {
+                                                "Moving…"
+                                            } else {
+                                                "Move it here"
+                                            }
+                                        }}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="legacy-delete"
+                                        disabled=move || {
+                                            busy.get() || !legacy_ack.get() || confirm_delete.get()
+                                        }
+                                        on:click=move |_| {
+                                            error.set(None);
+                                            confirm_delete.set(true);
+                                        }
+                                    >
+                                        "Delete it…"
                                     </button>
                                 </div>
+                                <Show when=move || confirm_delete.get()>
+                                    <div class="delete-confirm banner banner-warn">
+                                        <p>
+                                            "This deletes the old chain state in "
+                                            <code>{old_state.clone()}</code> " for good, freeing "
+                                            {delete_size.clone()}
+                                            ". Only do this if you do not want to keep it: syncing it again takes a day or more on Mainnet."
+                                        </p>
+                                        <label class="field">
+                                            <span>"Type " <code>{DELETE_WORD}</code> " to confirm"</span>
+                                            <input
+                                                type="text"
+                                                class="legacy-delete-word"
+                                                autocomplete="off"
+                                                prop:value=move || delete_typed.get()
+                                                on:input=move |event| {
+                                                    delete_typed.set(event_target_value(&event))
+                                                }
+                                            />
+                                        </label>
+                                        <div class="buttons">
+                                            <button
+                                                type="button"
+                                                class="danger legacy-delete-confirm"
+                                                disabled=move || {
+                                                    busy.get()
+                                                        || delete_typed.with(|t| t.trim() != DELETE_WORD)
+                                                }
+                                                on:click=delete_it
+                                            >
+                                                {move || if busy.get() { "Deleting…" } else { "Delete" }}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                disabled=move || busy.get()
+                                                on:click=move |_| {
+                                                    confirm_delete.set(false);
+                                                    delete_typed.set(String::new());
+                                                }
+                                            >
+                                                "Cancel"
+                                            </button>
+                                        </div>
+                                    </div>
+                                </Show>
                             }
                                 .into_any()
                         }
@@ -642,15 +755,15 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                     }
                         .into_any()
                 } else if current == Step::Legacy {
-                    // Until something was moved, moving on means leaving it where it is.
+                    // Until the state was moved or deleted, moving on means leaving it where it is.
                     view! {
                         <button
                             type="button"
-                            class:primary=move || moved.with(Option::is_some)
+                            class:primary=legacy_done
                             disabled=move || busy.get()
                             on:click=next
                         >
-                            {move || if moved.with(Option::is_some) { "Next" } else { "Leave it" }}
+                            {move || if legacy_done() { "Next" } else { "Leave it" }}
                         </button>
                     }
                         .into_any()

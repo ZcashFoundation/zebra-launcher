@@ -1023,6 +1023,28 @@ pub async fn import_legacy_state() -> Result<ImportOutcome, String> {
     })
 }
 
+pub async fn delete_legacy_state() -> Result<u64, String> {
+    sleep(700).await;
+    let mock = mock();
+    mock.require_stopped()?;
+    let Some(LegacyInstall {
+        state_dir: Some(_),
+        state_bytes,
+        ..
+    }) = mock.legacy.get_untracked()
+    else {
+        return Err("no alpha.4 chain state was found".into());
+    };
+    // The old config next to the old app stays.
+    mock.legacy.update(|legacy| {
+        if let Some(legacy) = legacy {
+            legacy.state_dir = None;
+            legacy.state_bytes = 0;
+        }
+    });
+    Ok(state_bytes)
+}
+
 pub async fn delete_node_data() -> Result<u64, String> {
     sleep(700).await;
     let mock = mock();

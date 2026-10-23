@@ -303,6 +303,15 @@ pub async fn import_legacy_state() -> ApiResult<ImportOutcome> {
     Ok(tauri::invoke0("import_legacy_state").await?)
 }
 
+/// Deletes the alpha.4 chain state in zebrad's default cache directory and returns the bytes
+/// freed (0 when unknown). Only while zebrad is stopped or failed.
+pub async fn delete_legacy_state() -> ApiResult<u64> {
+    if !is_tauri() {
+        return Ok(wire(mock::delete_legacy_state().await.map_err(ApiError)?)?);
+    }
+    Ok(tauri::invoke0("delete_legacy_state").await?)
+}
+
 /// Deletes the chain state and returns the bytes freed. Only while zebrad is stopped or
 /// failed.
 pub async fn delete_node_data() -> ApiResult<u64> {
