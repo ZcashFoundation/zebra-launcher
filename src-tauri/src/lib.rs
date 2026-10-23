@@ -13,6 +13,7 @@ pub mod exit;
 pub mod logging;
 pub mod paths;
 pub mod sidecar;
+pub mod tray;
 
 use std::time::Duration;
 
@@ -97,12 +98,20 @@ pub fn run() {
     }
 }
 
-fn show_main_window(app: &AppHandle) {
+/// Shows, unminimises and focuses the main window: from the tray, a second
+/// launch, or the macOS dock.
+pub(crate) fn show_main_window<R: tauri::Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// The app state, once startup succeeded.
+pub(crate) fn try_state<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<AppState> {
+    app.try_state::<AppState>()
+        .map(|state| state.inner().clone())
 }
 
 /// Starts everything. A failure is logged and ends the app with exit code 1
@@ -113,6 +122,7 @@ fn setup(app: &AppHandle) {
             app.manage(state.clone());
             bridge::forward_status(app.clone(), state.supervisor.watch_status());
             bridge::forward_node_stats(app.clone(), state.node_stats.clone());
+            tray::install(app, &state);
             // Until the first-run flow is done the user has not chosen where
             // the chain state goes, so zebrad waits for them.
             let settings = state.settings.current();
