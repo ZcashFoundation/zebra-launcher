@@ -16,8 +16,11 @@
 #           installed on demand), git.
 # A release build takes 15-40 minutes and several GB of disk.
 #
-# Usage: scripts/build-zebrad.sh [--version X.Y.Z] [--target TRIPLE] [--out PATH]
-#                                [--src-dir DIR] [--dry-run]
+# The tag must resolve to the pinned commit (ZEBRAD_COMMIT, or --commit), so a
+# moved tag cannot change what gets built.
+#
+# Usage: scripts/build-zebrad.sh [--version X.Y.Z] [--commit SHA] [--target TRIPLE]
+#                                [--out PATH] [--src-dir DIR] [--dry-run]
 
 set -euo pipefail
 
@@ -30,9 +33,13 @@ die() {
 
 usage() {
     cat <<'EOF'
-Usage: build-zebrad.sh [--version X.Y.Z] [--target TRIPLE] [--out PATH] [--src-dir DIR] [--dry-run]
+Usage: build-zebrad.sh [--version X.Y.Z] [--commit SHA] [--target TRIPLE] [--out PATH]
+                       [--src-dir DIR] [--dry-run]
 
   --version  zebrad version without a leading "v" (default: ZEBRAD_VERSION)
+  --commit   full 40-hex Zebra commit that tag v<version> must point to
+             (default: ZEBRAD_COMMIT when the version is ZEBRAD_VERSION;
+             required for any other version)
   --target   Rust target triple (default: the host)
   --out      where to install the binary
              (default: src-tauri/binaries/zebra-launcher-zebrad-<target>)
@@ -45,6 +52,7 @@ EOF
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 version=""
+commit=""
 target=""
 out=""
 src=""
@@ -53,6 +61,7 @@ dry_run=false
 while [ $# -gt 0 ]; do
     case "$1" in
         --version) [ $# -ge 2 ] || die "--version needs a value"; version="$2"; shift 2 ;;
+        --commit) [ $# -ge 2 ] || die "--commit needs a value"; commit="$2"; shift 2 ;;
         --target) [ $# -ge 2 ] || die "--target needs a value"; target="$2"; shift 2 ;;
         --out) [ $# -ge 2 ] || die "--out needs a value"; out="$2"; shift 2 ;;
         --src-dir) [ $# -ge 2 ] || die "--src-dir needs a value"; src="$2"; shift 2 ;;
@@ -84,6 +93,18 @@ if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.
 fi
 tag="v${version}"
 
+# ZEBRAD_COMMIT pins the commit of ZEBRAD_VERSION, so it only applies to it.
+if [ -z "${commit}" ]; then
+    pinned_version="$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_VERSION" 2>/dev/null)" || pinned_version=""
+    [ "${version}" = "${pinned_version}" ] ||
+        die "version ${version} is not ZEBRAD_VERSION (${pinned_version:-missing}); pass --commit"
+    [ -f "${repo_root}/ZEBRAD_COMMIT" ] || die "${repo_root}/ZEBRAD_COMMIT is missing; pass --commit"
+    commit="$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_COMMIT")"
+fi
+if ! printf '%s\n' "${commit}" | grep -Eq '^[0-9a-f]{40}$'; then
+    die "commit '${commit}' is not a full 40-character lowercase hex SHA"
+fi
+
 command -v rustc >/dev/null 2>&1 || die "rustup/rustc is required"
 host="$(rustc -vV | sed -n 's/^host: //p')"
 [ -n "${target}" ] || target="${host}"
@@ -101,15 +122,22 @@ else
     src="$(cd "$(dirname "${src}")" && pwd)/$(basename "${src}")"
 fi
 
-# 1. Check out the release tag.
+# 1. Check out the release tag, and check that it is the pinned commit.
 if [ -d "${src}/.git" ]; then
     echo "Using the existing checkout in ${src}"
+else
+    run git -c advice.detachedHead=false clone --depth 1 --branch "${tag}" "${ZEBRA_GIT}" "${src}"
+fi
+if [ -d "${src}/.git" ]; then
     head="$(git -C "${src}" rev-parse HEAD)"
     tag_commit="$(git -C "${src}" rev-parse "refs/tags/${tag}^{commit}" 2>/dev/null)" ||
         die "${src} has no tag ${tag}"
     [ "${head}" = "${tag_commit}" ] || die "${src} is at ${head}, not at ${tag} (${tag_commit})"
+    [ "${tag_commit}" = "${commit}" ] ||
+        die "${tag} is commit ${tag_commit}, but the pinned commit is ${commit}"
+    echo "${tag} is the pinned commit ${commit}"
 else
-    run git -c advice.detachedHead=false clone --depth 1 --branch "${tag}" "${ZEBRA_GIT}" "${src}"
+    echo "+ check that ${tag} and HEAD are the pinned commit ${commit}"
 fi
 
 # 2. Use the toolchain Zebra pins for this release.
@@ -168,4 +196,4 @@ else
 fi
 mv -f "${out}.tmp" "${out}"
 
-echo "zebrad ${version} (${target}): built from ${tag} with ${toolchain}, installed at ${out}"
+echo "zebrad ${version} (${target}): built from ${tag} (${commit}) with ${toolchain}, installed at ${out}"
