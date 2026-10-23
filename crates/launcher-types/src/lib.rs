@@ -286,7 +286,9 @@ pub enum UpdateMode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// The file format version, for future migrations.
+    /// The file format version. Files older than version 2 predate
+    /// `first_run_done` and are migrated when loaded (see
+    /// [`Settings::first_run_done`]).
     pub schema_version: u32,
     /// How launcher updates are handled.
     pub update_mode: UpdateMode,
@@ -304,13 +306,17 @@ pub struct Settings {
     /// How long a graceful stop may take before zebrad is killed, in seconds.
     pub stop_grace_secs: u64,
     /// The first-run flow was completed (`complete_first_run`). Until then
-    /// the UI shows it and zebrad is not started at launch.
+    /// the UI shows it and zebrad is not started.
+    ///
+    /// New installs start with `false`. A `launcher.json` written before
+    /// schema version 2 belongs to a user who already ran the launcher, so
+    /// loading it sets this to `true`.
     pub first_run_done: bool,
 }
 
 impl Settings {
     /// The current [`Settings::schema_version`].
-    pub const SCHEMA_VERSION: u32 = 1;
+    pub const SCHEMA_VERSION: u32 = 2;
 }
 
 impl Default for Settings {

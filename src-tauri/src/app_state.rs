@@ -12,7 +12,8 @@ use std::{
 };
 
 use launcher_core::{
-    config::ManagedKeys, paths::Paths, settings::SettingsHandle, supervisor::SupervisorHandle,
+    config::ManagedKeys, firstrun::SizeCache, paths::Paths, settings::SettingsHandle,
+    supervisor::SupervisorHandle,
 };
 use launcher_types::{NodeStats, Phase, Settings};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
@@ -44,6 +45,9 @@ pub struct AppState {
     /// Set once the tray icon exists, so closing the window may hide it
     /// instead of quitting.
     pub tray_ready: Arc<AtomicBool>,
+    /// The alpha.4 state size, measured once per launcher session by
+    /// `get_first_run_info` and reused by `delete_node_data`.
+    pub sizes: Arc<SizeCache>,
     /// Keeps zebrad starts and node-data changes apart: every start holds one
     /// permit until it has finished, and a data change (choosing the data
     /// directory, importing or deleting the state) holds all of them.
@@ -67,6 +71,7 @@ impl AppState {
             log_generation: Arc::new(AtomicU64::new(0)),
             exit: Arc::new(ExitGuard::default()),
             tray_ready: Arc::new(AtomicBool::new(false)),
+            sizes: Arc::new(SizeCache::default()),
             data_gate: Arc::new(Semaphore::new(DATA_GATE_PERMITS as usize)),
         }
     }

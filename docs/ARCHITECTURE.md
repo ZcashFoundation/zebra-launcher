@@ -193,7 +193,13 @@ change shown. `PortInUse` remediation offers other ports and writes them into th
 keys. The RPC address always comes from the written config, never from log lines.
 
 Launcher settings live in `launcher.json` (with `schema_version`), owned by a settings
-actor.
+actor. `set_settings` saves everything the UI sends except `first_run_done` and
+`data_dir`, which it keeps as stored: only `complete_first_run` and `choose_data_dir`
+change them, so a stale UI copy cannot undo a data directory choice or skip the checks
+`choose_data_dir` makes. A `launcher.json` older than schema version 2 (or without a
+`schema_version`) predates the first-run flow: `SettingsStore::open` sets
+`first_run_done`, bumps the version and writes it back, so upgrading users keep their
+autostart. Without a file, `first_run_done` starts false.
 
 ## First run and node data
 
@@ -202,15 +208,17 @@ directories; the commands in `src-tauri/src/commands.rs` call it off the async r
 
 | Command | Returns | Does |
 | --- | --- | --- |
-| `get_first_run_info` | `FirstRunInfo` | first run until `settings.first_run_done`; the default data dir and its free space (`statvfs` / `GetDiskFreeSpaceExW`, at the nearest existing ancestor); alpha.4 leftovers with the state size from a capped walk |
+| `get_first_run_info` | `FirstRunInfo` | first run until `settings.first_run_done`; the default data dir and its free space (`statvfs` / `GetDiskFreeSpaceExW`, at the nearest existing ancestor); alpha.4 leftovers with the state size from a walk capped at 50k entries (then a lower bound), done once per session |
 | `pick_data_dir` | `Option<String>` | the native folder picker |
 | `choose_data_dir(path)` | `DataDirChoice` | checks `path` is absolute and writable, saves `settings.data_dir`, rewrites `state.cache_dir`; returns the free space, the UI decides whether to warn |
 | `import_legacy_state` | `ImportOutcome` | renames `dirs::cache_dir()/zebra/state` into the current state dir; across volumes it fails and asks the user to move it by hand, never copying |
-| `delete_node_data` | `u64` (bytes freed) | removes `<data dir>/state` only, and only inside the launcher's data dir or the chosen one |
+| `delete_node_data` | `u64` (bytes freed) | removes `<data dir>/state` only, and only inside the launcher's data dir or the chosen one; the bytes come from a size measured earlier in the session, 0 (unknown) otherwise, never from a walk of the whole state |
 | `copy_diagnostics` | `String` | versions, OS, status, settings (URL credentials redacted), `zebrad.toml`, last 200 lines of each log; never the RPC cookie |
 | `complete_first_run` | `()` | sets `first_run_done`; from then on zebrad starts at launch |
 
-zebrad is not started at launch before the first run is complete. The data commands run
+zebrad is not started before the first run is complete: `firstrun::start_allowed` is the
+one rule, checked at launch, by the tray (whose Start item stays disabled until then) and
+by `start_zebrad`, `start_zebrad_killing_stale` and `restart_zebrad`. The data commands run
 only while zebrad is `Stopped` or `Failed`. A semaphore in `AppState` keeps them apart
 from starts: each start (UI, tray, launch, the restart inside `apply_config`) holds one
 permit until it finishes, and a data change holds all of them, so zebrad cannot start
@@ -234,7 +242,8 @@ Show / second launch (single-instance) / macOS dock -> show + focus the window
   request passes through once the shutdown finished; `RunEvent::Exit` blocks on the
   shutdown as a last resort.
 - If startup fails (paths, settings, supervisor), the window is hidden and a native error
-  dialog names the error and the log directory; dismissing it exits with code 1. A
+  dialog names the error and the log directory; dismissing it exits with code 1, and so
+  does a dialog that could not be shown or got no answer within 60 s. A
   `zebrad.toml` that cannot be updated is not fatal: zebrad reports it and the editor can
   fix it.
 

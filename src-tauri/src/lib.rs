@@ -19,7 +19,7 @@ pub mod updater;
 use std::time::Duration;
 
 use launcher_core::{
-    config,
+    config, firstrun,
     logfile::RotatingLogConfig,
     monitor::{self, Monitor},
     process::ZebradCommand,
@@ -136,7 +136,7 @@ fn setup(app: &AppHandle) {
             // Until the first-run flow is done the user has not chosen where
             // the chain state goes, so zebrad waits for them.
             let settings = state.settings.current();
-            if settings.start_node_on_launch && settings.first_run_done {
+            if settings.start_node_on_launch && firstrun::start_allowed(&settings).is_ok() {
                 tauri::async_runtime::spawn(start_in_background(app.clone(), state));
             }
         }
@@ -148,9 +148,18 @@ fn setup(app: &AppHandle) {
     }
 }
 
+/// How long the startup error dialog may stay unanswered before the launcher
+/// exits anyway, so a dialog that never appeared cannot leave a hidden
+/// process behind.
+const STARTUP_ERROR_DIALOG_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Tells the user why startup failed and where the log is, then exits with
 /// code 1 once the dialog is dismissed. The dialog is not modal to the event
 /// loop: `setup` runs on the main thread, where a blocking dialog must not.
+///
+/// The process also exits with code 1 if the dialog plugin drops the
+/// callback without calling it (the dialog could not be shown), or if no
+/// answer arrives within [`STARTUP_ERROR_DIALOG_TIMEOUT`].
 fn show_startup_error(app: &AppHandle, err: &StartupError) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
@@ -159,7 +168,32 @@ fn show_startup_error(app: &AppHandle, err: &StartupError) {
         Ok(dir) => format!("\n\nThe launcher log is in {}.", dir.display()),
         Err(_) => String::new(),
     };
+    let (answered, answer) = std::sync::mpsc::channel::<()>();
     let handle = app.clone();
+    let watchdog = std::thread::Builder::new()
+        .name("startup-error-dialog".into())
+        .spawn(move || {
+            match answer.recv_timeout(STARTUP_ERROR_DIALOG_TIMEOUT) {
+                Ok(()) => {
+                    tracing::info!("startup error dialog dismissed; exiting");
+                    handle.exit(1);
+                    return;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    tracing::error!("the startup error dialog could not be shown; exiting");
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => tracing::error!(
+                    secs = STARTUP_ERROR_DIALOG_TIMEOUT.as_secs(),
+                    "the startup error dialog got no answer; exiting"
+                ),
+            }
+            // The event loop may be what keeps the dialog from showing.
+            std::process::exit(1);
+        });
+    if let Err(err) = watchdog {
+        tracing::error!(%err, "could not watch the startup error dialog; exiting");
+        std::process::exit(1);
+    }
     app.dialog()
         .message(format!(
             "Zebra Launcher could not start:\n\n{err}{log_hint}"
@@ -167,7 +201,9 @@ fn show_startup_error(app: &AppHandle, err: &StartupError) {
         .title("Zebra Launcher")
         .kind(MessageDialogKind::Error)
         .buttons(MessageDialogButtons::Ok)
-        .show(move |_| handle.exit(1));
+        .show(move |_| {
+            let _ = answered.send(());
+        });
 }
 
 /// The startup sequence up to a running supervisor. Runs inside the Tokio
@@ -222,8 +258,13 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
 
 /// Starts zebrad without a UI request waiting for the result: at launch
 /// when `start_node_on_launch` is set, and from the tray. A zebrad left by an
-/// earlier run is reported to the UI with [`STALE_PROCESS_EVENT`].
+/// earlier run is reported to the UI with [`STALE_PROCESS_EVENT`]. Nothing
+/// starts before the first run is done ([`firstrun::start_allowed`]).
 pub(crate) async fn start_in_background(app: AppHandle, state: AppState) {
+    if let Err(err) = firstrun::start_allowed(&state.settings.current()) {
+        tracing::warn!(%err, "zebrad was not started");
+        return;
+    }
     let _permit = match state.start_permit() {
         Ok(permit) => permit,
         Err(err) => {

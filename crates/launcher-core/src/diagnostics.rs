@@ -38,13 +38,17 @@ pub fn tail_lines(path: &Path, n: usize) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
     let len = file.metadata()?.len();
     let start = len.saturating_sub(TAIL_MAX_BYTES);
-    file.seek(SeekFrom::Start(start))?;
+    // One byte before the window tells whether it starts at a line start.
+    let before = start.min(1);
+    file.seek(SeekFrom::Start(start - before))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    let text = String::from_utf8_lossy(&bytes);
+    let mid_line = before == 1 && bytes.first().is_some_and(|&b| b != b'\n');
+    let window = bytes.get(before as usize..).unwrap_or_default();
+    let text = String::from_utf8_lossy(window);
     let mut lines: Vec<&str> = text.lines().collect();
-    // A read that started mid-file starts mid-line.
-    if start > 0 && !lines.is_empty() {
+    // A read that started mid-line drops that partial line.
+    if mid_line && !lines.is_empty() {
         lines.remove(0);
     }
     let skip = lines.len().saturating_sub(n);
@@ -211,6 +215,26 @@ mod tests {
         let tail = tail_lines(&path, 5000).expect("tail");
         assert!(tail.lines().all(|l| l.len() == 999));
         assert!(tail.lines().count() < 2000);
+    }
+
+    #[test]
+    fn tail_keeps_a_first_line_that_starts_the_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("boundary.log");
+        // 1024 lines of 1024 bytes fill the window exactly; the line before
+        // it ends right where the window starts.
+        let window: String = (0..1024).map(|i| format!("{i:01023}\n")).collect();
+        assert_eq!(window.len() as u64, TAIL_MAX_BYTES);
+        fs::write(&path, format!("before\n{window}")).expect("write");
+        let tail = tail_lines(&path, 5000).expect("tail");
+        assert_eq!(tail.lines().count(), 1024);
+        assert_eq!(tail.lines().next(), Some(format!("{:01023}", 0).as_str()));
+
+        // One byte more and the window starts inside the first line.
+        fs::write(&path, format!("before!{window}")).expect("write");
+        let tail = tail_lines(&path, 5000).expect("tail");
+        assert_eq!(tail.lines().count(), 1023);
+        assert_eq!(tail.lines().next(), Some(format!("{:01023}", 1).as_str()));
     }
 
     #[test]

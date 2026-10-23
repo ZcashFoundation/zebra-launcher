@@ -13,6 +13,7 @@ use std::{
     sync::atomic::Ordering,
 };
 
+use launcher_core::firstrun::start_allowed;
 use launcher_types::Phase;
 use tauri::{
     AppHandle, Wry,
@@ -39,6 +40,7 @@ pub fn install(app: &AppHandle, state: &AppState) {
                 tray,
                 items,
                 state.supervisor.watch_status(),
+                state.settings.watch(),
             ));
         }
         Ok(Err(err)) => {
@@ -97,22 +99,29 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     }
 }
 
-/// Updates the tooltip and the Start/Stop items on every status change,
-/// until the supervisor ends.
+/// Updates the tooltip and the Start/Stop items on every status or settings
+/// change, until the supervisor or the settings store ends. Start stays
+/// disabled until the first run is done.
 async fn follow_status(
     tray: TrayIcon,
     items: Items,
     mut status: watch::Receiver<launcher_types::Status>,
+    mut settings: watch::Receiver<launcher_types::Settings>,
 ) {
     loop {
         let phase = status.borrow_and_update().phase.clone();
+        let may_start = start_allowed(&settings.borrow_and_update()).is_ok();
         if let Err(err) = tray.set_tooltip(Some(tooltip(&phase))) {
             tracing::debug!(%err, "could not update the tray tooltip");
         }
-        let (start, stop) = menu_state(&phase);
+        let (start, stop) = menu_state(&phase, may_start);
         let _ = items.start.set_enabled(start);
         let _ = items.stop.set_enabled(stop);
-        if status.changed().await.is_err() {
+        let changed = tokio::select! {
+            changed = status.changed() => changed,
+            changed = settings.changed() => changed,
+        };
+        if changed.is_err() {
             return;
         }
     }
@@ -131,10 +140,11 @@ pub fn tooltip(phase: &Phase) -> String {
     format!("Zebra Launcher: {what}")
 }
 
-/// Whether Start and Stop are enabled in `phase`.
-pub fn menu_state(phase: &Phase) -> (bool, bool) {
+/// Whether Start and Stop are enabled in `phase`; Start only when
+/// `may_start` ([`start_allowed`]).
+pub fn menu_state(phase: &Phase, may_start: bool) -> (bool, bool) {
     let stopped = is_stopped(phase);
-    (stopped, !stopped && *phase != Phase::Stopping)
+    (stopped && may_start, !stopped && *phase != Phase::Stopping)
 }
 
 #[cfg(test)]
@@ -145,16 +155,20 @@ mod tests {
 
     #[test]
     fn menu_follows_the_phase() {
-        assert_eq!(menu_state(&Phase::Stopped), (true, false));
+        assert_eq!(menu_state(&Phase::Stopped, true), (true, false));
+        assert_eq!(menu_state(&Phase::Stopped, false), (false, false));
         assert_eq!(
-            menu_state(&Phase::Failed {
-                class: ExitClass::ConfigError
-            }),
+            menu_state(
+                &Phase::Failed {
+                    class: ExitClass::ConfigError
+                },
+                true
+            ),
             (true, false)
         );
-        assert_eq!(menu_state(&Phase::Running), (false, true));
-        assert_eq!(menu_state(&Phase::Starting), (false, true));
-        assert_eq!(menu_state(&Phase::Stopping), (false, false));
+        assert_eq!(menu_state(&Phase::Running, true), (false, true));
+        assert_eq!(menu_state(&Phase::Starting, true), (false, true));
+        assert_eq!(menu_state(&Phase::Stopping, true), (false, false));
         assert_eq!(tooltip(&Phase::Running), "Zebra Launcher: zebrad running");
     }
 }

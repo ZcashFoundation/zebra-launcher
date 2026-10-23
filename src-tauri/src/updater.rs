@@ -21,8 +21,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use launcher_core::updates::{
-    self, FoundUpdate, NodeControl, OnChunk, UpdateBackend, UpdaterConfig, UpdaterHandle,
+use launcher_core::{
+    firstrun,
+    updates::{
+        self, FoundUpdate, NodeControl, OnChunk, UpdateBackend, UpdaterConfig, UpdaterHandle,
+    },
 };
 use launcher_types::{Status, UpdateInfo, UpdateState};
 use tauri::{
@@ -148,8 +151,8 @@ impl<R: Runtime> UpdateBackend for PluginBackend<R> {
 
 /// The zebrad supervisor as the updater sees it: stops go straight to the
 /// supervisor, but starts (the health gate's, and the restart after a failed
-/// install) follow the same rules as every other start: not before the first
-/// run is done, and not while the node data is being changed.
+/// install) follow the same rules as every other start:
+/// [`firstrun::start_allowed`], and not while the node data is being changed.
 #[derive(Clone)]
 struct GatedNode {
     state: AppState,
@@ -165,9 +168,7 @@ impl NodeControl for GatedNode {
     }
 
     async fn start(&self) -> Result<(), String> {
-        if !self.state.settings.current().first_run_done {
-            return Err("the first-run setup is not done yet".to_string());
-        }
+        firstrun::start_allowed(&self.state.settings.current())?;
         let _permit = self.state.start_permit()?;
         NodeControl::start(&self.state.supervisor).await
     }
