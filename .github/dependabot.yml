@@ -24,6 +24,42 @@ updates:
         exclude-patterns:
           - "@tauri*"
 
+  - package-ecosystem: cargo
+    directory: /
+    pull-request-branch-name:
+      separator: "-"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: "deps(cargo): "
+    groups:
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-*"
+          - "wry"
+          - "tao"
+      wasm:
+        patterns:
+          - "wasm-bindgen*"
+          - "js-sys"
+          - "web-sys"
+          - "leptos*"
+      rust-other:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "tauri"
+          - "tauri-*"
+          - "wry"
+          - "tao"
+          - "wasm-bindgen*"
+          - "js-sys"
+          - "web-sys"
+          - "leptos*"
+
   - package-ecosystem: github-actions
     directory: "/"
     pull-request-branch-name:
