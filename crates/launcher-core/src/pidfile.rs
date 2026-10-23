@@ -2,9 +2,15 @@
 //! earlier one (after a crash or a force quit).
 //!
 //! The file holds the pid and the path of the zebrad binary that was started.
-//! A pid alone can be reused by an unrelated process, so callers only act on a
-//! stale entry after confirming the process is alive, and the UI asks the user
-//! before killing anything.
+//! A pid alone can be reused by an unrelated process, so [`check`] only reports
+//! a stale entry when the process is alive and, where the platform lets us
+//! find out, runs the recorded binary. The UI asks the user before killing
+//! anything.
+//!
+//! The executable check is best effort: it reads `/proc/<pid>/exe` on Linux,
+//! calls `proc_pidpath` on macOS and `QueryFullProcessImageNameW` on Windows.
+//! On other platforms, or when the executable cannot be read (for example a
+//! process owned by another user), the entry is trusted as before.
 
 use std::{
     fs, io,
@@ -37,8 +43,9 @@ pub fn remove(path: &Path) -> io::Result<()> {
 
 /// Reads the pid file and returns the recorded process if it is still running.
 ///
-/// Returns `None` when there is no file, the file is malformed, or the process
-/// has exited. A malformed or dead entry is removed.
+/// Returns `None` when there is no file, the file is malformed, the process
+/// has exited, or the pid now belongs to a process running a different
+/// executable than the recorded binary. Such an entry is removed.
 pub fn check(path: &Path) -> io::Result<Option<StaleProcess>> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
@@ -55,12 +62,120 @@ pub fn check(path: &Path) -> io::Result<Option<StaleProcess>> {
         });
     match parsed {
         // pid 0 and our own pid never name a zebrad left behind.
-        Some(stale) if !is_own_or_group(stale.pid) && is_alive(stale.pid) => Ok(Some(stale)),
+        Some(stale)
+            if !is_own_or_group(stale.pid)
+                && is_alive(stale.pid)
+                && runs_binary(stale.pid, &stale.binary) =>
+        {
+            Ok(Some(stale))
+        }
         _ => {
             remove(path)?;
             Ok(None)
         }
     }
+}
+
+/// Whether the live process `pid` runs `binary`. True when the executable of
+/// `pid` cannot be determined, so the check only ever rules a process out.
+fn runs_binary(pid: u32, binary: &Path) -> bool {
+    let Some(live) = executable_of(pid) else {
+        return true;
+    };
+    let matches = same_file_path(&live, binary);
+    if !matches {
+        tracing::info!(
+            pid,
+            recorded = %binary.display(),
+            running = %live.display(),
+            "the recorded zebrad pid now belongs to another program"
+        );
+    }
+    matches
+}
+
+/// Compares two paths after resolving symlinks and, on Windows, ignoring case.
+fn same_file_path(a: &Path, b: &Path) -> bool {
+    let canonical = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (a, b) = (canonical(a), canonical(b));
+    if cfg!(windows) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
+    }
+}
+
+/// The executable of the running process `pid`, if the platform tells us.
+#[cfg(target_os = "linux")]
+fn executable_of(pid: u32) -> Option<PathBuf> {
+    let link = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    // A binary replaced or removed since the process started reads as
+    // "<path> (deleted)".
+    let link = match link.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(stripped) => PathBuf::from(stripped),
+        None => link,
+    };
+    Some(link)
+}
+
+/// The executable of the running process `pid`, if the platform tells us.
+#[cfg(target_os = "macos")]
+fn executable_of(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let mut buf = vec![0u8; usize::try_from(libc::PROC_PIDPATHINFO_MAXSIZE).ok()?];
+    let size = u32::try_from(buf.len()).ok()?;
+    // SAFETY: `buf` is writable for `size` bytes for the duration of the call.
+    let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), size) };
+    let len = usize::try_from(len).ok().filter(|&len| len > 0)?;
+    buf.truncate(len);
+    Some(PathBuf::from(std::ffi::OsString::from_vec(buf)))
+}
+
+/// The executable of the running process `pid`, if the platform tells us.
+#[cfg(windows)]
+fn executable_of(pid: u32) -> Option<PathBuf> {
+    use std::os::windows::{
+        ffi::OsStringExt,
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    };
+
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+
+    // SAFETY: OpenProcess has no preconditions; a null result is checked below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: the handle was just returned by OpenProcess and is owned by us.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let mut buf = vec![0u16; 32_768];
+    let mut size = u32::try_from(buf.len()).ok()?;
+    // SAFETY: the handle is valid, `buf` is writable for `size` UTF-16 units and
+    // `size` points to writable memory.
+    let ok = unsafe {
+        QueryFullProcessImageNameW(
+            handle.as_raw_handle(),
+            PROCESS_NAME_WIN32,
+            buf.as_mut_ptr(),
+            &mut size,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    buf.truncate(usize::try_from(size).ok()?);
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&buf)))
+}
+
+/// Other platforms cannot tell; the pid alone is trusted.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn executable_of(_pid: u32) -> Option<PathBuf> {
+    None
 }
 
 /// True for pids that never name a recorded zebrad: 0 (which `kill` treats as
@@ -188,6 +303,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    fn a_reused_pid_running_another_binary_is_not_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("zebrad.pid");
+        let mut live = sleeper();
+        let pid = live.id();
+        let other = dir.path().join("zebrad");
+        fs::write(&other, b"not the running program").expect("write binary");
+        write(&path, pid, &other).expect("write");
+        let found = check(&path);
+        let still_alive = is_alive(pid);
+        live.kill().expect("kill");
+        live.wait().expect("reap");
+        assert!(still_alive, "the process itself is alive");
+        assert_eq!(found.expect("read"), None);
+        assert!(!path.exists(), "the mismatched entry is removed");
+    }
+
+    #[test]
     fn own_pid_and_pid_zero_are_never_stale_or_terminated() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("zebrad.pid");
@@ -206,10 +340,10 @@ mod tests {
         let path = dir.path().join("zebrad.pid");
         assert_eq!(check(&path).expect("missing file is fine"), None);
 
-        // A live process is reported.
+        // A live process running the recorded binary is reported.
         let mut live = sleeper();
         let pid = live.id();
-        let binary = PathBuf::from("/opt/zebrad");
+        let binary = executable_of(pid).unwrap_or_else(|| PathBuf::from("/opt/zebrad"));
         write(&path, pid, &binary).expect("write");
         let found = check(&path);
         live.kill().expect("kill");
