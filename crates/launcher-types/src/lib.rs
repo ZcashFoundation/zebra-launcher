@@ -249,3 +249,234 @@ impl Default for Status {
         }
     }
 }
+
+/// The Zcash network zebrad runs on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Network {
+    /// The main network.
+    #[default]
+    Mainnet,
+    /// The public test network.
+    Testnet,
+}
+
+impl Network {
+    /// The name zebrad uses in `network.network`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Network::Mainnet => "Mainnet",
+            Network::Testnet => "Testnet",
+        }
+    }
+}
+
+impl fmt::Display for Network {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How the launcher handles its own updates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateMode {
+    /// Never check for updates.
+    #[default]
+    Off,
+    /// Check and tell the user, but do not install.
+    Notify,
+    /// Check, download and install.
+    Auto,
+}
+
+/// The launcher's own settings, stored in `launcher.json`.
+///
+/// Missing fields take their default, so older files keep loading.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// The file format version, for future migrations.
+    pub schema_version: u32,
+    /// How launcher updates are handled.
+    pub update_mode: UpdateMode,
+    /// Closing the window hides it to the tray instead of quitting.
+    pub close_to_tray: bool,
+    /// Start zebrad when the launcher starts.
+    pub start_node_on_launch: bool,
+    /// The Grafana dashboard URL to embed. Must be loopback `http(s)`, see
+    /// [`is_loopback_http_url`].
+    pub grafana_url: Option<String>,
+    /// The directory chosen for the chain state, if not the default.
+    pub data_dir: Option<String>,
+    /// The network zebrad runs on.
+    pub network: Network,
+    /// How long a graceful stop may take before zebrad is killed, in seconds.
+    pub stop_grace_secs: u64,
+}
+
+impl Settings {
+    /// The current [`Settings::schema_version`].
+    pub const SCHEMA_VERSION: u32 = 1;
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            update_mode: UpdateMode::Off,
+            close_to_tray: true,
+            start_node_on_launch: true,
+            grafana_url: None,
+            data_dir: None,
+            network: Network::Mainnet,
+            stop_grace_secs: 60,
+        }
+    }
+}
+
+/// Returns true when `url` is an `http://` or `https://` URL whose host is
+/// `127.0.0.1`, `localhost` or `[::1]`, with an optional port and path, and no
+/// user info.
+///
+/// This is the rule for [`Settings::grafana_url`]: the app's content security
+/// policy only allows loopback frames.
+pub fn is_loopback_http_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let Some(rest) = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    // User info (`127.0.0.1@evil.example`), backslashes and whitespace are
+    // refused outright: browsers parse them in surprising ways.
+    if rest.contains(['\\', ' ', '\t', '\n', '\r']) {
+        return false;
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.contains('@') {
+        return false;
+    }
+    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+        match v6.split_once(']') {
+            Some(parts) => parts,
+            None => return false,
+        }
+    } else {
+        match authority.find(':') {
+            Some(i) => authority.split_at(i),
+            None => (authority, ""),
+        }
+    };
+    let port_ok = match port.strip_prefix(':') {
+        Some(digits) => {
+            !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && digits.parse::<u16>().is_ok()
+        }
+        None => port.is_empty(),
+    };
+    port_ok && matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// Node statistics polled from zebrad's JSON-RPC interface.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeStats {
+    /// The height of the best verified block.
+    pub height: u64,
+    /// zebrad's estimate of the network chain tip height.
+    pub estimated_height: u64,
+    /// Sync progress from 0.0 to 1.0.
+    pub verification_progress: f64,
+    /// Connected peers.
+    pub peers: u32,
+    /// Transactions in the mempool.
+    pub mempool_transactions: u64,
+    /// The chain name zebrad reports, such as `main` or `test`.
+    pub chain: String,
+    /// The zebrad version, from `getinfo`.
+    pub zebrad_version: String,
+    /// The last warning or error: the RPC error that prevented the last poll,
+    /// or else zebrad's own `getinfo.errors` when it is not empty.
+    pub last_error: Option<String>,
+    /// When this release stops running, on Mainnet.
+    pub eos: Option<EosInfo>,
+    /// When these stats were last refreshed.
+    pub updated_at: SystemTime,
+}
+
+/// When the running zebrad release reaches its end of support and halts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EosInfo {
+    /// The block height at which zebrad halts.
+    pub block_height: u64,
+    /// zebrad's estimate of when that block is reached.
+    pub estimated_time: SystemTime,
+}
+
+/// The launcher-managed `zebrad.toml`, as shown in the editor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigDocument {
+    /// The file content.
+    pub text: String,
+    /// A compare-and-swap token: pass it back when saving, so an edit made by
+    /// someone else in the meantime is detected instead of overwritten.
+    pub token: String,
+    /// The file's path, for display.
+    pub path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_urls() {
+        for ok in [
+            "http://127.0.0.1:3000/d/zebra-overview?kiosk",
+            "https://localhost",
+            "http://localhost:3000",
+            "HTTP://LOCALHOST:3000/",
+            "http://[::1]:3000/x#y",
+            "http://127.0.0.1?x",
+        ] {
+            assert!(is_loopback_http_url(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "ftp://127.0.0.1",
+            "javascript:alert(1)",
+            "http://example.com",
+            "http://127.0.0.1.example.com",
+            "http://127.0.0.1@example.com",
+            "http://example.com@127.0.0.1",
+            "http://localhost:",
+            "http://localhost:99999",
+            "http://localhost:+80",
+            "http://localhost:3000x",
+            "http://[::1",
+            "http://[::2]:3000",
+            "http://0.0.0.0:3000",
+            "http://127.0.0.1\\@example.com",
+            "http://127.0.0.1 /",
+            "//127.0.0.1",
+        ] {
+            assert!(!is_loopback_http_url(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn settings_defaults_fill_missing_fields() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"network":"testnet"}"#).expect("partial settings parse");
+        assert_eq!(
+            settings,
+            Settings {
+                network: Network::Testnet,
+                ..Settings::default()
+            }
+        );
+    }
+}
