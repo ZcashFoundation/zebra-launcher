@@ -2,13 +2,15 @@
 //! WebAssembly and Tauri serves from `ui/dist`.
 //!
 //! The crate also compiles natively so the workspace-wide `cargo clippy` and `cargo test` cover
-//! it; the native binary does nothing.
+//! it, including the unit tests of the pure modules ([`log_view`], [`format`]); the native
+//! binary does nothing.
 
 #![forbid(unsafe_code)]
 // Natively nothing mounts the app, so most of it is unused there.
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
 mod api;
+mod app;
 mod clock;
 mod format;
 mod log_view;
@@ -16,12 +18,22 @@ mod mock;
 mod tauri;
 mod types;
 
+mod components {
+    pub mod nav;
+    pub mod status_strip;
+}
+
+mod pages {
+    pub mod configure;
+    pub mod dashboard;
+    pub mod logs;
+    pub mod settings;
+}
+
 #[cfg(target_arch = "wasm32")]
 fn main() {
-    use leptos::prelude::*;
-
     console_error_panic_hook::set_once();
-    leptos::mount::mount_to_body(|| view! { <p>"Zebra Launcher"</p> });
+    leptos::mount::mount_to_body(app::App);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
