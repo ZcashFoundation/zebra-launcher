@@ -20,6 +20,13 @@ const COMMANDS: &[&str] = &[
     "set_settings",
     "get_node_stats",
     "open_path",
+    "get_first_run_info",
+    "pick_data_dir",
+    "choose_data_dir",
+    "import_legacy_state",
+    "delete_node_data",
+    "copy_diagnostics",
+    "complete_first_run",
 ];
 
 fn main() {

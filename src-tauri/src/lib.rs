@@ -56,6 +56,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         // Keep in sync with build.rs and capabilities/main.json.
@@ -73,6 +74,13 @@ pub fn run() {
             commands::set_settings,
             commands::get_node_stats,
             commands::open_path,
+            commands::get_first_run_info,
+            commands::pick_data_dir,
+            commands::choose_data_dir,
+            commands::import_legacy_state,
+            commands::delete_node_data,
+            commands::copy_diagnostics,
+            commands::complete_first_run,
         ])
         .setup(|app| {
             setup(app.handle());
@@ -105,8 +113,11 @@ fn setup(app: &AppHandle) {
             app.manage(state.clone());
             bridge::forward_status(app.clone(), state.supervisor.watch_status());
             bridge::forward_node_stats(app.clone(), state.node_stats.clone());
-            if state.settings.current().start_node_on_launch {
-                tauri::async_runtime::spawn(start_on_launch(app.clone(), state));
+            // Until the first-run flow is done the user has not chosen where
+            // the chain state goes, so zebrad waits for them.
+            let settings = state.settings.current();
+            if settings.start_node_on_launch && settings.first_run_done {
+                tauri::async_runtime::spawn(start_in_background(app.clone(), state));
             }
         }
         Err(err) => {
@@ -167,8 +178,17 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     Ok(AppState::new(paths, supervisor, settings, node_stats))
 }
 
-/// Starts zebrad because `start_node_on_launch` is set.
-async fn start_on_launch(app: AppHandle, state: AppState) {
+/// Starts zebrad without a UI request waiting for the result: at launch
+/// when `start_node_on_launch` is set, and from the tray. A zebrad left by an
+/// earlier run is reported to the UI with [`STALE_PROCESS_EVENT`].
+pub(crate) async fn start_in_background(app: AppHandle, state: AppState) {
+    let _permit = match state.start_permit() {
+        Ok(permit) => permit,
+        Err(err) => {
+            tracing::warn!(%err, "zebrad was not started");
+            return;
+        }
+    };
     match state.supervisor.start().await {
         Ok(()) => {}
         Err(SupervisorError::StaleProcess(stale)) => {

@@ -20,6 +20,13 @@
     "allow-get-settings",
     "allow-set-settings",
     "allow-get-node-stats",
-    "allow-open-path"
+    "allow-open-path",
+    "allow-get-first-run-info",
+    "allow-pick-data-dir",
+    "allow-choose-data-dir",
+    "allow-import-legacy-state",
+    "allow-delete-node-data",
+    "allow-copy-diagnostics",
+    "allow-complete-first-run"
   ]
 }
