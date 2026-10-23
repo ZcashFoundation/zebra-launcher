@@ -8,6 +8,7 @@ pub mod config;
 mod fsutil;
 pub mod logfile;
 pub mod logs;
+pub mod monitor;
 pub mod paths;
 pub mod pidfile;
 pub mod policy;
