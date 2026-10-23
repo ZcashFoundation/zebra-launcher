@@ -16,7 +16,9 @@ All platforms:
   cargo install --locked trunk tauri-cli
   ```
 
-  CI installs pinned versions with `cargo binstall`; `tauri-cli` must match the minor
+  CI installs the versions pinned in
+  [`.github/tool-versions.env`](../.github/tool-versions.env) from their release
+  binaries, checked against recorded sha256 hashes; `tauri-cli` must match the minor
   version of the `tauri` crate.
 - `cargo install --locked cargo-deny` to run the license and advisory checks locally.
 

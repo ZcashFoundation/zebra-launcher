@@ -22,8 +22,12 @@ custody are in [SECURITY.md](SECURITY.md).
 2. Open the release PR:
    - set `[workspace.package] version` in `Cargo.toml`, then run
      `cargo update --workspace` so `Cargo.lock` matches;
-   - add a `CHANGELOG.md` section whose `## ` heading contains the version (for example
-     `## 0.2.0 - 2026-11-02`). The draft's release notes are taken from that section.
+   - add a `CHANGELOG.md` section whose `## ` heading starts with the exact version,
+     optionally as `v0.2.0` or `[0.2.0]` (for example `## 0.2.0 - 2026-11-02`). The
+     draft's release notes are taken from that section
+     ([`changelog-section.sh`](../scripts/changelog-section.sh)); `## 0.2.0-rc.1` is a
+     different version and never supplies the notes for `0.2.0`. Without a section the
+     notes say so in one line and the run shows a warning.
 3. Merge the PR.
 
 ## Release-day runbook
@@ -186,7 +190,15 @@ it, and only after approval. Custody, escrow and rotation are in
 | `APPLE_API_PRIVATE_KEY` | `release` secret | `.p8` contents; the job writes it to `APPLE_API_KEY_PATH` | App Store Connect admin reissues (download once) |
 | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | `release` secrets | `azure/login` OIDC; identifiers, not credentials | Azure subscription owner |
 | `AZURE_ARTIFACT_SIGNING_ENDPOINT`, `AZURE_ARTIFACT_SIGNING_ACCOUNT`, `AZURE_ARTIFACT_SIGNING_PROFILE` | `release` variables | Artifact Signing account and certificate profile | Azure subscription owner |
-| `UPDATER_ENABLED` | repository variable | set to `false` only for releases cut before the updater exists; then no `latest.json` is required | — |
+| `UPDATER_ENABLED` | repository variable | optional override; see below | — |
+
+Whether a release must ship updater artifacts (the `.sig` files and `latest.json`) follows
+`bundle.createUpdaterArtifacts` in [`tauri.conf.json`](../src-tauri/tauri.conf.json):
+`release.yml`'s `verify` job reads it once and passes the result to `bundle_sign`,
+`collect-bundles.sh --require-updater-sigs` and `manifest`. Leave `UPDATER_ENABLED` unset
+normally. Set it to `false` only to cut a release without `latest.json` although the config
+enables updater artifacts (for example a signing rehearsal before the updater ships); the
+run then warns. `true` only asserts that the config enables them, and fails otherwise.
 
 The Azure app registration has one federated credential, with subject
 `repo:ZcashFoundation/zebra-launcher:environment:release`, and the *Artifact Signing

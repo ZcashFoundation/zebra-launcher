@@ -2,9 +2,11 @@
 # smoke-tests the assets and publishes it by hand (docs/RELEASING.md).
 # Publishing is what makes latest.json, and so the in-app updater, live.
 #
-#   verify       tag == [workspace.package] version, tool version checks
+#   verify       tag == [workspace.package] version, tool version checks, and
+#                whether updater artifacts are required (require_updater)
+#   sidecars     zebrad-sidecars.yml: verified/attested zebrad per target; also
+#                resolves and validates ZEBRAD_VERSION (its `version` output)
 #   draft        creates the draft release once; the matrix jobs upload to it
-#   sidecars     zebrad-sidecars.yml: verified/attested zebrad per target
 #   build        UNPRIVILEGED, no secrets: compiles the app (`--no-bundle`)
 #   bundle_sign  environment `release` (required reviewer), NO caches:
 #                `cargo tauri bundle` packages and signs the compiled app,
@@ -16,6 +18,21 @@
 # Untrusted dependency code (build scripts, proc macros) runs only in `build`,
 # which has no secrets and read-only contents. No job restores a cache: the
 # signed bundle is made from binaries compiled from scratch in this run.
+#
+# Downloads in bundle_sign. tauri-cli and trunk are sha256-pinned in
+# .github/tool-versions.env, but tauri-cli's bundler (tauri-bundler 2.10.4 for
+# tauri-cli 2.12.4) also fetches helper tools itself while it bundles, with
+# the signing secrets in its environment:
+#   - Linux AppImage: AppRun and linuxdeploy from tauri-apps/binary-releases,
+#     and linuxdeploy-plugin-appimage from the moving `continuous` release of
+#     linuxdeploy/linuxdeploy-plugin-appimage. tauri-bundler checks NO hash
+#     for any of them, and runs them.
+#   - Windows NSIS: nsis-3.13.zip and the nsis_tauri_utils.dll plugin, each
+#     checked against a SHA-1 hard-coded in tauri-bundler.
+#   - WebView2: nothing at bundle time (the default downloadBootstrapper mode
+#     makes the installer fetch Microsoft's bootstrapper on the user's machine).
+#   - macOS: nothing.
+# See docs/SECURITY.md#release-pipeline-downloads.
 #
 # Secrets and variables live in the `release` environment; see
 # docs/RELEASING.md#secrets-inventory.
@@ -35,17 +52,10 @@ env:
   CARGO_TERM_COLOR: always
   CI: true
   TAG: ${{ github.ref_name }}
-  # Pinned tools; keep in sync with bundle.yml.
-  TAURI_CLI_VERSION: 2.12.4
-  TRUNK_VERSION: 0.22.0
-  BINSTALL_VERSION: 1.26.0
-  # The app's main binary (tauri.conf.json mainBinaryName).
-  APP_BIN: zebra-launcher
-  GLIBC_FLOOR: "2.35"
-  LINUX_PACKAGES: >-
-    libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
-    libssl-dev patchelf file libfuse2 curl git build-essential pkg-config
-    ca-certificates jq
+# Tool pins, APP_BIN, GLIBC_FLOOR and LINUX_PACKAGES come from
+# .github/tool-versions.env (loaded by the setup-tauri action); the target
+# matrix from .github/targets.json, read once by `verify`. bundle.yml uses the
+# same two files.
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -59,15 +69,18 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.versions.outputs.version }}
-      zebrad_version: ${{ steps.versions.outputs.zebrad_version }}
       prerelease: ${{ steps.versions.outputs.prerelease }}
+      require_updater: ${{ steps.updater.outputs.require_updater }}
+      matrix: ${{ steps.targets.outputs.matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # The one launcher-version grammar check. zebrad's version is checked
+      # by zebrad-sidecars.yml.
       - id: versions
-        name: Check the tag against Cargo.toml and ZEBRAD_VERSION
+        name: Check the tag against Cargo.toml
         shell: bash
         run: |
           set -euo pipefail
@@ -80,31 +93,69 @@ jobs:
             echo "::error::${version} is not X.Y.Z or X.Y.Z-rc.N"
             exit 1
           fi
-          zebrad_version="$(tr -d '[:space:]' < ZEBRAD_VERSION)"
-          if ! printf '%s\n' "${zebrad_version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
-            echo "::error::ZEBRAD_VERSION '${zebrad_version}' is not of the form X.Y.Z"
-            exit 1
-          fi
           case "${version}" in
             *-*) prerelease=true ;;
             *) prerelease=false ;;
           esac
           {
             echo "version=${version}"
-            echo "zebrad_version=${zebrad_version}"
             echo "prerelease=${prerelease}"
           } >> "${GITHUB_OUTPUT}"
-          echo "Zebra Launcher ${version} (zebrad ${zebrad_version}), prerelease: ${prerelease}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Zebra Launcher ${version}, prerelease: ${prerelease}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Check tool versions
         shell: bash
+        run: scripts/check-versions.sh
+
+      # The five-target matrix, from .github/targets.json.
+      - id: targets
+        name: Read the target matrix
+        shell: bash
+        run: echo "matrix=$(jq -c . .github/targets.json)" >> "${GITHUB_OUTPUT}"
+
+      # The one place that decides whether this release must ship updater
+      # artifacts (.sig files and latest.json): tauri.conf.json's
+      # bundle.createUpdaterArtifacts, unless the UPDATER_ENABLED repository
+      # variable overrides it (docs/RELEASING.md#secrets-inventory).
+      # bundle_sign, collect-bundles.sh and manifest all use this output.
+      - id: updater
+        name: Decide whether updater artifacts are required
+        shell: bash
+        env:
+          UPDATER_ENABLED: ${{ vars.UPDATER_ENABLED }}
         run: |
           set -euo pipefail
-          if [ -f scripts/check-versions.sh ]; then
-            TAURI_CLI_VERSION="${TAURI_CLI_VERSION}" bash scripts/check-versions.sh
+          conf=src-tauri/tauri.conf.json
+          jq empty "${conf}"
+          if jq -e '.bundle.createUpdaterArtifacts == true' "${conf}" > /dev/null; then
+            configured=true
           else
-            echo "::notice::scripts/check-versions.sh does not exist yet; skipped"
+            configured=false
           fi
+          case "${UPDATER_ENABLED}" in
+            "")
+              require="${configured}"
+              ;;
+            false)
+              require=false
+              if [ "${configured}" = true ]; then
+                echo "::warning::UPDATER_ENABLED=false overrides ${conf}: no latest.json, updater signatures not required"
+              fi
+              ;;
+            true)
+              if [ "${configured}" != true ]; then
+                echo "::error::UPDATER_ENABLED=true, but ${conf} does not set bundle.createUpdaterArtifacts to true"
+                exit 1
+              fi
+              require=true
+              ;;
+            *)
+              echo "::error::UPDATER_ENABLED is '${UPDATER_ENABLED}'; use true, false or leave it unset"
+              exit 1
+              ;;
+          esac
+          echo "require_updater=${require}" >> "${GITHUB_OUTPUT}"
+          echo "Updater artifacts required: ${require} (createUpdaterArtifacts: ${configured}, UPDATER_ENABLED: '${UPDATER_ENABLED}')" >> "${GITHUB_STEP_SUMMARY}"
 
   # ---------------------------------------------------------------------------
   # draft: one draft release, created once, so parallel jobs cannot race to
@@ -112,7 +163,7 @@ jobs:
   # ---------------------------------------------------------------------------
   draft:
     name: Create the draft release
-    needs: verify
+    needs: [verify, sidecars]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -123,29 +174,36 @@ jobs:
       html_url: ${{ steps.release.outputs.html_url }}
     env:
       VERSION: ${{ needs.verify.outputs.version }}
-      ZEBRAD_VERSION: ${{ needs.verify.outputs.zebrad_version }}
+      ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
+      ZEBRAD_COMMIT: ${{ needs.sidecars.outputs.commit }}
       PRERELEASE: ${{ needs.verify.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # The CHANGELOG.md section for this version when there is one, then how
-      # to verify the downloads.
+      # The CHANGELOG.md section for exactly this version (never another
+      # version's, e.g. 0.2.0-rc.1's for 0.2.0), or a one-line note when there
+      # is none; then how to verify the downloads.
       - name: Write the release notes
         shell: bash
         run: |
           set -euo pipefail
           notes="${RUNNER_TEMP}/notes.md"
+          status=0
+          changes="$(scripts/changelog-section.sh "${VERSION}" CHANGELOG.md)" || status=$?
+          case "${status}" in
+            0) ;;
+            1)
+              echo "::warning::CHANGELOG.md has no section for ${VERSION}"
+              changes="No CHANGELOG.md entry for ${VERSION}."
+              ;;
+            *) exit "${status}" ;;
+          esac
           {
-            echo "Zebra Launcher ${VERSION}, bundling zebrad ${ZEBRAD_VERSION}."
+            echo "Zebra Launcher ${VERSION}, bundling zebrad ${ZEBRAD_VERSION} (Zebra commit ${ZEBRAD_COMMIT})."
             echo
-            if [ -f CHANGELOG.md ]; then
-              awk -v v="${VERSION}" '
-                /^## / { if (found) exit; if (index($0, v)) { found = 1; next } }
-                found { print }
-              ' CHANGELOG.md
-            fi
+            printf '%s\n' "${changes}"
             echo
             echo "## Verifying the downloads"
             echo
@@ -202,7 +260,9 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
   # ---------------------------------------------------------------------------
-  # sidecars: zebrad for each target (unsigned; signed later by the bundler).
+  # sidecars: zebrad for each target (unsigned; signed later by the bundler),
+  # at ZEBRAD_VERSION/ZEBRAD_COMMIT, which it validates. After verify, so a
+  # bad tag fails before the long zebrad builds.
   # ---------------------------------------------------------------------------
   sidecars:
     name: zebrad sidecars
@@ -212,8 +272,6 @@ jobs:
       id-token: write # sidecar build provenance
       attestations: write # sidecar build provenance
     uses: ./.github/workflows/zebrad-sidecars.yml
-    with:
-      version: ${{ needs.verify.outputs.zebrad_version }}
 
   # ---------------------------------------------------------------------------
   # build: UNPRIVILEGED compile. No secrets, read-only token, no caches.
@@ -228,48 +286,30 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
-            container: ubuntu:22.04
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-            container: ubuntu:22.04
-          - target: aarch64-apple-darwin
-            runner: macos-15
-            container: ""
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-            container: ""
-          - target: x86_64-pc-windows-msvc
-            runner: windows-2025
-            container: ""
+      matrix: ${{ fromJSON(needs.verify.outputs.matrix) }}
     defaults:
       run:
         shell: bash
     env:
       TARGET: ${{ matrix.target }}
-      EXE_SUFFIX: ${{ startsWith(matrix.target, 'x86_64-pc-windows') && '.exe' || '' }}
+      EXE_SUFFIX: ${{ matrix.exe_suffix }}
     steps:
-      - name: Install Linux packages
+      # git must exist before checkout, or checkout falls back to a tarball.
+      # The rest of LINUX_PACKAGES comes from setup-tauri, which needs the
+      # checkout for .github/tool-versions.env.
+      - name: Install git (Linux container)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          # shellcheck disable=SC2086 # LINUX_PACKAGES is a word list
-          apt-get install -y --no-install-recommends ${LINUX_PACKAGES}
+          apt-get install -y --no-install-recommends git ca-certificates
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - uses: ./.github/actions/setup-tauri
-        with:
-          tauri-cli-version: ${{ env.TAURI_CLI_VERSION }}
-          trunk-version: ${{ env.TRUNK_VERSION }}
-          binstall-version: ${{ env.BINSTALL_VERSION }}
 
       # tauri-build needs the sidecar file to exist at compile time.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -325,43 +365,27 @@ jobs:
       id-token: write # azure/login OIDC (Windows)
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
-            container: ubuntu:22.04
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-            container: ubuntu:22.04
-          - target: aarch64-apple-darwin
-            runner: macos-15
-            container: ""
-          - target: x86_64-apple-darwin
-            runner: macos-15-intel
-            container: ""
-          - target: x86_64-pc-windows-msvc
-            runner: windows-2025
-            container: ""
+      matrix: ${{ fromJSON(needs.verify.outputs.matrix) }}
     defaults:
       run:
         shell: bash
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.verify.outputs.version }}
-      EXE_SUFFIX: ${{ startsWith(matrix.target, 'x86_64-pc-windows') && '.exe' || '' }}
+      EXE_SUFFIX: ${{ matrix.exe_suffix }}
       APPIMAGE_EXTRACT_AND_RUN: 1
-      # Set the repository variable UPDATER_ENABLED=false only for releases
-      # cut before the updater exists (M10 signing rehearsal).
-      REQUIRE_UPDATER: ${{ vars.UPDATER_ENABLED != 'false' }}
+      REQUIRE_UPDATER: ${{ needs.verify.outputs.require_updater }}
     steps:
-      - name: Install Linux packages
+      # git must exist before checkout, or checkout falls back to a tarball.
+      # The rest of LINUX_PACKAGES comes from setup-tauri, which needs the
+      # checkout for .github/tool-versions.env.
+      - name: Install git (Linux container)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          # shellcheck disable=SC2086 # LINUX_PACKAGES is a word list
-          apt-get install -y --no-install-recommends ${LINUX_PACKAGES}
+          apt-get install -y --no-install-recommends git ca-certificates
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -370,8 +394,7 @@ jobs:
       # No trunk: the frontend is already embedded in the compiled binary.
       - uses: ./.github/actions/setup-tauri
         with:
-          tauri-cli-version: ${{ env.TAURI_CLI_VERSION }}
-          binstall-version: ${{ env.BINSTALL_VERSION }}
+          compile: "false"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -536,7 +559,7 @@ jobs:
   #      [verify, draft, sidecars].
   #   2. In bundle_sign, delete the "build-<target>" download-artifact step and
   #      the "Place the compiled app" step (keep the zebrad download and add
-  #      its chmod +x), and pass `trunk-version: ${{ env.TRUNK_VERSION }}` to
+  #      its chmod +x), and drop `compile: "false"` from
   #      ./.github/actions/setup-tauri.
   #   3. In the three "Bundle and sign" steps, replace `cargo tauri bundle` with
   #      `cargo tauri build`, keeping the same flags and env, e.g.:
@@ -560,7 +583,7 @@ jobs:
   # ---------------------------------------------------------------------------
   manifest:
     name: Manifest, checksums and attestations
-    needs: [verify, draft, bundle_sign]
+    needs: [verify, sidecars, draft, bundle_sign]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -569,10 +592,10 @@ jobs:
       attestations: write # store the attestations
     env:
       VERSION: ${{ needs.verify.outputs.version }}
-      ZEBRAD_VERSION: ${{ needs.verify.outputs.zebrad_version }}
+      ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
       RELEASE_ID: ${{ needs.draft.outputs.release_id }}
       UPLOAD_URL: ${{ needs.draft.outputs.upload_url }}
-      REQUIRE_UPDATER: ${{ vars.UPDATER_ENABLED != 'false' }}
+      REQUIRE_UPDATER: ${{ needs.verify.outputs.require_updater }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
