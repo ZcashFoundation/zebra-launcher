@@ -2,14 +2,15 @@
 //! Save sends the whole settings object to `set_settings`; the data directory is changed only
 //! through `choose_data_dir`, so Save always sends the stored one.
 
-use launcher_types::{Network, Settings, UpdateMode, is_loopback_http_url};
+use launcher_types::{Network, Settings, is_loopback_http_url};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
     api,
     app::AppState,
     clipboard::copy_to_clipboard,
-    format::{bytes, data_change_allowed, is_low_space, state_dir, update_mode_text},
+    components::update_mode_choice::UpdateModeChoice,
+    format::{bytes, data_change_allowed, is_low_space, state_dir},
 };
 
 /// The word to type before node data is deleted.
@@ -166,31 +167,6 @@ pub fn SettingsPage() -> impl IntoView {
     let read = move |pick: fn(&Settings) -> bool| {
         move || draft.with(|draft| draft.as_ref().is_some_and(pick))
     };
-    let update_mode_radio = move |mode: UpdateMode| {
-        let (label, hint) = update_mode_text(mode);
-        view! {
-            <label class="radio">
-                <input
-                    type="radio"
-                    name="update-mode"
-                    prop:checked=move || {
-                        draft.with(|d| d.as_ref().is_some_and(|d| d.update_mode == mode))
-                    }
-                    on:change=move |_| {
-                        draft.update(|d| {
-                            if let Some(d) = d {
-                                d.update_mode = mode;
-                            }
-                        });
-                        result.set(None);
-                    }
-                />
-                <span>{label}</span>
-                <span class="muted">{hint}</span>
-            </label>
-        }
-    };
-
     view! {
         <Show
             when=move || draft.with(Option::is_some)
@@ -201,9 +177,20 @@ pub fn SettingsPage() -> impl IntoView {
 
                 <fieldset>
                     <legend>"Updates"</legend>
-                    {update_mode_radio(UpdateMode::Off)}
-                    {update_mode_radio(UpdateMode::Notify)}
-                    {update_mode_radio(UpdateMode::Auto)}
+                    <UpdateModeChoice
+                        name="update-mode"
+                        selected=Signal::derive(move || {
+                            draft.with(|d| d.as_ref().map(|d| d.update_mode))
+                        })
+                        on_select=Callback::new(move |mode| {
+                            draft.update(|d| {
+                                if let Some(d) = d {
+                                    d.update_mode = mode;
+                                }
+                            });
+                            result.set(None);
+                        })
+                    />
                 </fieldset>
 
                 <fieldset>

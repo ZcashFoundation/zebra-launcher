@@ -11,6 +11,7 @@ use leptos::{prelude::*, task::spawn_local};
 use crate::{
     api,
     app::AppState,
+    components::update_mode_choice::UpdateModeChoice,
     format::{bytes, is_low_space, state_dir, update_mode_text},
 };
 
@@ -448,29 +449,16 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
         .into_any()
     };
 
-    let update_radio = move |mode: UpdateMode| {
-        let (label, hint) = update_mode_text(mode);
-        view! {
-            <label class="radio">
-                <input
-                    type="radio"
-                    name="first-run-update-mode"
-                    prop:checked=move || update_mode.get() == mode
-                    on:change=move |_| update_mode.set(mode)
-                />
-                <span>{label}</span>
-                <span class="muted">{hint}</span>
-            </label>
-        }
-    };
     let updates_view = move || {
         view! {
             <p>"How should the launcher keep itself up to date?"</p>
             <fieldset class="choices">
                 <legend>"Updates"</legend>
-                {update_radio(UpdateMode::Off)}
-                {update_radio(UpdateMode::Notify)}
-                {update_radio(UpdateMode::Auto)}
+                <UpdateModeChoice
+                    name="first-run-update-mode"
+                    selected=Signal::derive(move || Some(update_mode.get()))
+                    on_select=Callback::new(move |mode| update_mode.set(mode))
+                />
             </fieldset>
             <p class="muted">
                 "Each zebrad release stops working some months after it is published (its end of support), so a launcher that is never updated eventually stops syncing. You can change this later in Settings."
