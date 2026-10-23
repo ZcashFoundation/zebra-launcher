@@ -140,6 +140,14 @@ runs:
           *) exe="" ;;
         esac
 
+        to_posix() {
+          if command -v cygpath > /dev/null 2>&1; then
+            cygpath -u "$1"
+          else
+            printf '%s\n' "$1"
+          fi
+        }
+
         sha256_of() {
           if command -v sha256sum > /dev/null 2>&1; then
             # Read from stdin: with a file operand GNU sha256sum prefixes the hash with
@@ -178,7 +186,8 @@ runs:
                 unzip -q -o "${archive}" -d "${dir}"
               fi
               ;;
-            *) tar -xzf "${archive}" -C "${dir}" ;;
+            # Git Bash's tar reads "D:\..." as a remote host; hand it POSIX paths.
+            *) tar -xzf "$(to_posix "${archive}")" -C "$(to_posix "${dir}")" ;;
           esac
         }
 
