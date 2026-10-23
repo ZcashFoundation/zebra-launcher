@@ -1,0 +1,6 @@
+[toolchain]
+# Tauri 2.12 needs 1.90+, Leptos 0.8 needs 1.88+. Keep in sync with `rust-version` in Cargo.toml
+# and the toolchain used by the CI workflows.
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
