@@ -13,7 +13,7 @@ sections name the milestone where that matters.
 ```text
 +--------------------------- Zebra Launcher (one process) ---------------------------+
 |                                                                                    |
-|  ui/  Leptos CSR (wasm) ----- invoke / Channel<LogBatch> -----> src-tauri/         |
+|  ui/  Leptos CSR (wasm) --- invoke / Channel<Vec<LogLine>> ---> src-tauri/         |
 |   |   Dashboard, Logs, Configure, Settings                       commands, tray,   |
 |   |                                                              updater, exit     |
 |   +-- <iframe> Grafana (no IPC)                                      |             |
@@ -58,7 +58,30 @@ One actor task owns the zebrad child. Nothing else touches it.
 | `oneshot` | reply | `History{since}` from the 10 000-line `VecDeque` ring, for late subscribers |
 
 The actor also writes a rotating `zebrad.log` for post-crash support. The Tauri side
-batches log lines every 100 ms into a `tauri::ipc::Channel<LogBatch>` with gap markers.
+(`src-tauri/src/bridge.rs`) sends the retained history, then batches live lines every
+100 ms (or every 1 000 lines) into a `tauri::ipc::Channel<Vec<LogLine>>`. When the
+bridge lags behind the broadcast, the dropped lines are replaced by one synthetic line
+with `stream: Launcher`, level `WARN`, no timestamp and the message `N lines dropped`,
+which takes the `seq` of the last dropped line. The UI shows that marker, together with
+any `seq` jump before it, as one "… N lines dropped" row, and a real line later fetched
+with `log_history` replaces the marker.
+
+## UI and backend IPC
+
+Commands (`src-tauri/src/commands.rs`) return `launcher-types` structs; errors are strings,
+except `apply_config`, which rejects with an `ApplyError {kind, message}`. Events carry
+changes the UI did not ask for: `status` (every `Status` change), `node_stats` (every
+`Option<NodeStats>` change) and `stale_process` (a zebrad from an earlier launcher run
+blocked the start at launch).
+
+At startup the UI subscribes first and then fetches a snapshot (`get_status`,
+`get_node_stats`, `log_history`), so no change falls between the two. An event that
+arrives while a snapshot request is in flight is newer than the snapshot, so the UI drops
+the `get_status` and `get_node_stats` snapshots once an event of the same kind has
+arrived. Log batches and history are merged by `seq`, so their order does not matter.
+`stale_process` may be emitted before the UI listens, so the stale-process banner is
+driven by `status.stale`, which the snapshot carries. A payload that does not deserialize
+is shown in the UI's error banner (the first one per event or channel), not only logged.
 
 **Spawning** happens on one dedicated, long-lived OS thread (the spawner) with
 `std::process::Command`, then `tokio::process::Child::from_std`. It must not be a tokio

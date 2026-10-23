@@ -6,11 +6,9 @@
 
 use leptos::{prelude::*, task::spawn_local};
 
-use crate::{
-    api,
-    format::highlight_toml,
-    types::{ApplyOutcome, ConfigDocument},
-};
+use launcher_types::{ApplyErrorKind, ApplyOutcome, ConfigDocument};
+
+use crate::{api, format::highlight_toml};
 
 /// What the editor area shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +34,9 @@ pub fn Configure() -> impl IntoView {
     let draft = RwSignal::new(String::new());
     let mode = RwSignal::new(Mode::Loading);
     let notice = RwSignal::new(None::<Notice>);
+    // Kept apart from `notice`, so a failed reload after a rollback shows next to the rollback
+    // message instead of replacing it.
+    let load_error = RwSignal::new(None::<String>);
 
     // Reloads the file. With `keep_editing`, the draft stays open (after a rollback the user
     // usually wants to fix their edit, against the token of the restored file).
@@ -43,6 +44,7 @@ pub fn Configure() -> impl IntoView {
         spawn_local(async move {
             match api::read_config().await {
                 Ok(fresh) => {
+                    load_error.set(None);
                     document.set(Some(fresh));
                     mode.set(if keep_editing {
                         Mode::Editing
@@ -51,10 +53,11 @@ pub fn Configure() -> impl IntoView {
                     });
                 }
                 Err(error) => {
-                    notice.set(Some(Notice::Failed(format!(
-                        "Could not read the config: {error}"
-                    ))));
-                    mode.set(if document.with_untracked(Option::is_some) {
+                    load_error.set(Some(format!("Could not read the config: {error}")));
+                    // After a rollback the draft stays open even though the reload failed.
+                    mode.set(if keep_editing {
+                        Mode::Editing
+                    } else if document.with_untracked(Option::is_some) {
                         Mode::Viewing
                     } else {
                         Mode::Loading
@@ -65,10 +68,19 @@ pub fn Configure() -> impl IntoView {
     };
     load(false);
 
+    let retry_load = move |_| {
+        let keep_editing = mode.get_untracked() == Mode::Editing;
+        load_error.set(None);
+        if !keep_editing {
+            mode.set(Mode::Loading);
+        }
+        load(keep_editing);
+    };
     let edit = move |_| {
         if let Some(doc) = document.get_untracked() {
             draft.set(doc.text);
             notice.set(None);
+            load_error.set(None);
             mode.set(Mode::Editing);
         }
     };
@@ -78,6 +90,7 @@ pub fn Configure() -> impl IntoView {
     };
     let reload = move |_| {
         notice.set(None);
+        load_error.set(None);
         mode.set(Mode::Loading);
         load(false);
     };
@@ -89,6 +102,7 @@ pub fn Configure() -> impl IntoView {
         let text = draft.get_untracked();
         mode.set(Mode::Applying);
         notice.set(None);
+        load_error.set(None);
         spawn_local(async move {
             match api::apply_config(text, token).await {
                 Ok(ApplyOutcome::Applied) => {
@@ -99,7 +113,7 @@ pub fn Configure() -> impl IntoView {
                     notice.set(Some(Notice::RolledBack(error)));
                     load(true);
                 }
-                Err(error) if error.kind == "conflict" => {
+                Err(error) if error.kind == ApplyErrorKind::Conflict => {
                     notice.set(Some(Notice::Conflict(error.message)));
                     mode.set(Mode::Editing);
                 }
@@ -140,6 +154,23 @@ pub fn Configure() -> impl IntoView {
                 <div class="banner banner-error" role="alert">{message}</div>
             }
             .into_any(),
+        })
+    };
+
+    let load_error_view = move || {
+        load_error.get().map(|message| {
+            let editing = mode.get() == Mode::Editing;
+            view! {
+                <div class="banner banner-error" role="alert">
+                    <span>{message}</span>
+                    {editing
+                        .then_some(
+                            " Your edit is still open; retry before saving, or the save may be refused because the file changed.",
+                        )}
+                    " "
+                    <button class="link" on:click=retry_load>"Retry"</button>
+                </div>
+            }
         })
     };
 
@@ -199,6 +230,7 @@ pub fn Configure() -> impl IntoView {
                 <div class="buttons">{buttons}</div>
             </div>
             {notice_view}
+            {load_error_view}
             {body}
         </div>
     }

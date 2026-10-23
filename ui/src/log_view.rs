@@ -18,20 +18,33 @@ impl LogBuffer {
     /// Adds a batch from the live stream or from `log_history`. Lines already present are
     /// ignored, so overlapping history and stream batches merge cleanly.
     pub fn merge(&mut self, batch: Vec<LogLine>) {
-        let newest = self.lines.back().map(|line| line.seq);
+        let Some(first) = batch.first() else {
+            return;
+        };
+        let after_newest = self
+            .lines
+            .back()
+            .is_none_or(|newest| first.seq > newest.seq);
         let in_order = batch.windows(2).all(|pair| pair[0].seq < pair[1].seq);
-        match (newest, batch.first()) {
-            // The common case: a live batch after everything we have.
-            (Some(newest), Some(first)) if in_order && first.seq > newest => {
-                self.lines.extend(batch)
-            }
-            (None, _) if in_order => self.lines.extend(batch),
-            _ => {
-                let mut all: Vec<LogLine> = self.lines.drain(..).chain(batch).collect();
-                all.sort_by_key(|line| line.seq);
-                all.dedup_by_key(|line| line.seq);
-                self.lines.extend(all);
-            }
+        if after_newest && in_order {
+            // The common case: a live batch that starts after everything kept.
+            self.lines.extend(batch);
+        } else {
+            // History overlapping the live stream, or an unordered batch. The sort is stable
+            // and the kept lines come first, so a kept line wins over a later copy.
+            let mut all: Vec<LogLine> = self.lines.drain(..).chain(batch).collect();
+            all.sort_by_key(|line| line.seq);
+            all.dedup_by(|later, kept| {
+                if later.seq != kept.seq {
+                    return false;
+                }
+                // A real line from `log_history` replaces the gap marker that took its seq.
+                if is_gap_marker(kept) && !is_gap_marker(later) {
+                    std::mem::swap(later, kept);
+                }
+                true
+            });
+            self.lines.extend(all);
         }
         let excess = self.lines.len().saturating_sub(MAX_LINES);
         self.lines.drain(..excess);
@@ -46,7 +59,7 @@ impl LogBuffer {
     }
 
     /// The lines that pass `filter`, with a [`LogEntry::Gap`] wherever `seq` jumps between two
-    /// buffered lines.
+    /// buffered lines or the backend sent a gap marker (see [`is_gap_marker`]).
     pub fn entries(&self, filter: &LogFilter) -> Vec<LogEntry> {
         let needle = filter.text.trim().to_lowercase();
         let mut entries = Vec::new();
@@ -54,6 +67,18 @@ impl LogBuffer {
         // Continuation lines (no level) follow the visibility of the line they continue.
         let mut parent_visible = true;
         for line in &self.lines {
+            if is_gap_marker(line) {
+                // The marker takes the seq of the last dropped line, so it and any jump in
+                // `seq` before it are one gap. A marker with nothing before it says nothing.
+                if let Some(previous) = previous_seq {
+                    entries.push(LogEntry::Gap {
+                        before_seq: line.seq,
+                        dropped: line.seq - previous,
+                    });
+                }
+                previous_seq = Some(line.seq);
+                continue;
+            }
             if let Some(previous) = previous_seq
                 && line.seq > previous + 1
             {
@@ -111,6 +136,18 @@ impl LogEntry {
     }
 }
 
+/// Whether `line` is the backend's stand-in for lines it dropped (`bridge::gap_marker` in
+/// `src-tauri`): a `Launcher` line reading "N lines dropped" that takes the seq of the last
+/// dropped line.
+pub fn is_gap_marker(line: &LogLine) -> bool {
+    line.stream == LogStream::Launcher
+        && line.timestamp.is_none()
+        && line
+            .message
+            .strip_suffix(" lines dropped")
+            .is_some_and(|count| !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn matches_text(line: &LogLine, needle_lowercase: &str) -> bool {
     [
         Some(line.message.as_str()),
@@ -163,10 +200,16 @@ pub fn time_of_day(timestamp: &str) -> &str {
         return timestamp;
     };
     let time = time.trim_end_matches('Z');
-    match time.find('.') {
-        Some(dot) => &time[..(dot + 4).min(time.len())],
-        None => time,
-    }
+    let Some(dot) = time.find('.') else {
+        return time;
+    };
+    // The dot and three characters after it, counted in characters so that a non-ASCII
+    // timestamp cannot split a code point.
+    let end = time[dot..]
+        .char_indices()
+        .nth(4)
+        .map_or(time.len(), |(offset, _)| dot + offset);
+    &time[..end]
 }
 
 #[cfg(test)]
@@ -203,6 +246,43 @@ mod tests {
     }
 
     #[test]
+    fn merge_ignores_an_empty_batch() {
+        let mut buffer = LogBuffer::default();
+        buffer.merge(Vec::new());
+        assert!(buffer.is_empty());
+        buffer.merge(vec![line(3, None, "c")]);
+        let before = buffer.clone();
+        buffer.merge(Vec::new());
+        assert_eq!(buffer, before);
+    }
+
+    #[test]
+    fn merge_appends_a_batch_after_the_newest_line() {
+        let mut buffer = LogBuffer::default();
+        buffer.merge(vec![line(1, None, "a"), line(2, None, "b")]);
+        // A jump in seq is kept as is: it is a gap, not an overlap.
+        buffer.merge(vec![line(7, None, "g"), line(8, None, "h")]);
+        assert_eq!(seqs(&buffer), [1, 2, 7, 8]);
+        assert_eq!(buffer.lines[2].message, "g");
+    }
+
+    #[test]
+    fn merge_sorts_an_unordered_batch() {
+        let mut buffer = LogBuffer::default();
+        buffer.merge(vec![line(1, None, "a")]);
+        buffer.merge(vec![
+            line(4, None, "d"),
+            line(3, None, "c"),
+            line(4, None, "x"),
+        ]);
+        assert_eq!(seqs(&buffer), [1, 3, 4]);
+        assert_eq!(buffer.lines[2].message, "d");
+        // A batch entirely older than the kept lines is sorted in front of them.
+        buffer.merge(vec![line(0, None, "z")]);
+        assert_eq!(seqs(&buffer), [0, 1, 3, 4]);
+    }
+
+    #[test]
     fn merge_caps_the_buffer() {
         let mut buffer = LogBuffer::default();
         for start in (0..1500).step_by(100) {
@@ -234,6 +314,65 @@ mod tests {
         keys.dedup();
         assert_eq!(keys.len(), 4);
         assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    fn gap_marker(seq: u64, dropped: u64) -> LogLine {
+        LogLine {
+            seq,
+            stream: LogStream::Launcher,
+            timestamp: None,
+            level: Some(LogLevel::Warn),
+            spans: None,
+            target: None,
+            message: format!("{dropped} lines dropped"),
+        }
+    }
+
+    #[test]
+    fn a_gap_marker_and_the_jump_before_it_are_one_gap() {
+        // What the bridge sends after lagging by 3: lines 2, 3 and 4 are lost and the marker
+        // takes seq 4.
+        let mut buffer = LogBuffer::default();
+        buffer.merge(vec![line(0, None, "a"), line(1, None, "b")]);
+        buffer.merge(vec![gap_marker(4, 3), line(5, None, "f")]);
+        let entries = buffer.entries(&LogFilter::default());
+        assert_eq!(entries.len(), 4);
+        assert_eq!(
+            entries[2],
+            LogEntry::Gap {
+                before_seq: 4,
+                dropped: 3
+            }
+        );
+        assert!(matches!(&entries[3], LogEntry::Line(line) if line.seq == 5));
+
+        // log_history fills in 3 and 4: the real line 4 replaces the marker and one line is
+        // still missing.
+        buffer.merge(vec![line(3, None, "d"), line(4, None, "e")]);
+        assert_eq!(seqs(&buffer), [0, 1, 3, 4, 5]);
+        assert_eq!(buffer.lines[3].message, "e");
+        let entries = buffer.entries(&LogFilter::default());
+        assert_eq!(
+            entries[2],
+            LogEntry::Gap {
+                before_seq: 3,
+                dropped: 1
+            }
+        );
+        assert_eq!(entries.len(), 6);
+    }
+
+    #[test]
+    fn only_dropped_line_notes_are_gap_markers() {
+        assert!(is_gap_marker(&gap_marker(9, 7)));
+        let mut note = gap_marker(9, 7);
+        note.message = "zebrad exited with code 0".into();
+        assert!(!is_gap_marker(&note));
+        let mut stdout = gap_marker(9, 7);
+        stdout.stream = LogStream::Stdout;
+        assert!(!is_gap_marker(&stdout));
+        note.message = " lines dropped".into();
+        assert!(!is_gap_marker(&note));
     }
 
     #[test]
@@ -289,5 +428,10 @@ mod tests {
         assert_eq!(time_of_day("2026-10-23T18:35:01.937583Z"), "18:35:01.937");
         assert_eq!(time_of_day("2026-10-23T18:35:01Z"), "18:35:01");
         assert_eq!(time_of_day("garbage"), "garbage");
+        assert_eq!(time_of_day("2026-10-23T18:35:01.9Z"), "18:35:01.9");
+        // Multi-byte characters right after the dot must not panic.
+        assert_eq!(time_of_day("xT01.éèêëZ"), "01.éèê");
+        assert_eq!(time_of_day("T.€"), ".€");
+        assert_eq!(time_of_day("日本T時.間"), "時.間");
     }
 }

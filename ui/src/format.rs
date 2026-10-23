@@ -1,9 +1,6 @@
-//! Display helpers and input validation. Pure Rust, tested natively.
+//! Display helpers. Pure Rust, tested natively.
 
-use std::{
-    net::Ipv4Addr,
-    time::{Duration, SystemTime},
-};
+use std::time::{Duration, SystemTime};
 
 use launcher_types::{ExitClass, Phase};
 
@@ -110,62 +107,6 @@ pub fn relative(time: SystemTime, now: SystemTime) -> String {
         Err(behind) if behind.duration() < JUST_NOW => "just now".to_owned(),
         Err(behind) => format!("{} ago", rough_duration(behind.duration())),
     }
-}
-
-/// Checks a Grafana URL from the settings form. Empty means "no dashboard".
-///
-/// Only `http://127.0.0.1[:port]` and `http://localhost[:port]` are accepted: the app's CSP
-/// allows exactly those as frame sources, and Grafana must not be loaded from another host.
-pub fn validate_grafana_url(input: &str) -> Result<Option<String>, String> {
-    let url = input.trim();
-    if url.is_empty() {
-        return Ok(None);
-    }
-    let Some(rest) = url.strip_prefix("http://") else {
-        return Err("The URL must start with http:// (Grafana runs on this computer).".into());
-    };
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    if authority.contains('@') {
-        return Err("The URL must not contain a user name or password.".into());
-    }
-    let (host, port) = split_host_port(authority)?;
-    if !is_allowed_host(host) {
-        return Err("Grafana must run on this computer: use 127.0.0.1 or localhost.".into());
-    }
-    if let Some(port) = port
-        && !matches!(port.parse::<u16>(), Ok(1..))
-    {
-        return Err(format!("{port:?} is not a valid port."));
-    }
-    if url.chars().any(char::is_whitespace) {
-        return Err("The URL must not contain spaces.".into());
-    }
-    Ok(Some(url.to_owned()))
-}
-
-fn split_host_port(authority: &str) -> Result<(&str, Option<&str>), String> {
-    if let Some(bracketed) = authority.strip_prefix('[') {
-        let Some((host, after)) = bracketed.split_once(']') else {
-            return Err("The URL has an unterminated IPv6 address.".into());
-        };
-        return match after {
-            "" => Ok((host, None)),
-            _ => match after.strip_prefix(':') {
-                Some(port) => Ok((host, Some(port))),
-                None => Err("The URL has an invalid host.".into()),
-            },
-        };
-    }
-    Ok(match authority.split_once(':') {
-        Some((host, port)) => (host, Some(port)),
-        None => (authority, None),
-    })
-}
-
-fn is_allowed_host(host: &str) -> bool {
-    // Keep in step with the CSP's frame-src allow-list (`http://127.0.0.1:* http://localhost:*`).
-    host.eq_ignore_ascii_case("localhost") || host.parse::<Ipv4Addr>() == Ok(Ipv4Addr::LOCALHOST)
 }
 
 /// Adds Grafana's `kiosk` query parameter, keeping any existing query and fragment.
@@ -298,39 +239,6 @@ mod tests {
         assert_eq!(relative(now - Duration::from_secs(1), now), "just now");
         assert_eq!(rough_duration(Duration::from_secs(59)), "59 s");
         assert_eq!(rough_duration(Duration::from_secs(120)), "2 min");
-    }
-
-    #[test]
-    fn grafana_url_must_be_loopback_http() {
-        let ok = |url: &str| validate_grafana_url(url).unwrap();
-        assert_eq!(ok(""), None);
-        assert_eq!(ok("  "), None);
-        assert_eq!(
-            ok(" http://127.0.0.1:3000/d/zebra-overview "),
-            Some("http://127.0.0.1:3000/d/zebra-overview".into())
-        );
-        assert_eq!(ok("http://localhost"), Some("http://localhost".into()));
-        assert_eq!(
-            ok("http://LOCALHOST:3000?orgId=1"),
-            Some("http://LOCALHOST:3000?orgId=1".into())
-        );
-        for bad in [
-            "https://127.0.0.1:3000",
-            "http://grafana.example.com",
-            "http://127.0.0.1.example.com:3000",
-            "http://example.com@127.0.0.1:3000",
-            "http://127.0.0.1@example.com",
-            "http://10.0.0.1:3000",
-            "http://127.0.0.2:3000",
-            "http://[::1]:3000",
-            "http://127.0.0.1:0",
-            "http://127.0.0.1:99999",
-            "http://127.0.0.1:abc",
-            "javascript:alert(1)",
-            "127.0.0.1:3000",
-        ] {
-            assert!(validate_grafana_url(bad).is_err(), "{bad} was accepted");
-        }
     }
 
     #[test]

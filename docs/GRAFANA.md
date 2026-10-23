@@ -74,9 +74,12 @@ http://127.0.0.1:3000/d/zebra-overview?kiosk&theme=dark
 `zebra-overview` is the `uid` of `zebra_overview.json`, which is also Grafana's home
 dashboard in this stack.
 
-- The URL must be loopback (`http://127.0.0.1:<port>` or `http://localhost:<port>`). The
-  launcher refuses other hosts, and its build-time CSP only allows
-  `frame-src http://127.0.0.1:* http://localhost:*`.
+- The URL must match the launcher's one Grafana URL rule, which mirrors its CSP
+  (`frame-src http://127.0.0.1:* http://localhost:*`): scheme `http`, host exactly
+  `127.0.0.1` or `localhost`, an optional port from 1 to 65535, and any path, query or
+  fragment. `https`, `[::1]`, other loopback addresses such as `127.0.0.2`, user info
+  (`user@`), backslashes and spaces are refused. The Settings page and the backend both
+  check it with the same function, `launcher_types::is_loopback_http_url`.
 - The iframe is sandboxed with `allow-scripts allow-same-origin` (Grafana keeps its own
   origin, cookies and API calls), with no top navigation, popups or referrer, and it gets
   no access to the launcher's IPC.

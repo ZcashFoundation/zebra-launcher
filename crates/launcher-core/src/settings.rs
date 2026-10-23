@@ -14,10 +14,8 @@ use crate::{fsutil, paths::Paths};
 /// Loading, validating or saving settings failed.
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
-    /// The Grafana URL is not a loopback `http(s)` URL.
-    #[error(
-        "the Grafana URL {0:?} must start with http:// or https:// and point to 127.0.0.1, localhost or [::1]"
-    )]
+    /// The Grafana URL is not `http://127.0.0.1` or `http://localhost`.
+    #[error("the Grafana URL {0:?} must start with http://127.0.0.1 or http://localhost")]
     InvalidGrafanaUrl(String),
     /// The settings file could not be read or written.
     #[error("settings file I/O failed: {0}")]

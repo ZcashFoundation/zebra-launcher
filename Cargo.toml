@@ -32,3 +32,12 @@ dirs = "7"
 [workspace.lints.clippy]
 # Shared state uses channels, `watch`, atomics or semaphores. See clippy.toml.
 disallowed_types = "deny"
+
+# The UI's release build (`trunk build --release`, selected in `ui/index.html`): a small wasm
+# matters more than speed there. Other release builds are unaffected.
+[profile.release-wasm]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

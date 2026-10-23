@@ -8,17 +8,18 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
     time::Duration,
 };
 
-use crate::{
-    clock,
-    types::{ApplyError, ApplyOutcome, ConfigDocument, EosInfo, NodeStats, Settings},
+use launcher_types::{
+    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, EosInfo, ExitClass, ExitInfo,
+    LogLevel, LogLine, LogStream, NodeStats, Phase, Settings, StaleProcessInfo, Status,
 };
-use launcher_types::{ExitClass, ExitInfo, LogLevel, LogLine, LogStream, Phase, Status};
 use leptos::prelude::*;
+
+use crate::clock;
 
 /// The config document the mock starts with: what the launcher's minimal managed file looks like.
 const SAMPLE_CONFIG: &str = r#"# Managed by Zebra Launcher. Keys you add are kept; the RPC, metrics and
@@ -48,6 +49,9 @@ const CONFIG_ERROR: &str = "error: Zebra could not load the provided configurati
 
 /// A config containing this comment makes the mock report that the file changed on disk.
 const CONFLICT_MARKER: &str = "# simulate-conflict";
+
+/// A config containing this comment makes the mock fail the next `read_config`.
+const READ_FAILURE_MARKER: &str = "# simulate-read-failure";
 
 /// `(stream, level, spans, target, message)` taken from real zebrad output.
 type SampleLine = (
@@ -205,6 +209,8 @@ struct Mock {
     /// Bumped by every command, so a delayed transition from an older command is skipped.
     generation: Arc<AtomicU64>,
     next_pid: Arc<AtomicU32>,
+    /// Makes the next `read_config` fail, see [`READ_FAILURE_MARKER`].
+    fail_next_read: Arc<AtomicBool>,
 }
 
 thread_local! {
@@ -232,8 +238,22 @@ impl Mock {
             next_seq: Arc::new(AtomicU64::new(0)),
             generation: Arc::new(AtomicU64::new(0)),
             next_pid: Arc::new(AtomicU32::new(4242)),
+            fail_next_read: Arc::new(AtomicBool::new(false)),
         };
-        mock.start();
+        // `?stale` in the page URL simulates a zebrad left behind by an earlier launcher run.
+        let stale = web_sys::window()
+            .and_then(|window| window.location().search().ok())
+            .is_some_and(|search| search.contains("stale"));
+        if stale {
+            mock.status.update(|status| {
+                status.stale = Some(StaleProcessInfo {
+                    pid: 1234,
+                    binary: "/opt/zebra-launcher/zebrad".into(),
+                })
+            });
+        } else {
+            mock.start();
+        }
         let ticker = mock.clone();
         set_interval(move || ticker.tick_stats(), Duration::from_secs(1));
         mock
@@ -373,9 +393,28 @@ pub async fn get_status() -> Status {
     mock().status.get_untracked()
 }
 
-pub async fn start_zebrad() {
+pub async fn start_zebrad() -> Result<(), String> {
     sleep(100).await;
     let mock = mock();
+    if let Some(stale) = mock.status.with_untracked(|status| status.stale.clone()) {
+        return Err(format!(
+            "a zebrad from an earlier launcher run is still running (pid {})",
+            stale.pid
+        ));
+    }
+    if matches!(
+        mock.phase(),
+        Phase::Stopped | Phase::Failed { .. } | Phase::Backoff { .. }
+    ) {
+        mock.start();
+    }
+    Ok(())
+}
+
+pub async fn start_zebrad_killing_stale() {
+    sleep(500).await;
+    let mock = mock();
+    mock.status.update(|status| status.stale = None);
     if matches!(
         mock.phase(),
         Phase::Stopped | Phase::Failed { .. } | Phase::Backoff { .. }
@@ -405,12 +444,26 @@ pub fn subscribe_logs(on_batch: impl Fn(Vec<LogLine>) + 'static) {
                 return;
             }
             let batch_number = batches.fetch_add(1, Ordering::Relaxed);
+            let mut batch = Vec::new();
             if batch_number % 60 == 59 {
-                mock.next_seq.fetch_add(7, Ordering::Relaxed);
+                // Like the bridge after lagging: the lost lines are replaced by one launcher
+                // line that takes the seq of the last of them.
+                const DROPPED: u64 = 7;
+                let first_dropped = mock.next_seq.fetch_add(DROPPED, Ordering::Relaxed);
+                batch.push(LogLine {
+                    seq: first_dropped + DROPPED - 1,
+                    stream: LogStream::Launcher,
+                    timestamp: None,
+                    level: Some(LogLevel::Warn),
+                    spans: None,
+                    target: None,
+                    message: format!("{DROPPED} lines dropped"),
+                });
             }
             let count = 1 + (js_sys::Math::random() * 3.0) as u64;
             let first = mock.next_seq.fetch_add(count, Ordering::Relaxed);
-            on_batch((first..first + count).map(|seq| mock.line(seq)).collect());
+            batch.extend((first..first + count).map(|seq| mock.line(seq)));
+            on_batch(batch);
         },
         Duration::from_millis(400),
     );
@@ -425,9 +478,13 @@ pub async fn log_history(since: u64) -> Vec<LogLine> {
         .collect()
 }
 
-pub async fn read_config() -> ConfigDocument {
+pub async fn read_config() -> Result<ConfigDocument, String> {
     sleep(150).await;
-    mock().config.get_untracked()
+    let mock = mock();
+    if mock.fail_next_read.swap(false, Ordering::Relaxed) {
+        return Err("(mock) permission denied reading zebrad.toml".into());
+    }
+    Ok(mock.config.get_untracked())
 }
 
 pub async fn apply_config(text: String, token: String) -> Result<ApplyOutcome, ApplyError> {
@@ -436,10 +493,12 @@ pub async fn apply_config(text: String, token: String) -> Result<ApplyOutcome, A
     let current = mock.config.get_untracked();
     if token != current.token || text.contains(CONFLICT_MARKER) {
         return Err(ApplyError {
-            kind: "conflict".into(),
+            kind: ApplyErrorKind::Conflict,
             message: format!("{} changed on disk since it was read", current.path),
         });
     }
+    mock.fail_next_read
+        .store(text.contains(READ_FAILURE_MARKER), Ordering::Relaxed);
     mock.stop(true);
     sleep(2000).await;
     if text.contains(BAD_KEY) {

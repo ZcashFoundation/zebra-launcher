@@ -294,8 +294,8 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// Start zebrad when the launcher starts.
     pub start_node_on_launch: bool,
-    /// The Grafana dashboard URL to embed. Must be loopback `http(s)`, see
-    /// [`is_loopback_http_url`].
+    /// The Grafana dashboard URL to embed: `http://127.0.0.1` or
+    /// `http://localhost` with any port and path, see [`is_loopback_http_url`].
     pub grafana_url: Option<String>,
     /// The directory chosen for the chain state, if not the default.
     pub data_dir: Option<String>,
@@ -329,50 +329,37 @@ impl Default for Settings {
     }
 }
 
-/// Returns true when `url` is an `http://` or `https://` URL whose host is
-/// `127.0.0.1`, `localhost` or `[::1]`, with an optional port and path, and no
-/// user info.
+/// Returns true when `url` is an `http://` URL whose host is exactly
+/// `127.0.0.1` or `localhost`, with an optional port (1 to 65535) and any
+/// path, query or fragment. Scheme and host are compared ignoring case.
 ///
-/// This is the rule for [`Settings::grafana_url`]: the app's content security
-/// policy only allows loopback frames.
+/// This is the one rule for [`Settings::grafana_url`], shared by the backend
+/// and the UI: the app's content security policy allows exactly
+/// `frame-src http://127.0.0.1:* http://localhost:*`, so `https`, `[::1]` and
+/// other loopback addresses would be refused by the webview anyway. User
+/// info, backslashes and whitespace are refused because browsers parse them
+/// in surprising ways.
 pub fn is_loopback_http_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    let Some(rest) = lower
-        .strip_prefix("http://")
-        .or_else(|| lower.strip_prefix("https://"))
+    let Some(rest) = url
+        .get(..7)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("http://"))
+        .map(|_| &url[7..])
     else {
         return false;
     };
-    // User info (`127.0.0.1@evil.example`), backslashes and whitespace are
-    // refused outright: browsers parse them in surprising ways.
-    if rest.contains(['\\', ' ', '\t', '\n', '\r']) {
+    if rest.contains(['\\', '@']) || rest.chars().any(char::is_whitespace) {
         return false;
     }
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
-    if authority.contains('@') {
-        return false;
-    }
-    let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
-        match v6.split_once(']') {
-            Some(parts) => parts,
-            None => return false,
-        }
-    } else {
-        match authority.find(':') {
-            Some(i) => authority.split_at(i),
-            None => (authority, ""),
-        }
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
     };
-    let port_ok = match port.strip_prefix(':') {
-        Some(digits) => {
-            !digits.is_empty()
-                && digits.bytes().all(|b| b.is_ascii_digit())
-                && digits.parse::<u16>().is_ok()
-        }
-        None => port.is_empty(),
-    };
-    port_ok && matches!(host, "127.0.0.1" | "localhost" | "::1")
+    let port_ok = port.is_none_or(|digits| {
+        digits.bytes().all(|b| b.is_ascii_digit()) && matches!(digits.parse::<u16>(), Ok(1..))
+    });
+    port_ok && (host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost"))
 }
 
 /// Node statistics polled from zebrad's JSON-RPC interface.
@@ -561,33 +548,46 @@ mod tests {
     #[test]
     fn loopback_urls() {
         for ok in [
-            "http://127.0.0.1:3000/d/zebra-overview?kiosk",
-            "https://localhost",
+            "http://127.0.0.1:3000/d/zebra-overview?kiosk&theme=dark",
+            "http://localhost",
             "http://localhost:3000",
             "HTTP://LOCALHOST:3000/",
-            "http://[::1]:3000/x#y",
             "http://127.0.0.1?x",
+            "http://127.0.0.1#top",
+            "http://127.0.0.1:65535/a/b?c=d#e",
         ] {
             assert!(is_loopback_http_url(ok), "{ok}");
         }
         for bad in [
             "",
+            "http://",
+            "https://localhost",
+            "https://127.0.0.1:3000",
             "ftp://127.0.0.1",
             "javascript:alert(1)",
+            "//127.0.0.1",
+            "127.0.0.1:3000",
+            "http://[::1]:3000/x#y",
+            "http://[::1",
+            "http://0.0.0.0:3000",
+            "http://127.0.0.2:3000",
+            "http://10.0.0.1:3000",
             "http://example.com",
             "http://127.0.0.1.example.com",
+            "http://localhost.example.com:3000",
             "http://127.0.0.1@example.com",
             "http://example.com@127.0.0.1",
             "http://localhost:",
+            "http://localhost:0",
             "http://localhost:99999",
             "http://localhost:+80",
             "http://localhost:3000x",
-            "http://[::1",
-            "http://[::2]:3000",
-            "http://0.0.0.0:3000",
+            "http://localhost:30:00",
             "http://127.0.0.1\\@example.com",
             "http://127.0.0.1 /",
-            "//127.0.0.1",
+            "http://127.0.0.1/a b",
+            " http://127.0.0.1",
+            "h\u{e9}://127.0.0.1",
         ] {
             assert!(!is_loopback_http_url(bad), "{bad}");
         }
