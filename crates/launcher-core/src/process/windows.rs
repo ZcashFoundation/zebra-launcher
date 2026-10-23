@@ -28,10 +28,6 @@ use windows_sys::Win32::{
     },
 };
 
-/// An upper bound on the thread snapshot, so a hostile or huge system cannot
-/// keep the loop busy forever.
-const MAX_SNAPSHOT_THREADS: usize = 65_536;
-
 /// Hides the console window and starts the process suspended, so it can be
 /// placed in its job before it runs.
 pub(super) fn prepare(cmd: &mut tokio::process::Command) {
@@ -127,7 +123,7 @@ fn resume_threads(pid: u32) -> io::Result<()> {
     // SAFETY: `entry` is a properly sized THREADENTRY32 and the snapshot is valid.
     let mut found = unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) };
     let mut resumed = 0usize;
-    let mut seen = 0usize;
+    // The snapshot is finite; the walk ends with ERROR_NO_MORE_FILES.
     while found != 0 {
         if entry.th32OwnerProcessID == pid {
             // SAFETY: OpenThread takes a thread id and returns a handle or null.
@@ -142,10 +138,6 @@ fn resume_threads(pid: u32) -> io::Result<()> {
                 return Err(io::Error::last_os_error());
             }
             resumed += 1;
-        }
-        seen += 1;
-        if seen >= MAX_SNAPSHOT_THREADS {
-            break;
         }
         entry.dwSize = u32::try_from(size_of::<THREADENTRY32>()).expect("small struct");
         // SAFETY: same as Thread32First.
