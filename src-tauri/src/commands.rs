@@ -82,16 +82,20 @@ pub async fn log_history(state: State<'_, AppState>, since: u64) -> Result<Vec<L
 
 /// Starts zebrad and waits until it accepted its configuration. Fails when a
 /// zebrad from an earlier launcher run is still alive (see `status.stale`);
-/// `start_zebrad_killing_stale` handles that case.
+/// `start_zebrad_killing_stale` handles that case. Fails before the first
+/// run is done ([`firstrun::start_allowed`]).
 #[tauri::command]
 pub async fn start_zebrad(state: State<'_, AppState>) -> Result<(), String> {
+    firstrun::start_allowed(&state.settings.current())?;
     let _permit = state.start_permit()?;
     state.supervisor.start().await.map_err(message)
 }
 
 /// Terminates a zebrad left behind by an earlier launcher run, then starts.
+/// Fails before the first run is done, without terminating anything.
 #[tauri::command]
 pub async fn start_zebrad_killing_stale(state: State<'_, AppState>) -> Result<(), String> {
+    firstrun::start_allowed(&state.settings.current())?;
     let _permit = state.start_permit()?;
     state
         .supervisor
@@ -106,9 +110,11 @@ pub async fn stop_zebrad(state: State<'_, AppState>) -> Result<(), String> {
     state.supervisor.stop().await.map_err(message)
 }
 
-/// Stops zebrad, then starts it again.
+/// Stops zebrad, then starts it again. Like `start_zebrad`, fails before
+/// the first run is done.
 #[tauri::command]
 pub async fn restart_zebrad(state: State<'_, AppState>) -> Result<(), String> {
+    firstrun::start_allowed(&state.settings.current())?;
     let _permit = state.start_permit()?;
     state.supervisor.restart().await.map_err(message)
 }
@@ -270,17 +276,17 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 /// directory) are updated right away and take effect on the next zebrad
 /// start; the stop grace period takes effect on the next launch.
 /// `first_run_done` is kept as it is: only `complete_first_run` sets it.
+/// `data_dir` is kept as it is too: only `choose_data_dir` changes it, after
+/// checking that zebrad is stopped and the directory is writable, so a stale
+/// copy of the settings in the UI cannot undo a choice.
 #[tauri::command]
 pub async fn set_settings(
     state: State<'_, AppState>,
-    mut settings: Settings,
+    settings: Settings,
 ) -> Result<Settings, String> {
     let saved = state
         .settings
-        .update(move |current| {
-            settings.first_run_done = current.first_run_done;
-            *current = settings;
-        })
+        .update(move |current| launcher_core::settings::apply_from_ui(current, settings))
         .await
         .map_err(message)?;
 
@@ -338,14 +344,19 @@ pub fn open_path<R: Runtime>(
 }
 
 /// What the first-run flow shows: whether it is due, the default data
-/// directory with its free space, and any alpha.4 leftovers.
+/// directory with its free space, and any alpha.4 leftovers. The alpha.4
+/// state is measured on the first call only (see [`AppState::sizes`]).
 #[tauri::command]
 pub async fn get_first_run_info(state: State<'_, AppState>) -> Result<FirstRunInfo, String> {
     let paths = state.paths.clone();
     let settings = state.settings.current();
+    let sizes = state.sizes.clone();
     blocking(move || {
-        let legacy =
-            firstrun::detect_legacy(&LegacyLocations::current(), &state_dir(&settings, &paths));
+        let legacy = firstrun::detect_legacy(
+            &LegacyLocations::current(),
+            &state_dir(&settings, &paths),
+            &sizes,
+        );
         firstrun::first_run_info(&paths, &settings, legacy)
     })
     .await
@@ -453,15 +464,20 @@ pub async fn import_legacy_state(state: State<'_, AppState>) -> Result<ImportOut
 /// Deletes the chain state (config, logs and the RPC cookie stay) and
 /// returns the bytes freed. Only while zebrad is stopped; the UI asks for
 /// confirmation first.
+///
+/// The state is not walked just to count it: the bytes come from a size
+/// measured earlier this session ([`AppState::sizes`]), and are 0 when none
+/// was, which the UI should show as "unknown".
 #[tauri::command]
 pub async fn delete_node_data(state: State<'_, AppState>) -> Result<u64, String> {
     let _data = state.data_change_permit()?;
     let settings = state.settings.current();
     let roots = state.data_roots(&settings);
     let dir = state_dir(&settings, &state.paths);
+    let sizes = state.sizes.clone();
     blocking(move || {
         let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
-        firstrun::delete_node_data(&dir, &roots)
+        firstrun::delete_node_data(&dir, &roots, &sizes)
     })
     .await?
     .map_err(message)
@@ -503,4 +519,49 @@ pub async fn complete_first_run(state: State<'_, AppState>) -> Result<(), String
         .await
         .map(|_| ())
         .map_err(message)
+}
+
+/// What the launcher's updater is doing.
+#[tauri::command]
+pub fn get_update_state(
+    updater: State<'_, launcher_core::updates::UpdaterHandle>,
+) -> launcher_types::UpdateState {
+    updater.state()
+}
+
+/// Everything the UI shows about launcher updates: the state, the mode, the
+/// stale-check warning, whether this install can update itself, and a
+/// post-update health failure.
+#[tauri::command]
+pub fn get_update_info(
+    updater: State<'_, launcher_core::updates::UpdaterHandle>,
+) -> launcher_types::UpdateInfo {
+    updater.info()
+}
+
+/// Checks for a launcher update now and returns the resulting state. Allowed
+/// in every update mode, Off included, because the user asked.
+#[tauri::command]
+pub async fn check_for_update(
+    updater: State<'_, launcher_core::updates::UpdaterHandle>,
+) -> Result<launcher_types::UpdateState, String> {
+    updater.check().await.map_err(message)
+}
+
+/// Starts installing the available update: download (if needed), signature
+/// check, graceful zebrad stop, install, relaunch. Returns once it started;
+/// progress arrives as `update_state` events.
+#[tauri::command]
+pub async fn install_update(
+    updater: State<'_, launcher_core::updates::UpdaterHandle>,
+) -> Result<(), String> {
+    updater.install().await.map_err(message)
+}
+
+/// Cancels an update check, a download, or an automatic-install countdown.
+#[tauri::command]
+pub async fn cancel_update(
+    updater: State<'_, launcher_core::updates::UpdaterHandle>,
+) -> Result<(), String> {
+    updater.cancel().await.map_err(message)
 }

@@ -27,6 +27,11 @@ const COMMANDS: &[&str] = &[
     "delete_node_data",
     "copy_diagnostics",
     "complete_first_run",
+    "get_update_state",
+    "get_update_info",
+    "check_for_update",
+    "install_update",
+    "cancel_update",
 ];
 
 fn main() {

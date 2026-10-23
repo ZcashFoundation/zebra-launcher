@@ -193,7 +193,13 @@ change shown. `PortInUse` remediation offers other ports and writes them into th
 keys. The RPC address always comes from the written config, never from log lines.
 
 Launcher settings live in `launcher.json` (with `schema_version`), owned by a settings
-actor.
+actor. `set_settings` saves everything the UI sends except `first_run_done` and
+`data_dir`, which it keeps as stored: only `complete_first_run` and `choose_data_dir`
+change them, so a stale UI copy cannot undo a data directory choice or skip the checks
+`choose_data_dir` makes. A `launcher.json` older than schema version 2 (or without a
+`schema_version`) predates the first-run flow: `SettingsStore::open` sets
+`first_run_done`, bumps the version and writes it back, so upgrading users keep their
+autostart. Without a file, `first_run_done` starts false.
 
 ## First run and node data
 
@@ -202,15 +208,17 @@ directories; the commands in `src-tauri/src/commands.rs` call it off the async r
 
 | Command | Returns | Does |
 | --- | --- | --- |
-| `get_first_run_info` | `FirstRunInfo` | first run until `settings.first_run_done`; the default data dir and its free space (`statvfs` / `GetDiskFreeSpaceExW`, at the nearest existing ancestor); alpha.4 leftovers with the state size from a capped walk |
+| `get_first_run_info` | `FirstRunInfo` | first run until `settings.first_run_done`; the default data dir and its free space (`statvfs` / `GetDiskFreeSpaceExW`, at the nearest existing ancestor); alpha.4 leftovers with the state size from a walk capped at 50k entries (then a lower bound), done once per session |
 | `pick_data_dir` | `Option<String>` | the native folder picker |
 | `choose_data_dir(path)` | `DataDirChoice` | checks `path` is absolute and writable, saves `settings.data_dir`, rewrites `state.cache_dir`; returns the free space, the UI decides whether to warn |
 | `import_legacy_state` | `ImportOutcome` | renames `dirs::cache_dir()/zebra/state` into the current state dir; across volumes it fails and asks the user to move it by hand, never copying |
-| `delete_node_data` | `u64` (bytes freed) | removes `<data dir>/state` only, and only inside the launcher's data dir or the chosen one |
+| `delete_node_data` | `u64` (bytes freed) | removes `<data dir>/state` only, and only inside the launcher's data dir or the chosen one; the bytes come from a size measured earlier in the session, 0 (unknown) otherwise, never from a walk of the whole state |
 | `copy_diagnostics` | `String` | versions, OS, status, settings (URL credentials redacted), `zebrad.toml`, last 200 lines of each log; never the RPC cookie |
 | `complete_first_run` | `()` | sets `first_run_done`; from then on zebrad starts at launch |
 
-zebrad is not started at launch before the first run is complete. The data commands run
+zebrad is not started before the first run is complete: `firstrun::start_allowed` is the
+one rule, checked at launch, by the tray (whose Start item stays disabled until then) and
+by `start_zebrad`, `start_zebrad_killing_stale` and `restart_zebrad`. The data commands run
 only while zebrad is `Stopped` or `Failed`. A semaphore in `AppState` keeps them apart
 from starts: each start (UI, tray, launch, the restart inside `apply_config`) holds one
 permit until it finishes, and a data change holds all of them, so zebrad cannot start
@@ -234,7 +242,8 @@ Show / second launch (single-instance) / macOS dock -> show + focus the window
   request passes through once the shutdown finished; `RunEvent::Exit` blocks on the
   shutdown as a last resort.
 - If startup fails (paths, settings, supervisor), the window is hidden and a native error
-  dialog names the error and the log directory; dismissing it exits with code 1. A
+  dialog names the error and the log directory; dismissing it exits with code 1, and so
+  does a dialog that could not be shown or got no answer within 60 s. A
   `zebrad.toml` that cannot be updated is not fatal: zebrad reports it and the editor can
   fix it.
 
@@ -252,24 +261,79 @@ banner, and a blocking halt card with no restart loop.
 
 ## Updater (opt-in, M11)
 
-Modes `Off`, `Notify`, `Auto`; Off until the first-run choice, which preselects Notify.
-Off makes zero network requests. Notify checks 30 s after launch and every 6 h with
-jitter. Auto downloads in the background and installs at the EOS warning or on user
-click after a cancellable countdown, never silently mid-session.
+Modes `Off`, `Notify`, `Auto` (`settings.update_mode`); Off until the first-run choice,
+which preselects Notify.
+
+- **Off** makes zero network requests: nothing is scheduled and no plugin `Updater` is
+  built. Only an explicit "Check for updates" (`check_for_update`) reaches the network.
+- **Notify** checks 30 s after launch, then every 6 h ± 10 % (seeded jitter), and shows
+  what it found. Installing is always a user click.
+- **Auto** also downloads a found update in the background and verifies it. It installs
+  only on a user click, or by itself when zebrad's end-of-support warning is on (the
+  estimated halt is within 14 days, or zebrad already refused to run), and then only
+  after a visible 60 s countdown that `cancel_update` stops. Never silently mid-session.
+- The `.deb` cannot update itself (root, package manager): it is Notify-only and the UI
+  links to the releases page (`UpdateInfo.can_install = false`). Development builds
+  cannot install either.
+
+### Updater actor
+
+The policy and the flow are Tauri-free, in `launcher-core::updates`: pure policy
+functions (schedule, auto-install rule, stale-check warning) and an actor that applies
+them. `src-tauri/src/updater.rs` implements the actor's `UpdateBackend` with
+`tauri-plugin-updater` and forwards its state to the UI.
 
 ```text
-check latest.json -> download -> Update::verify (minisign signature)
-  -> graceful stop of zebrad -> install -> app.restart()
-  -> health gate: Running with RPC within 5 min, else recovery UI
-install fails -> restart zebrad, show the error
+  commands ──mpsc<Cmd>──▶ updater actor ──▶ watch<UpdateInfo> ──▶ events update_info,
+  watch<Settings> ──────▶     │  ▲                                  update_state
+  watch<NodeStats> (EOS) ─▶   │  │ results (job id)
+  watch<Status> ────────▶     ▼  │
+                         child tasks: check | download+verify | install
+                                    │
+                    UpdateBackend (tauri-plugin-updater)   NodeControl (supervisor)
 ```
 
+States (`UpdateState`, tagged `state`):
+
+```text
+Idle ──check──▶ Checking ──▶ UpToDate | Error | Available
+Available ──install (or Auto)──▶ Downloading ──verify ok──▶ ReadyToInstall{countdown: None}
+ReadyToInstall ──Auto + EOS warning──▶ ReadyToInstall{countdown: Some(60..1)} ──0──▶ Installing
+ReadyToInstall ──install──▶ Installing ──▶ (launcher restarts)
+cancel: Checking → the found update or Idle, Downloading → Available, countdown → ReadyToInstall{None}
+update_mode → Off: abort everything except an install in progress → Idle
+```
+
+Install sequence, in a child task:
+
+```text
+Update::verify (minisign, signed version)  -- fails: Error, zebrad untouched
+  -> write <config>/pending_update_check {from, to, zebrad_was_running}
+  -> supervisor stop (graceful, kill after the grace period)
+  -> Update::install -> app.request_restart()  (Windows: the installer exits the app)
+stop or install fails -> remove the marker, start zebrad again if it was running, Error
+```
+
+At the next launch, if `pending_update_check` exists, the health gate checks that the
+new version is running and, if zebrad was running before, that it reaches `Running`
+with an RPC address within 5 minutes (starting it if `start_node_on_launch` is off).
+Then the marker is removed. On failure the `update_health_failed` event (and
+`UpdateInfo.health_failure`) carries the recovery hints: open logs, reset config, and
+the releases page for a previous installer.
+
+`UpdateInfo.stale_check_warning` is set when the end of support is within 28 days (or
+zebrad halted) and no check succeeded in the last 14 days; the last successful check
+is kept in `<config>/updater.json`.
+
 - Endpoint: `https://github.com/ZcashFoundation/zebra-launcher/releases/latest/download/latest.json`,
-  the latest non-prerelease release. Release candidates are rehearsed with a build-time
-  endpoint override, never a runtime environment variable.
-- `allowDowngrades = false`; roll forward only.
-- Updatable formats: AppImage, NSIS per-user, `.app.tar.gz` per macOS arch. The `.deb`
-  is Notify-only and shows the release link.
+  the latest non-prerelease release, from `plugins.updater.endpoints`. Release
+  candidates are rehearsed with a build-time endpoint override (`TAURI_CONFIG` or
+  `--config`, see [RELEASING.md](RELEASING.md#update-rehearsal)), never a runtime
+  environment variable; only debug builds read `LAUNCHER_UPDATE_ENDPOINT`.
+- `allowDowngrades = false` and `requireSignedVersion = true`; roll forward only. What
+  `verify` checks is in [SECURITY.md](SECURITY.md#what-the-updater-verifies).
+- Updatable formats: AppImage, NSIS per-user, `.app.tar.gz` per macOS arch. The plugin's
+  `zip` feature is off, so zipped NSIS and gzipped AppImage updates are refused.
 
 ## Release pipeline (M9, M10)
 

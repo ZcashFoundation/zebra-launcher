@@ -27,6 +27,11 @@
     "allow-import-legacy-state",
     "allow-delete-node-data",
     "allow-copy-diagnostics",
-    "allow-complete-first-run"
+    "allow-complete-first-run",
+    "allow-get-update-state",
+    "allow-get-update-info",
+    "allow-check-for-update",
+    "allow-install-update",
+    "allow-cancel-update"
   ]
 }

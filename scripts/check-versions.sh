@@ -11,6 +11,10 @@
 #      outside the workspace, src-tauri/Cargo.lock): the CLI that bundles the
 #      app must match the runtime it was built against. Skipped if nothing
 #      pins tauri-cli.
+#   5. src-tauri/tauri.conf.json sets plugins.updater.requireSignedVersion,
+#      and its updater pubkey is not the placeholder, unless the environment
+#      variable UPDATER_ENABLED is "false". Skipped while UPDATER_ENABLED is
+#      unset (CI on pull requests); release.yml sets it.
 #
 # Runs every check and reports each one, then exits 1 if any failed.
 # Requires: bash, grep, sed.
@@ -119,6 +123,27 @@ else
             fi
         done <<<"${cli_pins}"
     fi
+fi
+
+# 5. updater public key
+# The app is built with the minisign public key in tauri.conf.json. A release
+# with the updater enabled must not ship the placeholder: every update would
+# fail to verify. Checked only when UPDATER_ENABLED is set (release.yml sets
+# it); any value but "false" enforces it.
+conf="src-tauri/tauri.conf.json"
+placeholder="REPLACE_WITH_MINISIGN_PUBLIC_KEY"
+if [ ! -f "${root}/${conf}" ]; then
+    fail "${conf} is missing"
+elif ! grep -Eq '"requireSignedVersion":[[:space:]]*true' "${root}/${conf}"; then
+    fail "${conf} must set plugins.updater.requireSignedVersion to true (camelCase)"
+elif ! grep -q "\"pubkey\":[[:space:]]*\"${placeholder}\"" "${root}/${conf}"; then
+    ok "${conf} has an updater public key"
+elif [ -z "${UPDATER_ENABLED+set}" ]; then
+    skip "${conf} has the placeholder updater public key; fine unless releasing (UPDATER_ENABLED is unset)"
+elif [ "${UPDATER_ENABLED}" = "false" ]; then
+    ok "${conf} has the placeholder updater public key, and UPDATER_ENABLED=false"
+else
+    fail "${conf} has the placeholder updater public key, but UPDATER_ENABLED is '${UPDATER_ENABLED}': replace it (docs/SECURITY.md) or set the repository variable UPDATER_ENABLED=false"
 fi
 
 if [ "${failures}" -gt 0 ]; then
