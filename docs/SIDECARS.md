@@ -18,9 +18,9 @@ tag. The two files describe one release and change together (see
 [Bumping ZEBRAD_VERSION](#bumping-zebrad_version)).
 [`scripts/check-versions.sh`](../scripts/check-versions.sh), which CI runs,
 checks that both files are well formed and that `fake-zebrad` reports the same
-version. Once a workflow pins tauri-cli in a `TAURI_CLI_VERSION` env entry, it
-also checks that the pin has the same minor version as the `tauri` crate in
-`Cargo.lock`. No workflow pins tauri-cli yet, so the script skips that check.
+version. It also checks that the tauri-cli pin (`TAURI_CLI_VERSION` in
+[`.github/tool-versions.env`](../.github/tool-versions.env)) has the same minor
+version as the `tauri` crate in `Cargo.lock`.
 
 The scripts read both files by default. `ZEBRAD_COMMIT` applies only to the
 version in `ZEBRAD_VERSION`. To build any other version, pass its commit as well

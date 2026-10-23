@@ -5,11 +5,12 @@
 #   2. ZEBRAD_COMMIT is a full 40-character lowercase hex commit SHA.
 #   3. VERSION in crates/launcher-core/src/bin/fake-zebrad.rs equals
 #      ZEBRAD_VERSION, so the fake reports the version the launcher bundles.
-#   4. If a workflow pins tauri-cli with a `TAURI_CLI_VERSION:` env entry, its
-#      MAJOR.MINOR equals that of the `tauri` crate in Cargo.lock (or, while
-#      the app is outside the workspace, src-tauri/Cargo.lock): the CLI that
-#      bundles the app must match the runtime it was built against. No
-#      workflow pins tauri-cli yet, so this check is skipped until one does.
+#   4. The tauri-cli pin, `TAURI_CLI_VERSION=` in .github/tool-versions.env
+#      (and any `TAURI_CLI_VERSION:` env entry left in a workflow), has the
+#      MAJOR.MINOR of the `tauri` crate in Cargo.lock (or, while the app is
+#      outside the workspace, src-tauri/Cargo.lock): the CLI that bundles the
+#      app must match the runtime it was built against. Skipped if nothing
+#      pins tauri-cli.
 #
 # Runs every check and reports each one, then exits 1 if any failed.
 # Requires: bash, grep, sed.
@@ -84,10 +85,14 @@ else
 fi
 
 # 4. tauri-cli pin vs. the tauri crate
-# Matches `TAURI_CLI_VERSION: 2.1.0`, quoted or not, in any workflow's env.
-cli_pins="$(grep -HnE '^[[:space:]]*TAURI_CLI_VERSION:' "${root}"/.github/workflows/*.yml "${root}"/.github/workflows/*.yaml 2>/dev/null || true)"
+# Matches `TAURI_CLI_VERSION=2.1.0` in .github/tool-versions.env and
+# `TAURI_CLI_VERSION: 2.1.0`, quoted or not, in any workflow's env.
+cli_pins="$(
+    grep -HnE '^TAURI_CLI_VERSION=' "${root}/.github/tool-versions.env" 2>/dev/null || true
+    grep -HnE '^[[:space:]]*TAURI_CLI_VERSION:' "${root}"/.github/workflows/*.yml "${root}"/.github/workflows/*.yaml 2>/dev/null || true
+)"
 if [ -z "${cli_pins}" ]; then
-    skip "no workflow sets TAURI_CLI_VERSION, so the tauri-cli/tauri check does not apply"
+    skip "nothing sets TAURI_CLI_VERSION, so the tauri-cli/tauri check does not apply"
 else
     tauri_version=""
     for lock in Cargo.lock src-tauri/Cargo.lock; do
@@ -99,13 +104,13 @@ else
         fi
     done
     if [ -z "${tauri_version}" ]; then
-        fail "a workflow sets TAURI_CLI_VERSION, but no Cargo.lock has the tauri crate"
+        fail "TAURI_CLI_VERSION is set, but no Cargo.lock has the tauri crate"
     else
         tauri_minor="$(printf '%s\n' "${tauri_version}" | sed -n 's/^\([0-9]*\.[0-9]*\)\..*/\1/p')"
         while IFS= read -r pin; do
             location="${pin%%:*}:$(printf '%s\n' "${pin#*:}" | cut -d: -f1)"
             location="${location#"${root}"/}"
-            cli_version="$(printf '%s\n' "${pin}" | sed -E 's/.*TAURI_CLI_VERSION:[[:space:]]*["'\'']?([^"'\''[:space:]#]*).*/\1/')"
+            cli_version="$(printf '%s\n' "${pin}" | sed -E 's/.*TAURI_CLI_VERSION[:=][[:space:]]*["'\'']?([^"'\''[:space:]#]*).*/\1/')"
             cli_minor="$(printf '%s\n' "${cli_version}" | sed -n 's/^\([0-9]*\.[0-9]*\)\..*/\1/p')"
             if [ -n "${cli_minor}" ] && [ "${cli_minor}" = "${tauri_minor}" ]; then
                 ok "${location} tauri-cli ${cli_version} matches tauri ${tauri_version} (${tauri_lock})"
