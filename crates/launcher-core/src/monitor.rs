@@ -103,23 +103,24 @@ async fn run(
             continue;
         };
 
-        if current.as_ref().is_none_or(|run| run.addr != addr) {
-            let client = match RpcClient::new(addr, config.cookie_file.clone()) {
-                Ok(client) => client,
-                Err(err) => {
-                    tracing::warn!(%err, "could not create the RPC client");
-                    return;
-                }
-            };
-            current = Some(Run {
-                addr,
-                client,
-                eos: None,
-                eos_checked: None,
-            });
-        }
-        let Some(run) = current.as_mut() else {
-            continue;
+        // Keep the run for the same address; a new address is a new run.
+        let run = match current.take() {
+            Some(run) if run.addr == addr => current.insert(run),
+            _ => {
+                let client = match RpcClient::new(addr, config.cookie_file.clone()) {
+                    Ok(client) => client,
+                    Err(err) => {
+                        tracing::warn!(%err, "could not create the RPC client");
+                        return;
+                    }
+                };
+                current.insert(Run {
+                    addr,
+                    client,
+                    eos: None,
+                    eos_checked: None,
+                })
+            }
         };
 
         let result = poll(run, config.eos_interval).await;
