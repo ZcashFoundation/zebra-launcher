@@ -42,6 +42,17 @@ on:
         type: string
         default: ""
   workflow_call:
+    inputs:
+      zebrad_ref:
+        description: DEVELOPMENT BUILD, never released. Zebra branch, tag or full commit SHA to build the bundled zebrad from (empty uses the verified ZEBRAD_VERSION)
+        required: false
+        type: string
+        default: ""
+      targets:
+        description: comma-separated target triples from .github/targets.json (empty builds all five)
+        required: false
+        type: string
+        default: ""
   schedule:
     # Weekly, Monday 04:17 UTC, to catch Tier-3 zebrad build breakage early.
     - cron: "17 4 * * 1"
