@@ -47,27 +47,56 @@ The Tauri build needs a sidecar file at
 `src-tauri/binaries/zebra-launcher-zebrad-<host target triple>` (`.exe` on Windows).
 Binaries are never committed.
 
-- **Fake sidecar:** `scripts/dev-sidecar.sh` builds `fake-zebrad` and copies it into
-  place. It starts fast, needs no chain state, and can be scripted into failure modes
-  (`ok`, `crash`, `config-error`, `eos-warn`, `eos-halt`, `port-in-use`, `db-locked`,
-  `hang-on-signal`, `stderr-flood`, `non-utf8`, `stdin-close`).
-  <!-- TODO(M5): document dev-sidecar.sh's arguments once it lands. -->
+- **Fake sidecar:** `scripts/dev-sidecar.sh` (Windows: `scripts/dev-sidecar.ps1`) builds
+  `fake-zebrad` and copies it into place. It takes no arguments. fake-zebrad starts
+  fast, needs no chain state, and can be scripted into failure modes with the
+  `FAKE_ZEBRAD_MODE` environment variable (`ok`, `crash`, `config-error`, `eos-warn`,
+  `eos-halt`, `port-in-use`, `db-locked`, `hang-on-signal`, `stderr-flood`, `non-utf8`,
+  `stdin-close`), which it inherits from the launcher.
 - **Real zebrad:** the version in [`ZEBRAD_VERSION`](../ZEBRAD_VERSION), fetched or built by
   the M9 scripts (`scripts/fetch-zebrad-linux.sh`, `scripts/build-zebrad.sh`).
   <!-- TODO(M9): document fetching or building the real sidecar. -->
 
-Then:
+Then, from the repository root:
 
 ```sh
+scripts/dev-sidecar.sh                    # once, and after changing fake-zebrad
+cargo install --locked trunk tauri-cli    # once
 cargo tauri dev
 ```
 
-This runs `trunk serve` for the `ui` crate and starts the app with hot reload.
-<!-- TODO(M5): confirm the command and any environment variables once src-tauri is rewritten. -->
+`cargo tauri dev` runs `trunk serve` in `ui/` (port 1420, see `build.devUrl` in
+[`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json)) and starts the app against
+it, rebuilding on changes. Useful environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `RUST_LOG` | Launcher log filter, default `info`. Debug builds also log to stderr. |
+| `FAKE_ZEBRAD_MODE` | fake-zebrad's behaviour, see above. |
+| `LAUNCHER_STDIN_CLOSE=1` | Spawn zebrad with `--shutdown-on-stdin-close` and stop it by closing its stdin (fake-zebrad, or a zebrad with the upstream change from M6). |
+
+The launcher keeps its files in the per-user directories for the identifier
+`org.zfnd.zebra-launcher` (`zebrad.toml` and `launcher.json` in the config directory,
+the chain state, pidfile and RPC cookie in the local data directory, `launcher.*.log`
+and `zebrad.log` in the log directory). The `open_path` command opens them.
 
 On Linux, if the window is blank, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 To see the Grafana embed, start the stack in [GRAFANA.md](GRAFANA.md).
+
+### Release build
+
+`cargo tauri build` embeds `ui/dist`, which `trunk build --release` produces (the
+`beforeBuildCommand`). Until the `ui` crate is in the tree, build in two steps and
+expect the second to fail without it:
+
+```sh
+(cd ui && trunk build --release)          # 1. the frontend, into ui/dist
+cargo tauri build --debug                 # 2. the app and its bundles
+```
+
+Plain `cargo build`/`cargo clippy` of the app (no `custom-protocol` feature) do not
+embed the frontend and work without `ui/dist`, which is what CI relies on.
 
 ## Quality gate
 
@@ -80,6 +109,14 @@ RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --locked
 cargo test --workspace --locked
 cargo deny check
 ```
+
+Run `scripts/dev-sidecar.sh` first: the app crate's build script fails without the
+sidecar file. On Linux the app also needs the WebKitGTK packages listed above; without
+them, check everything else with `--exclude zebra-launcher`, and the app with
+`cargo clippy -p zebra-launcher --target x86_64-pc-windows-msvc --all-targets` (Tauri's
+Windows backend needs no system libraries to type-check; `rustup target add
+x86_64-pc-windows-msvc`, and an empty `src-tauri/binaries/zebra-launcher-zebrad-x86_64-pc-windows-msvc.exe`
+satisfies the build script).
 
 From M5, also `trunk build` in `ui/`. Windows and macOS CI run clippy and tests too, so
 `cfg(windows)` and `cfg(target_os = "macos")` code is checked; when you change it, run
