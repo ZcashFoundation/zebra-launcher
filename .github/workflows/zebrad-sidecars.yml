@@ -127,12 +127,15 @@ jobs:
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # Verifies the cosign signature on SHA256SUMS, the tarball checksum and
-      # Zebra's attestation (the runner's gh supports `gh attestation`), with
+      # Zebra's attestation (the script fails if the runner's gh is older than
+      # 2.68.0), with
       # the signature and attestation pinned to the Zebra commit, then checks
       # `zebrad --version`.
       - name: Download and verify zebrad
         env:
           GH_TOKEN: ${{ github.token }}
+          # CI must never skip the attestation check.
+          REQUIRE_ATTESTATION: "1"
         run: scripts/fetch-zebrad-linux.sh --version "${VERSION}" --commit "${COMMIT}" --target "${TARGET}" --out "${SIDECAR}"
 
       - name: Smoke test
@@ -187,7 +190,10 @@ jobs:
           git -c advice.detachedHead=false clone --depth 1 --branch "v${VERSION}" \
             https://github.com/ZcashFoundation/zebra zebra-src
 
-      # Installs the toolchain from Zebra's rust-toolchain.toml.
+      # Only for rust-cache: its key includes the rustc version of every
+      # installed toolchain, and it runs `cargo metadata` in zebra-src, so
+      # Zebra's toolchain must exist before it runs. build-zebrad.sh would
+      # install the toolchain itself, but only after the cache is restored.
       - name: Install Zebra's Rust toolchain
         working-directory: zebra-src
         run: rustup toolchain install --profile minimal
@@ -236,8 +242,8 @@ jobs:
       COMMIT: ${{ needs.version.outputs.commit }}
       TARGET: x86_64-pc-windows-msvc
       SIDECAR: dist/zebra-launcher-zebrad-x86_64-pc-windows-msvc.exe
-      # bindgen's libclang: the runner image preinstalls LLVM here.
-      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+      # bindgen's libclang: build-zebrad.ps1 finds the LLVM that the runner
+      # image preinstalls in C:\Program Files\LLVM, and fails if it is missing.
     defaults:
       run:
         shell: pwsh
@@ -252,16 +258,11 @@ jobs:
             https://github.com/ZcashFoundation/zebra zebra-src
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # Only for rust-cache, as in the macOS job; build-zebrad.ps1 would install
+      # the toolchain itself, but only after the cache is restored.
       - name: Install Zebra's Rust toolchain
         working-directory: zebra-src
         run: rustup toolchain install --profile minimal
-
-      - name: Check LLVM
-        run: |
-          if (-not (Test-Path (Join-Path $env:LIBCLANG_PATH 'libclang.dll'))) {
-            Write-Output "::error::libclang.dll not found in $env:LIBCLANG_PATH"
-            exit 1
-          }
 
       - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:

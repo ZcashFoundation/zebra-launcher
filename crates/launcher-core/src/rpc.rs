@@ -2,7 +2,8 @@
 //!
 //! zebrad writes `__cookie__:<secret>` to `<rpc.cookie_dir>/.cookie` on every
 //! start and expects it back as HTTP Basic credentials. The cookie changes on
-//! each start, so the client reads the file before every call.
+//! each start, so [`RpcClient`] reads the file before every call; a batch of
+//! calls shares one read through an [`RpcSession`].
 //!
 //! Only the fields the launcher shows are decoded; zebrad may add others.
 
@@ -66,18 +67,25 @@ pub struct BlockchainInfo {
 }
 
 /// The parts of `getinfo` the launcher uses.
+///
+/// Every field is optional, so a field zebrad renames or drops cannot fail
+/// the whole poll; a missing field decodes as zero or empty.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Info {
     /// The numeric node version.
+    #[serde(default)]
     pub version: u64,
     /// The release, such as `v7.0.0`.
     #[serde(default)]
     pub build: String,
     /// The P2P user agent, such as `/Zebra:7.0.0/`.
+    #[serde(default)]
     pub subversion: String,
     /// Inbound and outbound peer connections.
+    #[serde(default)]
     pub connections: u64,
     /// The last warning or error, or `no errors`.
+    #[serde(default)]
     pub errors: String,
 }
 
@@ -154,6 +162,76 @@ impl RpcClient {
         &self.cookie_file
     }
 
+    /// Reads the cookie once and returns a session that reuses it, for a batch
+    /// of calls.
+    pub async fn session(&self) -> Result<RpcSession<'_>, RpcError> {
+        let cookie = tokio::fs::read_to_string(&self.cookie_file)
+            .await
+            .map_err(|source| RpcError::Cookie {
+                path: self.cookie_file.clone(),
+                source,
+            })?;
+        Ok(RpcSession {
+            client: self,
+            authorization: format!("Basic {}", STANDARD.encode(cookie.trim())),
+        })
+    }
+
+    /// `getblockchaininfo`.
+    pub async fn get_blockchain_info(&self) -> Result<BlockchainInfo, RpcError> {
+        self.session().await?.get_blockchain_info().await
+    }
+
+    /// `getinfo`.
+    pub async fn get_info(&self) -> Result<Info, RpcError> {
+        self.session().await?.get_info().await
+    }
+
+    /// `getmempoolinfo`.
+    pub async fn get_mempool_info(&self) -> Result<MempoolInfo, RpcError> {
+        self.session().await?.get_mempool_info().await
+    }
+
+    /// The number of peers in `getpeerinfo`.
+    pub async fn get_peer_info(&self) -> Result<usize, RpcError> {
+        self.session().await?.get_peer_info().await
+    }
+
+    /// `getdeprecationinfo`.
+    pub async fn get_deprecation_info(&self) -> Result<DeprecationInfo, RpcError> {
+        self.session().await?.get_deprecation_info().await
+    }
+
+    /// Calls `method` with `params` and decodes the result.
+    pub async fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<T, RpcError> {
+        self.session().await?.call(method, params).await
+    }
+}
+
+/// An [`RpcClient`] with the cookie read once, from [`RpcClient::session`].
+///
+/// zebrad writes a new cookie on every start, so keep a session only for one
+/// batch of calls.
+#[derive(Clone)]
+pub struct RpcSession<'a> {
+    client: &'a RpcClient,
+    authorization: String,
+}
+
+impl std::fmt::Debug for RpcSession<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The credentials are left out on purpose.
+        f.debug_struct("RpcSession")
+            .field("client", self.client)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RpcSession<'_> {
     /// `getblockchaininfo`.
     pub async fn get_blockchain_info(&self) -> Result<BlockchainInfo, RpcError> {
         self.call("getblockchaininfo", json!([])).await
@@ -186,20 +264,12 @@ impl RpcClient {
         method: &str,
         params: Value,
     ) -> Result<T, RpcError> {
-        let cookie = tokio::fs::read_to_string(&self.cookie_file)
-            .await
-            .map_err(|source| RpcError::Cookie {
-                path: self.cookie_file.clone(),
-                source,
-            })?;
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
         let response = self
+            .client
             .http
-            .post(&self.url)
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Basic {}", STANDARD.encode(cookie.trim())),
-            )
+            .post(&self.client.url)
+            .header(reqwest::header::AUTHORIZATION, &self.authorization)
             .json(&body)
             .send()
             .await?;
@@ -263,6 +333,15 @@ mod tests {
             decode::<MempoolInfo>(br#"{"result":{"bytes":1}}"#),
             Err(RpcError::InvalidResponse(_))
         ));
+    }
+
+    #[test]
+    fn info_tolerates_missing_fields() {
+        let info: Info =
+            decode(br#"{"jsonrpc":"2.0","id":1,"result":{"build":"v7.1.0"}}"#).expect("ok");
+        assert_eq!(info.release(), "7.1.0");
+        assert_eq!(info.last_error(), None);
+        assert_eq!(info.connections, 0);
     }
 
     #[test]

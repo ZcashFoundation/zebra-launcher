@@ -166,17 +166,14 @@ async fn stdin_close_mode_stops_gracefully_on_every_platform() {
 async fn hanging_child_is_killed_after_the_grace_period() {
     let mut fx = fixture("hang-on-signal");
     fx.config.stop_grace = Duration::from_millis(500);
+    // Stop while the fake is still starting up: like zebrad, it handles
+    // shutdown requests from the start.
+    fx.config
+        .command
+        .env
+        .push(("FAKE_ZEBRAD_STARTUP_DELAY_MS".into(), "5000".into()));
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
-    let mut sub = within(handle.subscribe()).await.expect("subscribe");
     within(handle.start()).await.expect("start");
-    // The fake installs its signal handling only once it starts heart-beating;
-    // a SIGTERM before that would simply kill it instead of being ignored.
-    loop {
-        let line = within(sub.live.recv()).await.expect("live line");
-        if line.message.contains("estimated progress to chain tip") {
-            break;
-        }
-    }
     let started = std::time::Instant::now();
     within(handle.stop()).await.expect("stop");
     assert!(started.elapsed() < Duration::from_secs(10));
@@ -187,6 +184,13 @@ async fn hanging_child_is_killed_after_the_grace_period() {
     let history = within(handle.history_since(0)).await.expect("history");
     assert!(
         contains(&history, "did not stop within"),
+        "{:#?}",
+        messages(&history)
+    );
+    // The SIGTERM reached the fake's handler instead of killing it outright.
+    #[cfg(unix)]
+    assert!(
+        contains(&history, "ignoring in hang-on-signal mode"),
         "{:#?}",
         messages(&history)
     );

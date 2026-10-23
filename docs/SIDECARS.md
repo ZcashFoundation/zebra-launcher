@@ -2,7 +2,10 @@
 
 Zebra Launcher ships zebrad as a Tauri sidecar. Tauri looks for it at
 `src-tauri/binaries/zebra-launcher-zebrad-<target triple>` (with `.exe` on
-Windows). That directory is git-ignored, so the binary always comes from one of
+Windows). This prefixed name takes effect with the rewritten app
+crate (milestone M5); until it lands, the old `src-tauri/tauri.conf.json` still
+names the sidecar `binaries/zebrad`, so `cargo tauri build` does not find the
+files these scripts install. That directory is git-ignored, so the binary always comes from one of
 the scripts below and is never committed. The `zebra-launcher-` prefix keeps the
 Linux `.deb` from shadowing a system `/usr/bin/zebrad`.
 
@@ -47,10 +50,12 @@ to install anything unless all of these checks pass:
 2. The tarball matches its line in the signed `SHA256SUMS`.
 3. The tarball's GitHub build-provenance attestation is valid, comes from the
    same workflow, and was built from `refs/tags/v<ver>` (`--source-ref`) at the
-   pinned commit (`--source-digest`). This check needs
-   `gh` 2.49 or newer and a logged-in `gh` (or `GH_TOKEN`). With an older `gh`,
-   or none, the script says it skipped this check. If `gh` is new enough, the
-   check is required.
+   pinned commit (`--source-digest`). This check needs `gh` 2.68.0 or newer,
+   the first release with those two flags, and a logged-in `gh` (or
+   `GH_TOKEN`). If no `gh` or an older `gh` is on `PATH`, the script says it
+   skipped this check and names the minimum version; the cosign and sha256
+   checks still apply. CI sets `REQUIRE_ATTESTATION=1`, which turns a skipped
+   attestation check into an error before anything is downloaded.
 4. The extracted binary prints `zebrad <ver>` for `--version`.
 
 **macOS and Windows.** `build-zebrad.sh` and `build-zebrad.ps1` clone Zebra at
@@ -68,8 +73,11 @@ binaries:
 Both scripts take `--dry-run` (`-DryRun` in PowerShell), which prints the
 commands without running them. The build dependencies are listed at the top of
 each script. On macOS that is Xcode command line tools, `brew install protobuf
-cmake` and rustup. On Windows it is the VS 2022 C++ build tools, LLVM, protoc
-and rustup.
+cmake` and rustup. On Windows it is the VS 2022 C++ build tools, LLVM, protoc,
+rustup and PowerShell 7 (`pwsh`; Windows PowerShell 5.1 is not supported).
+`build-zebrad.ps1` restores the environment variables it sets for cargo when
+it exits, so running it in an open `pwsh` session leaves that session as it
+was.
 
 **CI.** [`zebrad-sidecars.yml`](../.github/workflows/zebrad-sidecars.yml) runs
 the scripts on native runners for all five targets. Its first job reads
@@ -97,7 +105,7 @@ gh attestation verify zebra-launcher-zebrad-aarch64-apple-darwin \
 `scripts/dev-sidecar.sh` (or `scripts/dev-sidecar.ps1` on Windows) builds the
 workspace's `fake-zebrad` test binary and installs it as the host's sidecar.
 After that, `cargo tauri dev` and `cargo tauri build` work without the real
-node. Never ship a bundle built this way. Replace the fake with the real
+node, once the rewritten app crate (M5) expects the prefixed sidecar name. Never ship a bundle built this way. Replace the fake with the real
 zebrad first:
 
 ```sh
@@ -108,7 +116,7 @@ scripts/build-zebrad.sh                   # macOS host (takes a while)
 ## Verifying a Zebra tarball by hand
 
 You need [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
-and, for step 3, `gh` 2.49 or newer.
+and, for step 3, `gh` 2.68.0 or newer.
 
 ```sh
 VER=7.0.0

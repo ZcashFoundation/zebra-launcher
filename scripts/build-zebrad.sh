@@ -31,6 +31,9 @@ die() {
     exit 1
 }
 
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 usage() {
     cat <<'EOF'
 Usage: build-zebrad.sh [--version X.Y.Z] [--commit SHA] [--target TRIPLE] [--out PATH]
@@ -81,32 +84,21 @@ run() {
     fi
 }
 
-if [ -z "${version}" ]; then
-    [ -f "${repo_root}/ZEBRAD_VERSION" ] || die "no --version given and ${repo_root}/ZEBRAD_VERSION is missing"
-    version="$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_VERSION")"
-fi
-case "${version}" in
-    v* | V*) die "version '${version}' must not start with 'v'" ;;
-esac
-if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
-    die "version '${version}' is not of the form X.Y.Z"
-fi
+[ -n "${version}" ] || version="$(read_zebrad_version "${repo_root}")"
+check_zebrad_version "${version}"
 tag="v${version}"
 
 # ZEBRAD_COMMIT pins the commit of ZEBRAD_VERSION, so it only applies to it.
 if [ -z "${commit}" ]; then
-    pinned_version="$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_VERSION" 2>/dev/null)" || pinned_version=""
+    pinned_version="$(read_pin "${repo_root}/ZEBRAD_VERSION")"
     [ "${version}" = "${pinned_version}" ] ||
         die "version ${version} is not ZEBRAD_VERSION (${pinned_version:-missing}); pass --commit"
     [ -f "${repo_root}/ZEBRAD_COMMIT" ] || die "${repo_root}/ZEBRAD_COMMIT is missing; pass --commit"
-    commit="$(tr -d '[:space:]' <"${repo_root}/ZEBRAD_COMMIT")"
+    commit="$(read_zebrad_commit "${repo_root}" "${version}")"
 fi
-if ! printf '%s\n' "${commit}" | grep -Eq '^[0-9a-f]{40}$'; then
-    die "commit '${commit}' is not a full 40-character lowercase hex SHA"
-fi
+check_commit "${commit}"
 
-command -v rustc >/dev/null 2>&1 || die "rustup/rustc is required"
-host="$(rustc -vV | sed -n 's/^host: //p')"
+host="$(host_triple)"
 [ -n "${target}" ] || target="${host}"
 
 exe=""
@@ -118,8 +110,14 @@ if [ -z "${src}" ]; then
     trap 'rm -rf "$(dirname "${src}")"' EXIT
 else
     # Absolute, so --remap-path-prefix matches the paths rustc sees.
-    mkdir -p "$(dirname "${src}")"
-    src="$(cd "$(dirname "${src}")" && pwd)/$(basename "${src}")"
+    src_parent="$(dirname "${src}")"
+    [ -d "${src_parent}" ] || run mkdir -p "${src_parent}"
+    if [ -d "${src_parent}" ]; then
+        src="$(cd "${src_parent}" && pwd)/$(basename "${src}")"
+    else
+        # Dry run: the parent was not created, so only make the path absolute.
+        case "${src}" in /*) ;; *) src="${PWD}/${src}" ;; esac
+    fi
 fi
 
 # 1. Check out the release tag, and check that it is the pinned commit.
@@ -160,40 +158,31 @@ run rustup target add --toolchain "${toolchain}" "${target}"
 
 # 3. Build like Zebra's release workflow does.
 export SOURCE_DATE_EPOCH="${source_date_epoch}"
-export RUSTFLAGS="--remap-path-prefix=${src}=/zebra --remap-path-prefix=${CARGO_HOME:-${HOME}/.cargo}=/cargo"
+# The flags are separated by 0x1f, not spaces, so paths with spaces survive.
+export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${src}=/zebra"$'\x1f'"--remap-path-prefix=${CARGO_HOME:-${HOME}/.cargo}=/cargo"
 export CARGO_PROFILE_RELEASE_STRIP=symbols
 echo "+ export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
-echo "+ export RUSTFLAGS=\"${RUSTFLAGS}\""
+printf '+ export CARGO_ENCODED_RUSTFLAGS=%q\n' "${CARGO_ENCODED_RUSTFLAGS}"
 echo "+ export CARGO_PROFILE_RELEASE_STRIP=symbols"
 run cargo build --manifest-path "${src}/Cargo.toml" --target-dir "${src}/target" \
     --locked --release -p zebrad --bin zebrad \
     --features default-release-binaries --target "${target}"
 
-# 4. Install. Cargo already stripped symbols (CARGO_PROFILE_RELEASE_STRIP).
+# 4. Install through ${out}.tmp, smoke-testing it first when the host can run
+#    the target. Cargo already stripped symbols (CARGO_PROFILE_RELEASE_STRIP).
 built="${src}/target/${target}/release/zebrad${exe}"
-run mkdir -p "$(dirname "${out}")"
-run cp "${built}" "${out}.tmp"
-run chmod +x "${out}.tmp"
-
-# 5. Smoke test, when the host can run the target.
 if [ "${dry_run}" = true ]; then
+    echo "+ install ${built} at ${out} through ${out}.tmp"
     echo "+ ${out}.tmp --version  # must print 'zebrad ${version}'"
-    run mv -f "${out}.tmp" "${out}"
     echo "dry run: zebrad ${version} for ${target} would be installed at ${out}"
     exit 0
 fi
-if [ "${target}" = "${host}" ]; then
-    reported="$("${out}.tmp" --version 2>/dev/null | head -n 1)" || reported=""
-    case "${reported}" in
-        "zebrad ${version}" | "zebrad ${version} "* | "zebrad ${version}+"*) ;;
-        *)
-            rm -f "${out}.tmp"
-            die "binary reports '${reported}', expected 'zebrad ${version}'"
-            ;;
-    esac
-else
+check_version="${version}"
+if [ "${target}" != "${host}" ]; then
     echo "Skipping the --version smoke test: ${target} does not run on ${host}"
+    check_version=""
 fi
-mv -f "${out}.tmp" "${out}"
+echo "+ install ${built} at ${out}"
+install_atomic "${built}" "${out}" "${check_version}"
 
 echo "zebrad ${version} (${target}): built from ${tag} (${commit}) with ${toolchain}, installed at ${out}"
