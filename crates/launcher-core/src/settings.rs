@@ -65,9 +65,32 @@ impl SettingsStore {
     /// A missing file gives the defaults. A corrupt file is logged, moved to
     /// `launcher.json.corrupt` (replacing an older backup) and replaced by the
     /// defaults on the next update.
+    ///
+    /// A file older than schema version 2 (or without a `schema_version`) was
+    /// written by a launcher that had no first-run flow: it is migrated by
+    /// setting `first_run_done`, so upgrading users are not sent through the
+    /// first run again, and written back. If the write fails the migrated
+    /// settings are still used and saved on the next update.
     pub fn open(paths: &Paths) -> Result<SettingsHandle, SettingsError> {
         let path = paths.settings_file();
-        let settings = load(&path)?;
+        let (settings, migrated) = load(&path)?;
+        if migrated {
+            match serde_json::to_vec_pretty(&settings) {
+                Ok(mut json) => {
+                    json.push(b'\n');
+                    match fsutil::write_atomic(&path, &json) {
+                        Ok(()) => tracing::info!(
+                            schema_version = settings.schema_version,
+                            "migrated launcher.json"
+                        ),
+                        Err(err) => {
+                            tracing::warn!(%err, "could not write the migrated launcher.json")
+                        }
+                    }
+                }
+                Err(err) => tracing::warn!(%err, "could not encode the migrated launcher.json"),
+            }
+        }
         let (watch_tx, watch_rx) = watch::channel(settings);
         let (tx, rx) = mpsc::channel(16);
         tokio::spawn(run(path, rx, watch_tx));
@@ -146,23 +169,54 @@ async fn save(path: &std::path::Path, settings: &Settings) -> Result<(), Setting
     Ok(())
 }
 
-fn load(path: &std::path::Path) -> Result<Settings, SettingsError> {
+/// The schema version a `launcher.json` was written with; files from before
+/// `schema_version` existed count as version 0. `Settings` cannot tell, as a
+/// missing field takes the current version.
+fn stored_schema_version(bytes: &[u8]) -> u64 {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|value| value.get("schema_version")?.as_u64())
+        .unwrap_or(0)
+}
+
+/// Brings settings loaded from an existing file up to
+/// [`Settings::SCHEMA_VERSION`]. Returns whether anything changed.
+fn migrate(settings: &mut Settings, stored_version: u64) -> bool {
+    if stored_version >= 2 {
+        return false;
+    }
+    // Version 1 predates the first-run flow: whoever wrote the file has
+    // already been using the launcher.
+    settings.first_run_done = true;
+    settings.schema_version = Settings::SCHEMA_VERSION;
+    true
+}
+
+/// The settings in `path` and whether they were migrated.
+fn load(path: &std::path::Path) -> Result<(Settings, bool), SettingsError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Settings::default()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Ok((Settings::default(), false));
+        }
         Err(err) => return Err(err.into()),
     };
+    let stored_version = stored_schema_version(&bytes);
+    let with_migration = |mut settings: Settings| {
+        let migrated = migrate(&mut settings, stored_version);
+        (settings, migrated)
+    };
     match serde_json::from_slice::<Settings>(&bytes) {
-        Ok(settings) if validate(&settings).is_ok() => Ok(settings),
+        Ok(settings) if validate(&settings).is_ok() => Ok(with_migration(settings)),
         Ok(settings) => {
             tracing::warn!(
                 url = ?settings.grafana_url,
                 "launcher.json has an invalid Grafana URL; ignoring it"
             );
-            Ok(Settings {
+            Ok(with_migration(Settings {
                 grafana_url: None,
                 ..settings
-            })
+            }))
         }
         Err(err) => {
             let backup = corrupt_path(path);
@@ -184,7 +238,7 @@ fn load(path: &std::path::Path) -> Result<Settings, SettingsError> {
                     "could not move the corrupt launcher.json aside"
                 );
             }
-            Ok(Settings::default())
+            Ok((Settings::default(), false))
         }
     }
 }
@@ -267,6 +321,44 @@ mod tests {
 
         let reopened = SettingsStore::open(&paths).expect("reopen");
         assert_eq!(reopened.current(), saved);
+    }
+
+    #[tokio::test]
+    async fn files_before_schema_2_are_migrated() {
+        for old in [
+            &br#"{ "schema_version": 1, "start_node_on_launch": true, "network": "testnet" }"#[..],
+            &br#"{ "start_node_on_launch": true, "network": "testnet" }"#[..],
+        ] {
+            let (_dir, paths) = paths();
+            fs::create_dir_all(paths.config_dir()).expect("mkdir");
+            fs::write(paths.settings_file(), old).expect("write");
+            let store = SettingsStore::open(&paths).expect("open");
+            let current = store.current();
+            assert!(current.first_run_done, "upgrading users skip the first run");
+            assert!(current.start_node_on_launch);
+            assert_eq!(current.network, Network::Testnet);
+            assert_eq!(current.schema_version, Settings::SCHEMA_VERSION);
+            let written = fs::read(paths.settings_file()).expect("read");
+            let on_disk: Settings = serde_json::from_slice(&written).expect("json");
+            assert_eq!(on_disk, current, "the migration is written back");
+            assert_eq!(stored_schema_version(&written), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn schema_2_files_and_new_installs_keep_the_first_run() {
+        let (_dir, paths) = paths();
+        let store = SettingsStore::open(&paths).expect("open");
+        assert!(!store.current().first_run_done);
+        assert!(!paths.settings_file().exists(), "nothing to migrate");
+        drop(store);
+
+        fs::create_dir_all(paths.config_dir()).expect("mkdir");
+        let current = br#"{ "schema_version": 2, "first_run_done": false }"#;
+        fs::write(paths.settings_file(), current).expect("write");
+        let store = SettingsStore::open(&paths).expect("open");
+        assert!(!store.current().first_run_done);
+        assert_eq!(fs::read(paths.settings_file()).expect("read"), current);
     }
 
     #[tokio::test]

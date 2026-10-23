@@ -196,7 +196,10 @@ Launcher settings live in `launcher.json` (with `schema_version`), owned by a se
 actor. `set_settings` saves everything the UI sends except `first_run_done` and
 `data_dir`, which it keeps as stored: only `complete_first_run` and `choose_data_dir`
 change them, so a stale UI copy cannot undo a data directory choice or skip the checks
-`choose_data_dir` makes.
+`choose_data_dir` makes. A `launcher.json` older than schema version 2 (or without a
+`schema_version`) predates the first-run flow: `SettingsStore::open` sets
+`first_run_done`, bumps the version and writes it back, so upgrading users keep their
+autostart. Without a file, `first_run_done` starts false.
 
 ## First run and node data
 
