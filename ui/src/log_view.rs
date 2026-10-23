@@ -18,20 +18,24 @@ impl LogBuffer {
     /// Adds a batch from the live stream or from `log_history`. Lines already present are
     /// ignored, so overlapping history and stream batches merge cleanly.
     pub fn merge(&mut self, batch: Vec<LogLine>) {
-        let newest = self.lines.back().map(|line| line.seq);
+        let Some(first) = batch.first() else {
+            return;
+        };
+        let after_newest = self
+            .lines
+            .back()
+            .is_none_or(|newest| first.seq > newest.seq);
         let in_order = batch.windows(2).all(|pair| pair[0].seq < pair[1].seq);
-        match (newest, batch.first()) {
-            // The common case: a live batch after everything we have.
-            (Some(newest), Some(first)) if in_order && first.seq > newest => {
-                self.lines.extend(batch)
-            }
-            (None, _) if in_order => self.lines.extend(batch),
-            _ => {
-                let mut all: Vec<LogLine> = self.lines.drain(..).chain(batch).collect();
-                all.sort_by_key(|line| line.seq);
-                all.dedup_by_key(|line| line.seq);
-                self.lines.extend(all);
-            }
+        if after_newest && in_order {
+            // The common case: a live batch that starts after everything kept.
+            self.lines.extend(batch);
+        } else {
+            // History overlapping the live stream, or an unordered batch. The sort is stable
+            // and the kept lines come first, so a kept line wins over a later copy.
+            let mut all: Vec<LogLine> = self.lines.drain(..).chain(batch).collect();
+            all.sort_by_key(|line| line.seq);
+            all.dedup_by_key(|line| line.seq);
+            self.lines.extend(all);
         }
         let excess = self.lines.len().saturating_sub(MAX_LINES);
         self.lines.drain(..excess);
@@ -200,6 +204,43 @@ mod tests {
         assert_eq!(buffer.lines[3].message, "e");
         buffer.merge(vec![line(9, None, "i")]);
         assert_eq!(seqs(&buffer), [2, 3, 4, 5, 6, 9]);
+    }
+
+    #[test]
+    fn merge_ignores_an_empty_batch() {
+        let mut buffer = LogBuffer::default();
+        buffer.merge(Vec::new());
+        assert!(buffer.is_empty());
+        buffer.merge(vec![line(3, None, "c")]);
+        let before = buffer.clone();
+        buffer.merge(Vec::new());
+        assert_eq!(buffer, before);
+    }
+
+    #[test]
+    fn merge_appends_a_batch_after_the_newest_line() {
+        let mut buffer = LogBuffer::default();
+        buffer.merge(vec![line(1, None, "a"), line(2, None, "b")]);
+        // A jump in seq is kept as is: it is a gap, not an overlap.
+        buffer.merge(vec![line(7, None, "g"), line(8, None, "h")]);
+        assert_eq!(seqs(&buffer), [1, 2, 7, 8]);
+        assert_eq!(buffer.lines[2].message, "g");
+    }
+
+    #[test]
+    fn merge_sorts_an_unordered_batch() {
+        let mut buffer = LogBuffer::default();
+        buffer.merge(vec![line(1, None, "a")]);
+        buffer.merge(vec![
+            line(4, None, "d"),
+            line(3, None, "c"),
+            line(4, None, "x"),
+        ]);
+        assert_eq!(seqs(&buffer), [1, 3, 4]);
+        assert_eq!(buffer.lines[2].message, "d");
+        // A batch entirely older than the kept lines is sorted in front of them.
+        buffer.merge(vec![line(0, None, "z")]);
+        assert_eq!(seqs(&buffer), [0, 1, 3, 4]);
     }
 
     #[test]
