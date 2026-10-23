@@ -1,0 +1,91 @@
+# Installs what `cargo tauri build` / `cargo tauri bundle` need on top of the
+# OS packages: the Rust toolchain from rust-toolchain.toml, cargo-binstall, and
+# tauri-cli and trunk at pinned versions. Used by bundle.yml and release.yml;
+# runs after actions/checkout, from the repository root.
+#
+# Rust toolchain: the macOS and Windows runner images ship rustup, so only the
+# toolchain is installed. In the ubuntu:22.04 container there is no rustup; it
+# is installed from the official rustup-init binary at a pinned version,
+# checked against a sha256 recorded here. (actions-rust-lang/setup-rust-toolchain
+# would instead pipe the unpinned sh.rustup.rs script into sh when rustup is
+# missing, so the container path would depend on whatever that script is on the
+# day.) Update RUSTUP_VERSION and both hashes together, from
+# https://static.rust-lang.org/rustup/archive/<version>/<triple>/rustup-init.sha256.
+#
+# trunk and tauri-cli come from their GitHub release binaries through
+# cargo-binstall (`--locked` applies if binstall falls back to compiling).
+name: Set up the Tauri toolchain
+description: Rust toolchain from rust-toolchain.toml, cargo-binstall, tauri-cli and trunk at pinned versions.
+
+inputs:
+  tauri-cli-version:
+    description: tauri-cli version, without a leading v
+    required: true
+  trunk-version:
+    description: trunk version, without a leading v; empty skips trunk (not needed to bundle)
+    required: false
+    default: ""
+  binstall-version:
+    description: cargo-binstall version, without a leading v
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install rustup (container)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        RUSTUP_VERSION: 1.29.2
+        RUSTUP_INIT_SHA256_X86_64: 5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+        RUSTUP_INIT_SHA256_AARCH64: a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697
+      run: |
+        set -euo pipefail
+        if command -v rustup > /dev/null 2>&1; then
+          echo "rustup is already installed: $(rustup --version 2> /dev/null)"
+          exit 0
+        fi
+        case "$(uname -m)" in
+          x86_64) triple=x86_64-unknown-linux-gnu; sha256="${RUSTUP_INIT_SHA256_X86_64}" ;;
+          aarch64) triple=aarch64-unknown-linux-gnu; sha256="${RUSTUP_INIT_SHA256_AARCH64}" ;;
+          *) echo "::error::no pinned rustup-init for $(uname -m)"; exit 1 ;;
+        esac
+        init="${RUNNER_TEMP}/rustup-init"
+        curl --proto '=https' --tlsv1.2 -sSf -o "${init}" \
+          "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${triple}/rustup-init"
+        echo "${sha256}  ${init}" | sha256sum -c -
+        chmod +x "${init}"
+        "${init}" -y --no-modify-path --profile minimal --default-toolchain none
+        rm -f "${init}"
+        echo "${CARGO_HOME:-${HOME}/.cargo}/bin" >> "${GITHUB_PATH}"
+
+    # Without arguments, `rustup toolchain install` installs the toolchain,
+    # components and targets named in rust-toolchain.toml (rustup >= 1.28).
+    - name: Install the Rust toolchain from rust-toolchain.toml
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustup toolchain install --profile minimal
+        rustc --version
+        cargo --version
+
+    - uses: cargo-bins/cargo-binstall@8a2045612414e945291083f820cd50b4d8fc2218 # v1.26.0
+      with:
+        version: ${{ inputs.binstall-version }}
+
+    - name: Install tauri-cli and trunk
+      shell: bash
+      env:
+        TAURI_CLI_VERSION: ${{ inputs.tauri-cli-version }}
+        TRUNK_VERSION: ${{ inputs.trunk-version }}
+      run: |
+        set -euo pipefail
+        crates=("tauri-cli@${TAURI_CLI_VERSION}")
+        if [ -n "${TRUNK_VERSION}" ]; then
+          crates+=("trunk@${TRUNK_VERSION}")
+        fi
+        cargo binstall --no-confirm --locked --disable-telemetry "${crates[@]}"
+        cargo tauri --version
+        if [ -n "${TRUNK_VERSION}" ]; then
+          trunk --version
+        fi

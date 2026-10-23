@@ -1,0 +1,247 @@
+# Unsigned bundles with the real, pinned zebrad on all five targets, so a
+# broken zebrad build or bundle shows up before release day.
+#
+# - sidecars: zebrad-sidecars.yml fetches (Linux) or builds (macOS, Windows)
+#   zebrad at ZEBRAD_VERSION and uploads `zebrad-<triple>` artifacts.
+# - bundle: `cargo tauri build` per target with that zebrad as the sidecar,
+#   then on Linux a glibc floor check, and on Linux x86_64 an install smoke
+#   test of the .deb and the AppImage under Xvfb.
+#
+# Nothing here is signed and no secrets are used: macOS bundles are ad-hoc
+# signed, updater artifacts are disabled, Windows binaries are unsigned. The
+# signed pipeline is release.yml.
+#
+# Callers of the workflow_call trigger must grant `contents: read`,
+# `id-token: write` and `attestations: write` (the sidecar attestations).
+name: Bundle
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  schedule:
+    # Weekly, Monday 04:17 UTC, to catch Tier-3 zebrad build breakage early.
+    - cron: "17 4 * * 1"
+  push:
+    branches: [main]
+    paths: [ZEBRAD_VERSION]
+
+permissions: {}
+
+concurrency:
+  # A literal prefix: under workflow_call, github.workflow is the caller's name.
+  group: bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CI: true
+  # Pinned tools. TAURI_CLI_VERSION follows the tauri crate's minor
+  # (scripts/check-versions.sh once it exists).
+  TAURI_CLI_VERSION: 2.12.4
+  TRUNK_VERSION: 0.22.0
+  BINSTALL_VERSION: 1.26.0
+  # The app's main binary (tauri.conf.json mainBinaryName).
+  APP_BIN: zebra-launcher
+  GLIBC_FLOOR: "2.35"
+  # Build and runtime packages for the ubuntu:22.04 container.
+  LINUX_PACKAGES: >-
+    libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+    libssl-dev patchelf file libfuse2 curl git build-essential pkg-config
+    ca-certificates
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Resolve the zebrad version once, from ZEBRAD_VERSION.
+  # ---------------------------------------------------------------------------
+  resolve:
+    name: Resolve the zebrad version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < ZEBRAD_VERSION)"
+          if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::ZEBRAD_VERSION '${version}' is not of the form X.Y.Z (no leading v)"
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "zebrad ${version}" >> "${GITHUB_STEP_SUMMARY}"
+
+  # ---------------------------------------------------------------------------
+  # zebrad sidecars: verified Linux downloads, macOS/Windows builds, attested.
+  # ---------------------------------------------------------------------------
+  sidecars:
+    name: zebrad sidecars
+    needs: resolve
+    permissions:
+      contents: read
+      id-token: write # sidecar build provenance
+      attestations: write # sidecar build provenance
+    uses: ./.github/workflows/zebrad-sidecars.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+
+  # ---------------------------------------------------------------------------
+  # Unsigned bundles, five targets.
+  # ---------------------------------------------------------------------------
+  bundle:
+    name: Bundle (${{ matrix.target }})
+    needs: [resolve, sidecars]
+    runs-on: ${{ matrix.runner }}
+    # Empty for macOS and Windows: the job then runs directly on the runner.
+    container: ${{ matrix.container }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds run in ubuntu:22.04 to keep the glibc floor at 2.35
+          # (the ubuntu-22.04 runner labels retire on 2027-04-17).
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            container: ubuntu:22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            container: ubuntu:22.04
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            container: ""
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            container: ""
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            container: ""
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      ZEBRAD_VERSION: ${{ needs.resolve.outputs.version }}
+      # linuxdeploy (AppImage) cannot use FUSE inside a container.
+      APPIMAGE_EXTRACT_AND_RUN: 1
+      EXE_SUFFIX: ${{ startsWith(matrix.target, 'x86_64-pc-windows') && '.exe' || '' }}
+    steps:
+      # git must exist before checkout, or checkout falls back to a tarball.
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          # shellcheck disable=SC2086 # LINUX_PACKAGES is a word list
+          apt-get install -y --no-install-recommends ${LINUX_PACKAGES}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-tauri
+        with:
+          tauri-cli-version: ${{ env.TAURI_CLI_VERSION }}
+          trunk-version: ${{ env.TRUNK_VERSION }}
+          binstall-version: ${{ env.BINSTALL_VERSION }}
+
+      # Unprivileged, unsigned job: a cache only speeds it up. release.yml uses
+      # no caches.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: bundle-${{ matrix.target }}
+
+      - name: Download the zebrad sidecar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zebrad-${{ matrix.target }}
+          path: src-tauri/binaries
+
+      # Artifacts lose the executable bit. Also checks it is the pinned zebrad.
+      - name: Install the zebrad sidecar
+        run: |
+          set -euo pipefail
+          sidecar="src-tauri/binaries/zebra-launcher-zebrad-${TARGET}${EXE_SUFFIX}"
+          chmod +x "${sidecar}"
+          "${sidecar}" --version | tee "${RUNNER_TEMP}/zebrad-version.txt"
+          grep -q "zebrad ${ZEBRAD_VERSION}" "${RUNNER_TEMP}/zebrad-version.txt" \
+            || { echo "::error::sidecar is not zebrad ${ZEBRAD_VERSION}"; exit 1; }
+
+      # Unsigned: no updater artifacts (they would need TAURI_SIGNING_PRIVATE_KEY),
+      # and an ad-hoc signature on macOS so the app opens via "Open Anyway".
+      - name: Write the unsigned bundle config
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_OS}" = macOS ]; then
+            echo '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
+          else
+            echo '{"bundle":{"createUpdaterArtifacts":false}}'
+          fi > "${RUNNER_TEMP}/tauri.unsigned.json"
+          cat "${RUNNER_TEMP}/tauri.unsigned.json"
+
+      - name: Check Cargo.lock is up to date
+        run: cargo fetch --locked
+
+      # The updater key must be absent, not empty: tauri-cli treats an empty
+      # TAURI_SIGNING_PRIVATE_KEY as a key.
+      - name: Build bundles
+        run: |
+          set -euo pipefail
+          unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          cargo tauri build --target "${TARGET}" --ci \
+            --config "${RUNNER_TEMP}/tauri.unsigned.json"
+
+      - name: Check the glibc floor
+        if: runner.os == 'Linux'
+        run: |
+          scripts/check-glibc.sh --floor "${GLIBC_FLOOR}" \
+            "target/${TARGET}/release/${APP_BIN}" \
+            "src-tauri/binaries/zebra-launcher-zebrad-${TARGET}"
+
+      - name: Collect bundles
+        run: scripts/collect-bundles.sh --target "${TARGET}" --out dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bundle-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+      # -----------------------------------------------------------------------
+      # Linux x86_64 install smoke tests. Each step fails on its own, so the
+      # failing step names the broken bundle. The real zebrad is the sidecar.
+      # -----------------------------------------------------------------------
+      - name: "Smoke: install smoke-test packages"
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get install -y --no-install-recommends xvfb xauth dbus dbus-x11 procps
+
+      - name: "Smoke: install the .deb"
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get install -y ./dist/zebra-launcher_*_amd64.deb
+          dpkg -L zebra-launcher | grep -E '/usr/bin/'
+          /usr/bin/zebra-launcher-zebrad --version | grep -q "zebrad ${ZEBRAD_VERSION}"
+
+      - name: "Smoke: run the .deb install"
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        continue-on-error: false
+        run: scripts/smoke-linux.sh --deb
+
+      - name: "Smoke: run the AppImage"
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        continue-on-error: false
+        run: scripts/smoke-linux.sh --appimage dist/zebra-launcher_*_x86_64.AppImage
