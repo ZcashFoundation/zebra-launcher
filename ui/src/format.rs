@@ -200,16 +200,27 @@ pub fn download_progress(downloaded: u64, total: Option<u64>) -> String {
 pub const NOTES_EXCERPT_CHARS: usize = 280;
 
 /// The start of the release notes for the header banner: the first paragraph, cut at
-/// `max_chars` characters (on a word boundary when there is one) with an ellipsis. `None` when
-/// the notes are empty.
+/// `max_chars` characters (on a word boundary when there is one) with an ellipsis. Paragraphs
+/// end at blank lines (with `\n` or `\r\n` line ends) and at Markdown headings; headings
+/// before the first paragraph are skipped. `None` when there is no paragraph.
 pub fn notes_excerpt(notes: &str, max_chars: usize) -> Option<String> {
-    let notes = notes.trim();
-    let first = notes.split("\n\n").next().unwrap_or_default().trim();
+    let is_break = |line: &str| line.is_empty() || line.starts_with('#');
+    // `lines` drops a `\r` before each `\n`; a lone `\r` is trimmed with the other blanks.
+    let mut lines = notes
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| is_break(line));
+    let first = lines
+        .by_ref()
+        .take_while(|line| !is_break(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     if first.is_empty() {
         return None;
     }
+    let first = first.as_str();
     let cut = first.char_indices().nth(max_chars).map(|(index, _)| index);
-    let more = cut.is_some() || first.len() < notes.len();
+    let more = cut.is_some() || lines.any(|line| !line.is_empty());
     let mut excerpt = match cut {
         Some(index) => {
             let (head, rest) = first.split_at(index);
@@ -472,6 +483,21 @@ mod tests {
             Some("Bumps…".into())
         );
         assert_eq!(notes_excerpt("ééééé", 3), Some("ééé…".into()));
+        // CRLF line ends, as release notes written on Windows have, and Markdown headings.
+        let crlf = "## Zebra Launcher 0.2.0\r\n\r\nBumps zebrad to 7.1.0.\r\nFixes a crash.\r\n\r\n### Details\r\nMore.\r\n";
+        assert_eq!(
+            notes_excerpt(crlf, 280),
+            Some("Bumps zebrad to 7.1.0.\nFixes a crash.…".into())
+        );
+        assert_eq!(
+            notes_excerpt("Fixes a crash.\r\n \r\nMore.", 280),
+            Some("Fixes a crash.…".into())
+        );
+        assert_eq!(
+            notes_excerpt("Only this.\r\n\r\n", 280),
+            Some("Only this.".into())
+        );
+        assert_eq!(notes_excerpt("# Heading only\r\n", 280), None);
     }
 
     #[test]
