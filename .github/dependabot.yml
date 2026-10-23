@@ -19,34 +19,20 @@ updates:
         dependency-type: "production"
         exclude-patterns:
           - "@tauri*"
-      devDependencies: 
+      devDependencies:
         dependency-type: "development"
         exclude-patterns:
           - "@tauri*"
-  - package-ecosystem: docker
-    directory: /docker
-    pull-request-branch-name:
-      separator: "-"
-    schedule:
-      interval: monthly
-    commit-message:
-      prefix: "deps(docker): "
 
   - package-ecosystem: github-actions
     directory: "/"
     pull-request-branch-name:
       separator: "-"
     schedule:
-      interval: weekly
+      interval: monthly
     commit-message:
       prefix: "deps(actions): "
     groups:
-      docker:
-        patterns:
-          - "docker*"
-      gcp:
-        patterns:
-          - "google-github-actions*"
-      others:
+      actions:
         patterns:
           - "*"

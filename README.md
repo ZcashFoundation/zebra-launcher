@@ -2,13 +2,14 @@
 
 A Desktop app for installing and running Zebra.
 
-[In-browser preview with example data](https://zebra-app-v0-zi2rzymvea-ue.a.run.app/)
+> **Status:** the launcher is being rebuilt on Tauri 2 stable. The alpha releases
+> below are from the previous prototype and are no longer maintained.
 
 ## Installation
 
 To install the Zebra Launcher:
 
-1. Download the installer for your operating system from the Github releases [here](https://github.com/ZcashFoundation/zebra-app/releases/tag/v0.0.0-alpha.1).
+1. Download the installer for your operating system from the Github releases [here](https://github.com/ZcashFoundation/zebra-launcher/releases).
 2. Run the installer
 
 Note: It currently requires a 64-bit processor, and on macOS, an ARM-based processor such as the Apple M1.
