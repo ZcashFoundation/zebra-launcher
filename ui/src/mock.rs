@@ -582,13 +582,14 @@ pub async fn get_settings() -> Settings {
 pub async fn set_settings(settings: Settings) -> Settings {
     sleep(200).await;
     let mock = mock();
-    // Like the real backend: `first_run_done` is only set by `complete_first_run`, while
-    // `data_dir` is saved as sent, so the UI must not send a stale one.
-    let stored = Settings {
-        first_run_done: mock.settings.with_untracked(|s| s.first_run_done),
-        schema_version: mock.settings.with_untracked(|s| s.schema_version),
+    // Like the real backend: `first_run_done` is only set by `complete_first_run` and
+    // `data_dir` only by `choose_data_dir`.
+    let stored = mock.settings.with_untracked(|current| Settings {
+        first_run_done: current.first_run_done,
+        schema_version: current.schema_version,
+        data_dir: current.data_dir.clone(),
         ..settings
-    };
+    });
     mock.settings.set(stored.clone());
     stored
 }
