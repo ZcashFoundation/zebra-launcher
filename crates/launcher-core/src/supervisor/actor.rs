@@ -21,7 +21,7 @@ use tokio::{
 use super::{Cmd, LogSubscription, StartOptions, SupervisorConfig, SupervisorError};
 use crate::{
     logfile::LogFileWriter,
-    logs::{Detector, classify_exit, parse_line},
+    logs::{Detector, classify_event, classify_exit, parse_line},
     pidfile,
     policy::{Decision, RestartTracker},
     process::{ChildHandle, SpawnedChild, Spawner, StopMethod},
@@ -83,7 +83,9 @@ struct Run {
     id: u64,
     handle: ChildHandle,
     detector: Detector,
-    events: Vec<LogEvent>,
+    /// The first deterministic cause of failure logged in this run, which
+    /// decides the exit class over the exit code.
+    deterministic_cause: Option<ExitClass>,
     detail: Option<String>,
     stdout_eof: bool,
     stderr_eof: bool,
@@ -350,7 +352,7 @@ impl Actor {
             id,
             handle,
             detector: Detector::new(),
-            events: Vec::new(),
+            deterministic_cause: None,
             detail: None,
             stdout_eof: false,
             stderr_eof: false,
@@ -516,7 +518,7 @@ impl Actor {
         });
         let requested = run.stop.is_some();
         let forced = run.stop.as_ref().is_some_and(|stop| stop.forced);
-        let mut class = classify_exit(exit.code, &run.events);
+        let mut class = classify_exit(exit.code, run.deterministic_cause);
         if requested && !class.is_deterministic() {
             // A stop the user asked for ended the run; the exit code says how.
             class = ExitClass::Clean;
@@ -620,7 +622,9 @@ impl Actor {
         if let Some(run) = self.run.as_mut()
             && let Some(event) = run.detector.detect(&line)
         {
-            run.events.push(event.clone());
+            if run.deterministic_cause.is_none() {
+                run.deterministic_cause = classify_event(&event);
+            }
             self.apply_event(event);
         }
     }

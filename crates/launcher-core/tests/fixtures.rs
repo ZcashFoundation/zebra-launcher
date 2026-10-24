@@ -1,7 +1,7 @@
 //! Parser and detector checks against output captured from a real zebrad.
 //! See `tests/fixtures/README.md` for how the files were produced.
 
-use launcher_core::logs::{Detector, classify_exit, parse_line};
+use launcher_core::logs::{Detector, classify_event, classify_exit, parse_line};
 use launcher_types::{ExitClass, LogEvent, LogLine, LogStream};
 
 fn parse_all(stream: LogStream, text: &str) -> Vec<LogLine> {
@@ -17,6 +17,11 @@ fn detect_all(lines: &[LogLine]) -> Vec<LogEvent> {
         .iter()
         .filter_map(|line| detector.detect(line))
         .collect()
+}
+
+/// The first deterministic cause among `events`, as the supervisor keeps it.
+fn cause(events: &[LogEvent]) -> Option<ExitClass> {
+    events.iter().find_map(classify_event)
 }
 
 #[test]
@@ -63,7 +68,7 @@ fn regtest_start_and_graceful_shutdown() {
             LogEvent::Stopped,
         ]
     );
-    assert_eq!(classify_exit(Some(0), &events), ExitClass::Clean);
+    assert_eq!(classify_exit(Some(0), cause(&events)), ExitClass::Clean);
 }
 
 #[test]
@@ -80,7 +85,10 @@ fn config_error_is_reported_on_stderr_with_exit_code_1() {
             panic!("expected a fatal error, got {:?}", events[1]);
         };
         assert!(message.contains("Configuration error:"), "{message}");
-        assert_eq!(classify_exit(Some(1), &events), ExitClass::ConfigError);
+        assert_eq!(
+            classify_exit(Some(1), cause(&events)),
+            ExitClass::ConfigError
+        );
     }
 }
 
@@ -99,7 +107,10 @@ fn database_lock_conflict_is_a_deterministic_failure() {
         message.contains("<DATA_DIR>/state/state/v29/regtest"),
         "{message}"
     );
-    assert_eq!(classify_exit(Some(134), &events), ExitClass::DbLocked);
+    assert_eq!(
+        classify_exit(Some(134), cause(&events)),
+        ExitClass::DbLocked
+    );
 }
 
 #[test]
@@ -113,5 +124,5 @@ fn metrics_port_in_use_is_a_deterministic_failure() {
     assert!(
         matches!(&events[0], LogEvent::PortInUse { message } if message.contains("127.0.0.1:19999"))
     );
-    assert_eq!(classify_exit(None, &events), ExitClass::PortInUse);
+    assert_eq!(classify_exit(None, cause(&events)), ExitClass::PortInUse);
 }
