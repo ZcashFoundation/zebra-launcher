@@ -81,7 +81,8 @@ pub fn thousands(value: u64) -> String {
     out
 }
 
-/// A verification progress fraction as a percentage, such as `94.53 %`.
+/// A fraction as a percentage with two decimals, such as `94.53 %`: the verification progress
+/// in the status strip and the sync stage card. The hero's figure is [`crate::charts::percent_1`].
 pub fn percent(fraction: f64) -> String {
     let fraction = if fraction.is_finite() {
         fraction.clamp(0.0, 1.0)

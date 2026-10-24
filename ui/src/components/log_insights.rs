@@ -5,22 +5,24 @@
 //! ([`crate::insight_text`]) are pure functions, tested natively; the components only wire
 //! them to signals.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use leptos::prelude::*;
-use wasm_bindgen::JsValue;
 
 use crate::{
     app::AppState,
-    charts::activity::{
-        Kind, LABELLED_COLUMNS, PLOT_BOTTOM, PLOT_LEFT, PLOT_RIGHT, PLOT_TOP, VIEW_HEIGHT,
-        VIEW_WIDTH, geometry, segment_path, tooltip_class,
+    charts::{
+        activity::{
+            Kind, LABELLED_COLUMNS, PLOT_BOTTOM, PLOT_LEFT, PLOT_RIGHT, PLOT_TOP, VIEW_HEIGHT,
+            VIEW_WIDTH, geometry, segment_path, tooltip_class,
+        },
+        hhmm, tz_offset_min_at,
     },
     components::{
         icons::{check_icon, clock_icon, cross_icon, warning_icon},
         rows::{Rows, text_rows},
     },
-    format::{relative, thousands},
+    format::{percent, relative, thousands},
     insight_text::{
         checkpoints_line, earlier_runs_line, mempool_line, peers_line, run_head, shutdown_line,
     },
@@ -29,13 +31,9 @@ use crate::{
     },
 };
 
-/// `time` as `HH:MM` in the user's time zone.
+/// `time` as `HH:MM` in the browser's zone at that instant, as the line charts label theirs.
 fn local_hhmm(time: SystemTime) -> String {
-    let millis = time
-        .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |since| since.as_millis() as f64);
-    let date = js_sys::Date::new(&JsValue::from_f64(millis));
-    format!("{:02}:{:02}", date.get_hours(), date.get_minutes())
+    hhmm(time, tz_offset_min_at(time))
 }
 
 fn tone_class(tone: Tone) -> &'static str {
@@ -55,11 +53,6 @@ fn tone_icon(tone: Tone) -> AnyView {
         Tone::Warning => warning_icon().into_any(),
         Tone::Critical => cross_icon().into_any(),
     }
-}
-
-/// `12.345` as `12.35 %`.
-fn percent_text(percent: f64) -> String {
-    format!("{percent:.2} %")
 }
 
 /// A column chart of the lines per minute over the last hour: INFO, WARN, ERROR (with
@@ -316,8 +309,8 @@ pub fn SyncStageCard() -> impl IntoView {
         if let Some(remaining) = snapshot.remaining {
             rows.push(("Remaining blocks", thousands(remaining)));
         }
-        if let Some(percent) = snapshot.percent {
-            rows.push(("Progress", percent_text(percent)));
+        if let Some(progress) = snapshot.percent {
+            rows.push(("Progress", percent(progress / 100.0)));
         }
         if let Some(since) = &snapshot.since_last_block {
             rows.push(("Last block", format!("{since} ago")));
@@ -518,15 +511,5 @@ pub fn LogInsightsPanel(on_pick: Callback<String>) -> impl IntoView {
                 <LogActivityChart />
             </div>
         </div>
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn percent_texts() {
-        assert_eq!(percent_text(12.345), "12.35 %");
     }
 }

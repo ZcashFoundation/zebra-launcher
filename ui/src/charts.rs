@@ -374,7 +374,9 @@ pub fn signed(delta: i64) -> String {
     }
 }
 
-/// A progress fraction with one decimal, rounded down so `99.99 %` never reads `100.0 %`.
+/// The sync hero's figure: a progress fraction with one decimal, rounded down so `99.99 %`
+/// never reads `100.0 %` before the tip. Kept apart from [`crate::format::percent`] (two
+/// decimals, rounded to nearest) for that floor.
 pub fn percent_1(fraction: f64) -> String {
     let fraction = if fraction.is_finite() {
         fraction.clamp(0.0, 1.0)
