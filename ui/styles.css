@@ -778,6 +778,11 @@ summary:focus-visible,
   flex-wrap: wrap;
 }
 
+/* The form's Revert / Save row, before the read-only sections. */
+form.settings > .buttons {
+  margin-bottom: 16px;
+}
+
 .data-dir-free {
   display: inline-flex;
   align-items: center;
