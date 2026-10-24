@@ -1,8 +1,5 @@
 # Uninstall
 
-> Skeleton. Paths are confirmed per OS once the app identifier and bundles ship
-> (M5, M9); entries marked TODO depend on that.
-
 Removing the app does not remove the chain state unless you ask for it. Mainnet state is
 hundreds of GB.
 
@@ -27,7 +24,8 @@ The app identifier is `org.zfnd.zebra-launcher`.
 `~/Library/Logs/org.zfnd.zebra-launcher` on macOS and
 `%LOCALAPPDATA%\org.zfnd.zebra-launcher\logs` on Windows.
 
-TODO(M9): confirm these against Tauri's path resolver on each OS with installed bundles.
+These are Tauri's `app_config_dir`, `app_local_data_dir` and `app_log_dir` for the
+identifier (`src-tauri/src/paths.rs`), so they follow Tauri's path resolver on each OS.
 
 ### Where the chain state lives
 
@@ -50,23 +48,28 @@ yourself is never removed by an uninstaller; delete it by hand if you no longer 
 
 ## Linux
 
-- **AppImage:** delete the `.AppImage` file. TODO(M5): the extracted zebrad sidecar in the
-  app data dir.
-- **deb:** `sudo apt remove zebra-launcher`. TODO(M9): confirm the package name.
+- **AppImage:** delete the `.AppImage` file, and the copy of zebrad the launcher keeps
+  outside the AppImage mount:
+  `~/.local/share/org.zfnd.zebra-launcher/sidecar/<launcher version>/zebra-launcher-zebrad`
+  (the launcher deletes other versions' copies, never the current one).
+- **deb:** `sudo apt remove zebra-launcher` (the package installs `/usr/bin/zebra-launcher`
+  and `/usr/bin/zebra-launcher-zebrad`).
 
 Then remove the directories above to delete state, config and logs.
 
 ## macOS
 
 Quit the launcher (tray → Quit), then move "Zebra Launcher" from Applications to the
-Trash. Remove `~/Library/Application Support/org.zfnd.zebra-launcher` to delete state,
-config and logs. TODO(M9): any caches or saved state.
+Trash. Remove `~/Library/Application Support/org.zfnd.zebra-launcher` (state and config)
+and `~/Library/Logs/org.zfnd.zebra-launcher` (logs). Whether macOS keeps a webview cache
+for the identifier elsewhere has not been checked on an installed bundle.
 
 ## Windows
 
 Settings → Apps → Installed apps → Zebra Launcher → Uninstall. The NSIS uninstaller
 offers to delete app data, which covers the default data dir. A data dir you chose
-yourself stays. TODO(M9): confirm the uninstaller's wording.
+yourself stays. The uninstaller's exact wording has not been checked on an installed
+bundle.
 
 ## Leftovers from v0.0.0-alpha.4
 
@@ -85,5 +88,6 @@ hand and never copies it itself. It runs only while the launcher's zebrad is sto
 
 To remove the leftovers by hand, delete the old app and that cache directory, but only
 if no terminal zebrad uses it: a zebrad you run yourself uses the same default directory,
-and moving it into the launcher takes it away from that zebrad.
-TODO(M9): confirm alpha.4 paths on each OS against a real alpha.4 install.
+and moving it into the launcher takes it away from that zebrad. These alpha.4 paths are
+what the old prototype's code used; they have not been checked against a real alpha.4
+install on each OS.
