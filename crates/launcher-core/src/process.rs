@@ -38,12 +38,17 @@ pub struct ZebradCommand {
     /// first, so the launcher's config is not silently overridden.
     pub env: Vec<(OsString, OsString)>,
     /// Pass [`SHUTDOWN_ON_STDIN_CLOSE_ARG`] and keep a pipe to zebrad's stdin,
-    /// so dropping the pipe is a graceful stop on every platform. Needs a zebrad
-    /// that understands the flag.
+    /// so dropping the pipe is a graceful stop on every platform, also when
+    /// the launcher dies. Needs a zebrad that understands the flag.
     pub shutdown_on_stdin_close: bool,
     /// Windows only: kill zebrad when the launcher exits for any reason,
-    /// including a crash. Set this while the bundled zebrad cannot shut down on
-    /// stdin close; with that mode the pipe does the job gracefully.
+    /// including a crash (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
+    ///
+    /// Paired with [`Self::shutdown_on_stdin_close`]: while that is off this
+    /// stays on, or a launcher crash would leave zebrad running with nothing
+    /// to stop it; once the bundled zebrad has the flag the closing pipe does
+    /// the job gracefully and this can be turned off. Nothing turns it off
+    /// yet. [`Spawner::spawn`] asserts the pairing in debug builds.
     pub kill_on_launcher_exit: bool,
 }
 
@@ -59,6 +64,12 @@ impl ZebradCommand {
             shutdown_on_stdin_close: false,
             kill_on_launcher_exit: true,
         }
+    }
+
+    /// Whether zebrad still stops when the launcher dies: its stdin pipe
+    /// closes, or (Windows) its job is closed.
+    fn stops_when_launcher_dies(&self) -> bool {
+        self.shutdown_on_stdin_close || self.kill_on_launcher_exit
     }
 }
 
@@ -192,6 +203,10 @@ fn is_zebra_env_var(key: &std::ffi::OsStr) -> bool {
 
 /// Spawns on the calling thread. See the module docs for why that matters.
 fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
+    debug_assert!(
+        command.stops_when_launcher_dies(),
+        "kill_on_launcher_exit must stay on until shutdown_on_stdin_close is on"
+    );
     let mut cmd = Command::new(&command.binary);
     cmd.arg("-c").arg(&command.config).arg("start");
     if command.shutdown_on_stdin_close {
@@ -263,7 +278,20 @@ fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::is_zebra_env_var;
+    use super::{ZebradCommand, is_zebra_env_var};
+
+    #[test]
+    fn zebrad_stays_stoppable_when_the_launcher_dies() {
+        let mut command = ZebradCommand::new("zebrad", "zebrad.toml");
+        assert!(command.stops_when_launcher_dies(), "the default pairing");
+        command.kill_on_launcher_exit = false;
+        assert!(
+            !command.stops_when_launcher_dies(),
+            "turning the job limit off needs the stdin-close mode"
+        );
+        command.shutdown_on_stdin_close = true;
+        assert!(command.stops_when_launcher_dies());
+    }
 
     #[test]
     fn zebra_env_vars_match_in_any_case() {
