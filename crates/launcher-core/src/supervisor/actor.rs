@@ -356,10 +356,7 @@ impl Actor {
         stale: &StaleProcess,
         start_replies: Vec<oneshot::Sender<Result<(), SupervisorError>>>,
     ) {
-        let info = StaleProcessInfo {
-            pid: stale.pid,
-            binary: stale.binary.display().to_string(),
-        };
+        let info = StaleProcessInfo::from(stale);
         self.status.send_modify(|s| s.stale = Some(info));
         for reply in start_replies {
             let _ = reply.send(Err(SupervisorError::StaleProcess(stale.clone())));

@@ -17,6 +17,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use launcher_types::StaleProcessInfo;
+
 use crate::fsutil;
 
 /// A zebrad process recorded by a previous launcher run.
@@ -26,6 +28,16 @@ pub struct StaleProcess {
     pub pid: u32,
     /// The zebrad binary that was started, for display.
     pub binary: PathBuf,
+}
+
+/// The wire form for the UI: the one place the two types are mapped.
+impl From<&StaleProcess> for StaleProcessInfo {
+    fn from(stale: &StaleProcess) -> Self {
+        Self {
+            pid: stale.pid,
+            binary: stale.binary.display().to_string(),
+        }
+    }
 }
 
 /// Writes `pid` and `binary` to `path`, replacing any previous content.
@@ -341,6 +353,21 @@ mod tests {
         assert!(still_alive, "the process itself is alive");
         assert_eq!(found.expect("read"), None);
         assert!(!path.exists(), "the mismatched entry is removed");
+    }
+
+    #[test]
+    fn the_wire_form_shows_the_binary_path() {
+        let stale = StaleProcess {
+            pid: 4242,
+            binary: PathBuf::from("/opt/zebrad"),
+        };
+        assert_eq!(
+            StaleProcessInfo::from(&stale),
+            StaleProcessInfo {
+                pid: 4242,
+                binary: "/opt/zebrad".to_string(),
+            }
+        );
     }
 
     #[test]
