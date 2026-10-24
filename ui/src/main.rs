@@ -29,7 +29,7 @@ mod theme;
 mod update_text;
 
 mod components {
-    pub mod config_form;
+    pub mod config_form_view;
     pub mod icons;
     pub mod log_insights;
     pub mod nav;

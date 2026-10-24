@@ -17,7 +17,7 @@ use leptos::{html, prelude::*};
 use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::{
-    components::{config_form::ZebradConfigForm, reset_config::ResetConfigButton},
+    components::{config_form_view::ZebradConfigForm, reset_config::ResetConfigButton},
     config_editor::{
         ConfigEditor, Load, Notice, changed_list, changes_text, save_label, saved_text,
         text_only_note,
