@@ -9,7 +9,9 @@ use crate::{
     api,
     app::AppState,
     clipboard::copy_to_clipboard,
-    components::{update_mode_choice::UpdateModeChoice, updates::UpdateStatus},
+    components::{
+        config_form::ZebradConfigForm, update_mode_choice::UpdateModeChoice, updates::UpdateStatus,
+    },
     format::{bytes, data_change_allowed, is_low_space, state_dir, theme_text, theme_value},
 };
 
@@ -381,6 +383,7 @@ pub fn SettingsPage() -> impl IntoView {
                 </div>
             </form>
             <section class="settings">
+                <ZebradConfigForm />
                 <Diagnostics />
                 <DeleteNodeData busy />
                 <About />
