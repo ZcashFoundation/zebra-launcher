@@ -62,7 +62,8 @@ enum Reload {
     Replace,
     /// The edits stay as they are (after a rollback: the file was restored).
     KeepEdits,
-    /// The changed fields are set again on top of the fresh values (after a conflict).
+    /// The changed fields are set again on top of the fresh values (after a conflict, or when
+    /// the file is re-read while there are edits).
     ReapplyPending,
 }
 
@@ -463,11 +464,18 @@ pub fn ZebradConfigForm() -> impl IntoView {
         edits.set(loaded.get_untracked());
         notice.set(None);
     };
+    // A failed reload leaves the edits in memory (after a rollback or a conflict they were to be
+    // kept), so a retry puts them back on top of the fresh file instead of replacing them.
     let retry = move |_| {
         if document.with_untracked(Option::is_none) {
             load.set(Load::Loading);
         }
-        spawn_local(reload(doc, Reload::Replace));
+        let mode = if changes.with_untracked(Vec::is_empty) {
+            Reload::Replace
+        } else {
+            Reload::ReapplyPending
+        };
+        spawn_local(reload(doc, mode));
     };
     // Ctrl (or Cmd) + S saves, from anywhere inside the form.
     let on_key = move |event: web_sys::KeyboardEvent| {
@@ -595,7 +603,9 @@ pub fn ZebradConfigForm() -> impl IntoView {
                     "No setting matches"
                 </p>
             </fieldset>
-            <div class="cfg-footer" hidden=move || !ready()>
+            // Shown with the fields, and while a read failed after a save, so the outcome of
+            // that save (zebrad's rejection, a conflict) is seen next to the read error.
+            <div class="cfg-footer" hidden=move || !ready() && notice.with(Option::is_none)>
                 {notice_view}
                 <div class="cfg-bar">
                     <div class="cfg-changes">
