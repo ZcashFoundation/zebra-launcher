@@ -1,7 +1,5 @@
 # Troubleshooting
 
-> Skeleton. Entries marked TODO are completed as the features land (M5–M12).
-
 Start with **Settings → Copy diagnostics**: it copies the launcher and bundled zebrad
 versions, the OS, the node status, the settings, the managed `zebrad.toml` and the last
 200 lines of the launcher and zebrad logs to the clipboard, ready to paste into an issue.
@@ -39,8 +37,9 @@ not moved, so delete it afterwards if you no longer need it (see
 ## A port is already in use
 
 zebrad stops with "already in use" when another program holds one of its ports. The
-launcher does not retry; it offers alternative ports for RPC and metrics and writes them
-into its `zebrad.toml`.
+launcher shows the node as failed ("a port zebrad needs is already in use") and does not
+retry. It cannot move the port for you: the RPC and metrics addresses are managed by the
+launcher and are read-only in Configure. Free the port, then press Start.
 
 | Port | Used for |
 | --- | --- |
@@ -50,18 +49,20 @@ into its `zebrad.toml`.
 
 The usual cause is a second zebrad, for example one started from a terminal. Find it with
 `lsof -i :8233` (Linux, macOS) or `Get-NetTCPConnection -LocalPort 8233` (Windows).
-If you moved the metrics port and use Grafana, update the Prometheus target (see
-[GRAFANA.md](GRAFANA.md)). TODO(M4): screenshots of the remediation dialog.
 
 ## Database likely already open
 
 Another zebrad is using the same state directory, which is locked. The launcher does not
-retry. Close the other zebrad. If it is a zebrad left over from a launcher crash, the
-launcher offers to wait for it or kill it on startup.
+retry. Close the other zebrad.
 
-The launcher never reuses a terminal zebrad's state directory, so this normally means two
-launchers or a manual zebrad pointed at the launcher's data dir. TODO(M3): describe the
-stale-process dialog.
+If it is the launcher's own zebrad from an earlier run (the launcher crashed or was
+killed), the launcher finds it through its pid file at the next start and shows a banner
+instead of starting a second one: "A zebrad from an earlier launcher run is still running
+(pid …), so the launcher cannot start its own." Its **Stop it and start** button
+terminates that zebrad and starts a fresh one; or wait for it to exit by itself.
+
+The launcher never reuses a terminal zebrad's state directory, so otherwise this means two
+launchers or a manual zebrad pointed at the launcher's data dir.
 
 ## Blank window on Linux
 
@@ -72,22 +73,24 @@ launcher with the DMA-BUF renderer disabled:
 WEBKIT_DISABLE_DMABUF_RENDERER=1 zebra-launcher
 ```
 
-For the AppImage: `WEBKIT_DISABLE_DMABUF_RENDERER=1 ./Zebra_Launcher_*.AppImage`.
-TODO(M5): confirm the binary name of the deb and how to persist this in the desktop
-entry.
+For the AppImage: `WEBKIT_DISABLE_DMABUF_RENDERER=1 ./zebra-launcher_<version>_x86_64.AppImage`.
+The deb installs the binary as `/usr/bin/zebra-launcher`. To make the setting permanent
+for the desktop entry, copy the `.desktop` file the package installs under
+`/usr/share/applications/` to `~/.local/share/applications/` and prefix its `Exec=` line
+with `env WEBKIT_DISABLE_DMABUF_RENDERER=1`.
 
 ## macOS: "cannot be opened" (Gatekeeper)
 
 Release builds are signed and notarized and should open normally. If macOS still blocks
 the app, check the download as described in [SECURITY.md](SECURITY.md#verifying-a-download).
 Unsigned development or nightly builds open through System Settings → Privacy & Security
-→ Open Anyway. TODO(M10): exact wording on macOS 15.
+→ Open Anyway (the exact wording differs between macOS versions).
 
 ## Windows: SmartScreen warning
 
 A new signing identity may show "Windows protected your PC" until it builds reputation.
 Choose More info → Run anyway after checking the signature
-(`Get-AuthenticodeSignature`). TODO(M10): confirm behaviour with Azure Artifact Signing.
+(`Get-AuthenticodeSignature`).
 
 ## Firewall prompt for port 8233
 
@@ -102,8 +105,13 @@ System Settings → Network → Firewall → Options.
 ## Node stopped: release too old
 
 On Mainnet, zebrad warns about 42 days and refuses to run about 56 days after its release.
-The launcher shows a countdown, then a blocking card. Install the latest launcher release
-(or let the updater do it, if enabled). TODO(M11): describe the in-app update path.
+The launcher shows a countdown, then a blocking card. Install the latest launcher release,
+or let the updater do it: with updates set to Notify or Auto (Settings → Updates), a
+banner at the top offers **Install** when a new launcher is available; in Auto mode the
+update is downloaded in the background and, once the halt is under 14 days away or zebrad
+has halted, installed after a 60 s countdown that **Cancel** stops. The halt card itself
+has **Check for updates**. The `.deb` cannot update itself and shows **Open releases
+page** instead.
 
 ## Config change rolled back
 
