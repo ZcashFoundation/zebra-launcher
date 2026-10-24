@@ -133,4 +133,6 @@ to the CSP when it serves the bundled assets.
 
 The crate also compiles natively so `cargo clippy --workspace --all-targets` and
 `cargo test --workspace` cover it; the native binary only prints a hint. Check the wasm build with
-`cargo clippy -p ui --target wasm32-unknown-unknown`.
+`cargo clippy -p ui --target wasm32-unknown-unknown`. CI runs that and `trunk build --release` on
+every pull request (`.github/workflows/ci.yml`), so a dependency or an API that does not exist on
+wasm fails there, not in the bundle build after the merge.

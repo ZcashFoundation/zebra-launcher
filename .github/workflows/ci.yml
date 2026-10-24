@@ -44,6 +44,15 @@ jobs:
         run: scripts/dev-sidecar.sh
       - run: cargo clippy --workspace --all-targets --locked
       - run: cargo test --workspace --locked
+      # The UI as it ships: compiled for wasm32 (rust-toolchain.toml installs the
+      # target), then built by trunk with the pinned wasm-bindgen and wasm-opt.
+      # setup-tauri without its bundler half: no tauri-cli, no second toolchain.
+      - run: cargo clippy -p ui --target wasm32-unknown-unknown --locked
+      - uses: ./.github/actions/setup-tauri
+        with:
+          bundler: "false"
+      - run: trunk build --release
+        working-directory: ui
 
   deny:
     name: cargo deny
