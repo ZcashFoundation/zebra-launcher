@@ -2,17 +2,26 @@
 
 A Desktop app for installing and running Zebra.
 
-> **Status:** the launcher is being rebuilt on Tauri 2 stable. The alpha releases
-> below are from the previous prototype and are no longer maintained.
-
 ## Installation
 
-To install the Zebra Launcher:
+1. Download the installer for your system from the
+   [releases page](https://github.com/ZcashFoundation/zebra-launcher/releases). The
+   `v0.0.0-alpha.*` releases there are from the previous prototype and are no longer
+   maintained.
+2. Run the installer.
 
-1. Download the installer for your operating system from the Github releases [here](https://github.com/ZcashFoundation/zebra-launcher/releases).
-2. Run the installer
+| System | Download |
+| --- | --- |
+| Linux x86_64 and arm64, glibc 2.35 or newer (Ubuntu 22.04, Debian 12 and later) | `.AppImage` (updates itself) or `.deb` (notifies about updates) |
+| macOS 12 or later, Apple Silicon and Intel | `.dmg` |
+| Windows 10 or 11, x64 | `-setup.exe` (installs for the current user) |
 
-Note: It currently requires a 64-bit processor, and on macOS, an ARM-based processor such as the Apple M1.
+All builds are 64-bit. On Windows, stopping the node (Stop, Restart, a config change, or
+quitting the launcher) terminates zebrad at once instead of asking it to shut down, so it
+skips its own shutdown steps: a windowless parent cannot deliver the Ctrl-C that zebrad
+handles there. Linux and macOS stop it gracefully with `SIGTERM`. A zebrad change that
+fixes this on every platform (shutdown when its stdin closes) is proposed upstream; see
+[ARCHITECTURE.md](docs/ARCHITECTURE.md#process-control-per-os).
 
 ## What it does
 
