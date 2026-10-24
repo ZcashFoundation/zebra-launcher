@@ -2,11 +2,12 @@
 //! from and written back to the file through `read_config` and `apply_config`.
 //!
 //! The file's values (`loaded`) and the user's edits (`edits`) are two [`FormState`]s. The
-//! edits hold the text as typed, where an empty text means "use the default"; [`normalised`]
-//! strips those, and the result is what Save writes and what counts as a change against the
-//! file. Saving renders the edits into the loaded text (`render_config`, so comments and
-//! unknown keys stay) and applies it; the outcomes follow the Configure page's handling, with
-//! the pending edits kept across a rollback or a conflict.
+//! edits hold the text as typed, where a text that is empty once normalised the way the file
+//! is written (blank, or a list of blank lines) means "use the default"; [`normalised`] strips
+//! those, and the result is what Save writes and what counts as a change against the file.
+//! Saving renders the edits into the loaded text (`render_config`, so comments and unknown keys
+//! stay) and applies it; the outcomes follow the Configure page's handling, with the pending
+//! edits kept across a rollback or a conflict.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,7 +23,7 @@ use crate::{
     components::tooltip::Help,
     config_form::{
         Control, FIELDS, Field, FieldId, FormState, Kind, SECTIONS, Section, display_default,
-        fields_of, matches_filter, parse_config, render_config, validate,
+        fields_of, matches_filter, normalize, parse_config, render_config, validate,
     },
 };
 
@@ -61,18 +62,20 @@ enum Reload {
     Replace,
     /// The edits stay as they are (after a rollback: the file was restored).
     KeepEdits,
-    /// The changed fields are set again on top of the fresh values (after a conflict).
+    /// The changed fields are set again on top of the fresh values (after a conflict, or when
+    /// the file is re-read while there are edits).
     ReapplyPending,
 }
 
 /// The signals the field rows read and write.
 #[derive(Clone, Copy)]
 struct Form {
-    /// The values in the file as last read.
+    /// The values in the file as last read, [`normalised`] like `values` so that padding in the
+    /// file does not count as a change.
     loaded: RwSignal<FormState>,
     /// The values as edited, text as typed.
     edits: RwSignal<FormState>,
-    /// `edits` with empty texts unset: what Save writes and what counts as a change.
+    /// `edits` [`normalised`]: what Save writes and what counts as a change.
     values: Memo<FormState>,
     /// The message of every field whose text [`validate`] rejects.
     errors: Memo<BTreeMap<FieldId, String>>,
@@ -87,24 +90,35 @@ struct Doc {
     form: Form,
 }
 
-/// `edits` with empty texts unset. An empty text means "use the default" ([`validate`] accepts
-/// it), so it must not reach [`render_config`] as a value.
+/// `edits` with every text [`normalize`]d as the file is written, and the texts that are then
+/// empty unset. Such a text means "use the default" ([`validate`] accepts it, [`render_config`]
+/// removes the key), so it must not count as a value: a space typed into an unset field, or a
+/// blank line added to a list, is not a change and must not restart zebrad for an unchanged
+/// file.
 fn normalised<'a>(fields: impl Iterator<Item = &'a Field>, edits: &FormState) -> FormState {
     let mut values = FormState::default();
     for field in fields {
-        if let Some(text) = edits.get(field.id()).filter(|text| !text.is_empty()) {
-            values.set(field.id(), Some(text.to_owned()));
+        if let Some(text) = edits
+            .get(field.id())
+            .map(|text| normalize(field.kind, text))
+            .filter(|text| !text.is_empty())
+        {
+            values.set(field.id(), Some(text));
         }
     }
     values
 }
 
-/// The message of every field whose edited text [`validate`] rejects.
+/// The message of every user-editable field whose edited text [`validate`] rejects. Locked
+/// fields are never written ([`render_config`] skips them and the backend rewrites the managed
+/// keys), and their rows show no error, so a value of theirs the form cannot read must not
+/// block Save.
 fn validation_errors<'a>(
     fields: impl Iterator<Item = &'a Field>,
     edits: &FormState,
 ) -> BTreeMap<FieldId, String> {
     fields
+        .filter(|field| field.control == Control::User)
         .filter_map(|field| {
             let text = edits.get(field.id())?;
             validate(field, text)
@@ -148,6 +162,35 @@ fn reapply(mut fresh: FormState, pending: Vec<(FieldId, Option<String>)>) -> For
         fresh.set(id, text);
     }
     fresh
+}
+
+/// The forbidden keys set in the file. [`render_config`] drops them, so a save removes them
+/// whatever else is edited: that counts as a change and enables Save, but it is not an edit to
+/// discard or to keep across a reload.
+fn removed_on_save<'a>(
+    fields: impl Iterator<Item = &'a Field>,
+    loaded: &FormState,
+) -> Vec<FieldId> {
+    fields
+        .filter(|field| matches!(field.control, Control::Forbidden { .. }))
+        .map(Field::id)
+        .filter(|id| loaded.get(*id).is_some())
+        .collect()
+}
+
+/// The list under the change count: the `section.key` paths of the edited fields, then the
+/// keys a save removes.
+fn changed_list(changes: &[FieldId], removals: &[FieldId]) -> String {
+    changes
+        .iter()
+        .map(|(section, key)| format!("{section}.{key}"))
+        .chain(
+            removals
+                .iter()
+                .map(|(section, key)| format!("{section}.{key} (removed on save)")),
+        )
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// What a control shows: the edited text, or the default when unset.
@@ -204,10 +247,14 @@ fn changes_text(count: usize) -> String {
     }
 }
 
-/// True while saving restarts zebrad: in every phase but stopped and failed, where the backend
-/// only writes the file.
+/// True while saving restarts zebrad: it is starting, running, or about to be restarted after a
+/// crash. Otherwise (stopped, stopping, failed) the backend only writes the file, and a stopping
+/// zebrad is left stopped; this mirrors `was_running` in the `apply_config` command.
 fn restarts_zebrad(phase: &Phase) -> bool {
-    !matches!(phase, Phase::Stopped | Phase::Failed { .. })
+    matches!(
+        phase,
+        Phase::Starting | Phase::Running | Phase::Backoff { .. }
+    )
 }
 
 fn save_label(restarts: bool) -> &'static str {
@@ -259,6 +306,10 @@ fn unreadable_note(keys: &[String]) -> Option<String> {
 /// Reads the file again and updates the form as `mode` says. A failure leaves the values as
 /// they are and shows the error in place of the fields.
 async fn reload(doc: Doc, mode: Reload) {
+    let form = doc.form;
+    // The fields stay enabled while the file is read (a reload is not a save), so an edit made
+    // meanwhile must not be replaced by the fresh values: it is put back on top of them.
+    let edits_before = form.edits.get_untracked();
     let fresh = match api::read_config().await {
         Ok(fresh) => fresh,
         Err(error) => {
@@ -276,9 +327,16 @@ async fn reload(doc: Doc, mode: Reload) {
             return;
         }
     };
-    let form = doc.form;
+    // Normalised like `values`, so that the file's values compare equal to edits of them.
+    let fresh_form = normalised(FIELDS.iter(), &parsed.form);
+    let mode =
+        if mode == Reload::Replace && form.edits.with_untracked(|edits| *edits != edits_before) {
+            Reload::ReapplyPending
+        } else {
+            mode
+        };
     match mode {
-        Reload::Replace => form.edits.set(parsed.form.clone()),
+        Reload::Replace => form.edits.set(fresh_form.clone()),
         Reload::KeepEdits => {}
         Reload::ReapplyPending => {
             let pending = form.values.with_untracked(|values| {
@@ -287,10 +345,10 @@ async fn reload(doc: Doc, mode: Reload) {
                         .with_untracked(|edits| pending_edits(&values.diff(loaded), edits))
                 })
             });
-            form.edits.set(reapply(parsed.form.clone(), pending));
+            form.edits.set(reapply(fresh_form.clone(), pending));
         }
     }
-    form.loaded.set(parsed.form);
+    form.loaded.set(fresh_form);
     doc.notes.set(Notes {
         unknown: parsed.unknown,
         unreadable: parsed.unreadable,
@@ -323,6 +381,7 @@ pub fn ZebradConfigForm() -> impl IntoView {
     };
     let changes =
         Memo::new(move |_| values.with(|values| loaded.with(|loaded| values.diff(loaded))));
+    let removals = Memo::new(move |_| loaded.with(|loaded| removed_on_save(FIELDS.iter(), loaded)));
     let filter = RwSignal::new(String::new());
     let only_changed = RwSignal::new(false);
     let shown = Memo::new(move |_| {
@@ -395,7 +454,8 @@ pub fn ZebradConfigForm() -> impl IntoView {
     let can_save = move || {
         load.with(|load| *load == Load::Ready)
             && !saving.get()
-            && changes.with(|changes| !changes.is_empty())
+            && (changes.with(|changes| !changes.is_empty())
+                || removals.with(|removals| !removals.is_empty()))
             && errors.with(BTreeMap::is_empty)
     };
     let save = move || {
@@ -448,11 +508,18 @@ pub fn ZebradConfigForm() -> impl IntoView {
         edits.set(loaded.get_untracked());
         notice.set(None);
     };
+    // A failed reload leaves the edits in memory (after a rollback or a conflict they were to be
+    // kept), so a retry puts them back on top of the fresh file instead of replacing them.
     let retry = move |_| {
         if document.with_untracked(Option::is_none) {
             load.set(Load::Loading);
         }
-        spawn_local(reload(doc, Reload::Replace));
+        let mode = if changes.with_untracked(Vec::is_empty) {
+            Reload::Replace
+        } else {
+            Reload::ReapplyPending
+        };
+        spawn_local(reload(doc, mode));
     };
     // Ctrl (or Cmd) + S saves, from anywhere inside the form.
     let on_key = move |event: web_sys::KeyboardEvent| {
@@ -533,15 +600,9 @@ pub fn ZebradConfigForm() -> impl IntoView {
             _ => None,
         })
     };
-    let changed_paths = move || {
-        changes.with(|changes| {
-            changes
-                .iter()
-                .map(|(section, key)| format!("{section}.{key}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-    };
+    let change_count = move || changes.with(Vec::len) + removals.with(Vec::len);
+    let changed_paths =
+        move || changes.with(|changes| removals.with(|removals| changed_list(changes, removals)));
 
     view! {
         <section class="cfg-form" aria-labelledby="cfg-heading" on:keydown=on_key>
@@ -549,7 +610,7 @@ pub fn ZebradConfigForm() -> impl IntoView {
                 <div class="cfg-intro">
                     <h2 id="cfg-heading">"zebrad configuration"</h2>
                     <p class="muted">
-                        "Settings for the node itself, written to zebrad.toml. Saving restarts zebrad. "
+                        "Settings for the node itself, written to zebrad.toml. Saving restarts a running zebrad. "
                         {move || path().map(|path| view! { <code>{path}</code> })}
                     </p>
                 </div>
@@ -580,11 +641,13 @@ pub fn ZebradConfigForm() -> impl IntoView {
                     "No setting matches"
                 </p>
             </fieldset>
-            <div class="cfg-footer" hidden=move || !ready()>
+            // Shown with the fields, and while a read failed after a save, so the outcome of
+            // that save (zebrad's rejection, a conflict) is seen next to the read error.
+            <div class="cfg-footer" hidden=move || !ready() && notice.with(Option::is_none)>
                 {notice_view}
                 <div class="cfg-bar">
                     <div class="cfg-changes">
-                        <span>{move || changes_text(changes.with(Vec::len))}</span>
+                        <span>{move || changes_text(change_count())}</span>
                         <span class="muted cfg-changed-list">{changed_paths}</span>
                     </div>
                     <p class="cfg-status ok" role="status">{saved_view}</p>
@@ -670,7 +733,11 @@ fn field_row(field: &'static Field, form: Form, shown: Memo<BTreeSet<FieldId>>) 
         Signal::derive(move || form.loaded.with(|loaded| loaded.get(id).map(str::to_owned)));
     let value =
         Signal::derive(move || form.values.with(|values| values.get(id).map(str::to_owned)));
-    let edited = Signal::derive(move || value.get() != in_file.get());
+    // A forbidden key set in the file is removed on save, so its row counts as changed.
+    let edited = Signal::derive(move || match field.control {
+        Control::Forbidden { .. } => in_file.get().is_some(),
+        _ => value.get() != in_file.get(),
+    });
     let error = Signal::derive(move || form.errors.with(|errors| errors.get(&id).cloned()));
     let set = move |text: Option<String>| form.edits.update(|edits| edits.set(id, text));
     let user = matches!(field.control, Control::User);
@@ -763,10 +830,13 @@ fn user_control(
     let shown = Signal::derive(move || shown_text(raw.get().as_deref(), default));
     let invalid = move || error.get().is_some();
     let on_text = move |event: web_sys::Event| set(Some(event_target_value(&event)));
-    // A cleared text control means "use the default": when it loses focus the value is unset
-    // and the control shows the default again.
+    // A cleared (or blank) text control means "use the default": when it loses focus the value
+    // is unset and the control shows the default again.
     let unset_if_empty = move |_| {
-        if raw.with(|raw| raw.as_deref() == Some("")) {
+        if raw.with(|raw| {
+            raw.as_deref()
+                .is_some_and(|raw| normalize(field.kind, raw).is_empty())
+        }) {
             set(None);
         }
     };
@@ -784,14 +854,16 @@ fn user_control(
             </div>
         }
         .into_any(),
-        Kind::Integer { min, max } => view! {
+        // A text input, not a number one: a number input's value is "" while it holds a
+        // not-yet-valid number such as a lone "-", and writing that "" back as the controlled
+        // value erases the minus sign as it is typed. `validate` checks the range instead.
+        Kind::Integer { .. } => view! {
             <input
-                type="number"
+                type="text"
                 inputmode="numeric"
+                spellcheck="false"
                 id=input_id
                 aria-describedby=hint_id.clone()
-                min=min.map(|min| min.to_string())
-                max=max.map(|max| max.to_string())
                 class:invalid=invalid
                 prop:value=move || shown.get()
                 on:input=on_text
@@ -1003,6 +1075,15 @@ mod tests {
         doc: "The seeders the node contacts first.",
         control: Control::User,
     };
+    const BARS: Field = Field {
+        section: "tracing",
+        key: "progress_bar",
+        label: "Progress bars",
+        kind: Kind::Choice(&["summary", "detailed"]),
+        default: None,
+        doc: "Shows progress bars in the terminal.",
+        control: Control::Forbidden { note: "" },
+    };
 
     fn with(values: &[(FieldId, &str)]) -> FormState {
         let mut form = FormState::default();
@@ -1022,12 +1103,45 @@ mod tests {
     }
 
     #[test]
-    fn validation_errors_cover_set_fields_only() {
-        // The scaffold's `validate` accepts everything; the map still only holds set fields.
+    fn normalising_treats_blank_texts_as_unset_and_trims_the_rest() {
+        // A space typed into an unset field, or a list of blank lines, is not a value: the
+        // writer drops it too, so counting it as a change would restart zebrad for nothing.
+        let edits = with(&[
+            (PORT.id(), " "),
+            (ADDR.id(), " 127.0.0.1:8232 "),
+            (PEERS.id(), "a\n\n b \n"),
+        ]);
+        let values = normalised([PORT, ADDR, PEERS].iter(), &edits);
+        assert_eq!(values.get(PORT.id()), None);
+        assert_eq!(values.get(ADDR.id()), Some("127.0.0.1:8232"));
+        assert_eq!(values.get(PEERS.id()), Some("a\nb"));
+        let blank_list = with(&[(PEERS.id(), "\n  \n")]);
+        assert_eq!(
+            normalised([PEERS].iter(), &blank_list).get(PEERS.id()),
+            None
+        );
+        // A padded value in the file is the same value, so the loaded state is normalised too
+        // and a set list with a trailing blank line added is not a change.
+        let loaded = normalised([PEERS].iter(), &with(&[(PEERS.id(), " a\nb ")]));
+        let edited = normalised([PEERS].iter(), &with(&[(PEERS.id(), "a\nb\n")]));
+        assert!(edited.diff(&loaded).is_empty());
+    }
+
+    #[test]
+    fn validation_errors_cover_set_user_fields_only() {
         let edits = with(&[(PORT.id(), "abc")]);
+        let errors = validation_errors([PORT, ADDR, PEERS].iter(), &edits);
+        assert_eq!(errors.keys().collect::<Vec<_>>(), vec![&PORT.id()]);
+        // A locked field's value from the file (here a non-loopback address in a managed key,
+        // as a hand edit can leave it) is not written, so it does not block Save.
+        let edits = with(&[(PORT.id(), "abc"), (ADDR.id(), "0.0.0.0:8232")]);
         let errors = validation_errors([PORT, ADDR].iter(), &edits);
-        assert!(errors.len() <= 1);
+        assert!(errors.contains_key(&PORT.id()));
         assert!(!errors.contains_key(&ADDR.id()));
+        assert!(
+            validate(&ADDR, "0.0.0.0:8232").is_err(),
+            "the test needs a rejected value"
+        );
     }
 
     #[test]
@@ -1061,6 +1175,29 @@ mod tests {
         assert_eq!(merged.get(PORT.id()), Some("4"));
         assert_eq!(merged.get(PEERS.id()), None);
         assert_eq!(merged.get(ADDR.id()), Some("127.0.0.1:1"));
+    }
+
+    #[test]
+    fn forbidden_keys_in_the_file_are_removed_on_save() {
+        // The file sets a forbidden key: the save drops it, which is listed as a change even
+        // though the edits equal the file, and enables Save.
+        let loaded = with(&[(BARS.id(), "summary"), (PORT.id(), "4")]);
+        let fields = [PORT, ADDR, PEERS, BARS];
+        assert_eq!(removed_on_save(fields.iter(), &loaded), vec![BARS.id()]);
+        assert!(normalised(fields.iter(), &loaded).diff(&loaded).is_empty());
+        assert_eq!(
+            changed_list(&[], &[BARS.id()]),
+            "tracing.progress_bar (removed on save)"
+        );
+        assert_eq!(
+            changed_list(&[PORT.id()], &[BARS.id()]),
+            "rpc.parallel_cpu_threads, tracing.progress_bar (removed on save)"
+        );
+        assert_eq!(changed_list(&[PORT.id()], &[]), "rpc.parallel_cpu_threads");
+        // A file without the key, or a user field, has nothing to remove.
+        let clean = with(&[(PORT.id(), "4")]);
+        assert!(removed_on_save(fields.iter(), &clean).is_empty());
+        assert_eq!(changed_list(&[], &[]), "");
     }
 
     #[test]
@@ -1119,9 +1256,15 @@ mod tests {
     }
 
     #[test]
-    fn saving_restarts_unless_stopped_or_failed() {
+    fn saving_restarts_unless_stopped_stopping_or_failed() {
         assert!(restarts_zebrad(&Phase::Running));
         assert!(restarts_zebrad(&Phase::Starting));
+        assert!(restarts_zebrad(&Phase::Backoff {
+            until: std::time::UNIX_EPOCH,
+            crashes: 1,
+        }));
+        // The backend leaves a stopping zebrad stopped and only writes the file.
+        assert!(!restarts_zebrad(&Phase::Stopping));
         assert!(!restarts_zebrad(&Phase::Stopped));
         assert!(!restarts_zebrad(&Phase::Failed {
             class: launcher_types::ExitClass::ConfigError,

@@ -2,11 +2,11 @@
 //!
 //! The box opens above the icon and flips below it when there is no room above; it is shifted
 //! sideways to stay inside the scrolling page. Hover and keyboard focus show it, a click or tap
-//! pins it (so it stays while the pointer moves away), `Escape` hides it. The box is measured
-//! with `getBoundingClientRect` once it is displayed, so the placement happens one frame after
-//! the icon is hovered, while the box is still invisible.
+//! pins it (so it stays while the pointer moves away), `Escape` hides it wherever the focus is.
+//! The box is measured with `getBoundingClientRect` once it is displayed, so the placement
+//! happens one frame after the icon is hovered, while the box is still invisible.
 
-use leptos::{html, prelude::*};
+use leptos::{ev, html, prelude::*};
 
 /// Space between the icon and the box, matching `.help-tip` in `styles/config-form.css`.
 const GAP: f64 = 6.0;
@@ -139,12 +139,15 @@ pub fn Help(id: String, text: &'static str) -> impl IntoView {
         focused.set(false);
         pinned.set(false);
     };
-    let on_key = move |event: web_sys::KeyboardEvent| {
+    // Keydown goes to the focused element, and the box opens on hover (or on a click in WebKit,
+    // which does not focus a clicked button) while something else has the focus, so Escape is
+    // taken on the window.
+    let escape = window_event_listener(ev::keydown, move |event| {
         if event.key() == "Escape" && open.get_untracked() {
-            event.prevent_default();
             hide();
         }
-    };
+    });
+    on_cleanup(move || escape.remove());
 
     view! {
         <span
@@ -165,8 +168,14 @@ pub fn Help(id: String, text: &'static str) -> impl IntoView {
                     focused.set(false);
                     pinned.set(false);
                 }
-                on:click=move |_| pinned.update(|pinned| *pinned = !*pinned)
-                on:keydown=on_key
+                on:click=move |_| {
+                    pinned.update(|pinned| *pinned = !*pinned);
+                    // WebKit on macOS does not focus a clicked button; focus it so that a click
+                    // elsewhere blurs it and unpins the box.
+                    if let Some(icon) = icon.get_untracked() {
+                        let _ = icon.focus();
+                    }
+                }
             >
                 "?"
             </button>

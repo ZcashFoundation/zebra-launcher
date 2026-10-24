@@ -193,7 +193,6 @@
 }
 
 .cfg-field input[type="text"],
-.cfg-field input[type="number"],
 .cfg-field select,
 .cfg-field textarea {
   width: 100%;
@@ -256,30 +255,37 @@
   text-align: center;
 }
 
-/* The action bar sticks to the bottom of the page while the form is in view. Its wrapper
-   generates no box, so the bar moves within the whole form, not within the wrapper. */
+/* The footer (the failure banner and the action bar) sticks to the bottom of the page while the
+   form is in view, so a failed save is seen from wherever Save was pressed. Its containing block
+   is the whole form, so it moves within the form. */
 
 .cfg-footer {
-  display: contents;
+  position: sticky;
+  /* The sticky area is inset by the scrolling page's padding (16px in styles.css); this puts
+     the footer on the page's bottom edge instead of 16px above it with content showing under. */
+  bottom: -16px;
+  z-index: 2;
+  padding-top: 8px;
+  background: var(--bg);
 }
 
 .cfg-footer .banner {
   margin: 0 0 8px;
 }
 
+/* zebrad's error can be long; the stuck footer must not take the whole viewport. */
+.cfg-footer .error-panel pre {
+  max-height: 30vh;
+  overflow: auto;
+}
+
 .cfg-bar {
-  position: sticky;
-  /* The sticky area is inset by the scrolling page's padding (16px in styles.css); this puts
-     the bar on the page's bottom edge instead of 16px above it with content showing under. */
-  bottom: -16px;
-  z-index: 2;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 16px;
-  margin: 8px 0 0;
+  margin: 0;
   padding: 10px 0;
-  background: var(--bg);
   border-top: 1px solid var(--border);
 }
 
@@ -299,13 +305,11 @@
   display: none;
 }
 
+/* Never hidden while empty: a live region is announced only when text changes inside a region
+   that is already in the accessibility tree. Empty, it has no height in the row. */
 .cfg-status {
   margin: 0;
   flex: 1 1 auto;
-}
-
-.cfg-status:empty {
-  display: none;
 }
 
 .cfg-bar .buttons {
@@ -355,7 +359,7 @@
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 6px;
-  box-shadow: var(--shadow, 0 2px 8px rgba(0, 0, 0, 0.35));
+  box-shadow: 0 2px 8px var(--shadow);
   color: var(--text);
   font-size: 12px;
   font-weight: normal;
@@ -377,6 +381,23 @@
 .help-tip.help-below {
   bottom: auto;
   top: calc(100% + 6px);
+}
+
+/* A transparent strip over the 6px gap keeps the pointer inside .help while it moves onto the
+   box, so the box can be read and its text selected (WCAG 1.4.13). As a part of the box it is
+   only there while the box is shown. */
+.help-tip::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 6px;
+}
+
+.help-tip.help-below::before {
+  top: auto;
+  bottom: 100%;
 }
 
 /* The Configure page's pointer to this form. */
