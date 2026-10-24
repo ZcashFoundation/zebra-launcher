@@ -12,7 +12,7 @@
 
 .logs-toolbar button.active {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .logs-toolbar .logs-target {
@@ -59,12 +59,11 @@
 }
 
 /* The activity chart is drawn in a fixed 640-unit viewBox and scales with its card; cap the
-   scale so a full-width card does not blow its text up. */
-.insight-activity svg {
-  display: block;
-  width: 100%;
+   scale so a full-width card does not blow its text up. The cap sits on the plot, not the
+   svg, so the tooltip layer inside it is exactly as wide as the svg and the tooltip's
+   percentage `left` lands on its column. */
+.insight-activity .insight-plot {
   max-width: 760px;
-  height: auto;
 }
 
 /* Wide: three cards in a row, the activity chart full width under them. */
@@ -230,7 +229,7 @@
 
 .insight-toggle[aria-pressed="true"] {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .insight-plot {
@@ -311,7 +310,16 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 2px 8px var(--shadow);
+}
+
+/* Near the plot's edges the tooltip hangs inward rather than being centred on the column. */
+.insight-tooltip-start {
+  transform: none;
+}
+
+.insight-tooltip-end {
+  transform: translateX(-100%);
 }
 
 .insight-tooltip-head {

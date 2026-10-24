@@ -220,6 +220,20 @@ pub fn segment_path(x: f32, y: f32, width: f32, height: f32, rounded: bool) -> S
     )
 }
 
+/// The tooltip's class for a column centred at `center`: centred on the column, or hung to
+/// the right of a column near the left edge and to the left of one near the right edge, so
+/// it stays inside the plot.
+pub fn tooltip_class(center: f32) -> &'static str {
+    let fraction = center / VIEW_WIDTH;
+    if fraction < 0.15 {
+        "insight-tooltip insight-tooltip-start"
+    } else if fraction > 0.85 {
+        "insight-tooltip insight-tooltip-end"
+    } else {
+        "insight-tooltip"
+    }
+}
+
 /// `time` as `HH:MM` in the user's time zone.
 fn local_hhmm(time: SystemTime) -> String {
     let millis = time
@@ -471,7 +485,9 @@ pub fn LogActivityChart() -> impl IntoView {
         let bucket = *buckets.get(index)?;
         let layout = geometry(&buckets);
         let center = layout.columns.get(index)?.center();
+        // A fraction of the tooltip layer, which is exactly as wide as the svg.
         let left = format!("{:.1}%", center / VIEW_WIDTH * 100.0);
+        let class = tooltip_class(center);
         let rows = Kind::LEGEND
             .into_iter()
             .map(|kind| {
@@ -485,7 +501,7 @@ pub fn LogActivityChart() -> impl IntoView {
             })
             .collect_view();
         Some(view! {
-            <div class="insight-tooltip" style:left=left>
+            <div class=class style:left=left>
                 <div class="insight-tooltip-head">
                     {local_hhmm(bucket.minute_start)}
                     " · "
@@ -889,6 +905,26 @@ mod tests {
         let empty = geometry(&[]);
         assert_eq!(empty.ticks, [1, 2, 3]);
         assert!(empty.columns.is_empty());
+    }
+
+    #[test]
+    fn tooltip_hangs_inward_near_the_edges() {
+        let buckets: Vec<MinuteBucket> = (0..ACTIVITY_MINUTES as u64)
+            .map(|i| bucket(i, 1, 0, 0, 0))
+            .collect();
+        let layout = geometry(&buckets);
+        let class_of = |index: usize| tooltip_class(layout.columns[index].center());
+        // The oldest and newest minutes (Home and End) would otherwise overhang the plot.
+        assert_eq!(class_of(0), "insight-tooltip insight-tooltip-start");
+        assert_eq!(class_of(5), "insight-tooltip insight-tooltip-start");
+        assert_eq!(class_of(6), "insight-tooltip");
+        assert_eq!(class_of(30), "insight-tooltip");
+        assert_eq!(class_of(50), "insight-tooltip");
+        assert_eq!(class_of(51), "insight-tooltip insight-tooltip-end");
+        assert_eq!(
+            class_of(ACTIVITY_MINUTES - 1),
+            "insight-tooltip insight-tooltip-end"
+        );
     }
 
     #[test]

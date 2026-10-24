@@ -35,6 +35,13 @@ fn level_key(level: Option<LogLevel>) -> &'static str {
         .map_or("all", |(key, _, _)| key)
 }
 
+/// The level filter once a problem is picked. Problems are WARN, ERROR or stderr lines, and
+/// stderr lines pass every level, so only "ERROR only" can hide a picked problem and is
+/// dropped; "Problems only" and wider filters stay.
+fn level_after_pick(min_level: Option<LogLevel>) -> Option<LogLevel> {
+    min_level.filter(|level| *level <= LogLevel::Warn)
+}
+
 fn level_class(level: LogLevel) -> &'static str {
     match level {
         LogLevel::Trace => "lvl lvl-trace",
@@ -213,11 +220,23 @@ pub fn Logs() -> impl IntoView {
         });
     };
 
-    let on_pick = Callback::new(move |filter: String| text.set(filter));
+    // The picked lines must be visible: a level or target filter that would hide them goes.
+    let apply_pick = move |filter: String| {
+        let level = min_level.get_untracked();
+        let kept = level_after_pick(level);
+        if kept != level {
+            min_level.set(kept);
+        }
+        if target.get_untracked().is_some() {
+            target.set(None);
+        }
+        text.set(filter);
+    };
+    let on_pick = Callback::new(apply_pick);
     // A problem picked on another page: apply its filter and take the request.
     Effect::new(move |_| {
         if let Some(filter) = state.log_filter_request.get() {
-            text.set(filter);
+            apply_pick(filter);
             state
                 .log_filter_request
                 .update_untracked(|request| *request = None);
@@ -352,5 +371,20 @@ pub fn Logs() -> impl IntoView {
                 />
             </Show>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pick_drops_only_a_level_filter_that_hides_warnings() {
+        // "ERROR only" would hide a picked WARN problem; "Problems only" and wider filters
+        // show every problem and stay as they are.
+        assert_eq!(level_after_pick(Some(LogLevel::Error)), None);
+        assert_eq!(level_after_pick(Some(LogLevel::Warn)), Some(LogLevel::Warn));
+        assert_eq!(level_after_pick(Some(LogLevel::Info)), Some(LogLevel::Info));
+        assert_eq!(level_after_pick(None), None);
     }
 }

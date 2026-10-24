@@ -3,7 +3,8 @@
 //!
 //! [`Insights::ingest`] is called from the app shell for every batch; the Logs page and the
 //! dashboard read the accessors. Everything here is plain data: no interior mutability, no
-//! clocks (the ingest `now` stands in for lines without a timestamp).
+//! clocks (a line without a timestamp takes the time of the timestamped line before it; the
+//! ingest `now` stands in only until one has been seen).
 
 pub mod fields;
 
@@ -46,6 +47,9 @@ const PROGRESS_TARGET: &str = "zebrad::components::sync::progress";
 pub struct Insights {
     /// The highest `seq` folded in; lines at or below it are duplicates.
     last_seq: Option<u64>,
+    /// The time of the last timestamped line. Continuation lines, stderr lines and launcher
+    /// notes carry no timestamp and take it, since they follow the line they belong to.
+    last_at: Option<SystemTime>,
     totals: LevelTotals,
     lines_total: u64,
     dropped_lines: u64,
@@ -341,8 +345,15 @@ impl Run {
 }
 
 impl Insights {
-    /// Folds a batch of lines in. `now` stands in for lines without a timestamp.
+    /// Folds a batch of lines in. A line without a timestamp takes the time of the timestamped
+    /// line before it, in this batch or an earlier one, or else of the first timestamped line
+    /// in the batch; `now` stands in only when there is neither. A replayed history so keeps
+    /// its own times instead of the reload time, which would wipe the minute buckets.
     pub fn ingest(&mut self, lines: &[LogLine], now: SystemTime) {
+        let first_stamp = lines
+            .iter()
+            .find_map(|line| line.timestamp.as_deref().and_then(parse_timestamp));
+        let mut last_at = self.last_at.or(first_stamp).unwrap_or(now);
         for line in lines {
             if self.last_seq.is_some_and(|seen| line.seq <= seen) {
                 continue;
@@ -352,11 +363,14 @@ impl Insights {
                 self.dropped_lines += dropped_count(&line.message);
                 continue;
             }
-            let at = line
-                .timestamp
-                .as_deref()
-                .and_then(parse_timestamp)
-                .unwrap_or(now);
+            let at = match line.timestamp.as_deref().and_then(parse_timestamp) {
+                Some(stamp) => {
+                    last_at = stamp;
+                    self.last_at = Some(stamp);
+                    stamp
+                }
+                None => last_at,
+            };
             self.lines_total += 1;
             self.count_line(line, at);
             self.note_problem(line, at);
@@ -752,8 +766,6 @@ pub fn compact(value: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::UNIX_EPOCH;
-
     use super::*;
 
     const T0: &str = "2026-10-23T18:35:01.937583Z";
@@ -966,7 +978,7 @@ mod tests {
             stderr(4, "panicked"),
             continuation(5, "more"),
         ];
-        // Lines without a timestamp use the ingest time.
+        // Lines without a timestamp take the time of the stamped line before them.
         let now = at("2026-10-23T18:38:10Z");
         insights.ingest(&batch, now);
         let activity = insights.activity(now);
@@ -984,9 +996,8 @@ mod tests {
         assert_eq!((m35.info, m35.warn, m35.error, m35.other), (1, 1, 0, 0));
         assert_eq!(by_minute("2026-10-23T18:36:00Z").total(), 0);
         let m37 = by_minute("2026-10-23T18:37:00Z");
-        assert_eq!((m37.info, m37.warn, m37.error, m37.other), (0, 0, 1, 1));
-        let m38 = by_minute("2026-10-23T18:38:00Z");
-        assert_eq!((m38.error, m38.other), (1, 1));
+        assert_eq!((m37.info, m37.warn, m37.error, m37.other), (0, 0, 2, 2));
+        assert_eq!(by_minute("2026-10-23T18:38:00Z").total(), 0);
 
         // Two hours later the old minutes have rolled out and the deque stays bounded.
         let later = at("2026-10-23T20:40:00Z");
@@ -999,10 +1010,13 @@ mod tests {
         assert_eq!(activity.iter().map(MinuteBucket::total).sum::<u32>(), 1);
         // A minute at a time for a while keeps exactly the bounded window.
         for i in 1..=90u64 {
-            let stamp = UNIX_EPOCH + Duration::from_secs(epoch_minute(later) * 60 + i * 60);
-            let mut l = stamped(6 + i, "2026-10-23T20:40:00Z", LogLevel::Info, "t", "f");
-            l.timestamp = None;
-            insights.ingest(&[l], stamp);
+            let minutes = 40 + i;
+            let stamp = format!(
+                "2026-10-23T{:02}:{:02}:00Z",
+                20 + minutes / 60,
+                minutes % 60
+            );
+            insights.ingest(&[stamped(6 + i, &stamp, LogLevel::Info, "t", "f")], later);
         }
         assert_eq!(insights.buckets.len(), BUCKETS_KEPT);
         // A line older than the window is dropped from the counts, not misfiled.
@@ -1056,8 +1070,10 @@ mod tests {
         );
         let problems = insights.problems(10);
         assert_eq!(problems.len(), 3);
-        // stderr took the ingest time, the newest; the two stalled peers are one problem.
+        // stderr took the time of the line before it, the newest; the two stalled peers are
+        // one problem.
         assert_eq!(problems[0].level, ProblemLevel::Stderr);
+        assert_eq!(problems[0].first, at("2026-10-23T18:35:05Z"));
         assert_eq!(
             problems[1].pattern,
             "dropping stalled peer: exceeded FindBlocks/FindHeaders stall threshold addr=_"
@@ -1359,8 +1375,9 @@ mod tests {
         let second = insights.current_run().unwrap();
         assert_eq!(second.started_at, at("2026-10-23T18:41:00Z"));
         assert_eq!(second.shutdown_reason.as_deref(), Some("stdin closed"));
-        // No `stopping zebrad`: the launcher's exit note gives the stop time.
-        assert_eq!(second.stopped_at, Some(at("2026-10-23T18:42:00Z")));
+        // No `stopping zebrad`: the launcher's exit note gives the stop time, dated by the
+        // line before it rather than by the ingest time.
+        assert_eq!(second.stopped_at, Some(at("2026-10-23T18:41:30Z")));
         // Per-run facts were reset by the second run and refilled by its startup.
         assert_eq!(insights.peers().initial_successes, 12);
         assert_eq!(insights.checkpoints().blocks_verified, 800);
@@ -1392,6 +1409,79 @@ mod tests {
         assert_eq!(insights.current_run(), None);
         assert_eq!(insights.problems(5).len(), 1);
         assert_eq!(insights.problems(5)[0].level, ProblemLevel::Stderr);
+        // With no timestamped line anywhere, the ingest time is all there is.
+        assert_eq!(insights.problems(5)[0].first, at(T0));
+    }
+
+    #[test]
+    fn a_replayed_history_keeps_its_own_times() {
+        // The webview reloads two hours into a run and the history is replayed: the launcher's
+        // note comes first and continuation and stderr lines sit between stamped ones. None
+        // may take the reload time, which would wipe the minute buckets and date the problems.
+        let mut insights = Insights::default();
+        let now = at("2026-10-23T20:35:00Z");
+        insights.ingest(
+            &[
+                launcher(0, "zebrad started (pid 1)"),
+                stamped(
+                    1,
+                    "2026-10-23T18:35:01Z",
+                    LogLevel::Info,
+                    "t",
+                    "Diagnostic metadata:",
+                ),
+                continuation(2, "version: 7.0.0"),
+                stamped(
+                    3,
+                    "2026-10-23T20:05:10Z",
+                    LogLevel::Warn,
+                    "t",
+                    "block download failed",
+                ),
+                stderr(4, "thread 'main' panicked"),
+                stamped(5, "2026-10-23T20:34:00Z", LogLevel::Info, "t", "fine"),
+            ],
+            now,
+        );
+        assert_eq!(insights.lines_total(), 6);
+        let activity = insights.activity(now);
+        let by_minute = |minute: &str| {
+            let start = at(minute);
+            *activity.iter().find(|b| b.minute_start == start).unwrap()
+        };
+        let m2005 = by_minute("2026-10-23T20:05:00Z");
+        assert_eq!(
+            (m2005.warn, m2005.error),
+            (1, 1),
+            "the WARN line and the stderr after it"
+        );
+        assert_eq!(by_minute("2026-10-23T20:34:00Z").info, 1);
+        assert_eq!(
+            by_minute("2026-10-23T20:35:00Z").total(),
+            0,
+            "nothing dated at the reload"
+        );
+        // The 18:35 bucket rolled out, more than an hour before the next line; the oldest kept
+        // minute is a line's own, not the reload minute.
+        assert_eq!(
+            insights.buckets.front().map(|b| b.minute_start),
+            Some(at("2026-10-23T20:05:00Z"))
+        );
+        let problems = insights.problems(5);
+        assert_eq!(problems.len(), 2);
+        assert!(
+            problems
+                .iter()
+                .all(|p| p.first == at("2026-10-23T20:05:10Z")),
+            "{problems:?}"
+        );
+        // A later batch without a timestamp still follows the last stamped line, not `now`.
+        insights.ingest(&[continuation(6, "more")], at("2026-10-23T20:36:00Z"));
+        let activity = insights.activity(now);
+        let m2034 = activity
+            .iter()
+            .find(|b| b.minute_start == at("2026-10-23T20:34:00Z"));
+        assert_eq!(m2034.map(|b| b.other), Some(1));
     }
 
     #[test]
