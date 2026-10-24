@@ -23,6 +23,9 @@ updates:
           - "js-sys"
           - "web-sys"
           - "leptos*"
+      # Everything else. The exclude list mirrors the two groups above so that
+      # a tauri or wasm crate never lands in this catch-all pull request:
+      # change the three lists together.
       rust-other:
         patterns:
           - "*"
@@ -42,9 +45,25 @@ updates:
       separator: "-"
     schedule:
       interval: monthly
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "deps(actions): "
     groups:
       actions:
+        patterns:
+          - "*"
+
+  # The Prometheus and Grafana images of the observability stack (docs/GRAFANA.md).
+  - package-ecosystem: docker-compose
+    directory: /docs/observability
+    pull-request-branch-name:
+      separator: "-"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "deps(compose): "
+    groups:
+      observability:
         patterns:
           - "*"

@@ -18,9 +18,9 @@ The launcher writes these keys into its managed `zebrad.toml`:
 | `rpc.listen_addr` | `127.0.0.1:8232` (`18232` on Testnet) |
 | `rpc.enable_cookie_auth` | `true` |
 
-Prometheus only needs the metrics endpoint. If the launcher moved a port because it was
-in use, change the target in `observability/prometheus.yml` and
-`observability/prometheus.linux.yml` to the port shown in the launcher's config.
+Prometheus only needs the metrics endpoint. The launcher never moves these ports (they are
+read-only in Configure), so the targets in `observability/prometheus.yml` and
+`observability/prometheus.linux.yml` always match.
 
 ## Start the stack
 
@@ -57,12 +57,13 @@ Docker bridge cannot reach a host port bound to `127.0.0.1`.
 - **Docker Desktop (macOS, Windows):** the default file scrapes `host.docker.internal:9999`,
   with `extra_hosts: ["host.docker.internal:host-gateway"]`.
 
-> **To verify in M7:** whether Docker Desktop forwards `host.docker.internal:9999` to a
-> host service bound to `127.0.0.1` on macOS and Windows. If it does not, the fallbacks
-> are Docker Desktop's host networking (Settings → Resources → Network → Enable host
-> networking) with the Linux override, or a metrics bind on the Docker bridge address.
-> The second conflicts with the launcher's loopback-only rule for metrics and needs a
-> decision first. Record the result here.
+> **Not yet verified on macOS and Windows:** whether Docker Desktop forwards
+> `host.docker.internal:9999` to a host service bound to `127.0.0.1`. The stack has only
+> been run on Linux so far. If it does not, the fallbacks are Docker Desktop's host
+> networking (Settings → Resources → Network → Enable host networking) with the Linux
+> override, or a metrics bind on the Docker bridge address. The second conflicts with the
+> launcher's loopback-only rule for metrics and needs a decision first. Record the result
+> here once checked.
 
 ## The Grafana tab
 
@@ -173,8 +174,8 @@ If a header is printed, `GF_SECURITY_ALLOW_EMBEDDING` did not reach the containe
 recreate it with `docker compose ... up -d --force-recreate grafana`. Also check that
 the launcher's Grafana URL starts with `http://127.0.0.1:` or `http://localhost:`.
 On macOS, whether WKWebView loads `http://127.0.0.1:3000` inside the launcher's
-`tauri://localhost` page (mixed content) is **to verify in M7**; if it is blocked, use
-"Open in browser".
+`tauri://localhost` page (mixed content) has **not been verified yet**; if it is blocked,
+use "Open in browser".
 
 **The iframe shows a login page.**
 Anonymous access is off. Check that this succeeds without credentials:
@@ -183,8 +184,8 @@ Anonymous access is off. Check that this succeeds without credentials:
 curl -sf http://127.0.0.1:3000/api/dashboards/uid/zebra-overview > /dev/null && echo ok
 ```
 
-Whether anonymous Viewer works inside the sandboxed iframe on every OS is **to verify in
-M7**. Logging in inside the iframe may not persist, because Grafana's session cookie is
+Whether anonymous Viewer works inside the sandboxed iframe has **not been verified yet**
+on an installed bundle on any OS. Logging in inside the iframe may not persist, because Grafana's session cookie is
 `SameSite=Lax` and the launcher page is a different site; log in from a browser instead.
 
 **Dashboards show "No data".**
@@ -193,7 +194,6 @@ M7**. Logging in inside the iframe may not persist, because Grafana's session co
 2. Is the target up? Open <http://127.0.0.1:9090/targets>.
 3. Target down on Linux: you started without `docker-compose.linux.yml`.
 4. Target down on Docker Desktop: see "Why two compose files" above.
-5. Wrong port: the launcher moved the metrics port; update the Prometheus target.
 
 **Port 3000 or 9090 already in use.**
 Change the host side of the `ports:` mapping in `docker-compose.yml`; on Linux change

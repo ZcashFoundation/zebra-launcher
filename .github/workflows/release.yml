@@ -113,11 +113,16 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           echo "Zebra Launcher ${version}, prerelease: ${prerelease}" >> "${GITHUB_STEP_SUMMARY}"
 
-      # The five-target matrix, from .github/targets.json.
+      # The five-target matrix, from .github/targets.json through the same
+      # script as bundle.yml (no `targets` input here: a release builds all).
       - id: targets
         name: Read the target matrix
         shell: bash
-        run: echo "matrix=$(jq -c . .github/targets.json)" >> "${GITHUB_OUTPUT}"
+        run: |
+          set -euo pipefail
+          matrix="$(scripts/select-targets.sh)"
+          echo "${matrix}"
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
 
       # The one place that decides whether this release must ship updater
       # artifacts (.sig files and latest.json): tauri.conf.json's
@@ -367,7 +372,9 @@ jobs:
   # signCommand (Azure Artifact Signing) for the app, the sidecar and the
   # installer; macOS codesign of the app and sidecar plus notarization. The
   # updater .sig files are made afterwards by "Sign the updater artifacts",
-  # the only step with the minisign key (see the header).
+  # the only step with the minisign key (see the header). If `cargo tauri
+  # bundle` cannot consume the `build` job's binaries for a target, see
+  # docs/RELEASING.md#if-bundling-the-prebuilt-binaries-fails.
   # ---------------------------------------------------------------------------
   bundle_sign:
     name: Bundle and sign (${{ matrix.target }})
@@ -604,39 +611,6 @@ jobs:
         run: |
           set -euo pipefail
           scripts/upload-release-assets.sh --release-id "${RELEASE_ID}" --upload-url "${UPLOAD_URL}" dist/*
-
-  # ===========================================================================
-  # FALLBACK: single-job build + bundle + sign.
-  #
-  # Use this if `cargo tauri bundle` cannot package the binaries compiled by
-  # the `build` job for some target (open verification item, docs/PLAN.md
-  # "Items to verify", M9). It gives up the unprivileged/privileged split for
-  # that run: dependency build scripts then execute in the job that holds the
-  # signing secrets, so keep it cache-free.
-  #
-  # To switch:
-  #   1. Delete the `build` job and change bundle_sign's `needs` to
-  #      [verify, draft, sidecars].
-  #   2. In bundle_sign, delete the "build-<target>" download-artifact step and
-  #      the "Place the compiled app" step (keep the zebrad download and add
-  #      its chmod +x), and drop `compile: "false"` from
-  #      ./.github/actions/setup-tauri.
-  #   3. In the three "Bundle and sign" steps, replace `cargo tauri bundle` with
-  #      `cargo tauri build`, keeping the same flags, env and throwaway key,
-  #      e.g.:
-  #
-  #        - name: Bundle and sign (Linux)
-  #          if: runner.os == 'Linux'
-  #          run: |
-  #            set -euo pipefail
-  #            export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-  #            cargo fetch --locked
-  #            cargo tauri build --target "${TARGET}" --ci
-  #
-  #      Add `scripts/check-glibc.sh` after it on Linux. Keep "Sign the updater
-  #      artifacts" as the only step with the updater key. Never add
-  #      Swatinem/rust-cache or actions/cache to this job.
-  # ===========================================================================
 
   # ---------------------------------------------------------------------------
   # manifest: latest.json, SHA256SUMS + keyless cosign, attestations.

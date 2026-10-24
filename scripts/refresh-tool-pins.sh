@@ -20,13 +20,19 @@
 #                 cargo-tauri-<triple>.tgz (Linux) or .zip (macOS, Windows)
 #   trunk         trunk-rs/trunk, tag v<version>,
 #                 trunk-<triple>.tar.gz, or .zip on Windows
-# These are the URLs .github/actions/setup-tauri downloads; keep them in step.
+#   ShellCheck    koalaman/shellcheck, tag v<version>, shellcheck-v<version>.<os>.<arch>.tar.xz
+#   actionlint    rhysd/actionlint, tag v<version>,
+#                 actionlint_<version>_<os>_<amd64|arm64>.tar.gz
+# (ShellCheck is capitalised above because a comment that starts with the
+# word shellcheck is read as a directive.)
+# These are the URLs .github/actions/setup-tauri and the lint job of ci.yml
+# download; keep them in step.
 #
 # Exits 1 if a download fails or a hash differs from GitHub's digest.
 # Requires: bash, curl, sed, awk, sha256sum or shasum; gh for the digest check.
 #
 # Usage: scripts/refresh-tool-pins.sh [--root DIR] [--write] TOOL VERSION
-#   TOOL     wasm-bindgen, binaryen, tauri-cli or trunk
+#   TOOL     wasm-bindgen, binaryen, tauri-cli, trunk, shellcheck or actionlint
 #   VERSION  the release version, as the *_VERSION line takes it
 #   --write  update .github/tool-versions.env (default: dry run)
 #   --root   the repository to change (default: this script's repository)
@@ -65,7 +71,9 @@ case "${tool}" in
     binaryen) prefix=BINARYEN; repo=WebAssembly/binaryen; tag="${version}" ;;
     tauri-cli) prefix=TAURI_CLI; repo=tauri-apps/tauri; tag="tauri-cli-v${version}" ;;
     trunk) prefix=TRUNK; repo=trunk-rs/trunk; tag="v${version}" ;;
-    *) die "unknown tool '${tool}': use wasm-bindgen, binaryen, tauri-cli or trunk" ;;
+    shellcheck) prefix=SHELLCHECK; repo=koalaman/shellcheck; tag="v${version}" ;;
+    actionlint) prefix=ACTIONLINT; repo=rhysd/actionlint; tag="v${version}" ;;
+    *) die "unknown tool '${tool}': use wasm-bindgen, binaryen, tauri-cli, trunk, shellcheck or actionlint" ;;
 esac
 
 # asset_name PLATFORM: the release asset for a platform as tool-versions.env
@@ -87,6 +95,15 @@ asset_name() {
             case "${platform}" in
                 *-windows-*) printf 'trunk-%s.zip\n' "${platform}" ;;
                 *) printf 'trunk-%s.tar.gz\n' "${platform}" ;;
+            esac
+            ;;
+        # The linters' keys are <ARCH>_<OS>, such as X86_64_LINUX.
+        shellcheck) printf 'shellcheck-v%s.%s.%s.tar.xz\n' "${version}" "${platform#*-}" "${platform%%-*}" ;;
+        actionlint)
+            case "${platform}" in
+                x86_64-linux) printf 'actionlint_%s_linux_amd64.tar.gz\n' "${version}" ;;
+                aarch64-linux) printf 'actionlint_%s_linux_arm64.tar.gz\n' "${version}" ;;
+                *) die "no actionlint asset name for ${platform}" ;;
             esac
             ;;
     esac

@@ -1,11 +1,21 @@
 # shellcheck shell=bash
-# Helpers shared by the sidecar scripts (fetch-zebrad-linux.sh,
-# build-zebrad.sh, dev-sidecar.sh). Source it after defining
-# `die MESSAGE...`, which must print the message and exit non-zero.
+# Helpers shared by the sidecar and version scripts (fetch-zebrad-linux.sh,
+# build-zebrad.sh, dev-sidecar.sh, check-versions.sh, bump-zebrad.sh) and by
+# the `run:` steps of zebrad-sidecars.yml and zebrad-watch.yml. Source it after
+# defining `die MESSAGE...`, which must print the message and exit non-zero.
 #
 # The functions that print a value are meant for `x="$(fn ...)"` under
 # `set -e`: when they call die inside the command substitution, the assignment
 # fails and the caller exits too.
+#
+# Two version grammars, decided once here:
+#   - the ZEBRAD_VERSION pin is a stable release, MAJOR.MINOR.PATCH and nothing
+#     else (is_stable_version): zebrad-watch.yml only ever bumps to one, and
+#     check-versions.sh and bump-zebrad.sh enforce it;
+#   - a one-off `--version` given to the build and fetch scripts, or the
+#     `version` input of zebrad-sidecars.yml, may carry a pre-release suffix
+#     such as 7.0.0-rc.0 (is_zebrad_version), to build or verify a release
+#     candidate without pinning it.
 
 # read_pin FILE: prints FILE with all whitespace removed, or nothing if it is
 # missing.
@@ -29,21 +39,37 @@ read_zebrad_commit() {
     fi
 }
 
-# check_zebrad_version VERSION [HINT]: dies unless VERSION is plain semver
-# (optionally with a pre-release suffix) without a leading "v", so it is safe
-# in URLs and patterns. HINT is appended to the leading-"v" error.
+# is_zebrad_version STRING: succeeds when STRING is X.Y.Z, optionally with a
+# pre-release suffix (7.0.0-rc.0), and no leading "v", so it is safe in URLs
+# and patterns.
+is_zebrad_version() {
+    printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+}
+
+# is_stable_version STRING: succeeds when STRING is exactly MAJOR.MINOR.PATCH,
+# with no leading zeros, suffix or leading "v": the grammar of ZEBRAD_VERSION.
+is_stable_version() {
+    printf '%s\n' "$1" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+}
+
+# check_zebrad_version VERSION [HINT]: dies unless is_zebrad_version VERSION.
+# HINT is appended to the leading-"v" error.
 check_zebrad_version() {
     case "$1" in
         v* | V*) die "version '$1' must not start with 'v'${2:+ $2}" ;;
     esac
-    printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' ||
-        die "version '$1' is not of the form X.Y.Z"
+    is_zebrad_version "$1" || die "version '$1' is not of the form X.Y.Z"
 }
 
-# check_commit SHA: dies unless SHA is a full 40-character lowercase hex SHA.
+# check_stable_version VERSION: dies unless is_stable_version VERSION, as the
+# ZEBRAD_VERSION pin requires.
+check_stable_version() {
+    is_stable_version "$1" || die "'$1' is not MAJOR.MINOR.PATCH without a leading v"
+}
+
+# check_commit SHA: dies unless is_full_sha SHA.
 check_commit() {
-    printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{40}$' ||
-        die "commit '$1' is not a full 40-character lowercase hex SHA"
+    is_full_sha "$1" || die "commit '$1' is not a full 40-character lowercase hex SHA"
 }
 
 # check_git_ref REF: dies unless REF looks like a branch, tag or commit name

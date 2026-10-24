@@ -3,7 +3,7 @@
 How to cut a Zebra Launcher release with
 [`release.yml`](../.github/workflows/release.yml). The goal: another maintainer can cut a
 release candidate from a clean clone by following this file alone. The pipeline design
-is in [ARCHITECTURE.md](ARCHITECTURE.md#release-pipeline-m9-m10), and signing and key
+is in [ARCHITECTURE.md](ARCHITECTURE.md#release-pipeline), and signing and key
 custody are in [SECURITY.md](SECURITY.md).
 
 ## Versions
@@ -94,6 +94,9 @@ Windows zebrad builds are cold.
    `curl -sL https://github.com/ZcashFoundation/zebra-launcher/releases/latest/download/latest.json | jq .version`.
 10. **Announce** the release in the usual Zcash Foundation channels, with the release
    link.
+11. **After the first green release candidate** on all five targets, delete the
+   [fallback section](#if-bundling-the-prebuilt-binaries-fails) and this step:
+   `cargo tauri bundle` consuming the `build` job's binaries is then verified.
 
 ### Smoke-test checklist
 
@@ -121,7 +124,7 @@ Windows zebrad builds are cold.
       Running.
 - [ ] **Every OS**: with close-to-tray on, closing the window keeps the node running;
       tray Quit leaves no `zebra-launcher-zebrad` process.
-- [ ] **Updater (M11 and later)**: every `.sig` names this version (see below), and
+- [ ] **Updater** (releases that ship it): every `.sig` names this version (see below), and
       the [update rehearsal](#update-rehearsal) from the previous rc to this release
       works on every target; the `.deb` shows the release link instead of installing.
 <!-- smoke-checklist:end -->
@@ -130,13 +133,13 @@ Windows zebrad builds are cold.
 
 The repository variable `UPDATER_ENABLED` says whether releases ship the updater:
 
-- unset or anything but `false` (the default from M11 on): `bundle_sign` must produce
+- unset or anything but `false` (the default once the updater key exists): `bundle_sign` must produce
   updater artifacts and `.sig` files, `manifest` must assemble a `latest.json` with all
   five platform keys, and `scripts/check-versions.sh` (in the `verify` job) fails while
   `plugins.updater.pubkey` in `src-tauri/tauri.conf.json` is still the placeholder
   `REPLACE_WITH_MINISIGN_PUBLIC_KEY`.
-- `false`: only for releases cut before the updater key exists (the M10 signing
-  rehearsal). No `latest.json` is required and the placeholder key is accepted. Such a
+- `false`: only for releases cut before the updater key exists (a signing rehearsal). No
+  `latest.json` is required and the placeholder key is accepted. Such a
   release cannot update itself; its users install the next one by hand.
 
 The `verify` job decides this once, in its `updater` step (`require_updater`, from the
@@ -227,6 +230,43 @@ at a local copy of `latest.json` served from a scratch directory (for example wi
 - a `latest.json` that announces a higher version with an older release's `url` and
   `signature`: refused (the signed version does not match);
 - updates Off: the local server's access log stays empty for the whole session.
+
+## If bundling the prebuilt binaries fails
+
+`release.yml` compiles the app in the unprivileged `build` job and packages the compiled
+binaries with `cargo tauri bundle` in `bundle_sign`. Whether `cargo tauri bundle` can
+consume those prebuilt binaries is confirmed, per target, by the first release candidate
+that runs the pipeline. If it cannot for some target, fall back to a single job that
+builds, bundles and signs. That gives up the unprivileged/privileged split for that run:
+dependency build scripts then execute in the job that holds the signing secrets, so keep
+it cache-free.
+
+To switch:
+
+1. Delete the `build` job and change `bundle_sign`'s `needs` to
+   `[verify, draft, sidecars]`.
+2. In `bundle_sign`, delete the `build-<target>` download-artifact step and the "Place
+   the compiled app" step (keep the zebrad download and add its `chmod +x`), and drop
+   `compile: "false"` from `./.github/actions/setup-tauri`.
+3. In the three "Bundle and sign" steps, replace `cargo tauri bundle` with
+   `cargo tauri build`, keeping the same flags, env and throwaway key, for example:
+
+   ```yaml
+   - name: Bundle and sign (Linux)
+     if: runner.os == 'Linux'
+     run: |
+       set -euo pipefail
+       export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+       cargo fetch --locked
+       cargo tauri build --target "${TARGET}" --ci
+   ```
+
+   Add `scripts/check-glibc.sh` after it on Linux. Keep "Sign the updater artifacts" as
+   the only step with the updater key. Never add `Swatinem/rust-cache` or
+   `actions/cache` to this job.
+
+Delete this section once a release candidate has gone green on all five targets (step 11
+of the [release-day runbook](#release-day-runbook)).
 
 ## Bad-release runbook
 

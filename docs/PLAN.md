@@ -2,6 +2,13 @@
 
 # Zebra Launcher: plan to make it a stable, maintained product
 
+> **Historical.** This is the plan as approved on 2026-10-23, kept as the design record.
+> [ARCHITECTURE.md](ARCHITECTURE.md) describes what was built; where the two differ (for
+> example, CI runs on the `ubuntu-24.04` runner rather than in an `ubuntu:22.04` container,
+> the build tools come from sha256-pinned release binaries rather than `cargo binstall`, and
+> the Grafana embed has its own tab rather than a place on the dashboard), ARCHITECTURE.md
+> is right. Milestone status lives in the merged pull requests.
+
 ## Context
 
 Zebra Launcher (this repo) is a Tauri desktop app that installs and runs `zebrad`, shows its logs, and lets the user edit `zebrad.toml` and restart the node. It stalled at v0.0.0-alpha.4 (2024-12-09): it pins Tauri 2.0.0-beta.6/beta.7 and `@tauri-apps` beta npm packages with open-ended `>=2.0.0-beta.0` ranges, dependabot churn was never merged, macOS builds were unsigned and would not open (issue #27), and the backend has debts: `std::sync::Mutex<Option<Child>>` state (`src-tauri/src/state.rs`), config and binary resolved next to the executable (`src-tauri/src/child_process.rs:34-54`, read-only on installed macOS/Windows/deb apps), `SIGKILL` with no `wait()` and hardcoded 3 s/5 s sleeps, stderr piped but never drained (can block zebrad), every failure an `expect()` before any window opens, no tracing subscriber, CSP `null`, `tauri-plugin-shell` depended on but never registered, and ~157 MB of zebrad binaries committed (`src-tauri/binaries`, .git is 179 MB, no macOS binary at all). CI only builds and deploys a browser demo to Cloud Run (always-on prod instance, GCP secrets); nothing checks the Rust code or builds a bundle.

@@ -1,7 +1,8 @@
 # Security
 
-> Partly a skeleton: sections marked TODO are filled in during M10 (signing, key
-> ceremony). The updater sections are M11.
+> Partly a skeleton: the items marked TODO (signing identities, the key ceremony record,
+> escrow, rotation, the disclosure address) are filled in when the first signed release
+> is cut.
 
 ## Reporting a vulnerability
 
@@ -24,10 +25,10 @@ What the launcher protects:
   without secrets; bundling and signing run in the `release` environment (required
   reviewer, no restored caches); actions are pinned by SHA.
 
-Out of scope: TODO(M10): for example a compromised user account or OS, and Grafana
+Out of scope: TODO: for example a compromised user account or OS, and Grafana
 security (user-run).
 
-TODO(M10): table of assets, threats and mitigations.
+TODO: table of assets, threats and mitigations.
 
 ## Release pipeline downloads
 
@@ -95,9 +96,9 @@ requires, so the build fails rather than fetch a different one.
 ## Code signing
 
 - macOS: Apple Developer ID, hardened runtime, notarization; sidecars are signed by the
-  Tauri bundler. TODO(M10): team ID and certificate holder.
+  Tauri bundler. TODO: team ID and certificate holder.
 - Windows: Azure Artifact Signing through GitHub OIDC, for installer, app and sidecar.
-  TODO(M10): identity and subscription owner.
+  TODO: identity and subscription owner.
 - Linux: no platform signing; cosign and attestations only.
 
 ## Updater key custody and rotation
@@ -119,7 +120,7 @@ updater artifacts in the `release` environment.
   unencrypted). It writes `zebra-launcher-updater.key` (the encrypted private key) and
   `zebra-launcher-updater.key.pub` (the public key, base64). Record the public key's
   SHA-256 in this file, then copy the `.pub` contents into `plugins.updater.pubkey`
-  in a reviewed PR. TODO(M10): date, participants, public key fingerprint.
+  in a reviewed PR. TODO: date, participants, public key fingerprint.
 - **The placeholder:** until that PR merges, `pubkey` is `REPLACE_WITH_MINISIGN_PUBLIC_KEY`.
   A build with the placeholder rejects every update (the key does not decode), and
   `scripts/check-versions.sh` fails the release unless the repository variable
@@ -127,10 +128,10 @@ updater artifacts in the `release` environment.
 - **Custody:** the encrypted key and its password are escrowed offline, separately, with
   two custodians; the CI copy lives only in the `release` environment's secrets
   `TAURI_SIGNING_PRIVATE_KEY` (the key file's contents) and
-  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. TODO(M10): where escrow copies are kept.
-- **Rotation:** TODO(M10): schedule and steps, including shipping the new public key in a
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. TODO: where escrow copies are kept.
+- **Rotation:** TODO: schedule and steps, including shipping the new public key in a
   release signed by the old one.
-- **Compromise:** TODO(M10): runbook (revoke, ship a key rotation, notify users). Updates
+- **Compromise:** TODO: runbook (revoke, ship a key rotation, notify users). Updates
   are opt-in and every asset also carries a keyless cosign signature for out-of-band
   checks.
 
@@ -184,11 +185,11 @@ post-update recovery screen links to.
 Zebra's ADR 0008 prefers keyless signing. The minisign updater key is a documented
 exception: Tauri's updater verifies only minisign signatures with a public key compiled
 into the app. Everything else (cosign signatures, attestations) is keyless.
-TODO(M10): link ADR 0008 and record the maintainers' sign-off.
+TODO: link ADR 0008 and record the maintainers' sign-off.
 
 ## Verifying a download
 
-TODO(M10): exact commands and identities, tested against a real release.
+TODO: exact commands and identities, tested against a real release.
 
 - **Checksums:** compare with `SHA256SUMS` from the release.
 - **cosign:** `cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json

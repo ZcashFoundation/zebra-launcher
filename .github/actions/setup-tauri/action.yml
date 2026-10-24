@@ -22,12 +22,20 @@
 # compile, trunk then runs offline (TRUNK_OFFLINE=true in $GITHUB_ENV), so it
 # cannot download its own wasm-bindgen or wasm-opt: it uses the pinned ones on
 # PATH, at exactly the versions it requires, or fails.
+#
+# With `bundler: "false"` only the pins and the frontend tools are installed:
+# for a job on a plain runner that already has the toolchain and only needs
+# `trunk build` (the lint job of ci.yml).
 name: Set up the Tauri toolchain
 description: Tool pins from .github/tool-versions.env, Linux packages, Rust toolchain, tauri-cli and (to compile) trunk, wasm-bindgen and wasm-opt.
 
 inputs:
   compile:
     description: '"true" when the job compiles the app (installs trunk, wasm-bindgen and wasm-opt); "false" when it only bundles'
+    required: false
+    default: "true"
+  bundler:
+    description: '"true" when the job runs cargo tauri build or bundle (installs the Linux packages, rustup, the Rust toolchain and tauri-cli); "false" for a job that already has a toolchain and only needs trunk, wasm-bindgen and wasm-opt'
     required: false
     default: "true"
 
@@ -54,7 +62,7 @@ runs:
         done < "${pins}"
 
     - name: Install Linux packages
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' && inputs.bundler == 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -64,7 +72,7 @@ runs:
         apt-get install -y --no-install-recommends ${LINUX_PACKAGES}
 
     - name: Install rustup (container)
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' && inputs.bundler == 'true'
       shell: bash
       env:
         RUSTUP_VERSION: 1.29.2
@@ -97,6 +105,7 @@ runs:
     # for the rest of the job, so rustup does not go back to the toolchain
     # file and install its components after all.
     - name: Install the Rust toolchain
+      if: inputs.bundler == 'true'
       shell: bash
       env:
         COMPILE: ${{ inputs.compile }}
@@ -128,6 +137,7 @@ runs:
       shell: bash
       env:
         COMPILE: ${{ inputs.compile }}
+        BUNDLER: ${{ inputs.bundler }}
       run: |
         set -euo pipefail
         host="$(rustc -vV | sed -n 's/^host: //p')"
@@ -200,16 +210,18 @@ runs:
           chmod +x "${dest}/${binary##*/}"
         }
 
-        case "${host}" in
-          *-linux-*) cli_ext=tgz ;;
-          *) cli_ext=zip ;;
-        esac
-        fetch TAURI_CLI \
-          "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v${TAURI_CLI_VERSION}/cargo-tauri-${host}.${cli_ext}" \
-          "${host}" "cargo-tauri${exe}"
-        [ "$(cargo tauri --version)" = "tauri-cli ${TAURI_CLI_VERSION}" ] \
-          || { echo "::error::cargo tauri --version is '$(cargo tauri --version)', expected tauri-cli ${TAURI_CLI_VERSION}"; exit 1; }
-        cargo tauri --version
+        if [ "${BUNDLER}" = true ]; then
+          case "${host}" in
+            *-linux-*) cli_ext=tgz ;;
+            *) cli_ext=zip ;;
+          esac
+          fetch TAURI_CLI \
+            "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v${TAURI_CLI_VERSION}/cargo-tauri-${host}.${cli_ext}" \
+            "${host}" "cargo-tauri${exe}"
+          [ "$(cargo tauri --version)" = "tauri-cli ${TAURI_CLI_VERSION}" ] \
+            || { echo "::error::cargo tauri --version is '$(cargo tauri --version)', expected tauri-cli ${TAURI_CLI_VERSION}"; exit 1; }
+          cargo tauri --version
+        fi
 
         if [ "${COMPILE}" = true ]; then
           case "${host}" in

@@ -29,18 +29,30 @@ jobs:
           # The toolchain comes from rust-toolchain.toml.
           cache: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Install the WebKitGTK and tray libraries Tauri builds against
+      # The one Linux package list, shared with the bundle jobs and DEVELOPMENT.md.
+      - name: Install the Linux packages Tauri builds against (LINUX_PACKAGES)
         run: |
+          set -euo pipefail
+          packages="$(sed -n 's/^LINUX_PACKAGES=//p' .github/tool-versions.env)"
+          [ -n "${packages}" ] || { echo "::error::no LINUX_PACKAGES in .github/tool-versions.env"; exit 1; }
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-            libxdo-dev libssl-dev patchelf
+          # shellcheck disable=SC2086 # LINUX_PACKAGES is a word list
+          sudo apt-get install -y --no-install-recommends ${packages}
       - run: cargo fmt --all --check
       # tauri-build requires the sidecar file named in bundle.externalBin.
       - name: Install fake-zebrad as the sidecar
         run: scripts/dev-sidecar.sh
       - run: cargo clippy --workspace --all-targets --locked
       - run: cargo test --workspace --locked
+      # The UI as it ships: compiled for wasm32 (rust-toolchain.toml installs the
+      # target), then built by trunk with the pinned wasm-bindgen and wasm-opt.
+      # setup-tauri without its bundler half: no tauri-cli, no second toolchain.
+      - run: cargo clippy -p ui --target wasm32-unknown-unknown --locked
+      - uses: ./.github/actions/setup-tauri
+        with:
+          bundler: "false"
+      - run: trunk build --release
+        working-directory: ui
 
   deny:
     name: cargo deny
@@ -50,6 +62,99 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
+
+  # The bash in scripts/ and docs/observability/, and the workflows (actionlint
+  # also hands every `run:` block to shellcheck). actionlint does not read
+  # composite actions, so .github/actions/setup-tauri/action.yml is not covered.
+  lint-scripts:
+    name: shellcheck and actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Release binaries at the versions pinned in .github/tool-versions.env,
+      # each checked against its sha256 pin before it runs, as setup-tauri does
+      # for the build tools. scripts/refresh-tool-pins.sh refreshes the pins.
+      - name: Install shellcheck and actionlint (pinned)
+        run: |
+          set -euo pipefail
+          pin() { sed -n "s/^$1=//p" .github/tool-versions.env | tr -d '\r'; }
+          bin="${RUNNER_TEMP}/lint-tools"
+          mkdir -p "${bin}"
+          fetch() { # fetch URL SHA256 ARCHIVE
+            curl --proto '=https' --tlsv1.2 -sSfL --retry 3 -o "$3" "$1"
+            echo "$2  $3" | sha256sum -c -
+          }
+          version="$(pin SHELLCHECK_VERSION)"
+          fetch "https://github.com/koalaman/shellcheck/releases/download/v${version}/shellcheck-v${version}.linux.x86_64.tar.xz" \
+            "$(pin SHELLCHECK_SHA256_X86_64_LINUX)" "${RUNNER_TEMP}/shellcheck.tar.xz"
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${bin}" --strip-components=1 "shellcheck-v${version}/shellcheck"
+          version="$(pin ACTIONLINT_VERSION)"
+          fetch "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz" \
+            "$(pin ACTIONLINT_SHA256_X86_64_LINUX)" "${RUNNER_TEMP}/actionlint.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/actionlint.tar.gz" -C "${bin}" actionlint
+          echo "${bin}" >> "${GITHUB_PATH}"
+          "${bin}/shellcheck" --version
+          "${bin}/actionlint" -version
+      - run: shellcheck scripts/*.sh docs/observability/*.sh
+      - run: actionlint
+
+  # The contract tests against the real, pinned zebrad
+  # (crates/launcher-core/tests/real_zebrad.rs), which pass silently without
+  # ZEBRAD_BIN. They run on pushes to main and on pull requests that change
+  # ZEBRAD_VERSION or ZEBRAD_COMMIT (every zebrad-watch bump), so pull-request
+  # CI stays fast and a bump cannot break stop detection or exit
+  # classification with every job green. Linux only: that is where a verified
+  # release binary exists (scripts/fetch-zebrad-linux.sh).
+  real-zebrad:
+    name: Real-zebrad contract tests (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The gate step diffs a pull request against its base.
+          fetch-depth: 0
+      - id: gate
+        name: Decide whether the tests run
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          run=false
+          if [ "${EVENT}" = push ]; then
+            run=true
+          else
+            changed="$(git diff --name-only "${BASE_SHA}...HEAD")"
+            if grep -qxE 'ZEBRAD_VERSION|ZEBRAD_COMMIT' <<< "${changed}"; then
+              run=true
+            fi
+          fi
+          echo "run the real-zebrad contract tests: ${run}"
+          echo "run=${run}" >> "${GITHUB_OUTPUT}"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: steps.gate.outputs.run == 'true'
+      # cosign, sha256 and the GitHub attestation, as zebrad-sidecars.yml checks.
+      - name: Fetch and verify the pinned zebrad
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUIRE_ATTESTATION: "1"
+        run: scripts/fetch-zebrad-linux.sh --out "${RUNNER_TEMP}/zebrad/zebrad"
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        if: steps.gate.outputs.run == 'true'
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.gate.outputs.run == 'true'
+      # --include-ignored: still runs them once the no-ZEBRAD_BIN skip is an
+      # `#[ignore]` rather than a silent pass.
+      - name: Run the contract tests
+        if: steps.gate.outputs.run == 'true'
+        env:
+          ZEBRAD_BIN: ${{ runner.temp }}/zebrad/zebrad
+        run: cargo test -p launcher-core --test real_zebrad --locked -- --include-ignored --nocapture
 
   test-os:
     name: Test (${{ matrix.os }})
