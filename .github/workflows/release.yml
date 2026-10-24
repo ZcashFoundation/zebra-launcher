@@ -372,7 +372,9 @@ jobs:
   # signCommand (Azure Artifact Signing) for the app, the sidecar and the
   # installer; macOS codesign of the app and sidecar plus notarization. The
   # updater .sig files are made afterwards by "Sign the updater artifacts",
-  # the only step with the minisign key (see the header).
+  # the only step with the minisign key (see the header). If `cargo tauri
+  # bundle` cannot consume the `build` job's binaries for a target, see
+  # docs/RELEASING.md#if-bundling-the-prebuilt-binaries-fails.
   # ---------------------------------------------------------------------------
   bundle_sign:
     name: Bundle and sign (${{ matrix.target }})

@@ -94,6 +94,9 @@ Windows zebrad builds are cold.
    `curl -sL https://github.com/ZcashFoundation/zebra-launcher/releases/latest/download/latest.json | jq .version`.
 10. **Announce** the release in the usual Zcash Foundation channels, with the release
    link.
+11. **After the first green release candidate** on all five targets, delete the
+   [fallback section](#if-bundling-the-prebuilt-binaries-fails) and this step:
+   `cargo tauri bundle` consuming the `build` job's binaries is then verified.
 
 ### Smoke-test checklist
 
@@ -230,36 +233,40 @@ at a local copy of `latest.json` served from a scratch directory (for example wi
 
 ## If bundling the prebuilt binaries fails
 
-FALLBACK: single-job build + bundle + sign.
-
-Use this if `cargo tauri bundle` cannot package the binaries compiled by
-the `build` job for some target (open verification item, docs/PLAN.md
-"Items to verify", M9). It gives up the unprivileged/privileged split for
-that run: dependency build scripts then execute in the job that holds the
-signing secrets, so keep it cache-free.
+`release.yml` compiles the app in the unprivileged `build` job and packages the compiled
+binaries with `cargo tauri bundle` in `bundle_sign`. Whether `cargo tauri bundle` can
+consume those prebuilt binaries is confirmed, per target, by the first release candidate
+that runs the pipeline. If it cannot for some target, fall back to a single job that
+builds, bundles and signs. That gives up the unprivileged/privileged split for that run:
+dependency build scripts then execute in the job that holds the signing secrets, so keep
+it cache-free.
 
 To switch:
-  1. Delete the `build` job and change bundle_sign's `needs` to
-     [verify, draft, sidecars].
-  2. In bundle_sign, delete the "build-<target>" download-artifact step and
-     the "Place the compiled app" step (keep the zebrad download and add
-     its chmod +x), and drop `compile: "false"` from
-     ./.github/actions/setup-tauri.
-  3. In the three "Bundle and sign" steps, replace `cargo tauri bundle` with
-     `cargo tauri build`, keeping the same flags, env and throwaway key,
-     e.g.:
 
-       - name: Bundle and sign (Linux)
-         if: runner.os == 'Linux'
-         run: |
-           set -euo pipefail
-           export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-           cargo fetch --locked
-           cargo tauri build --target "${TARGET}" --ci
+1. Delete the `build` job and change `bundle_sign`'s `needs` to
+   `[verify, draft, sidecars]`.
+2. In `bundle_sign`, delete the `build-<target>` download-artifact step and the "Place
+   the compiled app" step (keep the zebrad download and add its `chmod +x`), and drop
+   `compile: "false"` from `./.github/actions/setup-tauri`.
+3. In the three "Bundle and sign" steps, replace `cargo tauri bundle` with
+   `cargo tauri build`, keeping the same flags, env and throwaway key, for example:
 
-     Add `scripts/check-glibc.sh` after it on Linux. Keep "Sign the updater
-     artifacts" as the only step with the updater key. Never add
-     Swatinem/rust-cache or actions/cache to this job.
+   ```yaml
+   - name: Bundle and sign (Linux)
+     if: runner.os == 'Linux'
+     run: |
+       set -euo pipefail
+       export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+       cargo fetch --locked
+       cargo tauri build --target "${TARGET}" --ci
+   ```
+
+   Add `scripts/check-glibc.sh` after it on Linux. Keep "Sign the updater artifacts" as
+   the only step with the updater key. Never add `Swatinem/rust-cache` or
+   `actions/cache` to this job.
+
+Delete this section once a release candidate has gone green on all five targets (step 11
+of the [release-day runbook](#release-day-runbook)).
 
 ## Bad-release runbook
 
