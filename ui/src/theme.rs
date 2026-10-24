@@ -1,5 +1,5 @@
-//! Light and dark appearance: resolves the setting against the system preference and applies it
-//! to the document.
+//! Light and dark appearance: resolves the setting against the system preference, applies it
+//! to the document, and gives the Settings radios their words.
 //!
 //! The stylesheet defines every colour as a token on `:root` (the dark set) and redefines them
 //! under `:root[data-theme="light"]`, so applying a theme is one attribute on `<html>`.
@@ -9,6 +9,27 @@ use leptos::prelude::*;
 use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::app::AppState;
+
+/// The label and explanation of an appearance, for the Settings radios.
+pub fn theme_text(theme: Theme) -> (&'static str, &'static str) {
+    match theme {
+        Theme::System => (
+            "System",
+            "Follow the operating system's light or dark setting.",
+        ),
+        Theme::Light => ("Light", "Always light."),
+        Theme::Dark => ("Dark", "Always dark."),
+    }
+}
+
+/// The `value` of an appearance radio, the same word as on the wire.
+pub fn theme_value(theme: Theme) -> &'static str {
+    match theme {
+        Theme::System => "system",
+        Theme::Light => "light",
+        Theme::Dark => "dark",
+    }
+}
 
 /// Whether the appearance is dark for a setting and the system's preference.
 pub fn resolve(theme: Theme, system_prefers_light: bool) -> bool {
@@ -86,6 +107,14 @@ mod tests {
         assert!(!resolve(Theme::Light, true));
         assert!(resolve(Theme::Dark, false));
         assert!(resolve(Theme::Dark, true));
+    }
+
+    #[test]
+    fn theme_words() {
+        assert_eq!(theme_text(Theme::System).0, "System");
+        assert_eq!(theme_value(Theme::System), "system");
+        assert_eq!(theme_value(Theme::Light), "light");
+        assert_eq!(theme_value(Theme::Dark), "dark");
     }
 
     #[test]

@@ -41,9 +41,9 @@
 
 .cfg-pane-file {
   position: sticky;
-  /* The sticky area is inset by the scrolling page's padding (16px in styles.css); this puts
-     the pane on the page's top edge. */
-  top: -16px;
+  /* The sticky area is inset by the scrolling page's padding; this puts the pane on the page's
+     top edge. */
+  top: calc(-1 * var(--page-pad));
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -93,11 +93,6 @@
 .cfg-text-toggle {
   padding: 3px 10px;
   font-size: 12px;
-}
-
-.cfg-text-toggle[aria-pressed="true"] {
-  border-color: var(--accent);
-  color: var(--accent-text);
 }
 
 .cfg-file-body {
@@ -202,19 +197,6 @@
   border-top: 1px solid var(--error);
   color: var(--error);
   white-space: pre-wrap;
-}
-
-/* Text for assistive technology only. */
-.cfg-sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  border: 0;
 }
 
 /* Form pane */
@@ -463,11 +445,12 @@
 
 .cfg-footer {
   position: sticky;
-  /* The sticky area is inset by the scrolling page's padding (16px in styles.css); this puts
-     the footer on the page's bottom edge instead of 16px above it with content showing under. */
-  bottom: -16px;
+  /* The sticky area is inset by the scrolling page's padding; this puts the footer on the
+     page's bottom edge instead of above it with content showing under. */
+  bottom: calc(-1 * var(--page-pad));
   z-index: 2;
-  margin-top: 8px;
+  /* `pane_room` in configure.rs leaves the same gap when it sizes the file pane. */
+  margin-top: var(--cfg-footer-gap);
   padding-top: 8px;
   background: var(--bg);
 }
@@ -549,12 +532,13 @@
   color: var(--accent-text);
 }
 
-/* Above the icon, centred, until the measurement in tooltip.rs says otherwise. */
+/* Above the icon, centred, until the measurement in tooltip.rs says otherwise; the gap is
+   `--help-gap`, which tooltip.rs allows for too. */
 .help-tip {
   display: none;
   position: absolute;
   left: 50%;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + var(--help-gap));
   z-index: 5;
   width: max-content;
   max-width: 320px;
@@ -583,10 +567,10 @@
 
 .help-tip.help-below {
   bottom: auto;
-  top: calc(100% + 6px);
+  top: calc(100% + var(--help-gap));
 }
 
-/* A transparent strip over the 6px gap keeps the pointer inside .help while it moves onto the
+/* A transparent strip over the gap keeps the pointer inside .help while it moves onto the
    box, so the box can be read and its text selected (WCAG 1.4.13). As a part of the box it is
    only there while the box is shown. */
 .help-tip::before {
@@ -595,7 +579,7 @@
   left: 0;
   right: 0;
   top: 100%;
-  height: 6px;
+  height: var(--help-gap);
 }
 
 .help-tip.help-below::before {

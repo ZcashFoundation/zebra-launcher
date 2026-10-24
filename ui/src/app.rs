@@ -16,7 +16,6 @@ use crate::{
         status_strip::StatusStrip,
         updates::{HealthFailureBanner, UpdateBanner},
     },
-    format::update_needs_attention,
     insights::Insights,
     log_view::LogBuffer,
     pages::{
@@ -25,6 +24,7 @@ use crate::{
     },
     stats_history::StatsHistory,
     theme,
+    update_text::update_needs_attention,
 };
 
 /// The five pages.
@@ -224,7 +224,9 @@ impl AppState {
         self.logs.update(|logs| logs.merge(batch));
     }
 
-    /// Clears the Logs tab's badge: the user is looking at the page.
+    /// Clears the Logs tab's badge: the user is looking at the page. The shell calls it when
+    /// the Logs tab opens; [`AppState::record_logs`] covers the batches that arrive while the
+    /// tab is open. The Logs page itself has no part in the rule.
     pub fn mark_problems_seen(&self) {
         if self
             .insights
@@ -240,6 +242,40 @@ impl AppState {
             self.update
                 .with(|info| info.as_ref().and_then(|info| info.health_failure.clone()))
         })
+    }
+}
+
+/// Whether a subscription of [`subscribe_then_fetch`] has delivered an event yet.
+#[derive(Clone, Copy)]
+struct EventSeen(StoredValue<bool>);
+
+impl EventSeen {
+    fn mark(self) {
+        self.0.set_value(true);
+    }
+}
+
+/// The rule for a subscription that comes with a snapshot: subscribe before fetching, so no
+/// update falls between the fetch and the subscription; then apply the snapshot only when no
+/// event has arrived yet, since an event that arrives while the fetch is in flight is newer
+/// than the fetched snapshot. `subscribe` sets up the listeners (reporting their own errors)
+/// and calls `seen.mark()` from the one whose events the snapshot duplicates; `fetch` reads
+/// the snapshot, `apply` stores it, and `reading` names the fetch in the error if it fails.
+async fn subscribe_then_fetch<T, F>(
+    state: AppState,
+    subscribe: impl AsyncFnOnce(EventSeen),
+    fetch: impl FnOnce() -> F,
+    reading: &'static str,
+    apply: impl FnOnce(T),
+) where
+    F: Future<Output = api::ApiResult<T>>,
+{
+    let seen = EventSeen(StoredValue::new(false));
+    subscribe(seen).await;
+    match fetch().await {
+        Ok(snapshot) if !seen.0.get_value() => apply(snapshot),
+        Ok(_) => {}
+        Err(error) => state.report(reading, Err(error)),
     }
 }
 
@@ -267,91 +303,90 @@ pub fn App() -> impl IntoView {
 
     set_interval(move || state.now.set(clock::now()), Duration::from_secs(1));
 
-    // Subscribe before fetching, so no update falls between the fetch and the subscription. An
-    // event that arrives while the fetch is in flight is newer than the fetched snapshot, so the
-    // snapshot is only applied when no event has arrived yet.
-    spawn_local(async move {
-        let event_seen = StoredValue::new(false);
-        let result = api::on_status(
-            move |status| {
-                event_seen.set_value(true);
-                state.status.set(status);
-            },
-            state.payload_error(),
-        )
-        .await;
-        state.report("Listening for status", result);
-        // `stale_process` may have been emitted before this listener existed; the snapshot's
-        // `stale` covers that case.
-        let result = api::on_stale_process(
-            move |stale| state.status.update(|status| status.stale = Some(stale)),
-            state.payload_error(),
-        )
-        .await;
-        state.report("Listening for stale processes", result);
-        match api::get_status().await {
-            Ok(status) if !event_seen.get_value() => state.status.set(status),
-            Ok(_) => {}
-            Err(error) => state.report("Reading status", Err(error)),
-        }
-    });
-    spawn_local(async move {
-        let event_seen = StoredValue::new(false);
-        let result = api::on_node_stats(
-            move |stats| {
-                event_seen.set_value(true);
-                state.record_stats(stats);
-            },
-            state.payload_error(),
-        )
-        .await;
-        state.report("Listening for node stats", result);
-        match api::get_node_stats().await {
-            Ok(stats) if !event_seen.get_value() => state.record_stats(stats),
-            Ok(_) => {}
-            Err(error) => state.report("Reading node stats", Err(error)),
-        }
-    });
-    // The same rule for the updater: `update_info` carries the state too, and the backend sends
-    // it right after each `update_state`, so the info event and the snapshot are enough. An
-    // `update_state` only moves a loaded info along a little earlier.
-    spawn_local(async move {
-        let info_seen = StoredValue::new(false);
-        let result = api::on_update_info(
-            move |info| {
-                info_seen.set_value(true);
-                state.update.set(Some(info));
-            },
-            state.payload_error(),
-        )
-        .await;
-        state.report("Listening for updates", result);
-        let result = api::on_update_state(
-            move |update_state| {
-                if state.update.with_untracked(Option::is_some) {
-                    state.update.update(|info| {
-                        if let Some(info) = info {
-                            info.state = update_state;
-                        }
-                    });
-                }
-            },
-            state.payload_error(),
-        )
-        .await;
-        state.report("Listening for update states", result);
-        let result = api::on_update_health_failed(
-            move |failure| state.update_health.set(Some(failure)),
-            state.payload_error(),
-        )
-        .await;
-        state.report("Listening for update health", result);
-        match api::get_update_info().await {
-            Ok(info) if !info_seen.get_value() => state.update.set(Some(info)),
-            Ok(_) => {}
-            Err(error) => state.report("Reading the update state", Err(error)),
-        }
-    });
+    // The status, the node stats and the updater each come as a stream plus a snapshot; see
+    // `subscribe_then_fetch` for the order.
+    spawn_local(subscribe_then_fetch(
+        state,
+        async move |seen| {
+            let result = api::on_status(
+                move |status| {
+                    seen.mark();
+                    state.status.set(status);
+                },
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for status", result);
+            // `stale_process` may have been emitted before this listener existed; the
+            // snapshot's `stale` covers that case.
+            let result = api::on_stale_process(
+                move |stale| state.status.update(|status| status.stale = Some(stale)),
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for stale processes", result);
+        },
+        api::get_status,
+        "Reading status",
+        move |status| state.status.set(status),
+    ));
+    spawn_local(subscribe_then_fetch(
+        state,
+        async move |seen| {
+            let result = api::on_node_stats(
+                move |stats| {
+                    seen.mark();
+                    state.record_stats(stats);
+                },
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for node stats", result);
+        },
+        api::get_node_stats,
+        "Reading node stats",
+        move |stats| state.record_stats(stats),
+    ));
+    // `update_info` carries the state too, and the backend sends it right after each
+    // `update_state`, so the info event and the snapshot are enough. An `update_state` only
+    // moves a loaded info along a little earlier.
+    spawn_local(subscribe_then_fetch(
+        state,
+        async move |seen| {
+            let result = api::on_update_info(
+                move |info| {
+                    seen.mark();
+                    state.update.set(Some(info));
+                },
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for updates", result);
+            let result = api::on_update_state(
+                move |update_state| {
+                    if state.update.with_untracked(Option::is_some) {
+                        state.update.update(|info| {
+                            if let Some(info) = info {
+                                info.state = update_state;
+                            }
+                        });
+                    }
+                },
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for update states", result);
+            let result = api::on_update_health_failed(
+                move |failure| state.update_health.set(Some(failure)),
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for update health", result);
+        },
+        api::get_update_info,
+        "Reading the update state",
+        move |info| state.update.set(Some(info)),
+    ));
     spawn_local(async move {
         match api::get_settings().await {
             Ok(settings) => state.settings.set(Some(settings)),

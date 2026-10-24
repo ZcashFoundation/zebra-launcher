@@ -12,11 +12,13 @@ use crate::{
         ChartData, MAX_POINTS, Range, compact, downsample,
         line_chart::LineChart,
         phase_note, signed, sync_summary, uptime_text,
-        widgets::{Meter, RangeControl, StatTile, Tone, check_icon},
+        widgets::{Meter, RangeControl, StatTile, Tone},
     },
     clock,
     components::{
+        icons::check_icon,
         log_insights::{LogActivityChart, RecentProblems, SyncStageCard},
+        rows::{Row, Rows, text_rows},
         status_strip::phase_detail,
         updates::CheckForUpdate,
     },
@@ -241,63 +243,75 @@ pub fn Dashboard() -> impl IntoView {
         }
     });
 
+    // Rebuilt with the status; the cells that show a time follow the clock on their own.
     let node_rows = move || {
-        let now = state.now.get();
         state.status.with(|status| {
-            let mut rows = vec![(
-                "Phase",
-                match phase_detail(status, now) {
-                    Some(detail) => format!("{} — {detail}", phase_label(&status.phase)),
-                    None => phase_label(&status.phase).to_owned(),
-                },
-            )];
+            let phase_cell = {
+                let status = status.clone();
+                move || {
+                    let now = state.now.get();
+                    match phase_detail(&status, now) {
+                        Some(detail) => format!("{} — {detail}", phase_label(&status.phase)),
+                        None => phase_label(&status.phase).to_owned(),
+                    }
+                }
+            };
+            let mut rows: Vec<Row> = vec![("Phase", phase_cell.into_any())];
             if let Some(pid) = status.pid {
-                rows.push(("PID", pid.to_string()));
+                rows.push(("PID", pid.to_string().into_any()));
             }
             if let Some(started) = status.started_at {
-                rows.push(("Started", relative(started, now)));
+                rows.push((
+                    "Started",
+                    (move || relative(started, state.now.get())).into_any(),
+                ));
             }
             if let Some(addr) = status.rpc_addr {
-                rows.push(("RPC", addr.to_string()));
+                rows.push(("RPC", addr.to_string().into_any()));
             }
             if let Some(addr) = status.metrics_addr {
-                rows.push(("Metrics", addr.to_string()));
+                rows.push(("Metrics", addr.to_string().into_any()));
             }
             if let Some(exit) = &status.last_exit {
                 let code = exit.code.map_or_else(
                     || "killed by a signal".to_owned(),
                     |code| format!("code {code}"),
                 );
-                rows.push((
-                    "Last exit",
+                let (class, at) = (exit.class, exit.at);
+                let exit_cell = move || {
                     format!(
                         "{} ({code}), {}",
-                        exit_class_text(exit.class),
-                        relative(exit.at, now)
-                    ),
-                ));
+                        exit_class_text(class),
+                        relative(at, state.now.get())
+                    )
+                };
+                rows.push(("Last exit", exit_cell.into_any()));
                 if let Some(detail) = &exit.detail {
-                    rows.push(("Exit detail", detail.clone()));
+                    rows.push(("Exit detail", detail.clone().into_any()));
                 }
             }
             rows
         })
     };
 
-    // Only what the tiles do not show. One derived signal, so the rows update in place.
-    let chain_rows = Signal::derive(move || {
-        let now = state.now.get();
+    // Only what the tiles do not show. Rebuilt with the stats; "Updated" follows the clock.
+    let chain_rows = move || {
         state.stats.with(|stats| {
-            stats.as_ref().map_or_else(Vec::new, |s| {
-                vec![
+            stats.as_ref().map(|s| {
+                let updated_at = s.updated_at;
+                let mut rows = text_rows([
                     ("Chain", s.chain.clone()),
                     ("Estimated height", thousands(s.estimated_height)),
                     ("zebrad", s.zebrad_version.clone()),
-                    ("Updated", relative(s.updated_at, now)),
-                ]
+                ]);
+                rows.push((
+                    "Updated",
+                    (move || relative(updated_at, state.now.get())).into_any(),
+                ));
+                rows
             })
         })
-    });
+    };
 
     // A problem picked here is shown filtered on the Logs page.
     let show_in_logs = Callback::new(move |filter: String| {
@@ -394,7 +408,7 @@ pub fn Dashboard() -> impl IntoView {
             <div class="cards">
                 <div class="card">
                     <h3>"Node"</h3>
-                    <Rows rows=Signal::derive(node_rows) />
+                    {move || view! { <Rows rows=node_rows() /> }}
                 </div>
                 <div class="card">
                     <h3>"Chain"</h3>
@@ -402,28 +416,11 @@ pub fn Dashboard() -> impl IntoView {
                         when=move || state.stats.with(Option::is_some)
                         fallback=|| view! { <p class="muted">"No data from zebrad's RPC yet."</p> }
                     >
-                        <Rows rows=chain_rows />
+                        {move || chain_rows().map(|rows| view! { <Rows rows /> })}
                     </Show>
                 </div>
             </div>
             {grafana}
         </div>
-    }
-}
-
-#[component]
-fn Rows(rows: Signal<Vec<(&'static str, String)>>) -> impl IntoView {
-    view! {
-        <dl class="rows">
-            {move || {
-                rows.get()
-                    .into_iter()
-                    .map(|(label, value)| view! {
-                        <dt>{label}</dt>
-                        <dd>{value}</dd>
-                    })
-                    .collect_view()
-            }}
-        </dl>
     }
 }

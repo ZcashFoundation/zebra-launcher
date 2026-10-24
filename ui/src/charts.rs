@@ -1,9 +1,11 @@
 //! Inline SVG charts and stat tiles for the dashboard, with no chart library.
 //!
-//! This file holds the pure geometry and formatting helpers, unit-tested natively. The Leptos
-//! views live in [`line_chart`] (the chart cards) and [`widgets`] (range control, stat tiles,
-//! sparklines, the sync meter).
+//! This file holds the pure geometry and formatting helpers, unit-tested natively, and
+//! [`activity`] those of the log activity column chart. The Leptos views live in
+//! [`line_chart`] (the chart cards) and [`widgets`] (range control, stat tiles, sparklines,
+//! the sync meter); the activity chart's is in `components/log_insights.rs`.
 
+pub mod activity;
 pub mod line_chart;
 pub mod widgets;
 
@@ -372,7 +374,9 @@ pub fn signed(delta: i64) -> String {
     }
 }
 
-/// A progress fraction with one decimal, rounded down so `99.99 %` never reads `100.0 %`.
+/// The sync hero's figure: a progress fraction with one decimal, rounded down so `99.99 %`
+/// never reads `100.0 %` before the tip. Kept apart from [`crate::format::percent`] (two
+/// decimals, rounded to nearest) for that floor.
 pub fn percent_1(fraction: f64) -> String {
     let fraction = if fraction.is_finite() {
         fraction.clamp(0.0, 1.0)
