@@ -2,11 +2,12 @@
 //! from and written back to the file through `read_config` and `apply_config`.
 //!
 //! The file's values (`loaded`) and the user's edits (`edits`) are two [`FormState`]s. The
-//! edits hold the text as typed, where an empty text means "use the default"; [`normalised`]
-//! strips those, and the result is what Save writes and what counts as a change against the
-//! file. Saving renders the edits into the loaded text (`render_config`, so comments and
-//! unknown keys stay) and applies it; the outcomes follow the Configure page's handling, with
-//! the pending edits kept across a rollback or a conflict.
+//! edits hold the text as typed, where a text that is empty once normalised the way the file
+//! is written (blank, or a list of blank lines) means "use the default"; [`normalised`] strips
+//! those, and the result is what Save writes and what counts as a change against the file.
+//! Saving renders the edits into the loaded text (`render_config`, so comments and unknown keys
+//! stay) and applies it; the outcomes follow the Configure page's handling, with the pending
+//! edits kept across a rollback or a conflict.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,7 +23,7 @@ use crate::{
     components::tooltip::Help,
     config_form::{
         Control, FIELDS, Field, FieldId, FormState, Kind, SECTIONS, Section, display_default,
-        fields_of, matches_filter, parse_config, render_config, validate,
+        fields_of, matches_filter, normalize, parse_config, render_config, validate,
     },
 };
 
@@ -68,11 +69,12 @@ enum Reload {
 /// The signals the field rows read and write.
 #[derive(Clone, Copy)]
 struct Form {
-    /// The values in the file as last read.
+    /// The values in the file as last read, [`normalised`] like `values` so that padding in the
+    /// file does not count as a change.
     loaded: RwSignal<FormState>,
     /// The values as edited, text as typed.
     edits: RwSignal<FormState>,
-    /// `edits` with empty texts unset: what Save writes and what counts as a change.
+    /// `edits` [`normalised`]: what Save writes and what counts as a change.
     values: Memo<FormState>,
     /// The message of every field whose text [`validate`] rejects.
     errors: Memo<BTreeMap<FieldId, String>>,
@@ -87,13 +89,20 @@ struct Doc {
     form: Form,
 }
 
-/// `edits` with empty texts unset. An empty text means "use the default" ([`validate`] accepts
-/// it), so it must not reach [`render_config`] as a value.
+/// `edits` with every text [`normalize`]d as the file is written, and the texts that are then
+/// empty unset. Such a text means "use the default" ([`validate`] accepts it, [`render_config`]
+/// removes the key), so it must not count as a value: a space typed into an unset field, or a
+/// blank line added to a list, is not a change and must not restart zebrad for an unchanged
+/// file.
 fn normalised<'a>(fields: impl Iterator<Item = &'a Field>, edits: &FormState) -> FormState {
     let mut values = FormState::default();
     for field in fields {
-        if let Some(text) = edits.get(field.id()).filter(|text| !text.is_empty()) {
-            values.set(field.id(), Some(text.to_owned()));
+        if let Some(text) = edits
+            .get(field.id())
+            .map(|text| normalize(field.kind, text))
+            .filter(|text| !text.is_empty())
+        {
+            values.set(field.id(), Some(text));
         }
     }
     values
@@ -281,8 +290,10 @@ async fn reload(doc: Doc, mode: Reload) {
         }
     };
     let form = doc.form;
+    // Normalised like `values`, so that the file's values compare equal to edits of them.
+    let fresh_form = normalised(FIELDS.iter(), &parsed.form);
     match mode {
-        Reload::Replace => form.edits.set(parsed.form.clone()),
+        Reload::Replace => form.edits.set(fresh_form.clone()),
         Reload::KeepEdits => {}
         Reload::ReapplyPending => {
             let pending = form.values.with_untracked(|values| {
@@ -291,10 +302,10 @@ async fn reload(doc: Doc, mode: Reload) {
                         .with_untracked(|edits| pending_edits(&values.diff(loaded), edits))
                 })
             });
-            form.edits.set(reapply(parsed.form.clone(), pending));
+            form.edits.set(reapply(fresh_form.clone(), pending));
         }
     }
-    form.loaded.set(parsed.form);
+    form.loaded.set(fresh_form);
     doc.notes.set(Notes {
         unknown: parsed.unknown,
         unreadable: parsed.unreadable,
@@ -767,10 +778,13 @@ fn user_control(
     let shown = Signal::derive(move || shown_text(raw.get().as_deref(), default));
     let invalid = move || error.get().is_some();
     let on_text = move |event: web_sys::Event| set(Some(event_target_value(&event)));
-    // A cleared text control means "use the default": when it loses focus the value is unset
-    // and the control shows the default again.
+    // A cleared (or blank) text control means "use the default": when it loses focus the value
+    // is unset and the control shows the default again.
     let unset_if_empty = move |_| {
-        if raw.with(|raw| raw.as_deref() == Some("")) {
+        if raw.with(|raw| {
+            raw.as_deref()
+                .is_some_and(|raw| normalize(field.kind, raw).is_empty())
+        }) {
             set(None);
         }
     };
@@ -1023,6 +1037,31 @@ mod tests {
         assert_eq!(values.get(PORT.id()), None);
         assert_eq!(values.get(ADDR.id()), Some("127.0.0.1:8232"));
         assert_eq!(values.get(PEERS.id()), None);
+    }
+
+    #[test]
+    fn normalising_treats_blank_texts_as_unset_and_trims_the_rest() {
+        // A space typed into an unset field, or a list of blank lines, is not a value: the
+        // writer drops it too, so counting it as a change would restart zebrad for nothing.
+        let edits = with(&[
+            (PORT.id(), " "),
+            (ADDR.id(), " 127.0.0.1:8232 "),
+            (PEERS.id(), "a\n\n b \n"),
+        ]);
+        let values = normalised([PORT, ADDR, PEERS].iter(), &edits);
+        assert_eq!(values.get(PORT.id()), None);
+        assert_eq!(values.get(ADDR.id()), Some("127.0.0.1:8232"));
+        assert_eq!(values.get(PEERS.id()), Some("a\nb"));
+        let blank_list = with(&[(PEERS.id(), "\n  \n")]);
+        assert_eq!(
+            normalised([PEERS].iter(), &blank_list).get(PEERS.id()),
+            None
+        );
+        // A padded value in the file is the same value, so the loaded state is normalised too
+        // and a set list with a trailing blank line added is not a change.
+        let loaded = normalised([PEERS].iter(), &with(&[(PEERS.id(), " a\nb ")]));
+        let edited = normalised([PEERS].iter(), &with(&[(PEERS.id(), "a\nb\n")]));
+        assert!(edited.diff(&loaded).is_empty());
     }
 
     #[test]
