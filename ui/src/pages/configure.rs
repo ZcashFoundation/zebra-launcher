@@ -253,8 +253,10 @@ pub fn Configure() -> impl IntoView {
 #[component]
 fn FilePane(editor: ConfigEditor) -> impl IntoView {
     let body = NodeRef::<html::Div>::new();
-    // The line last edited in the form, highlighted for a moment.
-    let flash = RwSignal::new(None::<usize>);
+    // The line last edited in the form, highlighted for a moment: the class is toggled on its
+    // element, so the lines carry no per-line subscription (a rebuilt reactive class never
+    // unsubscribes, and the lines are rebuilt on every keystroke).
+    let flash = StoredValue::new(None::<usize>);
     // Bumped by every flash, so the timer of an earlier one does not end a newer one.
     let flash_generation = StoredValue::new(0u64);
     let lines = Memo::new(move |_| {
@@ -277,8 +279,8 @@ fn FilePane(editor: ConfigEditor) -> impl IntoView {
             .with(|document| document.as_ref().map(|document| document.path.clone()))
     };
 
-    // A form edit brings its key's line into view and flashes it. The lines are rendered by
-    // the time the next frame is drawn.
+    // A form edit brings its key's line into view and flashes it, restarting the flash when the
+    // same line is edited again. The lines are rendered by the time the next frame is drawn.
     Effect::new(move |_| {
         let Some((section, key)) = editor.last_edited.get() else {
             return;
@@ -294,16 +296,18 @@ fn FilePane(editor: ConfigEditor) -> impl IntoView {
         };
         flash_generation.update_value(|generation| *generation += 1);
         let mine = flash_generation.get_value();
-        flash.set(Some(number));
         set_timeout(
             move || {
                 if flash_generation.get_value() == mine {
-                    flash.set(None);
+                    set_flash(flash, None);
                 }
             },
             FLASH_FOR,
         );
-        request_animation_frame(move || reveal_line(body, number));
+        request_animation_frame(move || {
+            set_flash(flash, Some(number));
+            reveal_line(body, number);
+        });
     });
 
     let body_view = move || {
@@ -348,7 +352,7 @@ fn FilePane(editor: ConfigEditor) -> impl IntoView {
                     {move || {
                         lines
                             .with(|(lines, _)| {
-                                lines.iter().map(|line| line_view(line, flash)).collect_view()
+                                lines.iter().map(line_view).collect_view()
                             })
                     }}
                 </div>
@@ -378,20 +382,18 @@ fn line_id(number: usize) -> String {
 }
 
 /// One line of the file view: the number, a mark on a changed line, and the highlighted text.
-/// The view owns what it shows (`use<>`), so the lines can be rebuilt from a borrowed memo.
-fn line_view(line: &LineChange, flash: RwSignal<Option<usize>>) -> impl IntoView + use<> {
+/// The view owns what it shows (`use<>`), so the lines can be rebuilt from a borrowed memo. The
+/// flash class is not bound here but toggled by [`set_flash`]; a rebuild leaves it in place,
+/// since the static class is only rewritten when its text differs and the bound class only
+/// adds or removes itself.
+fn line_view(line: &LineChange) -> impl IntoView + use<> {
     let number = line.number;
     let spans = highlight_toml(&line.text)
         .into_iter()
         .map(|(class, text)| view! { <span class=class.css()>{text}</span> })
         .collect_view();
     view! {
-        <div
-            class="cfg-line"
-            id=line_id(number)
-            class:cfg-line-changed=line.changed
-            class:cfg-line-flash=move || flash.get() == Some(number)
-        >
+        <div class="cfg-line" id=line_id(number) class:cfg-line-changed=line.changed>
             <span class="cfg-line-no" aria-hidden="true">
                 {number}
             </span>
@@ -410,15 +412,33 @@ fn line_view(line: &LineChange, flash: RwSignal<Option<usize>>) -> impl IntoView
     }
 }
 
+/// The element of a line of the file view, if it is rendered.
+fn line_element(number: usize) -> Option<web_sys::HtmlElement> {
+    document()
+        .get_element_by_id(&line_id(number))
+        .and_then(|line| line.dyn_into::<web_sys::HtmlElement>().ok())
+}
+
+/// Moves the flash mark from the line it is on to `number`'s line, or clears it. The same
+/// line flashed again keeps its class across the removal and the re-add unless the style is
+/// recomputed in between, which is what restarts the animation.
+fn set_flash(flash: StoredValue<Option<usize>>, number: Option<usize>) {
+    if let Some(previous) = flash.get_value().and_then(line_element) {
+        let _ = previous.class_list().remove_1("cfg-line-flash");
+    }
+    if let Some(current) = number.and_then(line_element) {
+        let _ = current.offset_width();
+        let _ = current.class_list().add_1("cfg-line-flash");
+    }
+    flash.set_value(number);
+}
+
 /// Scrolls the file pane the least that brings a line into view.
 fn reveal_line(body: NodeRef<html::Div>, number: usize) {
     let Some(body) = body.get_untracked() else {
         return;
     };
-    let Some(line) = document()
-        .get_element_by_id(&line_id(number))
-        .and_then(|line| line.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
+    let Some(line) = line_element(number) else {
         return;
     };
     if let Some(top) = scroll_to_reveal(
