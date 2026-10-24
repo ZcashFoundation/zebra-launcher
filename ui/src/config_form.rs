@@ -12,7 +12,10 @@
 
 mod schema;
 
-use std::{collections::BTreeMap, net::SocketAddr};
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
+};
 
 use toml_edit::{Array, DocumentMut, Item, RawString, Table, Value, value};
 
@@ -38,7 +41,9 @@ pub enum Kind {
     Integer { min: Option<i64>, max: Option<i64> },
     /// Free text.
     Text,
-    /// `host:port`; with `loopback_only` the host must be a loopback address.
+    /// `ip:port`. With `loopback_only` the IP must be a loopback address (`LOOPBACK_KEYS` in
+    /// launcher-core require the port); without it the port may be left out, as zebrad then
+    /// uses the network's default port.
     SocketAddr { loopback_only: bool },
     /// A humantime duration such as `1m 1s` or `500ms`.
     Duration,
@@ -296,13 +301,25 @@ fn validate_integer(text: &str, min: Option<i64>, max: Option<i64>) -> Result<()
     Ok(())
 }
 
+/// `ip:port`, or for a public address also a bare IP, which zebrad 7.0.0 completes with the
+/// network's default port (it does not resolve host names here).
 fn validate_socket_addr(text: &str, loopback_only: bool) -> Result<(), String> {
-    let addr: SocketAddr = text.parse().map_err(|_| {
-        "Enter an IP address and port such as 127.0.0.1:8232; put an IPv6 address in brackets, \
-         such as [::1]:8232."
-            .to_owned()
-    })?;
-    if loopback_only && !addr.ip().is_loopback() {
+    let ip = match text.parse::<SocketAddr>() {
+        Ok(addr) => addr.ip(),
+        Err(_) if !loopback_only => ip_without_port(text).ok_or_else(|| {
+            "Enter an IP address, with or without a port, such as 0.0.0.0:8233 or 0.0.0.0; \
+             put an IPv6 address in brackets, such as [::]:8233."
+                .to_owned()
+        })?,
+        Err(_) => {
+            return Err(
+                "Enter an IP address and port such as 127.0.0.1:8232; put an IPv6 address in \
+                 brackets, such as [::1]:8232."
+                    .to_owned(),
+            );
+        }
+    };
+    if loopback_only && !ip.is_loopback() {
         return Err(
             "Must be a loopback address such as 127.0.0.1:8232, so the node is not \
                     reachable from other machines."
@@ -310,6 +327,17 @@ fn validate_socket_addr(text: &str, loopback_only: bool) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// An address without a port as zebrad accepts it: `0.0.0.0`, `::` or `[::]`.
+fn ip_without_port(text: &str) -> Option<IpAddr> {
+    text.parse::<IpAddr>().ok().or_else(|| {
+        text.strip_prefix('[')?
+            .strip_suffix(']')?
+            .parse::<Ipv6Addr>()
+            .ok()
+            .map(IpAddr::V6)
+    })
 }
 
 /// The units humantime accepts.
@@ -1047,7 +1075,26 @@ enabled = false
         assert_eq!(validate(public, "0.0.0.0:8233"), Ok(()));
         assert_eq!(validate(public, "[::]:8233"), Ok(()));
         assert_eq!(validate(public, "203.0.113.9:8233"), Ok(()));
-        assert_eq!(validate(public, "203.0.113.9"), malformed);
+        // zebrad adds the network's default port to an address without one.
+        assert_eq!(validate(public, "203.0.113.9"), Ok(()));
+        assert_eq!(validate(public, "0.0.0.0"), Ok(()));
+        assert_eq!(validate(public, "[::]"), Ok(()));
+        assert_eq!(validate(public, "::"), Ok(()));
+        let public_malformed = Err(
+            "Enter an IP address, with or without a port, such as 0.0.0.0:8233 or 0.0.0.0; \
+             put an IPv6 address in brackets, such as [::]:8233."
+                .to_owned(),
+        );
+        // zebrad 7.0.0 does not resolve host names for these keys, despite its hint.
+        assert_eq!(validate(public, "myhost.example:8233"), public_malformed);
+        assert_eq!(validate(public, "myhost.example"), public_malformed);
+        assert_eq!(validate(public, "[::]:"), public_malformed);
+        assert_eq!(validate(public, "[0.0.0.0]"), public_malformed);
+        assert_eq!(validate(public, "0.0.0.0:99999"), public_malformed);
+        assert_eq!(
+            validate(get(("network", "external_addr")), "198.51.100.7"),
+            Ok(())
+        );
     }
 
     #[test]

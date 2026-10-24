@@ -47,7 +47,7 @@ const PERCENT: Kind = Kind::Integer {
 const LOOPBACK: Kind = Kind::SocketAddr {
     loopback_only: true,
 };
-/// A peer-to-peer address that may be public.
+/// A peer-to-peer address that may be public; the port may be left out.
 const PUBLIC_ADDR: Kind = Kind::SocketAddr {
     loopback_only: false,
 };
@@ -134,7 +134,7 @@ pub const FIELDS: &[Field] = &[
         doc: "The address and port on which the node accepts connections from other nodes. \
               The default [::]:8233 listens on every IPv4 and IPv6 address of this machine; \
               Testnet nodes use port 18233. Change it only to listen on one address or on \
-              another port.",
+              another port. Without a port, the node uses the network's default port.",
         control: Control::User,
     },
     Field {
@@ -145,8 +145,8 @@ pub const FIELDS: &[Field] = &[
         default: None,
         doc: "The address and port other nodes should use to reach this node when it differs \
               from the listen address. Set it when the node is behind a router, firewall or \
-              NAT and you want to accept incoming connections. Unset by default: nothing is \
-              advertised.",
+              NAT and you want to accept incoming connections. Without a port, the node uses \
+              the network's default port. Unset by default: nothing is advertised.",
         control: Control::User,
     },
     Field {
