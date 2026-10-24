@@ -228,6 +228,39 @@ at a local copy of `latest.json` served from a scratch directory (for example wi
   `signature`: refused (the signed version does not match);
 - updates Off: the local server's access log stays empty for the whole session.
 
+## If bundling the prebuilt binaries fails
+
+FALLBACK: single-job build + bundle + sign.
+
+Use this if `cargo tauri bundle` cannot package the binaries compiled by
+the `build` job for some target (open verification item, docs/PLAN.md
+"Items to verify", M9). It gives up the unprivileged/privileged split for
+that run: dependency build scripts then execute in the job that holds the
+signing secrets, so keep it cache-free.
+
+To switch:
+  1. Delete the `build` job and change bundle_sign's `needs` to
+     [verify, draft, sidecars].
+  2. In bundle_sign, delete the "build-<target>" download-artifact step and
+     the "Place the compiled app" step (keep the zebrad download and add
+     its chmod +x), and drop `compile: "false"` from
+     ./.github/actions/setup-tauri.
+  3. In the three "Bundle and sign" steps, replace `cargo tauri bundle` with
+     `cargo tauri build`, keeping the same flags, env and throwaway key,
+     e.g.:
+
+       - name: Bundle and sign (Linux)
+         if: runner.os == 'Linux'
+         run: |
+           set -euo pipefail
+           export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+           cargo fetch --locked
+           cargo tauri build --target "${TARGET}" --ci
+
+     Add `scripts/check-glibc.sh` after it on Linux. Keep "Sign the updater
+     artifacts" as the only step with the updater key. Never add
+     Swatinem/rust-cache or actions/cache to this job.
+
 ## Bad-release runbook
 
 - **Owner:** the maintainer who approved the `release` deployment owns the release for
