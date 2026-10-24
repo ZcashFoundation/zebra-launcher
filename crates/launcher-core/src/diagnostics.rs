@@ -82,6 +82,18 @@ pub fn latest_launcher_log(log_file: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The tail of the log at `path` for the bundle: its last [`TAIL_LINES`]
+/// lines, or a note when there is no log file yet or it cannot be read.
+pub fn log_tail(path: Option<PathBuf>) -> String {
+    let Some(path) = path else {
+        return "(no log file yet)\n".to_string();
+    };
+    match tail_lines(&path, TAIL_LINES) {
+        Ok(tail) => tail,
+        Err(err) => format!("(could not read {}: {err})\n", path.display()),
+    }
+}
+
 /// `url` with any `user:password@` removed from its authority.
 pub fn redact_url(url: &str) -> String {
     let (scheme, rest) = match url.find("://") {

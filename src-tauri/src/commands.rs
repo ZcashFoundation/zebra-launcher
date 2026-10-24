@@ -476,21 +476,12 @@ pub async fn copy_diagnostics(state: State<'_, AppState>) -> Result<String, Stri
     let status = state.supervisor.status();
     let settings = state.settings.current();
     blocking(move || {
-        let launcher = log_tail(diagnostics::latest_launcher_log(&paths.launcher_log()));
-        let zebrad = log_tail(Some(paths.zebrad_log()));
+        let launcher =
+            diagnostics::log_tail(diagnostics::latest_launcher_log(&paths.launcher_log()));
+        let zebrad = diagnostics::log_tail(Some(paths.zebrad_log()));
         diagnostics::diagnostics_bundle(&paths, &status, &settings, &launcher, &zebrad)
     })
     .await
-}
-
-fn log_tail(path: Option<PathBuf>) -> String {
-    let Some(path) = path else {
-        return "(no log file yet)\n".to_string();
-    };
-    match diagnostics::tail_lines(&path, diagnostics::TAIL_LINES) {
-        Ok(tail) => tail,
-        Err(err) => format!("(could not read {}: {err})\n", path.display()),
-    }
 }
 
 /// Records that the first-run flow is done, so it is not shown again and
