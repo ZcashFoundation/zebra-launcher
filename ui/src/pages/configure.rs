@@ -115,6 +115,13 @@ pub fn Configure() -> impl IntoView {
     let change_count = move || editor.changes.with(Vec::len) + editor.removals.with(Vec::len);
     let changes_detail = move || {
         let dirty = editor.dirty.get();
+        // A draft the form cannot write (a forbidden key typed as text, say) is named here as
+        // in the form pane, not called "comments or formatting".
+        if let Some(error) = editor.render_error.get()
+            && change_count() == 0
+        {
+            return error;
+        }
         text_only_note(change_count(), dirty)
             .map(str::to_owned)
             .unwrap_or_else(|| {
