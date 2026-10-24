@@ -1,1 +1,413 @@
 /* Log analysis: the Logs page panel and its cards (see ui/src/components/log_insights.rs). */
+
+/* The panel between the toolbar and the log scroller. */
+
+.logs-analysis {
+  flex: none;
+  max-height: 45vh;
+  overflow: auto;
+  padding: 12px 12px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.logs-toolbar button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.logs-toolbar .logs-target {
+  max-width: 260px;
+}
+
+.logs-nowrap {
+  overflow-x: auto;
+}
+
+.logs-nowrap .log-row {
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.log-row .msg mark {
+  background: var(--accent);
+  color: #111;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.lvl-stderr {
+  color: var(--error);
+}
+
+/* The grid of cards */
+
+.insight-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.insight-card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.insight-activity {
+  grid-column: 1 / -1;
+}
+
+@media (min-width: 1100px) {
+  .insight-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .insight-activity {
+    grid-column: span 2;
+  }
+}
+
+.insight-empty {
+  margin: 4px 0;
+}
+
+.insight-foot {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
+.insight-rows {
+  grid-template-columns: max-content minmax(0, 1fr);
+}
+
+/* Sync stage */
+
+.insight-stage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 16px;
+}
+
+.insight-icon {
+  flex: none;
+}
+
+.insight-tone-good .insight-icon {
+  color: var(--status-good);
+}
+
+.insight-tone-neutral .insight-icon {
+  color: var(--text-secondary);
+}
+
+.insight-tone-warning .insight-icon {
+  color: var(--status-warning);
+}
+
+.insight-tone-critical .insight-icon {
+  color: var(--status-critical);
+}
+
+/* Recent problems */
+
+.insight-problem-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.insight-problem {
+  display: grid;
+  grid-template-columns: 5ch minmax(0, 1fr) auto;
+  grid-template-areas:
+    "level target when"
+    "level msg count";
+  gap: 2px 8px;
+  width: 100%;
+  padding: 6px 8px;
+  text-align: left;
+  background: var(--bg);
+  line-height: 1.35;
+}
+
+.insight-problem .lvl {
+  grid-area: level;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding-top: 2px;
+}
+
+.insight-problem-target {
+  grid-area: target;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.insight-problem-msg {
+  grid-area: msg;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.insight-problem-count {
+  grid-area: count;
+  align-self: end;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.insight-problem-when {
+  grid-area: when;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* The activity chart */
+
+.insight-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.insight-chart-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.insight-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.insight-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.insight-key {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.insight-toggle {
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+.insight-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.insight-plot {
+  position: relative;
+}
+
+.insight-plot svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+.insight-plot svg:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Series colours live on the marks; text keeps its own colour. */
+.insight-seg-info {
+  fill: var(--series-1);
+  background: var(--series-1);
+}
+
+.insight-seg-warn {
+  fill: var(--status-warning);
+  background: var(--status-warning);
+}
+
+.insight-seg-error {
+  fill: var(--status-critical);
+  background: var(--status-critical);
+}
+
+.insight-seg-other {
+  fill: var(--series-muted);
+  background: var(--series-muted);
+}
+
+.insight-column.insight-picked .insight-seg {
+  filter: brightness(1.25);
+}
+
+.insight-hit {
+  fill: transparent;
+}
+
+.insight-grid-line {
+  stroke: var(--grid);
+  stroke-width: 1;
+}
+
+.insight-axis {
+  stroke: var(--axis);
+  stroke-width: 1;
+}
+
+.insight-tick {
+  fill: var(--muted);
+  font-size: 10px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.insight-tooltip-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.insight-tooltip {
+  position: absolute;
+  top: 4px;
+  transform: translateX(-50%);
+  min-width: 150px;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.insight-tooltip-head {
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  white-space: nowrap;
+}
+
+.insight-tooltip-row {
+  display: grid;
+  grid-template-columns: 10px 3ch 1fr;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.insight-tooltip-row strong {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.insight-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.insight-table th,
+.insight-table td {
+  padding: 3px 8px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+}
+
+.insight-table th:first-child,
+.insight-table td:first-child {
+  text-align: left;
+}
+
+.insight-table thead th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* The startup timeline */
+
+.insight-run-head {
+  margin: 0 0 8px;
+}
+
+.insight-milestones {
+  margin: 0 0 8px;
+  padding: 0 0 0 16px;
+  border-left: 2px solid var(--border);
+  list-style: none;
+}
+
+.insight-milestones li {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+.insight-milestones li::before {
+  content: "";
+  position: absolute;
+  left: -21px;
+  top: 9px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--series-1);
+}
+
+.insight-ms-at {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.insight-facts {
+  margin: 0;
+  padding: 0 0 0 16px;
+  color: var(--text-secondary);
+}
+
+.insight-facts li {
+  padding: 2px 0;
+}
+
+.insight-shutdown {
+  color: var(--text);
+}

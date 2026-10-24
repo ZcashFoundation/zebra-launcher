@@ -58,6 +58,21 @@ impl LogBuffer {
         self.lines.is_empty()
     }
 
+    /// The `tracing` targets in the buffer with their line counts, most frequent first (ties
+    /// by name), at most `limit`.
+    pub fn targets_by_count(&self, limit: usize) -> Vec<(String, usize)> {
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        for target in self.lines.iter().filter_map(|line| line.target.as_deref()) {
+            match counts.iter_mut().find(|(name, _)| name == target) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((target.to_owned(), 1)),
+            }
+        }
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        counts.truncate(limit);
+        counts
+    }
+
     /// The lines that pass `filter`, with a [`LogEntry::Gap`] wherever `seq` jumps between two
     /// buffered lines or the backend sent a gap marker (see [`is_gap_marker`]).
     pub fn entries(&self, filter: &LogFilter) -> Vec<LogEntry> {
@@ -89,16 +104,21 @@ impl LogBuffer {
             }
             previous_seq = Some(line.seq);
 
-            let level_ok = match (line.level, line.stream) {
+            let shown = match (line.level, line.stream) {
                 (Some(level), _) => {
-                    parent_visible = filter.min_level.is_none_or(|min| level >= min);
+                    let level_ok = filter.min_level.is_none_or(|min| level >= min);
+                    let target_ok = filter
+                        .target
+                        .as_deref()
+                        .is_none_or(|wanted| line.target.as_deref() == Some(wanted));
+                    parent_visible = level_ok && target_ok;
                     parent_visible
                 }
                 (None, LogStream::Stdout) => parent_visible,
                 // stderr and launcher notes are always worth seeing.
                 (None, LogStream::Stderr | LogStream::Launcher) => true,
             };
-            if level_ok && (needle.is_empty() || matches_text(line, &needle)) {
+            if shown && (needle.is_empty() || matches_text(line, &needle)) {
                 entries.push(LogEntry::Line(line.clone()));
             }
         }
@@ -113,6 +133,63 @@ pub struct LogFilter {
     pub min_level: Option<LogLevel>,
     /// Show only lines containing this text, ignoring case. Empty shows everything.
     pub text: String,
+    /// Show only lines from this `tracing` target (and their continuation lines). `None` shows
+    /// every target. stderr and launcher lines, which have no target, stay visible.
+    pub target: Option<String>,
+}
+
+/// `text` cut into pieces that alternate between non-matches and case-insensitive matches of
+/// `needle` (trimmed, as the filter uses it); the flag is true for a match. Pieces never split
+/// a character, so a needle whose lower-case form straddles an expanding character (such as
+/// `İ`) simply does not match there. An empty needle gives the whole text as one non-match.
+pub fn split_matches(text: &str, needle: &str) -> Vec<(String, bool)> {
+    let needle = needle.trim().to_lowercase();
+    if needle.is_empty() || text.is_empty() {
+        return vec![(text.to_owned(), false)];
+    }
+    // The lower-cased text, with the offset of every original character in it.
+    let mut lower = String::with_capacity(text.len());
+    let mut boundaries: Vec<(usize, usize)> = Vec::with_capacity(text.len() + 1);
+    for (offset, ch) in text.char_indices() {
+        boundaries.push((lower.len(), offset));
+        lower.extend(ch.to_lowercase());
+    }
+    boundaries.push((lower.len(), text.len()));
+    let original_offset = |lower_offset: usize| {
+        boundaries
+            .binary_search_by_key(&lower_offset, |(l, _)| *l)
+            .ok()
+            .map(|index| boundaries[index].1)
+    };
+
+    let mut pieces = Vec::new();
+    let mut emitted = 0;
+    let mut search_from = 0;
+    while let Some(found) = lower[search_from..].find(&needle) {
+        let start = search_from + found;
+        let end = start + needle.len();
+        match (original_offset(start), original_offset(end)) {
+            (Some(from), Some(to)) => {
+                if from > emitted {
+                    pieces.push((text[emitted..from].to_owned(), false));
+                }
+                pieces.push((text[from..to].to_owned(), true));
+                emitted = to;
+                search_from = end;
+            }
+            _ => {
+                // The match straddles an expanded character: skip past this position.
+                search_from = start + lower[start..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
+        if search_from >= lower.len() {
+            break;
+        }
+    }
+    if emitted < text.len() {
+        pieces.push((text[emitted..].to_owned(), false));
+    }
+    pieces
 }
 
 /// One row of the log view.
@@ -389,7 +466,7 @@ mod tests {
         ]);
         let filter = LogFilter {
             min_level: Some(LogLevel::Warn),
-            text: String::new(),
+            ..LogFilter::default()
         };
         let shown: Vec<u64> = buffer
             .entries(&filter)
@@ -410,12 +487,116 @@ mod tests {
             line(1, Some(LogLevel::Info), "opening database"),
         ]);
         let filter = |text: &str| LogFilter {
-            min_level: None,
             text: text.into(),
+            ..LogFilter::default()
         };
         assert_eq!(buffer.entries(&filter("STARTING")).len(), 1);
         assert_eq!(buffer.entries(&filter("commands::start")).len(), 2);
         assert_eq!(buffer.entries(&filter("nothing")).len(), 0);
+    }
+
+    fn shown_seqs(buffer: &LogBuffer, filter: &LogFilter) -> Vec<u64> {
+        buffer
+            .entries(filter)
+            .iter()
+            .filter_map(|entry| match entry {
+                LogEntry::Line(line) => Some(line.seq),
+                LogEntry::Gap { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn target_filter_keeps_continuations_stderr_and_launcher_lines() {
+        let mut buffer = LogBuffer::default();
+        let mut network = line(2, Some(LogLevel::Info), "connecting to peers");
+        network.target = Some("zebra_network::peer_set::initialize".into());
+        let mut stderr = line(4, None, "panicked");
+        stderr.stream = LogStream::Stderr;
+        let mut note = line(5, None, "zebrad exited with code 0");
+        note.stream = LogStream::Launcher;
+        buffer.merge(vec![
+            line(0, Some(LogLevel::Info), "Diagnostic metadata:"),
+            line(1, None, "version: 7.0.0"),
+            network,
+            line(3, Some(LogLevel::Warn), "careful"),
+            stderr,
+            note,
+        ]);
+        let filter = LogFilter {
+            target: Some("zebrad::commands::start".into()),
+            ..LogFilter::default()
+        };
+        assert_eq!(shown_seqs(&buffer, &filter), [0, 1, 3, 4, 5]);
+        let filter = LogFilter {
+            target: Some("zebra_network::peer_set::initialize".into()),
+            min_level: Some(LogLevel::Warn),
+            ..LogFilter::default()
+        };
+        assert_eq!(
+            shown_seqs(&buffer, &filter),
+            [4, 5],
+            "level and target both apply"
+        );
+        assert_eq!(
+            buffer.targets_by_count(10),
+            [
+                ("zebrad::commands::start".to_owned(), 2),
+                ("zebra_network::peer_set::initialize".to_owned(), 1),
+            ]
+        );
+        assert_eq!(buffer.targets_by_count(1).len(), 1);
+    }
+
+    #[test]
+    fn split_matches_is_case_insensitive_and_char_safe() {
+        let joined =
+            |pieces: &[(String, bool)]| pieces.iter().map(|(p, _)| p.as_str()).collect::<String>();
+        let pieces = split_matches("Starting zebrad: start", "START");
+        assert_eq!(
+            pieces,
+            [
+                ("Start".to_owned(), true),
+                ("ing zebrad: ".to_owned(), false),
+                ("start".to_owned(), true),
+            ]
+        );
+        assert_eq!(split_matches("abc", ""), [("abc".to_owned(), false)]);
+        assert_eq!(split_matches("abc", "   "), [("abc".to_owned(), false)]);
+        assert_eq!(split_matches("", "x"), [(String::new(), false)]);
+        assert_eq!(split_matches("abc", "zzz"), [("abc".to_owned(), false)]);
+        assert_eq!(split_matches("aaa", "a").len(), 3);
+        assert_eq!(
+            split_matches("aaaa", "aa"),
+            [("aa".to_owned(), true), ("aa".to_owned(), true)]
+        );
+        // The filter trims the needle, as `entries` does.
+        assert_eq!(
+            split_matches("a b", " b "),
+            [("a ".to_owned(), false), ("b".to_owned(), true)]
+        );
+        // Non-ASCII text and needles, matched by lower-case form.
+        let pieces = split_matches("Höhe HÖHE höhe", "höhe");
+        assert_eq!(pieces.iter().filter(|(_, hit)| *hit).count(), 3);
+        assert_eq!(joined(&pieces), "Höhe HÖHE höhe");
+        // `İ` lower-cases to two code points: no match splits a character, and the text
+        // round-trips whatever happens.
+        let text = "İstanbul ii İ";
+        for needle in ["i", "i̇", "İ", "stan", "l i"] {
+            let pieces = split_matches(text, needle);
+            assert_eq!(joined(&pieces), text, "{needle}");
+            for (piece, _) in &pieces {
+                assert!(text.contains(piece.as_str()), "{needle}: {piece}");
+            }
+        }
+        assert_eq!(
+            split_matches("日本語のログ", "のロ"),
+            [
+                ("日本語".to_owned(), false),
+                ("のロ".to_owned(), true),
+                ("グ".to_owned(), false)
+            ]
+        );
     }
 
     #[test]
