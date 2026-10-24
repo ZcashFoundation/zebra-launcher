@@ -135,10 +135,12 @@ cargo deny check
 Run `scripts/dev-sidecar.sh` first: the app crate's build script fails without the
 sidecar file. On Linux the app also needs the WebKitGTK packages listed above; without
 them, check everything else with `--exclude zebra-launcher`, and the app with
-`cargo clippy -p zebra-launcher --target x86_64-pc-windows-msvc --all-targets` (Tauri's
-Windows backend needs no system libraries to type-check; `rustup target add
-x86_64-pc-windows-msvc`, and an empty `src-tauri/binaries/zebra-launcher-zebrad-x86_64-pc-windows-msvc.exe`
-satisfies the build script).
+[`scripts/check-windows.sh`](../scripts/check-windows.sh), which type-checks it for
+Windows (`cargo clippy -p zebra-launcher --target x86_64-pc-windows-msvc --all-targets`).
+Tauri's Windows backend needs no system libraries to type-check; the script installs the
+target, creates the placeholder sidecar file the build script wants, and provides the
+stub C compiler and archiver that the `ring`, `embed-resource` and `vswhom-sys` build
+scripts ask for on a non-Windows host. Run it whenever you touch `cfg(windows)` code.
 
 From M5, also `trunk build` in `ui/`. Windows and macOS CI run clippy and tests too, so
 `cfg(windows)` and `cfg(target_os = "macos")` code is checked; when you change it, run
