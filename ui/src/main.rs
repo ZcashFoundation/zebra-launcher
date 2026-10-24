@@ -18,6 +18,7 @@ mod config_form;
 mod config_view;
 mod format;
 mod grafana_url;
+mod insight_text;
 mod insights;
 mod log_view;
 mod mock;
