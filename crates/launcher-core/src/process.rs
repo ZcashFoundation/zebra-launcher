@@ -1,4 +1,5 @@
-//! Spawning zebrad and stopping it.
+//! Spawning zebrad and stopping it, and the OS process primitives behind the
+//! pid file ([`is_alive`], [`terminate_pid`], [`executable_of`]).
 //!
 //! Spawning happens on one long-lived thread, the [`Spawner`]: on Linux the
 //! child's parent-death signal is tied to the thread that forked it, and on
@@ -6,6 +7,9 @@
 //! resumed, which is simplest done synchronously. The supervisor keeps a
 //! [`ChildHandle`] to stop the process and moves the `Child` itself into a
 //! task that waits for it.
+//!
+//! All raw OS calls live in the two backends, `unix` and `windows`, which
+//! offer the same functions so they can be read side by side.
 
 use std::{ffi::OsString, io, path::PathBuf, process::Stdio};
 
@@ -16,9 +20,55 @@ use tokio::{
 };
 
 #[cfg(unix)]
-pub(crate) mod unix;
+mod unix;
 #[cfg(windows)]
 mod windows;
+
+/// Returns true when a process with `pid` exists: on Unix also when it
+/// belongs to another user, on Windows only while it has not exited.
+///
+/// For a process the launcher did not start; the pid file's check adds the
+/// rules about pid 0 and the launcher's own pid.
+pub(crate) fn is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unix::is_alive(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows::is_alive(pid)
+    }
+}
+
+/// Sends the platform's termination request to a process the launcher did
+/// not start: `SIGTERM` on Unix, `TerminateProcess` on Windows (a stale
+/// process is in no job the launcher owns).
+pub(crate) fn terminate_pid(pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::terminate(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows::terminate_pid(pid)
+    }
+}
+
+/// The executable of the running process `pid`, if the platform tells us: it
+/// reads `/proc/<pid>/exe` on Linux, calls `proc_pidpath` on macOS and
+/// `QueryFullProcessImageNameW` on Windows. `None` on other platforms, or
+/// when the executable cannot be read (for example a process owned by
+/// another user).
+pub(crate) fn executable_of(pid: u32) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        unix::executable_of(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows::executable_of(pid)
+    }
+}
 
 /// The argument that asks zebrad to shut down when its stdin closes.
 ///

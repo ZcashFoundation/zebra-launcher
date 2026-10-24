@@ -1,4 +1,5 @@
-//! Windows process control: a job object per zebrad.
+//! Windows process control: a job object per zebrad, and the liveness and
+//! executable checks behind the pid file.
 //!
 //! The child is created suspended, assigned to a fresh job, and then resumed,
 //! so nothing it starts can escape the job. Terminating the job kills the
@@ -8,11 +9,15 @@
 use std::{
     io,
     mem::size_of,
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
+    os::windows::{
+        ffi::OsStringExt,
+        io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
+    },
+    path::PathBuf,
 };
 
 use windows_sys::Win32::{
-    Foundation::{ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE},
+    Foundation::{ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE, STILL_ACTIVE},
     System::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
@@ -23,7 +28,9 @@ use windows_sys::Win32::{
             SetInformationJobObject, TerminateJobObject,
         },
         Threading::{
-            CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+            CREATE_NO_WINDOW, CREATE_SUSPENDED, GetExitCodeProcess, OpenProcess, OpenThread,
+            PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+            QueryFullProcessImageNameW, ResumeThread, THREAD_SUSPEND_RESUME, TerminateProcess,
         },
     },
 };
@@ -90,6 +97,68 @@ impl Job {
         }
         Ok(())
     }
+}
+
+/// Returns true when a process with `pid` exists and has not exited.
+pub(super) fn is_alive(pid: u32) -> bool {
+    // SAFETY: OpenProcess has no preconditions; a null result is checked below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    // SAFETY: the handle was just returned by OpenProcess and is owned by us.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let mut exit_code: u32 = 0;
+    // SAFETY: the handle is valid for the call and exit_code points to writable memory.
+    let ok = unsafe { GetExitCodeProcess(handle.as_raw_handle(), &mut exit_code) };
+    // STILL_ACTIVE is 259; a process that happens to exit with 259 is misreported, which
+    // is the documented limitation of this API and acceptable for a stale-pid hint.
+    ok != 0 && exit_code == STILL_ACTIVE as u32
+}
+
+/// Terminates the process `pid` outright (`TerminateProcess`): for a stale
+/// zebrad, which is in no job the launcher owns.
+pub(super) fn terminate_pid(pid: u32) -> io::Result<()> {
+    // SAFETY: OpenProcess has no preconditions; a null result is checked below.
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if handle.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the handle was just returned by OpenProcess and is owned by us.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    // SAFETY: the handle is valid and has PROCESS_TERMINATE access.
+    if unsafe { TerminateProcess(handle.as_raw_handle(), 1) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The executable of the running process `pid`, if the platform tells us.
+pub(super) fn executable_of(pid: u32) -> Option<PathBuf> {
+    // SAFETY: OpenProcess has no preconditions; a null result is checked below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: the handle was just returned by OpenProcess and is owned by us.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let mut buf = vec![0u16; 32_768];
+    let mut size = u32::try_from(buf.len()).ok()?;
+    // SAFETY: the handle is valid, `buf` is writable for `size` UTF-16 units and
+    // `size` points to writable memory.
+    let ok = unsafe {
+        QueryFullProcessImageNameW(
+            handle.as_raw_handle(),
+            PROCESS_NAME_WIN32,
+            buf.as_mut_ptr(),
+            &mut size,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    buf.truncate(usize::try_from(size).ok()?);
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&buf)))
 }
 
 /// Puts the suspended `child` in a new job and resumes it.
