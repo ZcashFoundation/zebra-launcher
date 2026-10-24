@@ -275,9 +275,10 @@ summary:focus-visible,
 }
 
 .brand-icon {
+  /* The 64 px asset shown at 28 px stays sharp on high-density screens. */
   display: block;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
 }
 
 .tabs {

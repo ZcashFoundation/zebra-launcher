@@ -12,4 +12,4 @@ gear would smear. Needs Pillow and the pinned tauri-cli:
 python3 -P scripts/make-icons.py
 ```
 
-`32x32.png` is also copied into the UI bundle for the header (see `ui/index.html`).
+`64x64.png` is also copied into the UI bundle for the header (see `ui/index.html`).

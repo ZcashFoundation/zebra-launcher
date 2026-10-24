@@ -33,7 +33,7 @@ pub fn Nav() -> impl IntoView {
     view! {
         <div class="nav-bar">
             <div class="brand">
-                <img class="brand-icon" src="/32x32.png" alt="" width="32" height="32" />
+                <img class="brand-icon" src="/64x64.png" alt="" width="64" height="64" />
                 <span class="brand-name">"Zebra Launcher"</span>
             </div>
             <nav class="tabs" role="tablist" aria-label="Pages">
