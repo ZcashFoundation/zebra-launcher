@@ -21,8 +21,12 @@
 //!
 //! `FAKE_ZEBRAD_STARTUP_DELAY_MS` delays the lines after `Starting zebrad`, and
 //! `FAKE_ZEBRAD_HEARTBEAT_MS` sets the heartbeat interval (default 500 ms).
-//! `start --shutdown-on-stdin-close` also shuts down when stdin reaches EOF,
-//! mirroring the flag proposed for zebrad.
+//! `FAKE_ZEBRAD_LINGER_MS` makes the fake leave a grandchild behind when it
+//! exits (except by a panic) that inherits stdout and stderr and lives that
+//! long, the way a zebrad subprocess could keep the pipes open: the
+//! supervisor then sits in its exit drain. `start --shutdown-on-stdin-close`
+//! also shuts down when stdin reaches EOF, mirroring the flag proposed for
+//! zebrad.
 //!
 //! When the `-c` config sets `rpc.listen_addr`, the fake also serves a minimal
 //! JSON-RPC endpoint there (port 0 picks a free port, and the bound address is
@@ -84,6 +88,13 @@ fn main() -> ExitCode {
     match rest.first().map(String::as_str) {
         Some("generate") => generate(&rest[1..]),
         Some("start") | None => start(config, rest.get(1..).unwrap_or(&[])),
+        // The grandchild of `FAKE_ZEBRAD_LINGER_MS`: holds the inherited
+        // pipes open for the given number of milliseconds.
+        Some("linger") => {
+            let ms = rest.get(1).and_then(|ms| ms.parse().ok()).unwrap_or(0);
+            std::thread::sleep(Duration::from_millis(ms));
+            ExitCode::SUCCESS
+        }
         Some(other) => {
             eprintln!("error: unrecognized subcommand '{other}'");
             ExitCode::from(2)
@@ -132,13 +143,34 @@ fn start(config: Option<PathBuf>, args: &[String]) -> ExitCode {
         .enable_all()
         .build()
         .expect("a current-thread runtime can always be built");
-    runtime.block_on(run(
+    let code = runtime.block_on(run(
         config,
         mode,
         startup_delay,
         heartbeat,
         shutdown_on_stdin_close,
-    ))
+    ));
+    spawn_lingerer();
+    code
+}
+
+/// With `FAKE_ZEBRAD_LINGER_MS` set, starts the `linger` grandchild that keeps
+/// this process's stdout and stderr open after it exits.
+fn spawn_lingerer() {
+    let linger = env_millis("FAKE_ZEBRAD_LINGER_MS", 0);
+    if linger.is_zero() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    // stdout and stderr are inherited; the handle is dropped so the
+    // grandchild outlives this process.
+    let _ = std::process::Command::new(exe)
+        .arg("linger")
+        .arg(linger.as_millis().to_string())
+        .stdin(std::process::Stdio::null())
+        .spawn();
 }
 
 async fn run(

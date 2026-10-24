@@ -197,6 +197,95 @@ async fn hanging_child_is_killed_after_the_grace_period() {
     within(handle.shutdown()).await.expect("shutdown");
 }
 
+/// A crashing fake whose output pipes stay open for `linger` after it exits
+/// (a grandchild holds them, as a zebrad subprocess could), so the supervisor
+/// sits in its exit drain with the phase still `Running`.
+fn draining_crash_fixture(linger: Duration) -> Fixture {
+    let mut fx = fixture("crash");
+    fx.config.exit_drain = Duration::from_millis(1500);
+    fx.config.command.env.push((
+        "FAKE_ZEBRAD_LINGER_MS".into(),
+        linger.as_millis().to_string().into(),
+    ));
+    fx
+}
+
+/// Starts `handle` and returns once the fake has crashed and the supervisor
+/// has had time to record the exit, while its pipes are still open.
+async fn start_and_wait_for_the_crash(handle: &SupervisorHandle) {
+    let mut sub = within(handle.subscribe()).await.expect("subscribe");
+    within(handle.start()).await.expect("start");
+    loop {
+        let line = within(sub.live.recv()).await.expect("live line");
+        if line.message.contains("simulated crash") {
+            break;
+        }
+    }
+    // The exit event follows the last line within microseconds; the actor
+    // processes child events before commands.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        handle.status().phase,
+        Phase::Running,
+        "the exit is not classified while the pipes are open"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_after_the_exit_does_not_signal_or_relabel_the_crash() {
+    let fx = draining_crash_fixture(Duration::from_secs(4));
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    start_and_wait_for_the_crash(&handle).await;
+
+    // Answered when the drain ends, not after the stop grace.
+    within(handle.stop()).await.expect("stop");
+    let status = handle.status();
+    assert_eq!(status.phase, Phase::Stopped);
+    let exit = status.last_exit.expect("exit recorded");
+    assert_eq!(exit.code, Some(2), "{exit:?}");
+    assert_eq!(exit.class, ExitClass::Crash, "{exit:?}");
+    assert!(!exit.requested, "the stop did not end the run: {exit:?}");
+
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(
+        !contains(&history, "stop requested ("),
+        "no signal to a reaped pid: {:#?}",
+        messages(&history)
+    );
+    assert!(
+        contains(&history, "stop requested after zebrad exited"),
+        "{:#?}",
+        messages(&history)
+    );
+    // The user asked for a stop: the crash policy does not restart zebrad.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(handle.status().phase, Phase::Stopped);
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(!contains(&history, "restarting zebrad in"));
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_during_the_exit_drain_learns_that_zebrad_exited() {
+    let fx = draining_crash_fixture(Duration::from_secs(4));
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    start_and_wait_for_the_crash(&handle).await;
+
+    let err = within(handle.start()).await.expect_err("the child is gone");
+    let SupervisorError::ExitedDuringStart(info) = err else {
+        panic!("unexpected error: {err}");
+    };
+    assert_eq!(info.class, ExitClass::Crash, "{info:?}");
+    assert_eq!(info.code, Some(2), "{info:?}");
+    // Nobody asked for a stop, so the crash policy applies.
+    assert!(
+        !matches!(handle.status().phase, Phase::Stopped),
+        "{:?}",
+        handle.status().phase
+    );
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_error_fails_without_restarting() {
     let fx = fixture("config-error");

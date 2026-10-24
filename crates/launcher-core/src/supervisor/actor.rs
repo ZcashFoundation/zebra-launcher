@@ -60,6 +60,60 @@ struct StopState {
     replies: Vec<oneshot::Sender<()>>,
 }
 
+/// The child has exited; the run ends once its pipes close or the drain
+/// deadline passes.
+struct Exited {
+    outcome: ExitOutcome,
+    /// The stop that was under way when the child exited, if any.
+    stop: Option<StopState>,
+    /// Stops requested after the exit. There is nothing left to signal, so
+    /// they only mark the run as stopped (no restart) and are answered when
+    /// it is finalized.
+    late_stop: Option<Vec<oneshot::Sender<()>>>,
+    drain_deadline: Instant,
+}
+
+impl Exited {
+    /// Whether a stop was requested, before or after the exit.
+    fn stopped(&self) -> bool {
+        self.stop.is_some() || self.late_stop.is_some()
+    }
+}
+
+/// Where a run is in its life. Every handler matches on this, so a command
+/// that arrives after the child exited cannot act on a reaped pid.
+enum RunState {
+    /// Spawned; waiting for `Starting zebrad`.
+    Starting,
+    /// zebrad accepted its configuration.
+    Running,
+    /// A stop was requested; waiting for the child to exit.
+    Stopping(StopState),
+    /// The child exited; waiting for its pipes to close.
+    Exited(Exited),
+}
+
+impl RunState {
+    /// Records the child's exit, keeping the stop that preceded it.
+    fn on_exit(&mut self, outcome: ExitOutcome, drain_deadline: Instant) {
+        let stop = match std::mem::replace(self, RunState::Starting) {
+            RunState::Stopping(stop) => Some(stop),
+            RunState::Exited(exited) => {
+                // One exit per run; keep what was recorded.
+                *self = RunState::Exited(exited);
+                return;
+            }
+            RunState::Starting | RunState::Running => None,
+        };
+        *self = RunState::Exited(Exited {
+            outcome,
+            stop,
+            late_stop: None,
+            drain_deadline,
+        });
+    }
+}
+
 /// The callers still waiting on a run that has ended.
 struct RunReplies {
     start: Vec<oneshot::Sender<Result<(), SupervisorError>>>,
@@ -89,12 +143,10 @@ struct Run {
     detail: Option<String>,
     stdout_eof: bool,
     stderr_eof: bool,
-    exit: Option<ExitOutcome>,
-    drain_deadline: Option<Instant>,
-    stop: Option<StopState>,
+    state: RunState,
+    /// Callers waiting for this run to reach `Running`.
     start_replies: Vec<oneshot::Sender<Result<(), SupervisorError>>>,
     started_at: Instant,
-    running: bool,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -186,13 +238,13 @@ impl Actor {
     fn next_deadline(&self) -> Option<Instant> {
         let mut deadline = self.backoff_until;
         if let Some(run) = &self.run {
-            if let Some(stop) = &run.stop
-                && !stop.escalated
-            {
-                deadline = Some(deadline.map_or(stop.deadline, |d| d.min(stop.deadline)));
-            }
-            if let Some(drain) = run.drain_deadline {
-                deadline = Some(deadline.map_or(drain, |d| d.min(drain)));
+            let run_deadline = match &run.state {
+                RunState::Stopping(stop) if !stop.escalated => Some(stop.deadline),
+                RunState::Exited(exited) => Some(exited.drain_deadline),
+                _ => None,
+            };
+            if let Some(run_deadline) = run_deadline {
+                deadline = Some(deadline.map_or(run_deadline, |d| d.min(run_deadline)));
             }
         }
         deadline
@@ -231,12 +283,17 @@ impl Actor {
             return;
         }
         if let Some(run) = self.run.as_mut() {
-            if run.stop.is_some() {
-                self.pending_start.push(reply);
-            } else if run.running {
-                let _ = reply.send(Ok(()));
-            } else {
-                run.start_replies.push(reply);
+            match &run.state {
+                RunState::Starting => run.start_replies.push(reply),
+                RunState::Running => {
+                    let _ = reply.send(Ok(()));
+                }
+                // Served once the stopped run is finalized.
+                RunState::Stopping(_) => self.pending_start.push(reply),
+                RunState::Exited(exited) if exited.stopped() => self.pending_start.push(reply),
+                // The child is gone but the exit is not classified yet;
+                // `finalize` answers with `ExitedDuringStart`.
+                RunState::Exited(_) => run.start_replies.push(reply),
             }
             return;
         }
@@ -356,12 +413,9 @@ impl Actor {
             detail: None,
             stdout_eof: false,
             stderr_eof: false,
-            exit: None,
-            drain_deadline: None,
-            stop: None,
+            state: RunState::Starting,
             start_replies,
             started_at: Instant::now(),
-            running: false,
             tasks,
         });
         self.status.send_modify(|s| {
@@ -376,9 +430,8 @@ impl Actor {
 
     fn on_stop(&mut self, replies: Vec<oneshot::Sender<()>>) {
         if let Some(run) = self.run.as_mut() {
-            match run.stop.as_mut() {
-                Some(stop) => stop.replies.extend(replies),
-                None => {
+            match &mut run.state {
+                RunState::Starting | RunState::Running => {
                     let mut forced = false;
                     let note = match run.handle.request_stop() {
                         Ok(StopMethod::StdinClosed) => "stop requested (stdin closed)".to_string(),
@@ -393,7 +446,7 @@ impl Actor {
                             format!("could not ask zebrad to stop ({err}); killed it")
                         }
                     };
-                    run.stop = Some(StopState {
+                    run.state = RunState::Stopping(StopState {
                         deadline: Instant::now() + self.config.stop_grace,
                         escalated: false,
                         forced,
@@ -401,6 +454,26 @@ impl Actor {
                     });
                     self.status.send_modify(|s| s.phase = Phase::Stopping);
                     self.note(note);
+                }
+                RunState::Stopping(stop)
+                | RunState::Exited(Exited {
+                    stop: Some(stop), ..
+                }) => stop.replies.extend(replies),
+                // The child is already gone: there is no pid to signal and
+                // the phase stays until the exit is classified. The stop
+                // still counts, so the run is not restarted.
+                RunState::Exited(exited) => {
+                    let first = exited.late_stop.is_none();
+                    exited
+                        .late_stop
+                        .get_or_insert_with(Vec::new)
+                        .extend(replies);
+                    if first {
+                        self.note(
+                            "stop requested after zebrad exited; it will not be restarted"
+                                .to_string(),
+                        );
+                    }
                 }
             }
             return;
@@ -427,25 +500,21 @@ impl Actor {
     async fn on_timer(&mut self) {
         let now = Instant::now();
         if let Some(run) = self.run.as_mut() {
-            if let Some(stop) = run.stop.as_mut()
-                && !stop.escalated
-                && now >= stop.deadline
-            {
-                stop.escalated = true;
-                stop.forced = true;
-                match run.handle.kill() {
-                    Ok(()) => self.note(format!(
-                        "zebrad did not stop within {:?}; killed it",
-                        self.config.stop_grace
-                    )),
-                    Err(err) => self.note(format!("could not kill zebrad: {err}")),
+            match &mut run.state {
+                RunState::Stopping(stop) if !stop.escalated && now >= stop.deadline => {
+                    stop.escalated = true;
+                    stop.forced = true;
+                    let killed = run.handle.kill();
+                    let grace = self.config.stop_grace;
+                    self.note(match killed {
+                        Ok(()) => format!("zebrad did not stop within {grace:?}; killed it"),
+                        Err(err) => format!("could not kill zebrad: {err}"),
+                    });
                 }
-            }
-            if let Some(run) = self.run.as_ref()
-                && run.exit.is_some()
-                && run.drain_deadline.is_some_and(|d| now >= d)
-            {
-                self.finalize().await;
+                RunState::Exited(exited) if now >= exited.drain_deadline => {
+                    self.finalize().await;
+                }
+                _ => {}
             }
         }
         if self.backoff_until.is_some_and(|until| now >= until) {
@@ -485,8 +554,8 @@ impl Actor {
                     }
                 };
                 if let Some(run) = self.run.as_mut() {
-                    run.exit = Some(outcome);
-                    run.drain_deadline = Some(Instant::now() + self.config.exit_drain);
+                    run.state
+                        .on_exit(outcome, Instant::now() + self.config.exit_drain);
                 }
                 self.maybe_finalize().await;
             }
@@ -496,10 +565,9 @@ impl Actor {
     }
 
     async fn maybe_finalize(&mut self) {
-        let ready = self
-            .run
-            .as_ref()
-            .is_some_and(|run| run.exit.is_some() && run.stdout_eof && run.stderr_eof);
+        let ready = self.run.as_ref().is_some_and(|run| {
+            matches!(run.state, RunState::Exited(_)) && run.stdout_eof && run.stderr_eof
+        });
         if ready {
             self.finalize().await;
         }
@@ -512,12 +580,21 @@ impl Actor {
         for task in &run.tasks {
             task.abort();
         }
-        let exit = run.exit.unwrap_or(ExitOutcome {
+        let no_outcome = || ExitOutcome {
             code: None,
             signal: None,
-        });
-        let requested = run.stop.is_some();
-        let forced = run.stop.as_ref().is_some_and(|stop| stop.forced);
+        };
+        let (exit, stop, late_stop) = match run.state {
+            RunState::Exited(exited) => (exited.outcome, exited.stop, exited.late_stop),
+            // Only exited runs are finalized; these arms are defensive and
+            // still answer the callers of a stop under way.
+            RunState::Stopping(stop) => (no_outcome(), Some(stop), None),
+            RunState::Starting | RunState::Running => (no_outcome(), None, None),
+        };
+        // A stop issued before the exit; one issued after it did not end the run.
+        let requested = stop.is_some();
+        let forced = stop.as_ref().is_some_and(|stop| stop.forced);
+        let stopped = requested || late_stop.is_some() || self.shutdown_replies.is_some();
         let mut class = classify_exit(exit.code, run.deterministic_cause);
         if requested && !class.is_deterministic() {
             // A stop the user asked for ended the run; the exit code says how.
@@ -555,9 +632,11 @@ impl Actor {
         // The callers waiting on this run are answered only once the status
         // shows how it ended, so a caller that reads the status after its
         // reply sees the final phase.
+        let mut stop_replies = stop.map(|stop| stop.replies).unwrap_or_default();
+        stop_replies.extend(late_stop.unwrap_or_default());
         let replies = RunReplies {
             start: run.start_replies,
-            stop: run.stop.map(|stop| stop.replies).unwrap_or_default(),
+            stop: stop_replies,
             info: info.clone(),
         };
 
@@ -569,7 +648,7 @@ impl Actor {
             s.last_exit = Some(info);
         });
 
-        if requested || self.shutdown_replies.is_some() {
+        if stopped {
             self.status.send_modify(|s| s.phase = Phase::Stopped);
             replies.send();
             if self.shutdown_replies.is_none() && !self.pending_start.is_empty() {
@@ -634,17 +713,25 @@ impl Actor {
             return;
         };
         match event {
-            LogEvent::StartingZebrad => {
-                if !run.running {
-                    run.running = true;
-                    if run.stop.is_none() {
-                        self.status.send_modify(|s| s.phase = Phase::Running);
-                    }
+            LogEvent::StartingZebrad => match run.state {
+                RunState::Starting => {
+                    run.state = RunState::Running;
+                    self.status.send_modify(|s| s.phase = Phase::Running);
                     for reply in run.start_replies.drain(..) {
                         let _ = reply.send(Ok(()));
                     }
                 }
-            }
+                // A stop is under way: the callers learn zebrad came up, the
+                // phase stays Stopping.
+                RunState::Stopping(_) => {
+                    for reply in run.start_replies.drain(..) {
+                        let _ = reply.send(Ok(()));
+                    }
+                }
+                // Already running, or the child exited before this line was
+                // processed: an exited run never becomes Running.
+                RunState::Running | RunState::Exited(_) => {}
+            },
             LogEvent::RpcOpened { addr } => self.status.send_modify(|s| s.rpc_addr = Some(addr)),
             LogEvent::MetricsOpened { addr } => {
                 self.status.send_modify(|s| s.metrics_addr = Some(addr));
