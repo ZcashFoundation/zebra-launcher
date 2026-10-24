@@ -99,12 +99,16 @@ fn normalised<'a>(fields: impl Iterator<Item = &'a Field>, edits: &FormState) ->
     values
 }
 
-/// The message of every field whose edited text [`validate`] rejects.
+/// The message of every user-editable field whose edited text [`validate`] rejects. Locked
+/// fields are never written ([`render_config`] skips them and the backend rewrites the managed
+/// keys), and their rows show no error, so a value of theirs the form cannot read must not
+/// block Save.
 fn validation_errors<'a>(
     fields: impl Iterator<Item = &'a Field>,
     edits: &FormState,
 ) -> BTreeMap<FieldId, String> {
     fields
+        .filter(|field| field.control == Control::User)
         .filter_map(|field| {
             let text = edits.get(field.id())?;
             validate(field, text)
@@ -1022,12 +1026,20 @@ mod tests {
     }
 
     #[test]
-    fn validation_errors_cover_set_fields_only() {
-        // The scaffold's `validate` accepts everything; the map still only holds set fields.
+    fn validation_errors_cover_set_user_fields_only() {
         let edits = with(&[(PORT.id(), "abc")]);
+        let errors = validation_errors([PORT, ADDR, PEERS].iter(), &edits);
+        assert_eq!(errors.keys().collect::<Vec<_>>(), vec![&PORT.id()]);
+        // A locked field's value from the file (here a non-loopback address in a managed key,
+        // as a hand edit can leave it) is not written, so it does not block Save.
+        let edits = with(&[(PORT.id(), "abc"), (ADDR.id(), "0.0.0.0:8232")]);
         let errors = validation_errors([PORT, ADDR].iter(), &edits);
-        assert!(errors.len() <= 1);
+        assert!(errors.contains_key(&PORT.id()));
         assert!(!errors.contains_key(&ADDR.id()));
+        assert!(
+            validate(&ADDR, "0.0.0.0:8232").is_err(),
+            "the test needs a rejected value"
+        );
     }
 
     #[test]
