@@ -261,29 +261,31 @@ fn list_entries(text: &str) -> impl Iterator<Item = &str> {
 /// Checks one field's text against its kind. Empty text is "use the default" and always
 /// valid: a user-controlled field is then removed from the file, and managed or forced fields
 /// are never written anyway.
-pub fn validate(field: &Field, text: &str) -> Result<(), String> {
-    let text = normalize(field.kind, text);
-    if text.is_empty() {
+pub fn validate(field: &Field, text_as_typed: &str) -> Result<(), String> {
+    let normalized = normalize(field.kind, text_as_typed);
+    if normalized.is_empty() {
         return Ok(());
     }
+    let text = normalized.as_str();
     match field.kind {
-        Kind::Bool => match text.as_str() {
+        Kind::Bool => match text {
             "true" | "false" => Ok(()),
             _ => Err("Enter true or false.".to_owned()),
         },
-        Kind::Integer { min, max } => validate_integer(&text, min, max),
+        Kind::Integer { min, max } => validate_integer(text, min, max),
         // Any non-empty text is a path or free text.
         Kind::Text | Kind::Path | Kind::BoolOrPath => Ok(()),
-        Kind::SocketAddr { loopback_only } => validate_socket_addr(&text, loopback_only),
-        Kind::Duration => validate_duration(&text),
+        Kind::SocketAddr { loopback_only } => validate_socket_addr(text, loopback_only),
+        Kind::Duration => validate_duration(text),
         Kind::Choice(choices) => {
-            if choices.contains(&text.as_str()) {
+            if choices.contains(&text) {
                 Ok(())
             } else {
                 Err(format!("Choose one of: {}.", choices.join(", ")))
             }
         }
-        Kind::StringList => validate_list(field, &text),
+        // The text as typed, so the line numbers in the message match the textarea rows.
+        Kind::StringList => validate_list(field, text_as_typed),
     }
 }
 
@@ -395,13 +397,15 @@ fn validate_duration(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A peer list (`initial_*_peers`) holds `host:port` entries; other lists take any text.
+/// A peer list (`initial_*_peers`) holds `host:port` entries; other lists take any text. Blank
+/// lines are skipped but counted, so "Line N" is the row of the text as typed.
 fn validate_list(field: &Field, text: &str) -> Result<(), String> {
     if !field.key.ends_with("_peers") {
         return Ok(());
     }
-    for (index, entry) in text.lines().enumerate() {
-        if !is_host_port(entry) {
+    for (index, line) in text.lines().enumerate() {
+        let entry = line.trim();
+        if !entry.is_empty() && !is_host_port(entry) {
             return Err(format!(
                 "Line {}: enter a host name or IP address with a port, such as \
                  dnsseed.z.cash:8233.",
@@ -1215,7 +1219,10 @@ enabled = false
             ))
         };
         assert_eq!(validate(field, "dnsseed.z.cash"), line(1));
-        assert_eq!(validate(field, "a.example:8233\n\nb.example"), line(2));
+        // The row in the textarea, blank lines included.
+        assert_eq!(validate(field, "a.example:8233\n\nb.example"), line(3));
+        assert_eq!(validate(field, "\n\nbad"), line(3));
+        assert_eq!(validate(field, "  a.example:8233 \n  bad \n"), line(2));
         assert_eq!(validate(field, "bad_host:8233"), line(1));
         assert_eq!(validate(field, "host:99999"), line(1));
         assert_eq!(validate(field, "-host.example:8233"), line(1));
