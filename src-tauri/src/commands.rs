@@ -281,36 +281,45 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 
 /// Validates and saves `settings`, returning what was saved.
 ///
-/// Managed `zebrad.toml` keys that depend on the settings (network, data
-/// directory) are updated right away and take effect on the next zebrad
-/// start; the stop grace period takes effect on the next launch.
-/// `first_run_done` is kept as it is: only `complete_first_run` sets it.
-/// `data_dir` is kept as it is too: only `choose_data_dir` changes it, after
-/// checking that zebrad is stopped and the directory is writable, so a stale
-/// copy of the settings in the UI cannot undo a choice.
+/// Managed `zebrad.toml` keys that depend on the settings (the network) are
+/// updated right away and take effect on the next zebrad start; the stop
+/// grace period takes effect on the next launch. A save that changes such a
+/// key is refused, without saving anything, while a configuration change is
+/// being applied (see [`AppState::config_writer`]); every other save goes
+/// through regardless. `first_run_done` is kept as it is: only
+/// `complete_first_run` sets it. `data_dir` is kept as it is too: only
+/// `choose_data_dir` changes it, after checking that zebrad is stopped and
+/// the directory is writable, so a stale copy of the settings in the UI
+/// cannot undo a choice.
 #[tauri::command]
 pub async fn set_settings(
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<Settings, String> {
+    let paths = state.paths.clone();
+    let current = state.settings.current();
+    let mut merged = current.clone();
+    launcher_core::settings::apply_from_ui(&mut merged, settings.clone());
+    let config_permit = if managed_keys(&merged, &paths) == managed_keys(&current, &paths) {
+        None
+    } else {
+        Some(state.try_config_permit()?)
+    };
+
     let saved = state
         .settings
         .update(move |current| launcher_core::settings::apply_from_ui(current, settings))
         .await
         .map_err(message)?;
 
-    // `ensure` only writes when a managed value changed.
-    let _permit = state
-        .config_writer
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(message)?;
-    let paths = state.paths.clone();
-    let keys = managed_keys(&saved, &paths);
-    blocking(move || config::ensure(&paths, &keys))
-        .await?
-        .map_err(|err| format!("settings saved, but zebrad.toml could not be updated: {err}"))?;
+    if config_permit.is_some() {
+        let keys = managed_keys(&saved, &paths);
+        blocking(move || config::ensure(&paths, &keys))
+            .await?
+            .map_err(|err| {
+                format!("settings saved, but zebrad.toml could not be updated: {err}")
+            })?;
+    }
     Ok(saved)
 }
 

@@ -39,6 +39,12 @@ pub struct AppState {
     pub node_stats: watch::Receiver<Option<NodeStats>>,
     /// One permit: held while `zebrad.toml` is being written, so a config
     /// apply and a settings change never interleave.
+    ///
+    /// The rule: only `apply_config` holds it for long (across a zebrad
+    /// restart, up to about a minute). Every other writer takes it with
+    /// [`AppState::try_config_permit`] and fails fast with "try again"
+    /// instead of waiting, so no IPC call hangs behind an apply, and takes it
+    /// before changing anything, so a refusal leaves everything as it was.
     pub config_writer: Arc<Semaphore>,
     /// Bumped by every `subscribe_logs`; older log forwarders stop when it
     /// changes, so a reloaded UI does not leave forwarders behind.
@@ -106,7 +112,9 @@ impl AppState {
     }
 
     /// Held while `zebrad.toml` is written by a command that does not wait
-    /// for a running config change (a reset, a data directory change).
+    /// for a running config change (a reset, a data directory change, a
+    /// settings save that changes a managed key); see
+    /// [`AppState::config_writer`].
     pub fn try_config_permit(&self) -> Result<OwnedSemaphorePermit, String> {
         self.config_writer
             .clone()
