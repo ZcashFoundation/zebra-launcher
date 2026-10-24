@@ -1,15 +1,19 @@
-//! A scripted stand-in for `zebrad`, used by the supervisor tests and by
-//! pull-request bundle builds that must not download the real node.
+//! A scripted stand-in for `zebrad`, used by the supervisor and RPC monitor
+//! tests, and installed as the development sidecar by `scripts/dev-sidecar.sh`
+//! so `tauri-build` and `cargo tauri dev` find a binary without downloading
+//! the real node. Release bundles never ship it.
 //!
 //! It accepts the subset of zebrad's command line the launcher uses
-//! (`--version`, `generate -o FILE`, `-c FILE start`), prints the same log
-//! lines the launcher's detectors key on, and shuts down on the same signals.
-//! `FAKE_ZEBRAD_MODE` selects a scenario:
+//! (`--version`, `-c FILE start`), prints the same log lines the launcher's
+//! detectors key on, and shuts down on the same signals. It reports the
+//! pinned `ZEBRAD_VERSION` as its version. `FAKE_ZEBRAD_MODE` selects a
+//! scenario:
 //!
 //! | mode | behaviour |
 //! |---|---|
 //! | `ok` (default) | starts, logs a heartbeat, shuts down cleanly on request |
 //! | `crash` | exits with code 2 right after start-up |
+//! | `crash-on-stop` | like `ok`, but a shutdown request ends with exit code 3 |
 //! | `config-error` | prints zebrad's config error to stderr and exits 1 |
 //! | `eos-warn` | like `ok`, plus the end-of-support warning on every heartbeat |
 //! | `eos-halt` | aborts with the end-of-support panic after start-up |
@@ -21,8 +25,12 @@
 //!
 //! `FAKE_ZEBRAD_STARTUP_DELAY_MS` delays the lines after `Starting zebrad`, and
 //! `FAKE_ZEBRAD_HEARTBEAT_MS` sets the heartbeat interval (default 500 ms).
-//! `start --shutdown-on-stdin-close` also shuts down when stdin reaches EOF,
-//! mirroring the flag proposed for zebrad.
+//! `FAKE_ZEBRAD_LINGER_MS` makes the fake leave a grandchild behind when it
+//! exits (except by a panic) that inherits stdout and stderr and lives that
+//! long, the way a zebrad subprocess could keep the pipes open: the
+//! supervisor then sits in its exit drain. `start --shutdown-on-stdin-close`
+//! also shuts down when stdin reaches EOF, mirroring the flag proposed for
+//! zebrad.
 //!
 //! When the `-c` config sets `rpc.listen_addr`, the fake also serves a minimal
 //! JSON-RPC endpoint there (port 0 picks a free port, and the bound address is
@@ -55,7 +63,8 @@ use tokio::{
     sync::oneshot,
 };
 
-const VERSION: &str = "7.0.0";
+/// The bundled zebrad's version, from the repository's `ZEBRAD_VERSION` pin.
+const VERSION: &str = include_str!("../../../../ZEBRAD_VERSION").trim_ascii();
 const RPC_ADDR: &str = "127.0.0.1:8232";
 const METRICS_ADDR: &str = "127.0.0.1:9999";
 
@@ -82,32 +91,17 @@ fn main() -> ExitCode {
     }
 
     match rest.first().map(String::as_str) {
-        Some("generate") => generate(&rest[1..]),
         Some("start") | None => start(config, rest.get(1..).unwrap_or(&[])),
+        // The grandchild of `FAKE_ZEBRAD_LINGER_MS`: holds the inherited
+        // pipes open for the given number of milliseconds.
+        Some("linger") => {
+            let ms = rest.get(1).and_then(|ms| ms.parse().ok()).unwrap_or(0);
+            std::thread::sleep(Duration::from_millis(ms));
+            ExitCode::SUCCESS
+        }
         Some(other) => {
             eprintln!("error: unrecognized subcommand '{other}'");
             ExitCode::from(2)
-        }
-    }
-}
-
-fn generate(args: &[String]) -> ExitCode {
-    let output = args
-        .iter()
-        .position(|a| a == "-o" || a == "--output-file")
-        .and_then(|i| args.get(i + 1));
-    let config = "# Default configuration for zebrad (fake).\n\n[network]\nnetwork = \"Mainnet\"\n\n[rpc]\nenable_cookie_auth = true\n\n[metrics]\n".to_string();
-    match output {
-        Some(path) => match std::fs::write(path, config) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => {
-                eprintln!("error: could not write {path}: {err}");
-                ExitCode::from(1)
-            }
-        },
-        None => {
-            print!("{config}");
-            ExitCode::SUCCESS
         }
     }
 }
@@ -132,13 +126,34 @@ fn start(config: Option<PathBuf>, args: &[String]) -> ExitCode {
         .enable_all()
         .build()
         .expect("a current-thread runtime can always be built");
-    runtime.block_on(run(
+    let code = runtime.block_on(run(
         config,
         mode,
         startup_delay,
         heartbeat,
         shutdown_on_stdin_close,
-    ))
+    ));
+    spawn_lingerer();
+    code
+}
+
+/// With `FAKE_ZEBRAD_LINGER_MS` set, starts the `linger` grandchild that keeps
+/// this process's stdout and stderr open after it exits.
+fn spawn_lingerer() {
+    let linger = env_millis("FAKE_ZEBRAD_LINGER_MS", 0);
+    if linger.is_zero() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    // stdout and stderr are inherited; the handle is dropped so the
+    // grandchild outlives this process.
+    let _ = std::process::Command::new(exe)
+        .arg("linger")
+        .arg(linger.as_millis().to_string())
+        .stdin(std::process::Stdio::null())
+        .spawn();
 }
 
 async fn run(
@@ -210,7 +225,7 @@ async fn run(
         "opening database, this may take a few minutes",
     );
     if sleep_unless_shutdown(startup_delay, &mut shutdown, &mode).await {
-        return ExitCode::SUCCESS;
+        return shutdown_exit_code(&mode);
     }
     if mode == "db-locked" {
         panic_and_abort(
@@ -286,7 +301,7 @@ async fn run(
     let mut height: u64 = 1_000;
     loop {
         if sleep_unless_shutdown(heartbeat, &mut shutdown, &mode).await {
-            return ExitCode::SUCCESS;
+            return shutdown_exit_code(&mode);
         }
         height += 1;
         log(
@@ -306,6 +321,16 @@ async fn run(
             );
         }
     }
+}
+
+/// How the fake exits after a graceful shutdown: 0, or 3 in `crash-on-stop`
+/// mode, like a zebrad that fails while shutting down.
+fn shutdown_exit_code(mode: &str) -> ExitCode {
+    if mode == "crash-on-stop" {
+        eprintln!("fake-zebrad: simulated crash during shutdown");
+        return ExitCode::from(3);
+    }
+    ExitCode::SUCCESS
 }
 
 type ShutdownFuture = std::pin::Pin<

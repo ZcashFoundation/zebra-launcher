@@ -1,6 +1,7 @@
-//! Unix process control: process groups, the parent-death signal and signals.
+//! Unix process control: process groups, the parent-death signal, signals,
+//! and the liveness and executable checks behind the pid file.
 
-use std::io;
+use std::{io, path::PathBuf};
 
 use nix::{
     errno::Errno,
@@ -33,7 +34,7 @@ fn pid(pid: u32) -> io::Result<Pid> {
 
 /// Sends `SIGTERM` to zebrad. A process that is already gone is not an
 /// error: it exited on its own just before the stop request.
-pub(crate) fn terminate(raw: u32) -> io::Result<()> {
+pub(super) fn terminate(raw: u32) -> io::Result<()> {
     ignore_gone(kill(pid(raw)?, Signal::SIGTERM))
 }
 
@@ -47,10 +48,59 @@ fn ignore_gone(result: nix::Result<()>) -> io::Result<()> {
 
 /// Sends `SIGKILL` to zebrad's process group and to zebrad itself. A process
 /// that is already gone is not an error.
-pub(crate) fn kill_group(raw: u32) -> io::Result<()> {
+pub(super) fn kill_group(raw: u32) -> io::Result<()> {
     let pid = pid(raw)?;
     ignore_gone(killpg(pid, Signal::SIGKILL))?;
     ignore_gone(kill(pid, Signal::SIGKILL))
+}
+
+/// Returns true when a process with `pid` exists, also when it belongs to
+/// another user.
+pub(super) fn is_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // Signal 0 performs the permission and existence checks without sending anything.
+    match kill(Pid::from_raw(pid), None) {
+        Ok(()) => true,
+        // The process exists but belongs to another user.
+        Err(Errno::EPERM) => true,
+        Err(_) => false,
+    }
+}
+
+/// The executable of the running process `pid`, if the platform tells us.
+#[cfg(target_os = "linux")]
+pub(super) fn executable_of(pid: u32) -> Option<PathBuf> {
+    let link = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    // A binary replaced or removed since the process started reads as
+    // "<path> (deleted)".
+    let link = match link.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(stripped) => PathBuf::from(stripped),
+        None => link,
+    };
+    Some(link)
+}
+
+/// The executable of the running process `pid`, if the platform tells us.
+#[cfg(target_os = "macos")]
+pub(super) fn executable_of(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let mut buf = vec![0u8; usize::try_from(libc::PROC_PIDPATHINFO_MAXSIZE).ok()?];
+    let size = u32::try_from(buf.len()).ok()?;
+    // SAFETY: `buf` is writable for `size` bytes for the duration of the call.
+    let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), size) };
+    let len = usize::try_from(len).ok().filter(|&len| len > 0)?;
+    buf.truncate(len);
+    Some(PathBuf::from(std::ffi::OsString::from_vec(buf)))
+}
+
+/// Other Unixes cannot tell; the pid alone is trusted.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(super) fn executable_of(_pid: u32) -> Option<PathBuf> {
+    None
 }
 
 #[cfg(test)]

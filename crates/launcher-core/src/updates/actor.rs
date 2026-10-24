@@ -20,8 +20,6 @@ use tokio::{
     time::Instant,
 };
 
-use crate::supervisor;
-
 use super::{
     FoundUpdate, Jitter, NodeControl, PendingUpdate, UpdateBackend, UpdaterRecord, clear_marker,
     eos_warning_active, next_check, node_is_running, save_record, should_auto_download,
@@ -144,9 +142,10 @@ impl UpdaterHandle {
 
 /// Starts the updater actor. Must be called inside a Tokio runtime.
 ///
-/// `settings` provides the update mode and the stop grace period, `stats` the
-/// end-of-support estimate. Nothing touches the network until an automatic
-/// check is due (never in Off mode) or [`UpdaterHandle::check`] is called.
+/// `settings` provides the update mode, `stats` the end-of-support estimate,
+/// and `node` the stop cap besides control of zebrad. Nothing touches the
+/// network until an automatic check is due (never in Off mode) or
+/// [`UpdaterHandle::check`] is called.
 pub fn spawn<B: UpdateBackend, N: NodeControl>(
     backend: B,
     node: N,
@@ -721,8 +720,9 @@ impl<B: UpdateBackend, N: NodeControl> Actor<B, N> {
             zebrad_was_running: node_is_running(&self.status.borrow()),
             written_at: SystemTime::now(),
         };
-        let stop_cap =
-            supervisor::shutdown_cap(Duration::from_secs(self.settings.borrow().stop_grace_secs));
+        // The supervisor's grace is fixed at launch; the settings may have
+        // changed since, so the cap comes from the supervisor.
+        let stop_cap = self.node.shutdown_cap();
         let id = self.new_job_id();
         let handle = tokio::spawn(install(InstallJob {
             id,
@@ -994,7 +994,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::updates::{AUTO_INSTALL_COUNTDOWN, CHECK_INTERVAL, FIRST_CHECK_DELAY, read_marker};
+    use crate::{
+        supervisor,
+        updates::{AUTO_INSTALL_COUNTDOWN, CHECK_INTERVAL, FIRST_CHECK_DELAY, read_marker},
+    };
 
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
     const T: Duration = Duration::from_secs(60);
@@ -1101,6 +1104,8 @@ mod tests {
         status: Arc<watch::Sender<Status>>,
         stops: Arc<AtomicUsize>,
         starts: Arc<AtomicUsize>,
+        /// The supervisor's stop grace, in seconds; `shutdown_cap` follows it.
+        stop_grace_secs: Arc<AtomicUsize>,
         /// How long `stop` takes, in seconds.
         stop_delay_secs: Arc<AtomicUsize>,
         /// Set while a stop is under way.
@@ -1123,6 +1128,7 @@ mod tests {
                 status: Arc::new(watch::channel(status).0),
                 stops: Arc::default(),
                 starts: Arc::default(),
+                stop_grace_secs: Arc::new(AtomicUsize::new(60)),
                 stop_delay_secs: Arc::default(),
                 stopping: Arc::default(),
                 started_while_stopping: Arc::default(),
@@ -1133,6 +1139,10 @@ mod tests {
     impl NodeControl for FakeNode {
         fn watch_status(&self) -> watch::Receiver<Status> {
             self.status.subscribe()
+        }
+        fn shutdown_cap(&self) -> Duration {
+            let grace = self.stop_grace_secs.load(Ordering::SeqCst) as u64;
+            supervisor::shutdown_cap(Duration::from_secs(grace))
         }
         async fn stop(&self) -> Result<(), String> {
             self.stops.fetch_add(1, Ordering::SeqCst);
@@ -1599,13 +1609,32 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_stop_cap_has_a_floor() {
         let h = harness(UpdateMode::Notify, FakeBackend::with_latest(Some("0.2.0")));
-        h.settings.send_modify(|s| s.stop_grace_secs = 5);
+        h.node.stop_grace_secs.store(5, Ordering::SeqCst);
         // The supervisor takes 40 s to stop: more than grace + margin, less
         // than the 70 s floor.
         h.node.stop_delay_secs.store(40, Ordering::SeqCst);
         check_and_install(&h).await;
         idle(Duration::from_secs(41)).await;
         assert_eq!(h.backend.count(|i| &i.installs), 1);
+        assert_eq!(h.node.starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_stop_cap_follows_the_supervisor_not_the_settings() {
+        let h = harness(UpdateMode::Notify, FakeBackend::with_latest(Some("0.2.0")));
+        // The grace was lowered in the settings after launch; the supervisor
+        // still waits its 120 s before killing zebrad, and so must the cap.
+        h.settings.send_modify(|s| s.stop_grace_secs = 5);
+        h.node.stop_grace_secs.store(120, Ordering::SeqCst);
+        h.node.stop_delay_secs.store(100, Ordering::SeqCst);
+        check_and_install(&h).await;
+        idle(Duration::from_secs(101)).await;
+        assert_eq!(
+            h.backend.count(|i| &i.installs),
+            1,
+            "{:?}",
+            h.handle.state()
+        );
         assert_eq!(h.node.starts.load(Ordering::SeqCst), 0);
     }
 

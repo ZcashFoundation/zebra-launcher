@@ -293,28 +293,28 @@ fn classify_panic(message: &str) -> LogEvent {
     }
 }
 
+/// The deterministic exit class `event` implies, if any: a cause that a
+/// restart without a change cannot fix. The supervisor keeps the first one
+/// seen in a run for [`classify_exit`].
+pub fn classify_event(event: &LogEvent) -> Option<ExitClass> {
+    Some(match event {
+        LogEvent::ConfigError => ExitClass::ConfigError,
+        LogEvent::EosHalt { .. } => ExitClass::EosHalt,
+        LogEvent::DbLocked { .. } => ExitClass::DbLocked,
+        LogEvent::PortInUse { .. } => ExitClass::PortInUse,
+        _ => return None,
+    })
+}
+
 /// Classifies how a run ended from its exit code (`None` when killed by a
-/// signal) and the events detected during the run.
+/// signal) and the first deterministic cause detected during the run
+/// ([`classify_event`]).
 ///
-/// Deterministic causes win over the exit code, because zebrad exits 1 for a
-/// config error and aborts (134 on Unix) for the panics, which alone say little.
-pub fn classify_exit<'a>(
-    exit_code: Option<i32>,
-    events: impl IntoIterator<Item = &'a LogEvent>,
-) -> ExitClass {
-    let mut class = None;
-    for event in events {
-        let candidate = match event {
-            LogEvent::ConfigError => ExitClass::ConfigError,
-            LogEvent::EosHalt { .. } => ExitClass::EosHalt,
-            LogEvent::DbLocked { .. } => ExitClass::DbLocked,
-            LogEvent::PortInUse { .. } => ExitClass::PortInUse,
-            _ => continue,
-        };
-        // Keep the earliest deterministic cause.
-        class.get_or_insert(candidate);
-    }
-    class.unwrap_or(match exit_code {
+/// The deterministic cause wins over the exit code, because zebrad exits 1 for
+/// a config error and aborts (134 on Unix) for the panics, which alone say
+/// little.
+pub fn classify_exit(exit_code: Option<i32>, cause: Option<ExitClass>) -> ExitClass {
+    cause.unwrap_or(match exit_code {
         Some(0) => ExitClass::Clean,
         _ => ExitClass::Crash,
     })
@@ -512,31 +512,66 @@ mod tests {
     }
 
     #[test]
-    fn exit_classification_prefers_deterministic_causes() {
-        let config = [
-            LogEvent::ConfigError,
+    fn only_deterministic_causes_classify_an_event() {
+        let deterministic = [
+            (LogEvent::ConfigError, ExitClass::ConfigError),
+            (
+                LogEvent::EosHalt {
+                    message: "x".into(),
+                },
+                ExitClass::EosHalt,
+            ),
+            (
+                LogEvent::DbLocked {
+                    message: "x".into(),
+                },
+                ExitClass::DbLocked,
+            ),
+            (
+                LogEvent::PortInUse {
+                    message: "x".into(),
+                },
+                ExitClass::PortInUse,
+            ),
+        ];
+        for (event, class) in deterministic {
+            assert_eq!(classify_event(&event), Some(class), "{event:?}");
+            assert!(class.is_deterministic());
+        }
+        for event in [
             LogEvent::FatalError {
                 message: "x".into(),
             },
-        ];
-        assert_eq!(classify_exit(Some(1), &config), ExitClass::ConfigError);
-        let locked = [LogEvent::DbLocked {
-            message: "x".into(),
-        }];
-        assert_eq!(classify_exit(None, &locked), ExitClass::DbLocked);
-        assert_eq!(classify_exit(Some(134), &locked), ExitClass::DbLocked);
-        assert_eq!(classify_exit(Some(0), &[]), ExitClass::Clean);
-        assert_eq!(classify_exit(Some(1), &[]), ExitClass::Crash);
+            LogEvent::Panic {
+                message: "x".into(),
+            },
+            LogEvent::EosWarn {
+                message: "x".into(),
+            },
+            LogEvent::StartingZebrad,
+            LogEvent::Stopped,
+        ] {
+            assert_eq!(classify_event(&event), None, "{event:?}");
+        }
+    }
+
+    #[test]
+    fn exit_classification_prefers_deterministic_causes() {
         assert_eq!(
-            classify_exit(
-                None,
-                &[LogEvent::Panic {
-                    message: "x".into()
-                }]
-            ),
-            ExitClass::Crash
+            classify_exit(Some(1), Some(ExitClass::ConfigError)),
+            ExitClass::ConfigError
         );
-        assert!(ExitClass::DbLocked.is_deterministic());
+        assert_eq!(
+            classify_exit(None, Some(ExitClass::DbLocked)),
+            ExitClass::DbLocked
+        );
+        assert_eq!(
+            classify_exit(Some(134), Some(ExitClass::DbLocked)),
+            ExitClass::DbLocked
+        );
+        assert_eq!(classify_exit(Some(0), None), ExitClass::Clean);
+        assert_eq!(classify_exit(Some(1), None), ExitClass::Crash);
+        assert_eq!(classify_exit(None, None), ExitClass::Crash);
         assert!(!ExitClass::Crash.is_deterministic());
     }
 }

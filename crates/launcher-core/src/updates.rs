@@ -315,6 +315,10 @@ pub trait UpdateBackend: Send + Sync + 'static {
 pub trait NodeControl: Clone + Send + Sync + 'static {
     /// The supervisor's status.
     fn watch_status(&self) -> watch::Receiver<Status>;
+    /// How long [`Self::stop`] may take before the updater gives up on it:
+    /// the supervisor's [`SupervisorHandle::shutdown_cap`], which outlasts
+    /// its escalation to a kill.
+    fn shutdown_cap(&self) -> Duration;
     /// Stops zebrad gracefully (then by force after the grace period) and
     /// waits until it exited.
     fn stop(&self) -> impl Future<Output = Result<(), String>> + Send;
@@ -325,6 +329,10 @@ pub trait NodeControl: Clone + Send + Sync + 'static {
 impl NodeControl for SupervisorHandle {
     fn watch_status(&self) -> watch::Receiver<Status> {
         SupervisorHandle::watch_status(self)
+    }
+
+    fn shutdown_cap(&self) -> Duration {
+        SupervisorHandle::shutdown_cap(self)
     }
 
     async fn stop(&self) -> Result<(), String> {
@@ -964,6 +972,9 @@ mod tests {
     impl NodeControl for InstantNode {
         fn watch_status(&self) -> watch::Receiver<Status> {
             self.status.subscribe()
+        }
+        fn shutdown_cap(&self) -> Duration {
+            crate::supervisor::shutdown_cap(Duration::from_secs(60))
         }
         async fn stop(&self) -> Result<(), String> {
             self.status.send_replace(Status::default());

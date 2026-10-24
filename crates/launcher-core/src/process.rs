@@ -1,4 +1,5 @@
-//! Spawning zebrad and stopping it.
+//! Spawning zebrad and stopping it, and the OS process primitives behind the
+//! pid file ([`is_alive`], [`terminate_pid`], [`executable_of`]).
 //!
 //! Spawning happens on one long-lived thread, the [`Spawner`]: on Linux the
 //! child's parent-death signal is tied to the thread that forked it, and on
@@ -6,6 +7,9 @@
 //! resumed, which is simplest done synchronously. The supervisor keeps a
 //! [`ChildHandle`] to stop the process and moves the `Child` itself into a
 //! task that waits for it.
+//!
+//! All raw OS calls live in the two backends, `unix` and `windows`, which
+//! offer the same functions so they can be read side by side.
 
 use std::{ffi::OsString, io, path::PathBuf, process::Stdio};
 
@@ -16,9 +20,55 @@ use tokio::{
 };
 
 #[cfg(unix)]
-pub(crate) mod unix;
+mod unix;
 #[cfg(windows)]
 mod windows;
+
+/// Returns true when a process with `pid` exists: on Unix also when it
+/// belongs to another user, on Windows only while it has not exited.
+///
+/// For a process the launcher did not start; the pid file's check adds the
+/// rules about pid 0 and the launcher's own pid.
+pub(crate) fn is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unix::is_alive(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows::is_alive(pid)
+    }
+}
+
+/// Sends the platform's termination request to a process the launcher did
+/// not start: `SIGTERM` on Unix, `TerminateProcess` on Windows (a stale
+/// process is in no job the launcher owns).
+pub(crate) fn terminate_pid(pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::terminate(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows::terminate_pid(pid)
+    }
+}
+
+/// The executable of the running process `pid`, if the platform tells us: it
+/// reads `/proc/<pid>/exe` on Linux, calls `proc_pidpath` on macOS and
+/// `QueryFullProcessImageNameW` on Windows. `None` on other platforms, or
+/// when the executable cannot be read (for example a process owned by
+/// another user).
+pub(crate) fn executable_of(pid: u32) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        unix::executable_of(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows::executable_of(pid)
+    }
+}
 
 /// The argument that asks zebrad to shut down when its stdin closes.
 ///
@@ -38,12 +88,17 @@ pub struct ZebradCommand {
     /// first, so the launcher's config is not silently overridden.
     pub env: Vec<(OsString, OsString)>,
     /// Pass [`SHUTDOWN_ON_STDIN_CLOSE_ARG`] and keep a pipe to zebrad's stdin,
-    /// so dropping the pipe is a graceful stop on every platform. Needs a zebrad
-    /// that understands the flag.
+    /// so dropping the pipe is a graceful stop on every platform, also when
+    /// the launcher dies. Needs a zebrad that understands the flag.
     pub shutdown_on_stdin_close: bool,
     /// Windows only: kill zebrad when the launcher exits for any reason,
-    /// including a crash. Set this while the bundled zebrad cannot shut down on
-    /// stdin close; with that mode the pipe does the job gracefully.
+    /// including a crash (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`).
+    ///
+    /// Paired with [`Self::shutdown_on_stdin_close`]: while that is off this
+    /// stays on, or a launcher crash would leave zebrad running with nothing
+    /// to stop it; once the bundled zebrad has the flag the closing pipe does
+    /// the job gracefully and this can be turned off. Nothing turns it off
+    /// yet. [`Spawner::spawn`] asserts the pairing in debug builds.
     pub kill_on_launcher_exit: bool,
 }
 
@@ -59,6 +114,12 @@ impl ZebradCommand {
             shutdown_on_stdin_close: false,
             kill_on_launcher_exit: true,
         }
+    }
+
+    /// Whether zebrad still stops when the launcher dies: its stdin pipe
+    /// closes, or (Windows) its job is closed.
+    fn stops_when_launcher_dies(&self) -> bool {
+        self.shutdown_on_stdin_close || self.kill_on_launcher_exit
     }
 }
 
@@ -192,6 +253,10 @@ fn is_zebra_env_var(key: &std::ffi::OsStr) -> bool {
 
 /// Spawns on the calling thread. See the module docs for why that matters.
 fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
+    debug_assert!(
+        command.stops_when_launcher_dies(),
+        "kill_on_launcher_exit must stay on until shutdown_on_stdin_close is on"
+    );
     let mut cmd = Command::new(&command.binary);
     cmd.arg("-c").arg(&command.config).arg("start");
     if command.shutdown_on_stdin_close {
@@ -263,7 +328,20 @@ fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::is_zebra_env_var;
+    use super::{ZebradCommand, is_zebra_env_var};
+
+    #[test]
+    fn zebrad_stays_stoppable_when_the_launcher_dies() {
+        let mut command = ZebradCommand::new("zebrad", "zebrad.toml");
+        assert!(command.stops_when_launcher_dies(), "the default pairing");
+        command.kill_on_launcher_exit = false;
+        assert!(
+            !command.stops_when_launcher_dies(),
+            "turning the job limit off needs the stdin-close mode"
+        );
+        command.shutdown_on_stdin_close = true;
+        assert!(command.stops_when_launcher_dies());
+    }
 
     #[test]
     fn zebra_env_vars_match_in_any_case() {
