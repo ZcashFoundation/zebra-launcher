@@ -11,7 +11,10 @@ use wasm_bindgen::JsValue;
 
 use crate::{
     app::AppState,
-    components::rows::{Rows, text_rows},
+    components::{
+        icons::{check_icon, clock_icon, cross_icon, warning_icon},
+        rows::{Rows, text_rows},
+    },
     format::{relative, thousands},
     insights::{
         ACTIVITY_MINUTES, Checkpoints, Mempool, MinuteBucket, Peers, Problem, ProblemLevel, Run,
@@ -254,22 +257,12 @@ fn tone_class(tone: Tone) -> &'static str {
 }
 
 /// The icon that goes with a tone, so the state never rests on colour alone.
-fn tone_icon(tone: Tone) -> impl IntoView {
-    let path = match tone {
-        Tone::Good => "M4.5 8.5l2.5 2.5 4.5-5",
-        Tone::Neutral => "M8 4.5V8l2.5 1.5",
-        Tone::Warning => "M8 5v4M8 11.2v.3",
-        Tone::Critical => "M5.5 5.5l5 5M10.5 5.5l-5 5",
-    };
-    let outline = match tone {
-        Tone::Warning => "M8 1.5L15 14H1z",
-        _ => "M8 1a7 7 0 1 1 0 14A7 7 0 0 1 8 1z",
-    };
-    view! {
-        <svg class="insight-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
-            <path d=outline fill="none" stroke="currentColor" stroke-width="1.5" />
-            <path d=path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
-        </svg>
+fn tone_icon(tone: Tone) -> AnyView {
+    match tone {
+        Tone::Good => check_icon().into_any(),
+        Tone::Neutral => clock_icon().into_any(),
+        Tone::Warning => warning_icon().into_any(),
+        Tone::Critical => cross_icon().into_any(),
     }
 }
 

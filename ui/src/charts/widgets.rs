@@ -1,10 +1,12 @@
-//! Dashboard widgets: the range control, stat tiles with sparklines, the sync meter and the
-//! inline icons.
+//! Dashboard widgets: the range control, stat tiles with sparklines and the sync meter.
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::charts::{Range, spark_paths};
+use crate::{
+    charts::{Range, spark_paths},
+    components::icons::warning_icon,
+};
 
 /// A segmented control for the dashboard's time range: a radio group, operable with the arrow
 /// keys.
@@ -147,25 +149,5 @@ pub fn Meter(#[prop(into)] fraction: Signal<f64>, label: &'static str) -> impl I
         >
             <div class="meter-fill" style:width=move || format!("{:.2}%", percent())></div>
         </div>
-    }
-}
-
-/// A check mark, for "at chain tip".
-pub fn check_icon() -> impl IntoView {
-    view! {
-        <svg class="dash-icon dash-icon-ok" viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M3 8.5l3 3 7-7" />
-        </svg>
-    }
-}
-
-/// A warning triangle, for a stale RPC update.
-pub fn warning_icon() -> impl IntoView {
-    view! {
-        <svg class="dash-icon" viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M8 2L14.5 13.5H1.5Z" />
-            <path d="M8 6.5v3" />
-            <path d="M8 11.8v0.01" />
-        </svg>
     }
 }

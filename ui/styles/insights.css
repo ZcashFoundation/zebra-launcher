@@ -96,23 +96,19 @@
   font-size: 16px;
 }
 
-.insight-icon {
-  flex: none;
-}
-
-.insight-tone-good .insight-icon {
+.insight-tone-good .icon {
   color: var(--status-good);
 }
 
-.insight-tone-neutral .insight-icon {
+.insight-tone-neutral .icon {
   color: var(--text-secondary);
 }
 
-.insight-tone-warning .insight-icon {
+.insight-tone-warning .icon {
   color: var(--status-warning);
 }
 
-.insight-tone-critical .insight-icon {
+.insight-tone-critical .icon {
   color: var(--status-critical);
 }
 

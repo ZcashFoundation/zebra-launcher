@@ -158,6 +158,29 @@ pre {
   color: var(--ok);
 }
 
+/* Icons (components/icons.rs): 16 px, drawn in the text colour of where they sit. */
+.icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+}
+
+.icon path {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.icon-frame {
+  stroke-width: 1.5;
+}
+
+.icon-mark {
+  stroke-width: 1.8;
+}
+
 /* The outcome of an action (components/outcome_note.rs): beside its button, or as a line under
    it. Empty until there is one, taking no room, so the live region is there before its text
    changes. */

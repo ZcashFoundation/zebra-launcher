@@ -27,6 +27,7 @@ mod theme;
 
 mod components {
     pub mod config_form;
+    pub mod icons;
     pub mod log_insights;
     pub mod nav;
     pub mod outcome_note;

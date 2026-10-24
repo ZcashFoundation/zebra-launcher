@@ -12,10 +12,11 @@ use crate::{
         ChartData, MAX_POINTS, Range, compact, downsample,
         line_chart::LineChart,
         phase_note, signed, sync_summary, uptime_text,
-        widgets::{Meter, RangeControl, StatTile, Tone, check_icon},
+        widgets::{Meter, RangeControl, StatTile, Tone},
     },
     clock,
     components::{
+        icons::check_icon,
         log_insights::{LogActivityChart, RecentProblems, SyncStageCard},
         rows::{Row, Rows, text_rows},
         status_strip::phase_detail,
