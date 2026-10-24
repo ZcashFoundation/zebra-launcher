@@ -113,11 +113,16 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           echo "Zebra Launcher ${version}, prerelease: ${prerelease}" >> "${GITHUB_STEP_SUMMARY}"
 
-      # The five-target matrix, from .github/targets.json.
+      # The five-target matrix, from .github/targets.json through the same
+      # script as bundle.yml (no `targets` input here: a release builds all).
       - id: targets
         name: Read the target matrix
         shell: bash
-        run: echo "matrix=$(jq -c . .github/targets.json)" >> "${GITHUB_OUTPUT}"
+        run: |
+          set -euo pipefail
+          matrix="$(scripts/select-targets.sh)"
+          echo "${matrix}"
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
 
       # The one place that decides whether this release must ship updater
       # artifacts (.sig files and latest.json): tauri.conf.json's

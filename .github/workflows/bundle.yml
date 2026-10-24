@@ -314,10 +314,25 @@ jobs:
       # Linux x86_64 install smoke tests. Each step fails on its own, so the
       # failing step names the broken bundle. The real zebrad is the sidecar.
       # A development build runs them only if its zebrad runs in this
-      # container (see "Install the zebrad sidecar (development build)").
+      # container (see "Install the zebrad sidecar (development build)"); the
+      # decision is made once, in the `smoke` step.
       # -----------------------------------------------------------------------
+      - id: smoke
+        name: Decide whether the Linux install smoke tests run
+        env:
+          DEV_SIDECAR_RUNS: ${{ steps.devsidecar.outputs.runs }}
+        run: |
+          set -euo pipefail
+          if [ "${TARGET}" = x86_64-unknown-linux-gnu ] && { [ -z "${ZEBRAD_REF}" ] || [ "${DEV_SIDECAR_RUNS}" = true ]; }; then
+            run=true
+          else
+            run=false
+          fi
+          echo "Linux install smoke tests: ${run}"
+          echo "run=${run}" >> "${GITHUB_OUTPUT}"
+
       - name: "Smoke: install smoke-test packages"
-        if: matrix.target == 'x86_64-unknown-linux-gnu' && (needs.sidecars.outputs.zebrad_ref == '' || steps.devsidecar.outputs.runs == 'true')
+        if: steps.smoke.outputs.run == 'true'
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
@@ -326,7 +341,7 @@ jobs:
       # ZEBRAD_VERSION is empty for a development build, so the check is then
       # only that the sidecar reports `zebrad <something>`.
       - name: "Smoke: install the .deb"
-        if: matrix.target == 'x86_64-unknown-linux-gnu' && (needs.sidecars.outputs.zebrad_ref == '' || steps.devsidecar.outputs.runs == 'true')
+        if: steps.smoke.outputs.run == 'true'
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
@@ -335,11 +350,9 @@ jobs:
           /usr/bin/zebra-launcher-zebrad --version | grep -q "zebrad ${ZEBRAD_VERSION}"
 
       - name: "Smoke: run the .deb install"
-        if: matrix.target == 'x86_64-unknown-linux-gnu' && (needs.sidecars.outputs.zebrad_ref == '' || steps.devsidecar.outputs.runs == 'true')
-        continue-on-error: false
+        if: steps.smoke.outputs.run == 'true'
         run: scripts/smoke-linux.sh --deb
 
       - name: "Smoke: run the AppImage"
-        if: matrix.target == 'x86_64-unknown-linux-gnu' && (needs.sidecars.outputs.zebrad_ref == '' || steps.devsidecar.outputs.runs == 'true')
-        continue-on-error: false
+        if: steps.smoke.outputs.run == 'true'
         run: scripts/smoke-linux.sh --appimage dist/zebra-launcher_*_x86_64.AppImage
