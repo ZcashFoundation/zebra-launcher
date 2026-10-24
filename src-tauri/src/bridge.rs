@@ -1,8 +1,9 @@
 //! Forwards launcher-core's channels to the webview.
 //!
 //! Status and node statistics change rarely, so every change is emitted as a
-//! Tauri event (`status`, `node_stats`). Logs can arrive by the thousand per
-//! second, so they go through a `tauri::ipc::Channel` in batches.
+//! Tauri event ([`events::STATUS`], [`events::NODE_STATS`]). Logs can arrive
+//! by the thousand per second, so they go through a `tauri::ipc::Channel` in
+//! batches.
 
 use std::{
     sync::{
@@ -13,7 +14,7 @@ use std::{
 };
 
 use launcher_core::supervisor::LogSubscription;
-use launcher_types::{LogLine, NodeStats, Status};
+use launcher_types::{LogLine, NodeStats, Status, events};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, ipc::Channel};
 use tokio::{
@@ -21,23 +22,19 @@ use tokio::{
     time::MissedTickBehavior,
 };
 
-/// The event carrying every [`Status`] change.
-pub const STATUS_EVENT: &str = "status";
-/// The event carrying every `Option<NodeStats>` change.
-pub const NODE_STATS_EVENT: &str = "node_stats";
 /// How long log lines are collected before a batch is sent.
 pub const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(100);
 /// A batch is sent early once it holds this many lines.
 pub const MAX_LOG_BATCH: usize = 1000;
 
-/// Emits `status` now and on every change, until the supervisor ends.
+/// Emits [`events::STATUS`] now and on every change, until the supervisor ends.
 pub fn forward_status<R: Runtime>(app: AppHandle<R>, rx: watch::Receiver<Status>) {
-    tauri::async_runtime::spawn(forward_watch(app, STATUS_EVENT, rx));
+    tauri::async_runtime::spawn(forward_watch(app, events::STATUS, rx));
 }
 
-/// Emits `node_stats` now and on every change, until the monitor ends.
+/// Emits [`events::NODE_STATS`] now and on every change, until the monitor ends.
 pub fn forward_node_stats<R: Runtime>(app: AppHandle<R>, rx: watch::Receiver<Option<NodeStats>>) {
-    tauri::async_runtime::spawn(forward_watch(app, NODE_STATS_EVENT, rx));
+    tauri::async_runtime::spawn(forward_watch(app, events::NODE_STATS, rx));
 }
 
 async fn forward_watch<R: Runtime, T: Clone + Serialize>(

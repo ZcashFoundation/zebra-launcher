@@ -14,6 +14,48 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+/// The names of the events the backend emits and the UI listens to. Logs do
+/// not go through an event: they take a `tauri::ipc::Channel` of
+/// `Vec<LogLine>` batches, set up by the `subscribe_logs` command.
+pub mod events {
+    /// Every [`Status`](crate::Status) change.
+    pub const STATUS: &str = "status";
+    /// Every `Option<NodeStats>` change ([`NodeStats`](crate::NodeStats)).
+    pub const NODE_STATS: &str = "node_stats";
+    /// zebrad was to start at launch, but a zebrad from an earlier launcher
+    /// run is still alive: a [`StaleProcessInfo`](crate::StaleProcessInfo).
+    /// The UI offers `start_zebrad_killing_stale`.
+    pub const STALE_PROCESS: &str = "stale_process";
+    /// Every [`UpdateState`](crate::UpdateState) change.
+    pub const UPDATE_STATE: &str = "update_state";
+    /// Every [`UpdateInfo`](crate::UpdateInfo) change.
+    pub const UPDATE_INFO: &str = "update_info";
+    /// The launcher did not come back healthy after an update: an
+    /// [`UpdateHealthFailure`](crate::UpdateHealthFailure).
+    pub const UPDATE_HEALTH_FAILED: &str = "update_health_failed";
+}
+
+/// A location the `open_path` command opens with the system's default
+/// handler. On the wire it is the snake_case name (`config_dir`, ...).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenTarget {
+    /// The launcher's configuration directory, with `zebrad.toml`.
+    ConfigDir,
+    /// The chosen chain data directory, or the launcher's data directory
+    /// when none was chosen.
+    DataDir,
+    /// The directory with the launcher and zebrad logs.
+    LogDir,
+    /// The launcher's releases page, in the browser.
+    ReleasesPage,
+    /// The launcher's source repository, in the browser.
+    Repo,
+    /// The Grafana URL from the settings, in the browser. Fails when none is
+    /// set.
+    Grafana,
+}
+
 /// Where a log line came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -664,7 +706,7 @@ pub enum UpdateState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryAction {
-    /// Open the log directory (`open_path("log_dir")`).
+    /// Open the log directory (`open_path` with [`OpenTarget::LogDir`]).
     OpenLogs,
     /// Restore the default `zebrad.toml`.
     ResetConfig,
@@ -755,6 +797,23 @@ mod tests {
             .unwrap(),
             serde_json::json!({"kind": "apply_in_progress", "message": "busy"})
         );
+    }
+
+    #[test]
+    fn open_targets_are_snake_case_on_the_wire() {
+        for (target, name) in [
+            (OpenTarget::ConfigDir, "config_dir"),
+            (OpenTarget::DataDir, "data_dir"),
+            (OpenTarget::LogDir, "log_dir"),
+            (OpenTarget::ReleasesPage, "releases_page"),
+            (OpenTarget::Repo, "repo"),
+            (OpenTarget::Grafana, "grafana"),
+        ] {
+            assert_eq!(serde_json::to_value(target).unwrap(), name);
+            let parsed: OpenTarget = serde_json::from_value(serde_json::json!(name)).unwrap();
+            assert_eq!(parsed, target);
+        }
+        assert!(serde_json::from_value::<OpenTarget>(serde_json::json!("home")).is_err());
     }
 
     #[test]

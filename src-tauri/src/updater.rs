@@ -11,10 +11,11 @@
 //!   request is made. Release builds honour no runtime endpoint override; the
 //!   QA override is build-time (`TAURI_CONFIG` / `--config`, see
 //!   docs/RELEASING.md). Debug builds also read `LAUNCHER_UPDATE_ENDPOINT`.
-//! - emits `update_info` (an [`UpdateInfo`]) on every change and
-//!   `update_state` (its [`UpdateState`]) when the state changes;
+//! - emits [`events::UPDATE_INFO`] (an [`UpdateInfo`]) on every change and
+//!   [`events::UPDATE_STATE`] (its [`UpdateState`]) when the state changes;
 //! - runs the health gate when the previous launch installed an update, and
-//!   emits `update_health_failed` if the update did not come back healthy.
+//!   emits [`events::UPDATE_HEALTH_FAILED`] if the update did not come back
+//!   healthy.
 
 use std::{
     sync::Arc,
@@ -24,7 +25,7 @@ use std::{
 use launcher_core::updates::{
     self, FoundUpdate, NodeControl, OnChunk, UpdateBackend, UpdaterConfig, UpdaterHandle,
 };
-use launcher_types::{Status, UpdateInfo, UpdateState};
+use launcher_types::{Status, UpdateInfo, UpdateState, events};
 use tauri::{
     AppHandle, Emitter, Runtime,
     utils::{config::BundleType, platform::bundle_type},
@@ -33,14 +34,6 @@ use tauri_plugin_updater::{Update, Updater, UpdaterExt};
 use tokio::sync::watch;
 
 use crate::{app_state::AppState, commands::RELEASES_URL};
-
-/// The event carrying every [`UpdateState`] change.
-pub const UPDATE_STATE_EVENT: &str = "update_state";
-/// The event carrying every [`UpdateInfo`] change.
-pub const UPDATE_INFO_EVENT: &str = "update_info";
-/// The event emitted when an update did not come back healthy, with an
-/// [`launcher_types::UpdateHealthFailure`].
-pub const UPDATE_HEALTH_FAILED_EVENT: &str = "update_health_failed";
 
 /// How long a check may take.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -271,7 +264,7 @@ pub fn start<R: Runtime>(
         .await;
         if let Some(Err(failure)) = gate {
             let _ = updater.report_health_failure(failure.clone()).await;
-            if let Err(err) = app.emit(UPDATE_HEALTH_FAILED_EVENT, failure) {
+            if let Err(err) = app.emit(events::UPDATE_HEALTH_FAILED, failure) {
                 tracing::warn!(%err, "could not emit update_health_failed");
             }
         }
@@ -286,12 +279,12 @@ async fn forward<R: Runtime>(app: AppHandle<R>, mut rx: watch::Receiver<UpdateIn
     loop {
         let info = rx.borrow_and_update().clone();
         if last_state.as_ref() != Some(&info.state) {
-            if let Err(err) = app.emit(UPDATE_STATE_EVENT, info.state.clone()) {
+            if let Err(err) = app.emit(events::UPDATE_STATE, info.state.clone()) {
                 tracing::warn!(%err, "could not emit update_state");
             }
             last_state = Some(info.state.clone());
         }
-        if let Err(err) = app.emit(UPDATE_INFO_EVENT, info) {
+        if let Err(err) = app.emit(events::UPDATE_INFO, info) {
             tracing::warn!(%err, "could not emit update_info");
         }
         if rx.changed().await.is_err() {

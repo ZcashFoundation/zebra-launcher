@@ -19,7 +19,7 @@ use launcher_core::{
 };
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, ExitClass,
-    FirstRunInfo, ImportOutcome, LogLine, NodeStats, Settings, Status,
+    FirstRunInfo, ImportOutcome, LogLine, NodeStats, OpenTarget, Settings, Status,
 };
 use tauri::{AppHandle, Runtime, State, ipc::Channel};
 use tauri_plugin_dialog::DialogExt;
@@ -36,7 +36,7 @@ use crate::{
 /// this has accepted it.
 const APPLY_START_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The page `open_path("releases_page")` opens.
+/// The page `open_path` opens for [`OpenTarget::ReleasesPage`].
 pub const RELEASES_URL: &str = "https://github.com/ZcashFoundation/zebra-launcher/releases";
 
 fn message(err: impl Display) -> String {
@@ -338,37 +338,34 @@ fn path_arg(path: &Path) -> String {
 /// Grafana tab's setup card describes lives (`docs/observability/`).
 const REPO_URL: &str = "https://github.com/ZcashFoundation/zebra-launcher";
 
-/// Opens one of a fixed set of locations with the system's default handler:
-/// `config_dir`, `data_dir` (the chosen chain data directory, or the
-/// launcher's data directory), `log_dir`, `releases_page`, `repo` (the
-/// source repository, in the browser), or `grafana` (the Grafana URL from
-/// the settings, in the browser; fails when none is set).
+/// Opens one of a fixed set of locations ([`OpenTarget`]) with the system's
+/// default handler. A `target` outside the set is refused by Tauri before
+/// this runs.
 #[tauri::command]
 pub fn open_path<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
-    target: String,
+    target: OpenTarget,
 ) -> Result<(), String> {
     let opener = app.opener();
     let paths = &state.paths;
-    let result = match target.as_str() {
-        "config_dir" => opener.open_path(path_arg(paths.config_dir()), None::<&str>),
-        "data_dir" => {
+    let result = match target {
+        OpenTarget::ConfigDir => opener.open_path(path_arg(paths.config_dir()), None::<&str>),
+        OpenTarget::DataDir => {
             let dir = match state.settings.current().data_dir {
                 Some(dir) => dir,
                 None => path_arg(paths.data_dir()),
             };
             opener.open_path(dir, None::<&str>)
         }
-        "log_dir" => opener.open_path(path_arg(paths.log_dir()), None::<&str>),
-        "releases_page" => opener.open_url(RELEASES_URL, None::<&str>),
-        "repo" => opener.open_url(REPO_URL, None::<&str>),
+        OpenTarget::LogDir => opener.open_path(path_arg(paths.log_dir()), None::<&str>),
+        OpenTarget::ReleasesPage => opener.open_url(RELEASES_URL, None::<&str>),
+        OpenTarget::Repo => opener.open_url(REPO_URL, None::<&str>),
         // Validated as a loopback http URL when it was saved (`is_loopback_http_url`).
-        "grafana" => match state.settings.current().grafana_url {
+        OpenTarget::Grafana => match state.settings.current().grafana_url {
             Some(url) => opener.open_url(url, None::<&str>),
             None => return Err("no Grafana URL is set".into()),
         },
-        other => return Err(format!("cannot open {other:?}")),
     };
     result.map_err(message)
 }

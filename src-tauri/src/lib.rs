@@ -27,16 +27,11 @@ use launcher_core::{
     settings::SettingsStore,
     supervisor::{self, SupervisorConfig, SupervisorError},
 };
-use launcher_types::StaleProcessInfo;
+use launcher_types::{StaleProcessInfo, events};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::app_state::{AppState, managed_keys};
-
-/// The event emitted when zebrad was to start at launch but a zebrad from
-/// an earlier launcher run is still alive. The UI offers
-/// `start_zebrad_killing_stale`.
-pub const STALE_PROCESS_EVENT: &str = "stale_process";
 
 /// Set to `1` to run zebrad with `--shutdown-on-stdin-close`, for testing
 /// with a zebrad that has the upstream change.
@@ -286,7 +281,7 @@ pub(crate) fn launch_plan(settings: &launcher_types::Settings) -> LaunchPlan {
 /// result does: not before the first run is done
 /// ([`firstrun::start_allowed`]), not while the node data is being changed
 /// ([`AppState::start_permit`]), and with a zebrad left by an earlier run
-/// reported to the UI with [`STALE_PROCESS_EVENT`]. The error is the message
+/// reported to the UI with [`events::STALE_PROCESS`]. The error is the message
 /// for the log or the caller.
 pub(crate) async fn start_node<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -312,7 +307,7 @@ pub(crate) async fn start_in_background(app: AppHandle, state: AppState) {
     }
 }
 
-/// Tells the UI with [`STALE_PROCESS_EVENT`] that a zebrad from an earlier
+/// Tells the UI with [`events::STALE_PROCESS`] that a zebrad from an earlier
 /// launcher run is still alive.
 pub(crate) fn report_stale_process<R: tauri::Runtime>(app: &AppHandle<R>, stale: &StaleProcess) {
     tracing::warn!(
@@ -323,7 +318,7 @@ pub(crate) fn report_stale_process<R: tauri::Runtime>(app: &AppHandle<R>, stale:
         pid: stale.pid,
         binary: stale.binary.display().to_string(),
     };
-    if let Err(err) = app.emit(STALE_PROCESS_EVENT, info) {
+    if let Err(err) = app.emit(events::STALE_PROCESS, info) {
         tracing::warn!(%err, "could not emit stale_process");
     }
 }
