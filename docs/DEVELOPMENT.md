@@ -262,7 +262,7 @@ zebrad binary, so `cargo test` needs no zebrad and no network. Run them locally 
 the zebrad you are about to pin:
 
 ```sh
-ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-core --test real_zebrad -- --nocapture
+ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-core --test real_zebrad -- --include-ignored --nocapture
 ```
 
 They take a few seconds. On failure they print zebrad's whole output. Run them on every
