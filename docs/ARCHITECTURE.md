@@ -63,8 +63,8 @@ The actor also writes a rotating `zebrad.log` for post-crash support. The Tauri 
 bridge lags behind the broadcast, the dropped lines are replaced by one synthetic line
 with `stream: Launcher`, level `WARN`, no timestamp and the message `N lines dropped`,
 which takes the `seq` of the last dropped line. The UI shows that marker, together with
-any `seq` jump before it, as one "… N lines dropped" row, and a real line later fetched
-with `log_history` replaces the marker.
+any `seq` jump before it, as one "… N lines dropped" row; a real line with the same
+`seq` arriving later (the `log_history` command exists for that) replaces the marker.
 
 ## UI and backend IPC
 
@@ -78,12 +78,14 @@ change), `update_state` (its `UpdateState`, when that changed) and
 healthy).
 
 At startup the UI subscribes first and then fetches a snapshot (`get_status`,
-`get_node_stats`, `get_update_info`, `log_history`), so no change falls between the two.
+`get_node_stats`, `get_update_info`), so no change falls between the two; the log
+subscription itself streams the retained history before live lines, so logs need no
+snapshot request.
 An event that arrives while a snapshot request is in flight is newer than the snapshot,
 so the UI drops the `get_status`, `get_node_stats` and `get_update_info` snapshots once
 an event of the same kind has arrived (for the updater: `update_info`; an
 `update_state` that arrives before any `update_info` replaces the snapshot's state).
-Log batches and history are merged by `seq`, so their order does not matter.
+Log batches are merged by `seq`, so their order does not matter.
 `stale_process` may be emitted before the UI listens, so the stale-process banner is
 driven by `status.stale`, which the snapshot carries; likewise `update_health_failed`
 is also in `UpdateInfo.health_failure`. A payload that does not deserialize is shown in
