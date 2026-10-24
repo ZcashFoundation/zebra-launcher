@@ -832,12 +832,14 @@ button.danger {
 }
 
 .delete-confirm,
-.reset-confirm {
+.reset-confirm,
+.typed-confirm {
   margin: 8px 0 0;
 }
 
 .delete-confirm p,
-.reset-confirm p {
+.reset-confirm p,
+.typed-confirm p {
   margin: 0 0 4px;
 }
 
