@@ -273,6 +273,10 @@ fn unreadable_note(keys: &[String]) -> Option<String> {
 /// Reads the file again and updates the form as `mode` says. A failure leaves the values as
 /// they are and shows the error in place of the fields.
 async fn reload(doc: Doc, mode: Reload) {
+    let form = doc.form;
+    // The fields stay enabled while the file is read (a reload is not a save), so an edit made
+    // meanwhile must not be replaced by the fresh values: it is put back on top of them.
+    let edits_before = form.edits.get_untracked();
     let fresh = match api::read_config().await {
         Ok(fresh) => fresh,
         Err(error) => {
@@ -290,9 +294,14 @@ async fn reload(doc: Doc, mode: Reload) {
             return;
         }
     };
-    let form = doc.form;
     // Normalised like `values`, so that the file's values compare equal to edits of them.
     let fresh_form = normalised(FIELDS.iter(), &parsed.form);
+    let mode =
+        if mode == Reload::Replace && form.edits.with_untracked(|edits| *edits != edits_before) {
+            Reload::ReapplyPending
+        } else {
+            mode
+        };
     match mode {
         Reload::Replace => form.edits.set(fresh_form.clone()),
         Reload::KeepEdits => {}
