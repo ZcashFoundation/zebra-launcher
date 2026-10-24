@@ -266,7 +266,11 @@ ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-core --test real_zebrad -- --n
 ```
 
 They take a few seconds. On failure they print zebrad's whole output. Run them on every
-`ZEBRAD_VERSION` bump, next to re-capturing the [log fixtures](#log-fixtures).
+`ZEBRAD_VERSION` bump, next to re-capturing the [log fixtures](#log-fixtures). CI runs
+them too (the `real-zebrad` job of `ci.yml`): on every push to `main`, and on pull
+requests that change `ZEBRAD_VERSION` or `ZEBRAD_COMMIT`, with the release binary
+fetched and verified by `scripts/fetch-zebrad-linux.sh`. Other pull requests skip them,
+so plain `cargo test` still needs no zebrad.
 
 ## Observability stack
 
