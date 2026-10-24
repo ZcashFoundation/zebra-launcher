@@ -125,8 +125,9 @@ pinned by fixtures captured from real zebrad; see
 
 **Spawn environment.** `zebrad -c <app_config_dir>/zebrad.toml start`. Every inherited
 `ZEBRA_*` variable is removed with `env_remove` (never `env_clear`, which would drop
-`PATH`, `HOME`, `SystemRoot` and `LOCALAPPDATA`). `ZEBRA_TRACING__USE_COLOR=false` is
-forced; `ZEBRA_TRACING__PROGRESS_BAR` and `ZEBRA_TRACING__LOG_FILE` are unset.
+`PATH`, `HOME`, `SystemRoot` and `LOCALAPPDATA`). `ZEBRA_TRACING__USE_COLOR=false` and
+`ZEBRA_TRACING__FORCE_USE_COLOR=false` are forced; `ZEBRA_TRACING__PROGRESS_BAR` and
+`ZEBRA_TRACING__LOG_FILE` are unset.
 
 ## Process control per OS
 
