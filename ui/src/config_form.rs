@@ -452,9 +452,10 @@ pub fn render_config(original: &str, form: &FormState) -> Result<String, String>
     for field in FIELDS {
         match field.control {
             Control::User => {}
-            // A value zebrad.toml must not carry: dropped so the launcher accepts the file.
+            // A key zebrad.toml must not carry, whatever its value: dropped so the launcher
+            // accepts the file.
             Control::Forbidden { .. } => {
-                remove_value(&mut doc, field);
+                remove_key(&mut doc, field);
                 continue;
             }
             Control::Managed { .. } | Control::Forced { .. } => continue,
@@ -505,8 +506,23 @@ fn set_value(doc: &mut DocumentMut, field: &Field, text: &str) -> Result<(), Str
 }
 
 /// Removes a readable value and, when that empties a section with no comment on its header,
-/// the section.
+/// the section. A value the form could not show (see [`item_text`]) is left alone: the user
+/// never saw it, so unsetting the field is not a request to drop it.
 fn remove_value(doc: &mut DocumentMut, field: &Field) {
+    let readable = doc
+        .as_table()
+        .get(field.section)
+        .and_then(Item::as_table_like)
+        .and_then(|table| table.get(field.key))
+        .is_some_and(|item| item_text(field.kind, item).is_some());
+    if readable {
+        remove_key(doc, field);
+    }
+}
+
+/// Removes a key whatever its value and, when that empties a section with no comment on its
+/// header, the section.
+fn remove_key(doc: &mut DocumentMut, field: &Field) {
     let root = doc.as_table_mut();
     let Some(item) = root.get_mut(field.section) else {
         return;
@@ -514,13 +530,9 @@ fn remove_value(doc: &mut DocumentMut, field: &Field) {
     let Some(table) = item.as_table_like_mut() else {
         return;
     };
-    let readable = table
-        .get(field.key)
-        .is_some_and(|item| item_text(field.kind, item).is_some());
-    if !readable {
+    if table.remove(field.key).is_none() {
         return;
     }
-    table.remove(field.key);
     let emptied = table.is_empty();
     if emptied && !has_comment(item) {
         remove_section(root, field.section);
@@ -1355,6 +1367,41 @@ enabled = false
         form.set(("tracing", "use_color"), Some("false".to_owned()));
         form.set(("tracing", "log_file"), Some("/tmp/zebrad.log".to_owned()));
         assert_eq!(render_config(FIXTURE, &form).expect("renders"), FIXTURE);
+    }
+
+    #[test]
+    fn forbidden_keys_are_read_for_display_and_removed_on_render() {
+        let original = "[tracing]\nlog_file = \"/tmp/z.log\"\nprogress_bar = 1\n\n\
+                        [sync]\nparallel_cpu_threads = 4\n";
+        let parsed = parse_config(original).expect("parses");
+        // Still read, so the locked control can show what the file holds.
+        assert_eq!(parsed.form.get(("tracing", "log_file")), Some("/tmp/z.log"));
+        assert_eq!(parsed.unreadable, ["tracing.progress_bar"]);
+        // Removed whatever the value's type: the launcher refuses the file while the key is
+        // present. The emptied section goes too.
+        assert_eq!(
+            render_config(original, &parsed.form).expect("renders"),
+            "[sync]\nparallel_cpu_threads = 4\n"
+        );
+        assert_eq!(
+            render_config(
+                "[tracing]\nlog_file = \"/tmp/z.log\"\n",
+                &FormState::default()
+            )
+            .expect("renders"),
+            ""
+        );
+        // Other tracing keys stay.
+        assert_eq!(
+            render_config(
+                "[tracing]\nfilter = \"debug\"\nprogress_bar = \"summary\"\n",
+                &parse_config("[tracing]\nfilter = \"debug\"\n")
+                    .expect("parses")
+                    .form
+            )
+            .expect("renders"),
+            "[tracing]\nfilter = \"debug\"\n"
+        );
     }
 
     #[test]
