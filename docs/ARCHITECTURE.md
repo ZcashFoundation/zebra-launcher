@@ -461,10 +461,13 @@ Targets: macOS Apple Silicon, macOS Intel, Windows x64, Linux x64 and arm64. Lin
 AppImage and deb, built in `ubuntu:22.04` containers (glibc floor 2.35, above zebrad's
 2.34). See [RELEASING.md](RELEASING.md) and [SECURITY.md](SECURITY.md).
 
-CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs fmt, clippy with the
-mutex ban, tests and `cargo deny` on Linux, and clippy and tests on `windows-2025` and
-`macos-15`. `bundle.yml` builds unsigned bundles with the real zebrad for all five
-targets.
+CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs, on Linux,
+`scripts/check-versions.sh`, fmt, clippy with the mutex ban, the tests, the UI crate's
+clippy for `wasm32-unknown-unknown` and `trunk build --release`, `cargo deny`, and
+shellcheck and actionlint over the scripts and workflows; clippy and tests on
+`windows-2025` and `macos-15`; and, on pushes to `main` and on pull requests that change
+the zebrad pin, the real-zebrad contract tests against the verified release binary.
+`bundle.yml` builds unsigned bundles with the real zebrad for all five targets.
 
 ## Decisions
 
