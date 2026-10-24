@@ -1,2 +1,386 @@
 /* The zebrad configuration form in Settings and its tooltips (see ui/src/components/config_form.rs
-   and ui/src/components/tooltip.rs). Class prefixes: cfg-, help-. */
+   and ui/src/components/tooltip.rs). Class prefixes: cfg-, help-. Tokens only: both themes
+   come from styles.css. */
+
+/* Layout */
+
+.cfg-form {
+  max-width: 920px;
+  margin: 0 0 16px;
+}
+
+.cfg-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px 16px;
+  margin-bottom: 12px;
+}
+
+.cfg-intro {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.cfg-intro h2 {
+  margin-bottom: 4px;
+}
+
+.cfg-intro p {
+  margin: 0;
+}
+
+.cfg-intro code {
+  overflow-wrap: anywhere;
+}
+
+.cfg-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.cfg-filter {
+  width: 220px;
+  max-width: 100%;
+}
+
+.cfg-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.cfg-notes {
+  margin: 0 0 8px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* The fieldset only exists to disable every control while a save runs. */
+.cfg-fields {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+/* Sections */
+
+.cfg-section {
+  margin: 0 0 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  /* Tooltips reach past the card. */
+  overflow: visible;
+}
+
+.cfg-section > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  padding: 10px 16px;
+  cursor: pointer;
+  list-style: none;
+  border-radius: 8px;
+}
+
+.cfg-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* A chevron in place of the default marker: right when closed, down when open. */
+.cfg-section > summary::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-right: 2px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: translateY(-2px) rotate(-45deg);
+}
+
+.cfg-section[open] > summary::before {
+  transform: translateY(-3px) rotate(45deg);
+}
+
+.cfg-section-title {
+  font-weight: 600;
+}
+
+.cfg-section-count {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cfg-section-count:empty {
+  display: none;
+}
+
+.cfg-section-doc {
+  flex-basis: 100%;
+  font-size: 12px;
+  padding-left: 18px;
+}
+
+.cfg-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 24px;
+  padding: 6px 16px 14px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 760px) {
+  .cfg-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Fields */
+
+.cfg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 6px 0 6px 10px;
+  margin-left: -12px;
+  border-left: 2px solid transparent;
+}
+
+/* The field differs from the file: a bar on the left, and the "edited" badge says so. */
+.cfg-field.cfg-edited {
+  border-left-color: var(--accent);
+}
+
+.cfg-field-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+}
+
+.cfg-field-head > label {
+  font-weight: 600;
+}
+
+.cfg-key {
+  margin-left: auto;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.cfg-badge {
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.cfg-badge-edited {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.cfg-field input[type="text"],
+.cfg-field input[type="number"],
+.cfg-field select,
+.cfg-field textarea {
+  width: 100%;
+  max-width: 420px;
+}
+
+.cfg-field textarea {
+  padding: 5px 8px;
+  resize: vertical;
+}
+
+.cfg-mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.cfg-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 29px;
+}
+
+.cfg-check input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.cfg-locked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.cfg-locked input {
+  flex: 1 1 200px;
+  color: var(--text-secondary);
+  background: var(--bg);
+}
+
+.cfg-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  font-size: 12px;
+}
+
+.cfg-meta .cfg-reset {
+  font-size: 12px;
+  color: var(--accent-text);
+}
+
+.cfg-error {
+  flex-basis: 100%;
+}
+
+.cfg-empty {
+  padding: 24px 0;
+  text-align: center;
+}
+
+/* The action bar sticks to the bottom of the page while the form is in view. Its wrapper
+   generates no box, so the bar moves within the whole form, not within the wrapper. */
+
+.cfg-footer {
+  display: contents;
+}
+
+.cfg-footer .banner {
+  margin: 0 0 8px;
+}
+
+.cfg-bar {
+  position: sticky;
+  /* The sticky area is inset by the scrolling page's padding (16px in styles.css); this puts
+     the bar on the page's bottom edge instead of 16px above it with content showing under. */
+  bottom: -16px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  margin: 8px 0 0;
+  padding: 10px 0;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+
+.cfg-changes {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.cfg-changed-list {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.cfg-changed-list:empty {
+  display: none;
+}
+
+.cfg-status {
+  margin: 0;
+  flex: 1 1 auto;
+}
+
+.cfg-status:empty {
+  display: none;
+}
+
+.cfg-bar .buttons {
+  margin-left: auto;
+}
+
+/* Help icons and their tooltips */
+
+.help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.help .help-icon {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--muted);
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+  cursor: help;
+}
+
+.help .help-icon:hover,
+.help .help-icon:focus-visible,
+.help .help-icon.help-pinned {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+/* Above the icon, centred, until the measurement in tooltip.rs says otherwise. */
+.help-tip {
+  display: none;
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  z-index: 5;
+  width: max-content;
+  max-width: 320px;
+  padding: 6px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow, 0 2px 8px rgba(0, 0, 0, 0.35));
+  color: var(--text);
+  font-size: 12px;
+  font-weight: normal;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  transform: translateX(calc(-50% + var(--help-shift, 0px)));
+  visibility: hidden;
+}
+
+.help-tip.help-open {
+  display: block;
+}
+
+.help-tip.help-placed {
+  visibility: visible;
+}
+
+.help-tip.help-below {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+
+/* The Configure page's pointer to this form. */
+.cfg-note {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
