@@ -324,7 +324,7 @@ pub struct StaleProcessInfo {
 }
 
 /// The supervisor's view of zebrad, published on a `watch` channel.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     /// The current phase.
     pub phase: Phase,
@@ -340,6 +340,35 @@ pub struct Status {
     pub last_exit: Option<ExitInfo>,
     /// A zebrad from an earlier launcher run that is still alive, if detected.
     pub stale: Option<StaleProcessInfo>,
+    /// Whether a requested stop lets zebrad run its shutdown: the supervisor
+    /// closes its stdin (zebrad started with `--shutdown-on-stdin-close`) or
+    /// sends `SIGTERM`. False when a stop terminates the process instead,
+    /// which is the case on Windows while the bundled zebrad lacks the
+    /// stdin-close flag: a hard stop, with no `stopping zebrad` lines. Fixed
+    /// for the supervisor's lifetime, set from its configuration. A status
+    /// from a backend without the field reads as graceful.
+    #[serde(default = "stop_is_graceful_default")]
+    pub stop_is_graceful: bool,
+}
+
+fn stop_is_graceful_default() -> bool {
+    true
+}
+
+impl Default for Status {
+    /// Stopped, with nothing recorded and a graceful stop.
+    fn default() -> Self {
+        Self {
+            phase: Phase::Stopped,
+            pid: None,
+            started_at: None,
+            rpc_addr: None,
+            metrics_addr: None,
+            last_exit: None,
+            stale: None,
+            stop_is_graceful: true,
+        }
+    }
 }
 
 /// The Zcash network zebrad runs on.
@@ -921,6 +950,25 @@ mod tests {
         assert_eq!(status.pid, None);
         assert_eq!(status.last_exit, None);
         assert_eq!(status.stale, None);
+        assert!(status.stop_is_graceful);
+    }
+
+    #[test]
+    fn stop_is_graceful_defaults_to_true_on_the_wire() {
+        // A payload from a backend without the field.
+        let old: Status = serde_json::from_str(
+            r#"{"phase":{"phase":"running"},"pid":7,"started_at":null,"rpc_addr":null,"metrics_addr":null,"last_exit":null,"stale":null}"#,
+        )
+        .expect("old payload");
+        assert!(old.stop_is_graceful);
+        let hard = Status {
+            stop_is_graceful: false,
+            ..Status::default()
+        };
+        let json = serde_json::to_value(&hard).unwrap();
+        assert_eq!(json["stop_is_graceful"], false);
+        let round_trip: Status = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, hard);
     }
 
     #[test]

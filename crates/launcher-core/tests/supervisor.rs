@@ -87,6 +87,8 @@ async fn starts_streams_logs_and_stops_cleanly() {
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
     let mut sub = within(handle.subscribe()).await.expect("subscribe");
     assert!(sub.history.is_empty());
+    // SIGTERM is graceful; without the stdin mode Windows terminates.
+    assert_eq!(handle.status().stop_is_graceful, cfg!(unix));
 
     within(handle.start()).await.expect("start");
     assert_eq!(handle.status().phase, Phase::Running);
@@ -150,9 +152,15 @@ async fn stdin_close_mode_stops_gracefully_on_every_platform() {
     let mut fx = fixture("ok");
     fx.config.command.shutdown_on_stdin_close = true;
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    assert!(handle.status().stop_is_graceful);
     within(handle.start()).await.expect("start");
     within(handle.stop()).await.expect("stop");
-    let exit = handle.status().last_exit.expect("exit recorded");
+    let status = handle.status();
+    assert!(
+        status.stop_is_graceful,
+        "fixed for the supervisor's lifetime"
+    );
+    let exit = status.last_exit.expect("exit recorded");
     assert_eq!(exit.code, Some(0), "{exit:?}");
     let history = within(handle.history_since(0)).await.expect("history");
     assert!(

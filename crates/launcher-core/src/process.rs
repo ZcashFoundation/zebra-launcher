@@ -121,6 +121,15 @@ impl ZebradCommand {
     fn stops_when_launcher_dies(&self) -> bool {
         self.shutdown_on_stdin_close || self.kill_on_launcher_exit
     }
+
+    /// Whether a requested stop lets zebrad run its shutdown: the stdin
+    /// pipe closes ([`Self::shutdown_on_stdin_close`]), or `SIGTERM` is sent
+    /// on Unix. Without the stdin mode a stop on Windows terminates the
+    /// process instead ([`StopMethod::Terminated`]); `Status::stop_is_graceful`
+    /// tells the UI.
+    pub fn stop_is_graceful(&self) -> bool {
+        self.shutdown_on_stdin_close || cfg!(unix)
+    }
 }
 
 /// A freshly spawned zebrad, split into the parts the supervisor needs.
@@ -341,6 +350,14 @@ mod tests {
         );
         command.shutdown_on_stdin_close = true;
         assert!(command.stops_when_launcher_dies());
+    }
+
+    #[test]
+    fn a_stop_is_graceful_with_stdin_close_or_a_signal() {
+        let mut command = ZebradCommand::new("zebrad", "zebrad.toml");
+        assert_eq!(command.stop_is_graceful(), cfg!(unix));
+        command.shutdown_on_stdin_close = true;
+        assert!(command.stop_is_graceful());
     }
 
     #[test]
