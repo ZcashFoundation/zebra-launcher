@@ -247,10 +247,14 @@ fn changes_text(count: usize) -> String {
     }
 }
 
-/// True while saving restarts zebrad: in every phase but stopped and failed, where the backend
-/// only writes the file.
+/// True while saving restarts zebrad: it is starting, running, or about to be restarted after a
+/// crash. Otherwise (stopped, stopping, failed) the backend only writes the file, and a stopping
+/// zebrad is left stopped; this mirrors `was_running` in the `apply_config` command.
 fn restarts_zebrad(phase: &Phase) -> bool {
-    !matches!(phase, Phase::Stopped | Phase::Failed { .. })
+    matches!(
+        phase,
+        Phase::Starting | Phase::Running | Phase::Backoff { .. }
+    )
 }
 
 fn save_label(restarts: bool) -> &'static str {
@@ -606,7 +610,7 @@ pub fn ZebradConfigForm() -> impl IntoView {
                 <div class="cfg-intro">
                     <h2 id="cfg-heading">"zebrad configuration"</h2>
                     <p class="muted">
-                        "Settings for the node itself, written to zebrad.toml. Saving restarts zebrad. "
+                        "Settings for the node itself, written to zebrad.toml. Saving restarts a running zebrad. "
                         {move || path().map(|path| view! { <code>{path}</code> })}
                     </p>
                 </div>
@@ -1252,9 +1256,15 @@ mod tests {
     }
 
     #[test]
-    fn saving_restarts_unless_stopped_or_failed() {
+    fn saving_restarts_unless_stopped_stopping_or_failed() {
         assert!(restarts_zebrad(&Phase::Running));
         assert!(restarts_zebrad(&Phase::Starting));
+        assert!(restarts_zebrad(&Phase::Backoff {
+            until: std::time::UNIX_EPOCH,
+            crashes: 1,
+        }));
+        // The backend leaves a stopping zebrad stopped and only writes the file.
+        assert!(!restarts_zebrad(&Phase::Stopping));
         assert!(!restarts_zebrad(&Phase::Stopped));
         assert!(!restarts_zebrad(&Phase::Failed {
             class: launcher_types::ExitClass::ConfigError,
