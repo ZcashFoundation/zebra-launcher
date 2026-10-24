@@ -286,7 +286,7 @@ fn Embedded(url: String) -> impl IntoView {
     };
 
     view! {
-        <div class="grafana-toolbar">
+        <div class="toolbar grafana-toolbar">
             <select aria-label="Dashboard" prop:value=move || selected.get() on:change=pick_dashboard>
                 {options
                     .iter()

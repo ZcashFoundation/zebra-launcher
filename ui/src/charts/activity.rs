@@ -56,10 +56,10 @@ impl Kind {
 
     pub fn key_class(self) -> &'static str {
         match self {
-            Kind::Info => "insight-key insight-seg-info",
-            Kind::Other => "insight-key insight-seg-other",
-            Kind::Warn => "insight-key insight-seg-warn",
-            Kind::Error => "insight-key insight-seg-error",
+            Kind::Info => "chart-key-block insight-seg-info",
+            Kind::Other => "chart-key-block insight-seg-other",
+            Kind::Warn => "chart-key-block insight-seg-warn",
+            Kind::Error => "chart-key-block insight-seg-error",
         }
     }
 
@@ -210,11 +210,11 @@ pub fn segment_path(x: f32, y: f32, width: f32, height: f32, rounded: bool) -> S
 pub fn tooltip_class(center: f32) -> &'static str {
     let fraction = center / VIEW_WIDTH;
     if fraction < 0.15 {
-        "insight-tooltip insight-tooltip-start"
+        "chart-tooltip chart-tooltip-start"
     } else if fraction > 0.85 {
-        "insight-tooltip insight-tooltip-end"
+        "chart-tooltip chart-tooltip-end"
     } else {
-        "insight-tooltip"
+        "chart-tooltip chart-tooltip-centred"
     }
 }
 
@@ -303,15 +303,15 @@ mod tests {
         let layout = geometry(&buckets);
         let class_of = |index: usize| tooltip_class(layout.columns[index].center());
         // The oldest and newest minutes (Home and End) would otherwise overhang the plot.
-        assert_eq!(class_of(0), "insight-tooltip insight-tooltip-start");
-        assert_eq!(class_of(5), "insight-tooltip insight-tooltip-start");
-        assert_eq!(class_of(6), "insight-tooltip");
-        assert_eq!(class_of(30), "insight-tooltip");
-        assert_eq!(class_of(50), "insight-tooltip");
-        assert_eq!(class_of(51), "insight-tooltip insight-tooltip-end");
+        assert_eq!(class_of(0), "chart-tooltip chart-tooltip-start");
+        assert_eq!(class_of(5), "chart-tooltip chart-tooltip-start");
+        assert_eq!(class_of(6), "chart-tooltip chart-tooltip-centred");
+        assert_eq!(class_of(30), "chart-tooltip chart-tooltip-centred");
+        assert_eq!(class_of(50), "chart-tooltip chart-tooltip-centred");
+        assert_eq!(class_of(51), "chart-tooltip chart-tooltip-end");
         assert_eq!(
             class_of(ACTIVITY_MINUTES - 1),
-            "insight-tooltip insight-tooltip-end"
+            "chart-tooltip chart-tooltip-end"
         );
     }
 

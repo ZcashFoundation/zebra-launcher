@@ -232,6 +232,13 @@ button:disabled {
   cursor: default;
 }
 
+/* A toggle that is on (`aria-pressed="true"`): the one pressed look on every page. */
+button[aria-pressed="true"],
+button[aria-pressed="true"]:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
 button.primary {
   border-color: var(--accent);
   color: var(--accent-text);
@@ -252,6 +259,31 @@ select {
 
 input.invalid {
   border-color: var(--error);
+}
+
+/* Form groups: the Settings page's fieldsets and the wizard's choices. */
+
+fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 0 0 12px;
+  padding: 8px 16px 12px;
+  /* A fieldset is as wide as its widest line by default; let its contents scroll instead. */
+  min-width: 0;
+}
+
+legend {
+  color: var(--muted);
+  padding: 0 6px;
+}
+
+/* A radio or check box with its label (and hint) on one line. */
+.radio,
+.check {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
 }
 
 /* Focus: one ring for everything that takes the keyboard. */
@@ -604,7 +636,7 @@ summary:focus-visible,
   font-variant-numeric: tabular-nums;
 }
 
-/* Logs */
+/* Logs (the toolbar is the Grafana page's too) */
 
 .page-logs {
   display: flex;
@@ -764,28 +796,6 @@ summary:focus-visible,
   max-width: 640px;
 }
 
-.settings fieldset {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin: 0 0 12px;
-  padding: 8px 16px 12px;
-  /* A fieldset is as wide as its widest line by default; let the diagnostics scroll instead. */
-  min-width: 0;
-}
-
-.settings legend {
-  color: var(--muted);
-  padding: 0 6px;
-}
-
-.settings .radio,
-.settings .check {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 4px 0;
-}
-
 .settings .field {
   display: flex;
   flex-direction: column;
@@ -906,23 +916,7 @@ details.diagnostics pre {
 }
 
 .modal fieldset.choices {
-  border: 1px solid var(--border);
-  border-radius: 8px;
   margin: 12px 0;
-  padding: 8px 16px 12px;
-}
-
-.modal legend {
-  color: var(--muted);
-  padding: 0 6px;
-}
-
-.modal .radio,
-.modal .check {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 4px 0;
 }
 
 .modal .banner {

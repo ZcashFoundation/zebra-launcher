@@ -98,8 +98,8 @@ pub fn LogActivityChart() -> impl IntoView {
             .map(|(tick, label)| {
                 let y = layout.y_of(*tick);
                 view! {
-                    <line class="insight-grid-line" x1=PLOT_LEFT x2=PLOT_RIGHT y1=y y2=y />
-                    <text class="insight-tick" x=PLOT_LEFT - 6.0 y=y + 3.5 text-anchor="end">
+                    <line class="chart-grid-line" x1=PLOT_LEFT x2=PLOT_RIGHT y1=y y2=y />
+                    <text class="chart-axis" x=PLOT_LEFT - 6.0 y=y + 3.5 text-anchor="end">
                         {label.clone()}
                     </text>
                 }
@@ -153,7 +153,7 @@ pub fn LogActivityChart() -> impl IntoView {
                     _ => column.center(),
                 };
                 Some(view! {
-                    <text class="insight-tick" x=x y=VIEW_HEIGHT - 4.0 text-anchor=anchor>
+                    <text class="chart-axis" x=x y=VIEW_HEIGHT - 4.0 text-anchor=anchor>
                         {local_hhmm(bucket.minute_start)}
                     </text>
                 })
@@ -161,7 +161,7 @@ pub fn LogActivityChart() -> impl IntoView {
             .collect_view();
         view! {
             {grid}
-            <line class="insight-axis" x1=PLOT_LEFT x2=PLOT_RIGHT y1=PLOT_BOTTOM y2=PLOT_BOTTOM />
+            <line class="chart-axis-line" x1=PLOT_LEFT x2=PLOT_RIGHT y1=PLOT_BOTTOM y2=PLOT_BOTTOM />
             {columns}
             {labels}
         }
@@ -190,7 +190,7 @@ pub fn LogActivityChart() -> impl IntoView {
             .collect_view();
         Some(view! {
             <div class=class style:left=left>
-                <div class="insight-tooltip-head">
+                <div class="chart-tooltip-time">
                     {local_hhmm(bucket.minute_start)}
                     " · "
                     {bucket.total().to_string()}
@@ -220,7 +220,8 @@ pub fn LogActivityChart() -> impl IntoView {
             })
             .collect_view();
         view! {
-            <table class="insight-table">
+            <div class="chart-table-wrap">
+            <table class="chart-table">
                 <caption class="visually-hidden">"Log lines per minute, last 60 minutes"</caption>
                 <thead>
                     <tr>
@@ -234,6 +235,7 @@ pub fn LogActivityChart() -> impl IntoView {
                 </thead>
                 <tbody>{rows}</tbody>
             </table>
+            </div>
         }
     };
 
@@ -254,7 +256,7 @@ pub fn LogActivityChart() -> impl IntoView {
             <div class="insight-chart-bar">
                 <div class="insight-legend" aria-hidden="true">{legend}</div>
                 <button
-                    class="insight-toggle"
+                    class="chart-toggle"
                     aria-pressed=move || show_table.get().to_string()
                     on:click=move |_| show_table.update(|table| *table = !*table)
                 >
@@ -277,7 +279,7 @@ pub fn LogActivityChart() -> impl IntoView {
                         >
                             {chart}
                         </svg>
-                        <div class="insight-tooltip-layer" role="status">{tooltip}</div>
+                        <div class="chart-tooltip-layer" role="status">{tooltip}</div>
                     </div>
                 </Show>
             </Show>

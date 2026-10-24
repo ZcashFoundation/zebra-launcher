@@ -95,11 +95,6 @@
   font-size: 12px;
 }
 
-.cfg-text-toggle[aria-pressed="true"] {
-  border-color: var(--accent);
-  color: var(--accent-text);
-}
-
 .cfg-file-body {
   position: relative;
   display: flex;

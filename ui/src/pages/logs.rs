@@ -290,7 +290,6 @@ pub fn Logs() -> impl IntoView {
             />
             <button
                 aria-pressed=move || problems_only.get().to_string()
-                class:active=move || problems_only.get()
                 on:click=move |_| {
                     min_level.set(if problems_only.get_untracked() {
                         None
@@ -303,7 +302,6 @@ pub fn Logs() -> impl IntoView {
             </button>
             <button
                 aria-pressed=move || (!nowrap.get()).to_string()
-                class:active=move || !nowrap.get()
                 on:click=move |_| nowrap.update(|nowrap| *nowrap = !*nowrap)
             >
                 "Wrap"

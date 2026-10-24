@@ -297,7 +297,7 @@ fn Plot(
         let class = if x > width * 0.6 {
             "chart-tooltip chart-tooltip-left"
         } else {
-            "chart-tooltip"
+            "chart-tooltip chart-tooltip-right"
         };
         Some(view! {
             <div class=class style:left=format!("{:.2}%", x / width * 100.0)>
