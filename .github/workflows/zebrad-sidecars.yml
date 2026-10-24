@@ -27,7 +27,8 @@
 # `attestations: write`. The `version` and `commit` outputs are the resolved,
 # validated zebrad version and Zebra commit; callers use them instead of
 # reading ZEBRAD_VERSION themselves. Both are empty for a development build,
-# which sets `zebrad_ref`, `zebrad_commit` and `zebrad_version_string` instead.
+# which sets `zebrad_ref` and `zebrad_commit` instead (what the binary prints
+# for --version is in each artifact's zebrad-build-info.txt).
 name: zebrad sidecars
 
 on:
@@ -66,9 +67,6 @@ on:
       zebrad_commit:
         description: the full Zebra commit that zebrad_ref resolved to (empty unless a development build)
         value: ${{ jobs.version.outputs.zebrad_commit }}
-      zebrad_version_string:
-        description: what the development-build zebrad prints for --version (empty unless a development build)
-        value: ${{ jobs.linux.outputs.version_string || jobs.macos.outputs.version_string || jobs.windows.outputs.version_string }}
   workflow_dispatch:
     inputs:
       version:
@@ -219,8 +217,6 @@ jobs:
       contents: read
       id-token: write # sign the build provenance
       attestations: write # store the build provenance
-    outputs:
-      version_string: ${{ steps.info.outputs.version_string }}
     env:
       VERSION: ${{ needs.version.outputs.version }}
       COMMIT: ${{ needs.version.outputs.commit }}
@@ -301,30 +297,21 @@ jobs:
           "${SIDECAR}" generate -o "${RUNNER_TEMP}/zebrad.toml"
           test -s "${RUNNER_TEMP}/zebrad.toml"
 
-      - id: info
-        name: Write zebrad-build-info.txt (development build)
+      - name: Write zebrad-build-info.txt (development build)
         if: needs.version.outputs.zebrad_ref != ''
         run: |
           set -euo pipefail
           scripts/dev-build-info.sh --ref "${ZEBRAD_REF}" --commit "${ZEBRAD_COMMIT}" \
             --target "${TARGET}" --binary "${SIDECAR}" > dist/zebrad-build-info.txt
           cat dist/zebrad-build-info.txt
-          echo "version_string=$(sed -n 's/^zebrad_version=//p' dist/zebrad-build-info.txt)" >> "${GITHUB_OUTPUT}"
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ env.SIDECAR }}
 
+      # zebrad-build-info.txt exists for a development build only; the
+      # artifact's root is dist/ either way.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: needs.version.outputs.zebrad_ref == ''
-        with:
-          name: zebrad-${{ matrix.target }}
-          path: ${{ env.SIDECAR }}
-          if-no-files-found: error
-
-      - name: Upload zebrad (development build)
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: needs.version.outputs.zebrad_ref != ''
         with:
           name: zebrad-${{ matrix.target }}
           path: |
@@ -348,8 +335,6 @@ jobs:
       contents: read
       id-token: write # sign the build provenance
       attestations: write # store the build provenance
-    outputs:
-      version_string: ${{ steps.info.outputs.version_string }}
     env:
       VERSION: ${{ needs.version.outputs.version }}
       COMMIT: ${{ needs.version.outputs.commit }}
@@ -417,30 +402,21 @@ jobs:
           "${SIDECAR}" generate -o "${RUNNER_TEMP}/zebrad.toml"
           test -s "${RUNNER_TEMP}/zebrad.toml"
 
-      - id: info
-        name: Write zebrad-build-info.txt (development build)
+      - name: Write zebrad-build-info.txt (development build)
         if: needs.version.outputs.zebrad_ref != ''
         run: |
           set -euo pipefail
           scripts/dev-build-info.sh --ref "${ZEBRAD_REF}" --commit "${ZEBRAD_COMMIT}" \
             --target "${TARGET}" --binary "${SIDECAR}" > dist/zebrad-build-info.txt
           cat dist/zebrad-build-info.txt
-          echo "version_string=$(sed -n 's/^zebrad_version=//p' dist/zebrad-build-info.txt)" >> "${GITHUB_OUTPUT}"
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ env.SIDECAR }}
 
+      # zebrad-build-info.txt exists for a development build only; the
+      # artifact's root is dist/ either way.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: needs.version.outputs.zebrad_ref == ''
-        with:
-          name: zebrad-${{ matrix.target }}
-          path: ${{ env.SIDECAR }}
-          if-no-files-found: error
-
-      - name: Upload zebrad (development build)
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: needs.version.outputs.zebrad_ref != ''
         with:
           name: zebrad-${{ matrix.target }}
           path: |
@@ -463,8 +439,6 @@ jobs:
       contents: read
       id-token: write # sign the build provenance
       attestations: write # store the build provenance
-    outputs:
-      version_string: ${{ steps.info.outputs.version_string }}
     env:
       VERSION: ${{ needs.version.outputs.version }}
       COMMIT: ${{ needs.version.outputs.commit }}
@@ -534,8 +508,7 @@ jobs:
           if ((Get-Item "$env:RUNNER_TEMP/zebrad.toml").Length -eq 0) { exit 1 }
 
       # Git Bash, as for the other targets.
-      - id: info
-        name: Write zebrad-build-info.txt (development build)
+      - name: Write zebrad-build-info.txt (development build)
         if: needs.version.outputs.zebrad_ref != ''
         shell: bash
         run: |
@@ -543,22 +516,14 @@ jobs:
           scripts/dev-build-info.sh --ref "${ZEBRAD_REF}" --commit "${ZEBRAD_COMMIT}" \
             --target "${TARGET}" --binary "${SIDECAR}" > dist/zebrad-build-info.txt
           cat dist/zebrad-build-info.txt
-          echo "version_string=$(sed -n 's/^zebrad_version=//p' dist/zebrad-build-info.txt)" >> "${GITHUB_OUTPUT}"
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ env.SIDECAR }}
 
+      # zebrad-build-info.txt exists for a development build only; the
+      # artifact's root is dist/ either way.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: needs.version.outputs.zebrad_ref == ''
-        with:
-          name: zebrad-${{ matrix.target }}
-          path: ${{ env.SIDECAR }}
-          if-no-files-found: error
-
-      - name: Upload zebrad (development build)
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: needs.version.outputs.zebrad_ref != ''
         with:
           name: zebrad-${{ matrix.target }}
           path: |
