@@ -214,12 +214,13 @@ fn split(base: &str) -> Parts<'_> {
     }
 }
 
-/// When `path` names a dashboard (`[<prefix>]/d/<uid>[/<slug>]`): the prefix before `/d/` and
-/// the uid after it (possibly empty for a bare `/d/`).
+/// When `path` names a dashboard (`[<prefix>]/d[/<uid>[/<slug>]]`): the prefix before `/d` and
+/// the uid after it (empty for a bare `/d` or `/d/`).
 fn dashboard_in(path: &str) -> Option<(String, &str)> {
     let segments: Vec<&str> = path.split('/').collect();
-    let marker = (0..segments.len().saturating_sub(1)).find(|&at| segments[at] == "d")?;
-    Some((segments[..marker].join("/"), segments[marker + 1]))
+    let marker = segments.iter().position(|segment| *segment == "d")?;
+    let uid = segments.get(marker + 1).copied().unwrap_or("");
+    Some((segments[..marker].join("/"), uid))
 }
 
 /// The URL the iframe loads: `base` with the dashboard `uid`, in kiosk mode, over `range`,
@@ -440,6 +441,15 @@ mod tests {
             default_url("http://127.0.0.1:3000/d/", "x"),
             format!("http://127.0.0.1:3000/d/x?{TAIL}")
         );
+        // Without the trailing slash too: `/d` is the marker, not a path prefix (`/d/d/x`).
+        assert_eq!(
+            default_url("http://127.0.0.1:3000/d", "x"),
+            format!("http://127.0.0.1:3000/d/x?{TAIL}")
+        );
+        assert_eq!(
+            default_url("http://localhost:3000/grafana/d", "x"),
+            format!("http://localhost:3000/grafana/d/x?{TAIL}")
+        );
     }
 
     #[test]
@@ -447,6 +457,7 @@ mod tests {
         assert_eq!(uid_in("http://127.0.0.1:3000"), None);
         assert_eq!(uid_in("http://127.0.0.1:3000/"), None);
         assert_eq!(uid_in("http://127.0.0.1:3000/d/"), None);
+        assert_eq!(uid_in("http://127.0.0.1:3000/d"), None);
         assert_eq!(uid_in("http://127.0.0.1:3000/dashboards"), None);
         assert_eq!(uid_in("http://127.0.0.1:3000/d/abc"), Some("abc".into()));
         assert_eq!(

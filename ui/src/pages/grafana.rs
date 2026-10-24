@@ -20,7 +20,12 @@ use crate::{
 const SUGGESTED_URL: &str = "http://127.0.0.1:3000";
 
 /// Starts the shipped Prometheus and Grafana stack (Docker Desktop; Linux adds an override).
+/// The path is relative to a checkout of the repository below: the installed app does not carry
+/// the compose files.
 const COMPOSE_COMMAND: &str = "docker compose -f docs/observability/docker-compose.yml up -d";
+
+/// The launcher's source repository, where the compose files and dashboards live.
+const REPO_URL: &str = "https://github.com/ZcashFoundation/zebra-launcher";
 
 /// The one rule for the URL, shared with the backend: it mirrors the CSP's `frame-src`.
 const URL_ERROR: &str = "Only http:// URLs on 127.0.0.1 or localhost can be embedded.";
@@ -110,6 +115,16 @@ fn Setup() -> impl IntoView {
         });
     };
 
+    let open_error = RwSignal::new(None::<String>);
+    let open_repo = move |_| {
+        open_error.set(None);
+        spawn_local(async move {
+            if let Err(error) = api::open_path("repo").await {
+                open_error.try_set(Some(format!("Could not open the browser: {error}")));
+            }
+        });
+    };
+
     let use_this = move |event: leptos::ev::SubmitEvent| {
         event.prevent_default();
         let url = input.with_untracked(|input| input.trim().to_owned());
@@ -139,8 +154,15 @@ fn Setup() -> impl IntoView {
             <div class="card grafana-setup">
                 <h2>"Connect Grafana"</h2>
                 <p>
-                    "zebrad exports Prometheus metrics while it runs. This repository ships a Prometheus and Grafana stack with 14 Zebra dashboards; start it with Docker from the repository root:"
+                    "zebrad exports Prometheus metrics while it runs. The launcher's source repository ships a Prometheus and Grafana stack with 14 Zebra dashboards in "
+                    <code>"docs/observability/"</code>
+                    ". Clone or download " <code>{REPO_URL}</code>
+                    ", then start the stack with Docker from its root:"
                 </p>
+                <div class="buttons">
+                    <button type="button" on:click=open_repo>"Open the repository"</button>
+                    {move || open_error.get().map(|error| view! { <span class="error">{error}</span> })}
+                </div>
                 <div class="grafana-command">
                     <pre>{COMPOSE_COMMAND}</pre>
                     <button type="button" on:click=copy_command>"Copy"</button>
@@ -220,6 +242,15 @@ fn Embedded(url: String) -> impl IntoView {
     // Bumped by Reload: the frame is re-created with the same src.
     let reloads = RwSignal::new(0u64);
     let open_error = RwSignal::new(None::<String>);
+    // The frame loads on the tab's first visit, not at startup, and stays loaded after: pages
+    // stay mounted while hidden, and a hidden frame would still run Grafana and its refresh loop
+    // (and reload on every theme change) for a user who never opens the tab.
+    let shown = RwSignal::new(false);
+    Effect::new(move |_| {
+        if state.tab.get() == Tab::Grafana {
+            shown.set(true);
+        }
+    });
 
     let selected = {
         let url = url.clone();
@@ -305,10 +336,12 @@ fn Embedded(url: String) -> impl IntoView {
         </div>
         <p class="muted grafana-hint">
             "Blank? Make sure Grafana is running at " <code>{url}</code>
-            " and allows embedding (see docs/GRAFANA.md)."
+            " and allows embedding (see " <code>"docs/GRAFANA.md"</code> " in the repository at "
+            <code>{REPO_URL}</code> ")."
         </p>
         // Keyed on the reload counter, so Reload replaces the frame (a rebuilt frame with the
-        // same src would be left alone); a pick or theme change updates the src in place.
+        // same src would be left alone); a pick or theme change updates the src in place. Without
+        // a src (before the first visit) the frame is about:blank and loads nothing.
         <For
             each=move || [reloads.get()]
             key=|generation| *generation
@@ -317,7 +350,7 @@ fn Embedded(url: String) -> impl IntoView {
                     <iframe
                         class="grafana-frame"
                         title="Grafana dashboard"
-                        src=move || src.get()
+                        src=move || shown.get().then(|| src.get())
                         sandbox="allow-scripts allow-same-origin allow-forms"
                         referrerpolicy="no-referrer"
                     ></iframe>

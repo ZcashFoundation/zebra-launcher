@@ -1,4 +1,4 @@
-//! The app shell: shared state, backend subscriptions, the header, the four pages and the
+//! The app shell: shared state, backend subscriptions, the header, the five pages and the
 //! first-run wizard.
 
 use std::time::{Duration, SystemTime};
@@ -87,6 +87,35 @@ impl Tab {
     /// The tab's position, 1 to 5: its keyboard shortcut is Ctrl (or Cmd) plus this digit.
     pub fn number(self) -> usize {
         Tab::ALL.iter().position(|tab| *tab == self).unwrap_or(0) + 1
+    }
+
+    /// The tab `by` places to the right (to the left when negative), wrapping around the ends:
+    /// the arrow keys in the tab bar.
+    pub fn step(self, by: i32) -> Tab {
+        let len = Tab::ALL.len() as i32;
+        let index = (self.number() as i32 - 1 + by).rem_euclid(len);
+        Tab::ALL[index as usize]
+    }
+
+    /// The tab's name in element ids.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Tab::Dashboard => "dashboard",
+            Tab::Logs => "logs",
+            Tab::Grafana => "grafana",
+            Tab::Configure => "configure",
+            Tab::Settings => "settings",
+        }
+    }
+
+    /// The id of the tab's button in the tab bar; its page names it in `aria-labelledby`.
+    pub fn button_id(self) -> String {
+        format!("tab-{}", self.slug())
+    }
+
+    /// The id of the tab's page; the button names it in `aria-controls`.
+    pub fn page_id(self) -> String {
+        format!("page-{}", self.slug())
     }
 
     /// The tab for a keyboard shortcut, from a keydown's `key` and `code`: `1` to `5`, or the
@@ -358,7 +387,7 @@ pub fn App() -> impl IntoView {
     });
 
     // Pages stay mounted while hidden, so a half-edited config or the log scroll position
-    // survive switching tabs.
+    // survive switching tabs. Each page is the tab panel of its tab button in the header.
     let hidden = move |tab: Tab| move || state.tab.get() != tab;
     // While the first-run wizard is open, the app behind it takes no input.
     let first_run_open = RwSignal::new(false);
@@ -391,19 +420,49 @@ pub fn App() -> impl IntoView {
                 }}
             </header>
             <main class="app-main">
-                <section class="page" hidden=hidden(Tab::Dashboard)>
+                <section
+                    class="page"
+                    role="tabpanel"
+                    id=Tab::Dashboard.page_id()
+                    aria-labelledby=Tab::Dashboard.button_id()
+                    hidden=hidden(Tab::Dashboard)
+                >
                     <Dashboard />
                 </section>
-                <section class="page page-logs" hidden=hidden(Tab::Logs)>
+                <section
+                    class="page page-logs"
+                    role="tabpanel"
+                    id=Tab::Logs.page_id()
+                    aria-labelledby=Tab::Logs.button_id()
+                    hidden=hidden(Tab::Logs)
+                >
                     <Logs />
                 </section>
-                <section class="page page-grafana" hidden=hidden(Tab::Grafana)>
+                <section
+                    class="page page-grafana"
+                    role="tabpanel"
+                    id=Tab::Grafana.page_id()
+                    aria-labelledby=Tab::Grafana.button_id()
+                    hidden=hidden(Tab::Grafana)
+                >
                     <Grafana />
                 </section>
-                <section class="page" hidden=hidden(Tab::Configure)>
+                <section
+                    class="page"
+                    role="tabpanel"
+                    id=Tab::Configure.page_id()
+                    aria-labelledby=Tab::Configure.button_id()
+                    hidden=hidden(Tab::Configure)
+                >
                     <Configure />
                 </section>
-                <section class="page" hidden=hidden(Tab::Settings)>
+                <section
+                    class="page"
+                    role="tabpanel"
+                    id=Tab::Settings.page_id()
+                    aria-labelledby=Tab::Settings.button_id()
+                    hidden=hidden(Tab::Settings)
+                >
                     <SettingsPage />
                 </section>
             </main>
@@ -420,6 +479,29 @@ mod tests {
     fn tabs_are_numbered_in_order() {
         assert_eq!(Tab::Dashboard.number(), 1);
         assert_eq!(Tab::Settings.number(), 5);
+    }
+
+    #[test]
+    fn steps_wrap_around_the_tab_bar() {
+        assert_eq!(Tab::Dashboard.step(1), Tab::Logs);
+        assert_eq!(Tab::Grafana.step(-1), Tab::Logs);
+        // Past either end, the bar wraps.
+        assert_eq!(Tab::Settings.step(1), Tab::Dashboard);
+        assert_eq!(Tab::Dashboard.step(-1), Tab::Settings);
+        assert_eq!(Tab::Logs.step(0), Tab::Logs);
+        assert_eq!(Tab::Logs.step(5), Tab::Logs);
+        assert_eq!(Tab::Logs.step(-7), Tab::Settings);
+    }
+
+    #[test]
+    fn ids_link_each_tab_to_its_page() {
+        for tab in Tab::ALL {
+            assert_eq!(tab.slug(), tab.label().to_ascii_lowercase());
+            assert_eq!(tab.button_id(), format!("tab-{}", tab.slug()));
+            assert_eq!(tab.page_id(), format!("page-{}", tab.slug()));
+        }
+        assert_eq!(Tab::Grafana.button_id(), "tab-grafana");
+        assert_eq!(Tab::Grafana.page_id(), "page-grafana");
     }
 
     #[test]
