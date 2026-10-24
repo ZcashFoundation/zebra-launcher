@@ -276,12 +276,14 @@ fn token(bytes: &[u8]) -> String {
 }
 
 /// The listener addresses that must stay on loopback.
-const LOOPBACK_KEYS: [(&str, &str); 5] = [
+const LOOPBACK_KEYS: [(&str, &str); 6] = [
     ("rpc", "listen_addr"),
     ("rpc", "indexer_listen_addr"),
     ("rpc", "lightwalletd_listen_addr"),
     ("metrics", "endpoint_addr"),
     ("health", "listen_addr"),
+    // The tracing filter endpoint (`filter-reload` builds) takes unauthenticated requests.
+    ("tracing", "endpoint_addr"),
 ];
 
 /// Checks an edited `zebrad.toml` before it is saved.
@@ -665,6 +667,10 @@ tx_cost_limit = 1000
             (
                 "health = { listen_addr = \"0.0.0.0:8080\" }\n",
                 "health.listen_addr",
+            ),
+            (
+                "[tracing]\nendpoint_addr = \"0.0.0.0:3000\"\n",
+                "tracing.endpoint_addr",
             ),
             (
                 "[rpc]\nenable_cookie_auth = false\n",
