@@ -335,7 +335,8 @@ fn path_arg(path: &Path) -> String {
 
 /// Opens one of a fixed set of locations with the system's default handler:
 /// `config_dir`, `data_dir` (the chosen chain data directory, or the
-/// launcher's data directory), `log_dir`, or `releases_page`.
+/// launcher's data directory), `log_dir`, `releases_page`, or `grafana` (the
+/// Grafana URL from the settings, in the browser; fails when none is set).
 #[tauri::command]
 pub fn open_path<R: Runtime>(
     app: AppHandle<R>,
@@ -355,6 +356,11 @@ pub fn open_path<R: Runtime>(
         }
         "log_dir" => opener.open_path(path_arg(paths.log_dir()), None::<&str>),
         "releases_page" => opener.open_url(RELEASES_URL, None::<&str>),
+        // Validated as a loopback http URL when it was saved (`is_loopback_http_url`).
+        "grafana" => match state.settings.current().grafana_url {
+            Some(url) => opener.open_url(url, None::<&str>),
+            None => return Err("no Grafana URL is set".into()),
+        },
         other => return Err(format!("cannot open {other:?}")),
     };
     result.map_err(message)
