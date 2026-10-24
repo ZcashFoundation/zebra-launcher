@@ -164,6 +164,35 @@ fn reapply(mut fresh: FormState, pending: Vec<(FieldId, Option<String>)>) -> For
     fresh
 }
 
+/// The forbidden keys set in the file. [`render_config`] drops them, so a save removes them
+/// whatever else is edited: that counts as a change and enables Save, but it is not an edit to
+/// discard or to keep across a reload.
+fn removed_on_save<'a>(
+    fields: impl Iterator<Item = &'a Field>,
+    loaded: &FormState,
+) -> Vec<FieldId> {
+    fields
+        .filter(|field| matches!(field.control, Control::Forbidden { .. }))
+        .map(Field::id)
+        .filter(|id| loaded.get(*id).is_some())
+        .collect()
+}
+
+/// The list under the change count: the `section.key` paths of the edited fields, then the
+/// keys a save removes.
+fn changed_list(changes: &[FieldId], removals: &[FieldId]) -> String {
+    changes
+        .iter()
+        .map(|(section, key)| format!("{section}.{key}"))
+        .chain(
+            removals
+                .iter()
+                .map(|(section, key)| format!("{section}.{key} (removed on save)")),
+        )
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// What a control shows: the edited text, or the default when unset.
 fn shown_text(raw: Option<&str>, default: Option<&str>) -> String {
     raw.or(default).unwrap_or_default().to_owned()
@@ -348,6 +377,7 @@ pub fn ZebradConfigForm() -> impl IntoView {
     };
     let changes =
         Memo::new(move |_| values.with(|values| loaded.with(|loaded| values.diff(loaded))));
+    let removals = Memo::new(move |_| loaded.with(|loaded| removed_on_save(FIELDS.iter(), loaded)));
     let filter = RwSignal::new(String::new());
     let only_changed = RwSignal::new(false);
     let shown = Memo::new(move |_| {
@@ -420,7 +450,8 @@ pub fn ZebradConfigForm() -> impl IntoView {
     let can_save = move || {
         load.with(|load| *load == Load::Ready)
             && !saving.get()
-            && changes.with(|changes| !changes.is_empty())
+            && (changes.with(|changes| !changes.is_empty())
+                || removals.with(|removals| !removals.is_empty()))
             && errors.with(BTreeMap::is_empty)
     };
     let save = move || {
@@ -565,15 +596,9 @@ pub fn ZebradConfigForm() -> impl IntoView {
             _ => None,
         })
     };
-    let changed_paths = move || {
-        changes.with(|changes| {
-            changes
-                .iter()
-                .map(|(section, key)| format!("{section}.{key}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-    };
+    let change_count = move || changes.with(Vec::len) + removals.with(Vec::len);
+    let changed_paths =
+        move || changes.with(|changes| removals.with(|removals| changed_list(changes, removals)));
 
     view! {
         <section class="cfg-form" aria-labelledby="cfg-heading" on:keydown=on_key>
@@ -618,7 +643,7 @@ pub fn ZebradConfigForm() -> impl IntoView {
                 {notice_view}
                 <div class="cfg-bar">
                     <div class="cfg-changes">
-                        <span>{move || changes_text(changes.with(Vec::len))}</span>
+                        <span>{move || changes_text(change_count())}</span>
                         <span class="muted cfg-changed-list">{changed_paths}</span>
                     </div>
                     <p class="cfg-status ok" role="status">{saved_view}</p>
@@ -704,7 +729,11 @@ fn field_row(field: &'static Field, form: Form, shown: Memo<BTreeSet<FieldId>>) 
         Signal::derive(move || form.loaded.with(|loaded| loaded.get(id).map(str::to_owned)));
     let value =
         Signal::derive(move || form.values.with(|values| values.get(id).map(str::to_owned)));
-    let edited = Signal::derive(move || value.get() != in_file.get());
+    // A forbidden key set in the file is removed on save, so its row counts as changed.
+    let edited = Signal::derive(move || match field.control {
+        Control::Forbidden { .. } => in_file.get().is_some(),
+        _ => value.get() != in_file.get(),
+    });
     let error = Signal::derive(move || form.errors.with(|errors| errors.get(&id).cloned()));
     let set = move |text: Option<String>| form.edits.update(|edits| edits.set(id, text));
     let user = matches!(field.control, Control::User);
@@ -1042,6 +1071,15 @@ mod tests {
         doc: "The seeders the node contacts first.",
         control: Control::User,
     };
+    const BARS: Field = Field {
+        section: "tracing",
+        key: "progress_bar",
+        label: "Progress bars",
+        kind: Kind::Choice(&["summary", "detailed"]),
+        default: None,
+        doc: "Shows progress bars in the terminal.",
+        control: Control::Forbidden { note: "" },
+    };
 
     fn with(values: &[(FieldId, &str)]) -> FormState {
         let mut form = FormState::default();
@@ -1133,6 +1171,29 @@ mod tests {
         assert_eq!(merged.get(PORT.id()), Some("4"));
         assert_eq!(merged.get(PEERS.id()), None);
         assert_eq!(merged.get(ADDR.id()), Some("127.0.0.1:1"));
+    }
+
+    #[test]
+    fn forbidden_keys_in_the_file_are_removed_on_save() {
+        // The file sets a forbidden key: the save drops it, which is listed as a change even
+        // though the edits equal the file, and enables Save.
+        let loaded = with(&[(BARS.id(), "summary"), (PORT.id(), "4")]);
+        let fields = [PORT, ADDR, PEERS, BARS];
+        assert_eq!(removed_on_save(fields.iter(), &loaded), vec![BARS.id()]);
+        assert!(normalised(fields.iter(), &loaded).diff(&loaded).is_empty());
+        assert_eq!(
+            changed_list(&[], &[BARS.id()]),
+            "tracing.progress_bar (removed on save)"
+        );
+        assert_eq!(
+            changed_list(&[PORT.id()], &[BARS.id()]),
+            "rpc.parallel_cpu_threads, tracing.progress_bar (removed on save)"
+        );
+        assert_eq!(changed_list(&[PORT.id()], &[]), "rpc.parallel_cpu_threads");
+        // A file without the key, or a user field, has nothing to remove.
+        let clean = with(&[(PORT.id(), "4")]);
+        assert!(removed_on_save(fields.iter(), &clean).is_empty());
+        assert_eq!(changed_list(&[], &[]), "");
     }
 
     #[test]
