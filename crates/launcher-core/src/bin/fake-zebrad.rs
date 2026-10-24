@@ -1,10 +1,13 @@
-//! A scripted stand-in for `zebrad`, used by the supervisor tests and by
-//! pull-request bundle builds that must not download the real node.
+//! A scripted stand-in for `zebrad`, used by the supervisor and RPC monitor
+//! tests, and installed as the development sidecar by `scripts/dev-sidecar.sh`
+//! so `tauri-build` and `cargo tauri dev` find a binary without downloading
+//! the real node. Release bundles never ship it.
 //!
 //! It accepts the subset of zebrad's command line the launcher uses
-//! (`--version`, `generate -o FILE`, `-c FILE start`), prints the same log
-//! lines the launcher's detectors key on, and shuts down on the same signals.
-//! `FAKE_ZEBRAD_MODE` selects a scenario:
+//! (`--version`, `-c FILE start`), prints the same log lines the launcher's
+//! detectors key on, and shuts down on the same signals. It reports the
+//! pinned `ZEBRAD_VERSION` as its version. `FAKE_ZEBRAD_MODE` selects a
+//! scenario:
 //!
 //! | mode | behaviour |
 //! |---|---|
@@ -60,7 +63,8 @@ use tokio::{
     sync::oneshot,
 };
 
-const VERSION: &str = "7.0.0";
+/// The bundled zebrad's version, from the repository's `ZEBRAD_VERSION` pin.
+const VERSION: &str = include_str!("../../../../ZEBRAD_VERSION").trim_ascii();
 const RPC_ADDR: &str = "127.0.0.1:8232";
 const METRICS_ADDR: &str = "127.0.0.1:9999";
 
@@ -87,7 +91,6 @@ fn main() -> ExitCode {
     }
 
     match rest.first().map(String::as_str) {
-        Some("generate") => generate(&rest[1..]),
         Some("start") | None => start(config, rest.get(1..).unwrap_or(&[])),
         // The grandchild of `FAKE_ZEBRAD_LINGER_MS`: holds the inherited
         // pipes open for the given number of milliseconds.
@@ -99,27 +102,6 @@ fn main() -> ExitCode {
         Some(other) => {
             eprintln!("error: unrecognized subcommand '{other}'");
             ExitCode::from(2)
-        }
-    }
-}
-
-fn generate(args: &[String]) -> ExitCode {
-    let output = args
-        .iter()
-        .position(|a| a == "-o" || a == "--output-file")
-        .and_then(|i| args.get(i + 1));
-    let config = "# Default configuration for zebrad (fake).\n\n[network]\nnetwork = \"Mainnet\"\n\n[rpc]\nenable_cookie_auth = true\n\n[metrics]\n".to_string();
-    match output {
-        Some(path) => match std::fs::write(path, config) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => {
-                eprintln!("error: could not write {path}: {err}");
-                ExitCode::from(1)
-            }
-        },
-        None => {
-            print!("{config}");
-            ExitCode::SUCCESS
         }
     }
 }

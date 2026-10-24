@@ -14,12 +14,13 @@ use std::{
 
 use launcher_core::{
     logfile::RotatingLogConfig,
+    logs::Detector,
     pidfile,
     policy::RestartPolicy,
     process::ZebradCommand,
     supervisor::{self, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle},
 };
-use launcher_types::{ExitClass, LogLine, LogStream, Phase};
+use launcher_types::{ExitClass, LogEvent, LogLine, LogStream, Phase};
 use tokio::time::timeout;
 
 const LIMIT: Duration = Duration::from_secs(20);
@@ -420,6 +421,68 @@ async fn database_lock_and_port_conflicts_are_deterministic_failures() {
             class: ExitClass::PortInUse
         }
     );
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_end_of_support_halt_is_a_deterministic_failure() {
+    let fx = fixture("eos-halt");
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    // The fake prints `Starting zebrad` before it panics, so the start can resolve first.
+    let _ = within(handle.start()).await;
+    let status = wait_phase(&handle, |p| matches!(p, Phase::Failed { .. })).await;
+    assert_eq!(
+        status.phase,
+        Phase::Failed {
+            class: ExitClass::EosHalt
+        }
+    );
+    let exit = status.last_exit.expect("exit recorded");
+    assert_eq!(exit.class, ExitClass::EosHalt, "{exit:?}");
+    assert!(!exit.requested, "{exit:?}");
+    assert!(
+        exit.detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Zebra refuses to run"),
+        "{exit:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(handle.status().phase, status.phase, "must not restart");
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(
+        contains(&history, "not restarting zebrad (EosHalt)"),
+        "{:#?}",
+        messages(&history)
+    );
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_end_of_support_warning_keeps_zebrad_running() {
+    let fx = fixture("eos-warn");
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    let mut sub = within(handle.subscribe()).await.expect("subscribe");
+    within(handle.start()).await.expect("start");
+    // The warning is detected as `EosWarn` from the heartbeat lines.
+    let mut detector = Detector::new();
+    loop {
+        let line = within(sub.live.recv()).await.expect("live line");
+        if let Some(LogEvent::EosWarn { message }) = detector.detect(&line) {
+            assert!(
+                message.starts_with("Your Zebra release is too old"),
+                "{message}"
+            );
+            break;
+        }
+    }
+    // A warning only: zebrad keeps running and nothing is classified.
+    let status = handle.status();
+    assert_eq!(status.phase, Phase::Running);
+    assert_eq!(status.last_exit, None);
+    within(handle.stop()).await.expect("stop");
+    let exit = handle.status().last_exit.expect("exit recorded");
+    assert_eq!(exit.class, ExitClass::Clean, "{exit:?}");
     within(handle.shutdown()).await.expect("shutdown");
 }
 
