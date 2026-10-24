@@ -51,10 +51,11 @@ pub enum Notice {
         restarted: bool,
     },
     RolledBack(String),
-    /// The file was re-read because it changed on disk; `as_text` says whether the draft was
-    /// being edited as text (and kept as it was) or in the form (and put back on top).
+    /// The file was re-read because it changed on disk; `kept` says whether the draft was kept
+    /// as it was (it is edited as text, or holds more than form values) or its field edits were
+    /// put back on top of the fresh file.
     Conflict {
-        as_text: bool,
+        kept: bool,
     },
     Failed(String),
 }
@@ -65,11 +66,23 @@ enum Reload {
     /// The fresh file replaces the draft.
     Replace,
     /// The draft stays as it is; only the saved file (and its token) is refreshed: after a
-    /// rollback, or when the draft is edited as text.
+    /// rollback, or when the draft holds anything a field edit cannot put back (it is edited as
+    /// text, or carries a comment, an unknown key or other text edit).
     KeepDraft,
     /// The changed fields are set again on top of the fresh file: after a conflict, or when the
-    /// file is re-read while the form has edits.
+    /// file is re-read while the draft is the saved file with the form's edits and nothing more.
     ReapplyPending,
+}
+
+impl Reload {
+    /// The reload of an edited draft: kept as it is, or its field edits put back.
+    fn of_edited(kept: bool) -> Self {
+        if kept {
+            Self::KeepDraft
+        } else {
+            Self::ReapplyPending
+        }
+    }
 }
 
 /// `edits` with every text [`normalize`]d as the file is written, and the texts that are then
@@ -327,6 +340,30 @@ fn values_of(text: &str) -> FormState {
         .unwrap_or_default()
 }
 
+/// The draft `reset_draft` makes of a saved text: the text with its forbidden keys dropped, or
+/// the text itself when it is not TOML or cannot be rendered.
+fn pristine_text(text: &str) -> String {
+    render_config(text, &values_of(text)).unwrap_or_else(|_| text.to_owned())
+}
+
+/// True when `draft` is `saved` with `values` written in and nothing more (no comment, unknown
+/// key or other text edit), so writing those values into a fresh file loses nothing.
+fn draft_is_form_only(saved: &str, draft: &str, values: &FormState) -> bool {
+    render_config(saved, values).is_ok_and(|rendered| rendered == draft)
+}
+
+/// The first forbidden key `current` (the draft's values) sets and `saved` (the file's) does
+/// not: one typed as text, which the draft keeps and names rather than drops quietly.
+fn typed_forbidden<'a>(
+    fields: impl Iterator<Item = &'a Field>,
+    saved: &FormState,
+    current: &FormState,
+) -> Option<FieldId> {
+    removed_on_save(fields, current)
+        .into_iter()
+        .find(|id| saved.get(*id).is_none())
+}
+
 /// The draft of `zebrad.toml` and everything that reads or writes it. Every field is a signal
 /// or a memo, so the struct is `Copy` and is shared by the form pane, the file pane and the
 /// action bar.
@@ -356,8 +393,12 @@ pub struct ConfigEditor {
     pub changes: Memo<Vec<FieldId>>,
     /// The forbidden keys in the saved file, which the draft drops.
     pub removals: Memo<Vec<FieldId>>,
-    /// The draft differs from the saved file as text (a comment edit counts).
+    /// The draft differs from the saved file as text (a comment edit counts): there is
+    /// something to save.
     pub dirty: Memo<bool>,
+    /// The draft holds something a reload or a reset would lose: it differs from what Discard
+    /// gives. A forbidden key the draft drops is not an edit, so it does not count here.
+    pub edited: Memo<bool>,
     /// Why the last form edit could not be written into the draft, if it could not.
     pub render_error: RwSignal<Option<String>>,
     pub saving: RwSignal<bool>,
@@ -410,6 +451,18 @@ impl ConfigEditor {
                     .is_some_and(|document| draft.with(|draft| *draft != document.text))
             })
         });
+        let pristine = Memo::new(move |_| {
+            document.with(|document| {
+                document
+                    .as_ref()
+                    .map(|document| pristine_text(&document.text))
+                    .unwrap_or_default()
+            })
+        });
+        let edited = Memo::new(move |_| {
+            document.with(Option::is_some)
+                && draft.with(|draft| pristine.with(|pristine| *draft != *pristine))
+        });
         let editor = Self {
             state,
             document,
@@ -424,6 +477,7 @@ impl ConfigEditor {
             changes,
             removals,
             dirty,
+            edited,
             render_error: RwSignal::new(None),
             saving: RwSignal::new(false),
             notice: RwSignal::new(None),
@@ -439,13 +493,7 @@ impl ConfigEditor {
         Effect::new(move |previous: Option<u64>| {
             let changed = state.config_changed.get();
             if previous.is_some_and(|previous| previous != changed) {
-                let (mode, notice) = editor.pending_reload();
-                spawn_local(async move {
-                    editor.reload(mode).await;
-                    if let Some(notice) = notice {
-                        editor.show_notice(notice);
-                    }
-                });
+                spawn_local(editor.reload_pending());
             }
             changed
         });
@@ -455,7 +503,7 @@ impl ConfigEditor {
             if tab == Tab::Configure
                 && previous.is_some_and(|previous| previous != tab)
                 && !editor.saving.get_untracked()
-                && !editor.dirty.get_untracked()
+                && !editor.edited.get_untracked()
                 && editor.load.with_untracked(|load| *load == Load::Ready)
             {
                 spawn_local(editor.reload(Reload::Replace));
@@ -466,19 +514,62 @@ impl ConfigEditor {
     }
 
     /// How to re-read the file around the current draft, and what to tell the user: a draft
-    /// edited as text is kept as it is, one edited in the form is put back on top of the fresh
-    /// file, and no draft is replaced quietly.
+    /// that holds more than the form's values is kept as it is, one that is the file with the
+    /// form's edits is put back on top of the fresh file, and no draft is replaced quietly.
     fn pending_reload(self) -> (Reload, Option<Notice>) {
-        if !self.dirty.get_untracked() {
+        if !self.edited.get_untracked() {
             return (Reload::Replace, None);
         }
-        let as_text = self.text_mode.get_untracked();
-        let mode = if as_text {
-            Reload::KeepDraft
-        } else {
-            Reload::ReapplyPending
+        let kept = self.keeps_draft();
+        (Reload::of_edited(kept), Some(Notice::Conflict { kept }))
+    }
+
+    /// True when a re-read must keep the draft as it is: it is edited as text, or it is more than
+    /// the saved file with the form's values written in (a comment, an unknown key, a forbidden
+    /// key or text that is not TOML), which setting the changed fields again cannot put back.
+    fn keeps_draft(self) -> bool {
+        if self.text_mode.get_untracked() {
+            return true;
+        }
+        let Some(current) = self.parsed.with_untracked(|parsed| {
+            parsed
+                .as_ref()
+                .ok()
+                .map(|parsed| normalised(FIELDS.iter(), &parsed.form))
+        }) else {
+            return true;
         };
-        (mode, Some(Notice::Conflict { as_text }))
+        let saved = self
+            .document
+            .with_untracked(|document| document.as_ref().map(|document| document.text.clone()))
+            .unwrap_or_default();
+        // What `sync_draft` rendered: an invalid text keeps the draft's own value.
+        let values = self.values.with_untracked(|values| {
+            self.errors
+                .with_untracked(|errors| render_values(values, errors, &current))
+        });
+        !self
+            .draft
+            .with_untracked(|draft| draft_is_form_only(&saved, draft, &values))
+    }
+
+    /// Re-reads the file around the draft as [`Self::pending_reload`] says and, when the file
+    /// differs from the one the draft was edited against, says how the draft was treated. A
+    /// failed read leaves the draft and shows the error instead.
+    async fn reload_pending(self) {
+        let (mode, notice) = self.pending_reload();
+        let text = move || {
+            self.document
+                .with_untracked(|document| document.as_ref().map(|document| document.text.clone()))
+        };
+        let before = text();
+        self.reload(mode).await;
+        if let Some(notice) = notice
+            && text() != before
+            && self.load.with_untracked(|load| *load == Load::Ready)
+        {
+            self.show_notice(notice);
+        }
     }
 
     /// Reads the file again and updates the draft as `mode` says. A failure leaves the draft
@@ -539,12 +630,23 @@ impl ConfigEditor {
     }
 
     /// Writes the form's values into the draft. Nothing happens while the draft is not TOML (the
-    /// text is then authoritative); a field whose text is invalid keeps the draft's value.
+    /// text is then authoritative); a field whose text is invalid keeps the draft's value. A
+    /// forbidden key typed as text is kept and named, not dropped quietly: only the saved file's
+    /// forbidden keys are removed on save (`removals`), and Save is refused until it is removed.
     fn sync_draft(self) {
         let current = match self.parsed.get_untracked() {
             Ok(parsed) => normalised(FIELDS.iter(), &parsed.form),
             Err(_) => return,
         };
+        let typed = self
+            .saved
+            .with_untracked(|saved| typed_forbidden(FIELDS.iter(), saved, &current));
+        if let Some((section, key)) = typed {
+            self.render_error.set(Some(format!(
+                "`{section}.{key}` is not allowed by the launcher; remove it from the file."
+            )));
+            return;
+        }
         let values = self.values.with_untracked(|values| {
             self.errors
                 .with_untracked(|errors| render_values(values, errors, &current))
@@ -580,7 +682,8 @@ impl ConfigEditor {
     }
 
     /// Shows the draft as text, or as marked lines again. Both ways the form's values are
-    /// written in first, which drops a forbidden key typed as text.
+    /// written in first; a forbidden key typed as text stays in the draft and is named in the
+    /// form pane until it is removed.
     pub fn set_text_mode(self, on: bool) {
         self.sync_draft();
         self.text_mode.set(on);
@@ -604,7 +707,8 @@ impl ConfigEditor {
 
     /// Applies the draft. Applied: the file is re-read and becomes the draft. Rolled back: the
     /// draft stays, against the restored file. Conflict: the file is re-read and the draft kept
-    /// (as text) or put back on top of it (in the form).
+    /// as it is, or, when it is the file with the form's edits and nothing more, its edits put
+    /// back on top of the fresh file.
     pub fn save(self) {
         if !untrack(|| self.can_save()) {
             return;
@@ -631,14 +735,9 @@ impl ConfigEditor {
                     Notice::RolledBack(error)
                 }
                 Err(error) if error.kind == ApplyErrorKind::Conflict => {
-                    let as_text = self.text_mode.get_untracked();
-                    self.reload(if as_text {
-                        Reload::KeepDraft
-                    } else {
-                        Reload::ReapplyPending
-                    })
-                    .await;
-                    Notice::Conflict { as_text }
+                    let kept = self.keeps_draft();
+                    self.reload(Reload::of_edited(kept)).await;
+                    Notice::Conflict { kept }
                 }
                 Err(error) => Notice::Failed(error.message),
             };
@@ -654,13 +753,13 @@ impl ConfigEditor {
     }
 
     /// Reads the file again after a failed read. The draft is kept across the failure (after a
-    /// rollback or a conflict it was to be kept), so it goes back on top of the fresh file.
+    /// rollback or a conflict it was to be kept), so it is kept or put back on top of the fresh
+    /// file as a re-read does, and the user is told when that file differs.
     pub fn retry(self) {
         if self.document.with_untracked(Option::is_none) {
             self.load.set(Load::Loading);
         }
-        let (mode, _) = self.pending_reload();
-        spawn_local(self.reload(mode));
+        spawn_local(self.reload_pending());
     }
 
     fn show_notice(self, next: Notice) {
@@ -1358,6 +1457,73 @@ mod tests {
         assert_eq!(values.get(PORT.id()), Some("4"));
         assert_eq!(values.get(PEERS.id()), None);
         assert_eq!(values_of("not = [toml"), FormState::default());
+    }
+
+    #[test]
+    fn the_pristine_text_drops_the_files_forbidden_keys_only() {
+        // The real schema: `rpc.parallel_cpu_threads` is a user field, `tracing.progress_bar`
+        // a forbidden one.
+        let plain = "# mine\n\n[rpc]\nparallel_cpu_threads = 4\n";
+        assert_eq!(pristine_text(plain), plain);
+        let with_forbidden = format!("{plain}\n[tracing]\nprogress_bar = \"summary\"\n");
+        assert_eq!(pristine_text(&with_forbidden), plain);
+        // Not TOML: the text itself, so a broken file does not count as edited.
+        assert_eq!(pristine_text("not = [toml"), "not = [toml");
+    }
+
+    #[test]
+    fn a_draft_is_form_only_when_it_is_the_file_with_the_values_written_in() {
+        let saved = "# Managed\n\n[rpc]\nparallel_cpu_threads = 4\n";
+        let mut values = values_of(saved);
+        assert!(draft_is_form_only(saved, saved, &values));
+        values.set(PORT.id(), Some("8".to_owned()));
+        let draft = render_config(saved, &values).expect("renders");
+        assert!(draft.contains("parallel_cpu_threads = 8"), "{draft}");
+        assert!(draft_is_form_only(saved, &draft, &values));
+        // A comment, an unknown key or a forbidden key typed as text is more than the form's
+        // values, which setting the changed fields again cannot put back.
+        assert!(!draft_is_form_only(
+            saved,
+            &format!("# tuned for my box\n{draft}"),
+            &values
+        ));
+        assert!(!draft_is_form_only(
+            saved,
+            &format!("{draft}\n[mining]\nminer_address = \"t1\"\n"),
+            &values
+        ));
+        assert!(!draft_is_form_only(
+            saved,
+            &format!("{draft}\n[tracing]\nprogress_bar = \"summary\"\n"),
+            &values
+        ));
+        // A forbidden key in the saved file is dropped by the draft and the rendering alike.
+        let with_forbidden = format!("{saved}\n[tracing]\nprogress_bar = \"summary\"\n");
+        assert!(draft_is_form_only(
+            &with_forbidden,
+            &pristine_text(&with_forbidden),
+            &values_of(&with_forbidden)
+        ));
+        // A draft that is not TOML is never form-only.
+        assert!(!draft_is_form_only(
+            "not = [toml",
+            "not = [toml",
+            &FormState::default()
+        ));
+    }
+
+    #[test]
+    fn a_forbidden_key_typed_as_text_is_found() {
+        let fields = [PORT, ADDR, PEERS, BARS];
+        let saved = with(&[(PORT.id(), "4")]);
+        let typed = with(&[(PORT.id(), "4"), (BARS.id(), "summary")]);
+        assert_eq!(
+            typed_forbidden(fields.iter(), &saved, &typed),
+            Some(BARS.id())
+        );
+        // One the file already holds is removed on save, not typed.
+        assert_eq!(typed_forbidden(fields.iter(), &typed, &typed), None);
+        assert_eq!(typed_forbidden(fields.iter(), &saved, &saved), None);
     }
 
     #[test]

@@ -58,7 +58,7 @@ pub fn Configure() -> impl IntoView {
             <div class="banner banner-error" role="alert">
                 <span>{message}</span>
                 {editor
-                    .dirty
+                    .edited
                     .get()
                     .then_some(
                         " Your draft is kept; retry before saving, or the save may be refused because the file changed.",
@@ -88,12 +88,12 @@ pub fn Configure() -> impl IntoView {
                 }
                 .into_any(),
             ),
-            Notice::Conflict { as_text } => Some(
+            Notice::Conflict { kept } => Some(
                 view! {
                     <div class="banner banner-warn" role="alert">
                         <strong>"The file changed on disk and was read again. "</strong>
-                        {if as_text {
-                            "Your text is kept as it is; Done editing shows the lines that differ from the file now. Save again to replace it."
+                        {if kept {
+                            "Your draft is kept as it is; the marked lines are those that differ from the file now (turn off Edit as text to see them). Save again to replace it."
                         } else {
                             "Your edits were put back on top of it; check them and save again."
                         }}
@@ -126,9 +126,11 @@ pub fn Configure() -> impl IntoView {
             })
     };
     // Also while the file cannot be read, the main case a reset is for; not over an unsaved
-    // draft, which Discard clears first.
+    // draft, which Discard clears first. A forbidden key the draft drops is not such a draft.
     let reset_blocked = Signal::derive(move || {
-        editor.saving.get() || editor.dirty.get() || editor.load.with(|load| *load == Load::Loading)
+        editor.saving.get()
+            || editor.edited.get()
+            || editor.load.with(|load| *load == Load::Loading)
     });
 
     view! {
@@ -164,7 +166,7 @@ pub fn Configure() -> impl IntoView {
                     <div class="buttons">
                         <button
                             type="button"
-                            disabled=move || editor.saving.get() || !editor.dirty.get()
+                            disabled=move || editor.saving.get() || !editor.edited.get()
                             on:click=move |_| editor.discard()
                         >
                             "Discard"
