@@ -132,24 +132,19 @@ jobs:
           INPUT_COMMIT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
-          pinned_version="$(tr -d '[:space:]' < ZEBRAD_VERSION)"
+          die() { echo "::error::$*"; exit 1; }
+          # shellcheck disable=SC1091 # the version grammars live in scripts/lib.sh
+          . scripts/lib.sh
+          pinned_version="$(read_zebrad_version .)"
           version="${INPUT_VERSION:-${pinned_version}}"
-          if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
-            echo "::error::'${version}' is not a zebrad version of the form X.Y.Z (no leading v)"
-            exit 1
-          fi
-          commit="${INPUT_COMMIT}"
-          if [ -z "${commit}" ]; then
-            if [ "${version}" != "${pinned_version}" ]; then
-              echo "::error::version ${version} is not ZEBRAD_VERSION (${pinned_version}); give the commit input too"
-              exit 1
-            fi
-            commit="$(tr -d '[:space:]' < ZEBRAD_COMMIT)"
-          fi
-          if ! printf '%s\n' "${commit}" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "::error::'${commit}' is not a full 40-character lowercase hex commit SHA"
-            exit 1
-          fi
+          # A one-off version input may be a release candidate; the pin itself
+          # is held to the stable grammar by check-versions.sh in ci.yml.
+          check_zebrad_version "${version}"
+          # ZEBRAD_COMMIT pins ZEBRAD_VERSION only.
+          commit="${INPUT_COMMIT:-$(read_zebrad_commit . "${version}")}"
+          [ -n "${commit}" ] \
+            || die "version ${version} is not ZEBRAD_VERSION (${pinned_version}); give the commit input too"
+          check_commit "${commit}"
           {
             echo "version=${version}"
             echo "commit=${commit}"

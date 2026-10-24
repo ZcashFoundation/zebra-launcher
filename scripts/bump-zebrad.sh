@@ -21,6 +21,9 @@ die() {
     exit 2
 }
 
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "${script_dir}/.." && pwd)"
 args=()
@@ -37,10 +40,9 @@ version="${args[0]}"
 commit="${args[1]}"
 [ -d "${root}" ] || die "${root} is not a directory"
 
-printf '%s\n' "${version}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' ||
-    die "'${version}' is not MAJOR.MINOR.PATCH without a leading v"
-printf '%s\n' "${commit}" | grep -Eq '^[0-9a-f]{40}$' ||
-    die "'${commit}' is not a full 40-character lowercase hex SHA"
+# The pin grammar is decided in lib.sh: a stable release only.
+check_stable_version "${version}"
+check_commit "${commit}"
 
 fake="${root}/crates/launcher-core/src/bin/fake-zebrad.rs"
 [ -f "${fake}" ] || die "${fake} is missing"

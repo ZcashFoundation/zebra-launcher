@@ -5,12 +5,10 @@
 #   2. ZEBRAD_COMMIT is a full 40-character lowercase hex commit SHA.
 #   3. VERSION in crates/launcher-core/src/bin/fake-zebrad.rs equals
 #      ZEBRAD_VERSION, so the fake reports the version the launcher bundles.
-#   4. The tauri-cli pin, `TAURI_CLI_VERSION=` in .github/tool-versions.env
-#      (and any `TAURI_CLI_VERSION:` env entry left in a workflow), has the
-#      MAJOR.MINOR of the `tauri` crate in Cargo.lock (or, while the app is
-#      outside the workspace, src-tauri/Cargo.lock): the CLI that bundles the
-#      app must match the runtime it was built against. Skipped if nothing
-#      pins tauri-cli.
+#   4. The tauri-cli pin, `TAURI_CLI_VERSION=` in .github/tool-versions.env,
+#      has the MAJOR.MINOR of the `tauri` crate in Cargo.lock: the CLI that
+#      bundles the app must match the runtime it was built against. Skipped if
+#      nothing pins tauri-cli.
 #   5. src-tauri/tauri.conf.json sets plugins.updater.requireSignedVersion
 #      to true, always. Its updater pubkey must also not be the placeholder,
 #      unless the environment variable UPDATER_ENABLED is "false"; only this
@@ -34,6 +32,9 @@ die() {
     exit 2
 }
 
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -52,17 +53,11 @@ fail() {
 }
 skip() { echo "skip: $*"; }
 
-# Prints a file with all whitespace removed, or nothing if it is missing.
-read_pin() {
-    [ -f "$1" ] && tr -d '[:space:]' <"$1"
-    return 0
-}
-
-# 1. ZEBRAD_VERSION
+# 1. ZEBRAD_VERSION (the pin grammar is decided in lib.sh)
 version="$(read_pin "${root}/ZEBRAD_VERSION")"
 if [ ! -f "${root}/ZEBRAD_VERSION" ]; then
     fail "ZEBRAD_VERSION is missing"
-elif printf '%s\n' "${version}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+elif is_stable_version "${version}"; then
     ok "ZEBRAD_VERSION is ${version}"
 else
     fail "ZEBRAD_VERSION is '${version}', expected MAJOR.MINOR.PATCH without a leading v"
@@ -72,7 +67,7 @@ fi
 commit="$(read_pin "${root}/ZEBRAD_COMMIT")"
 if [ ! -f "${root}/ZEBRAD_COMMIT" ]; then
     fail "ZEBRAD_COMMIT is missing"
-elif printf '%s\n' "${commit}" | grep -Eq '^[0-9a-f]{40}$'; then
+elif is_full_sha "${commit}"; then
     ok "ZEBRAD_COMMIT is ${commit}"
 else
     fail "ZEBRAD_COMMIT is '${commit}', expected a full 40-character lowercase hex SHA"
@@ -94,39 +89,26 @@ else
 fi
 
 # 4. tauri-cli pin vs. the tauri crate
-# Matches `TAURI_CLI_VERSION=2.1.0` in .github/tool-versions.env and
-# `TAURI_CLI_VERSION: 2.1.0`, quoted or not, in any workflow's env.
-cli_pins="$(
-    grep -HnE '^TAURI_CLI_VERSION=' "${root}/.github/tool-versions.env" 2>/dev/null || true
-    grep -HnE '^[[:space:]]*TAURI_CLI_VERSION:' "${root}"/.github/workflows/*.yml "${root}"/.github/workflows/*.yaml 2>/dev/null || true
-)"
-if [ -z "${cli_pins}" ]; then
+cli_pin_line="$(grep -nE '^TAURI_CLI_VERSION=' "${root}/.github/tool-versions.env" 2>/dev/null || true)"
+if [ -z "${cli_pin_line}" ]; then
     skip "nothing sets TAURI_CLI_VERSION, so the tauri-cli/tauri check does not apply"
+elif [ "$(printf '%s\n' "${cli_pin_line}" | wc -l)" -ne 1 ]; then
+    fail ".github/tool-versions.env sets TAURI_CLI_VERSION more than once"
 else
-    tauri_version=""
-    for lock in Cargo.lock src-tauri/Cargo.lock; do
-        [ -f "${root}/${lock}" ] || continue
-        tauri_version="$(sed -n '/^name = "tauri"$/{n;s/^version = "\([^"]*\)"$/\1/p;}' "${root}/${lock}" | head -n 1)"
-        if [ -n "${tauri_version}" ]; then
-            tauri_lock="${lock}"
-            break
-        fi
-    done
+    location=".github/tool-versions.env:${cli_pin_line%%:*}"
+    cli_version="${cli_pin_line#*=}"
+    cli_version="${cli_version%$'\r'}"
+    tauri_version="$(sed -n '/^name = "tauri"$/{n;s/^version = "\([^"]*\)"$/\1/p;}' "${root}/Cargo.lock" 2>/dev/null | head -n 1)"
     if [ -z "${tauri_version}" ]; then
-        fail "TAURI_CLI_VERSION is set, but no Cargo.lock has the tauri crate"
+        fail "TAURI_CLI_VERSION is set, but Cargo.lock has no tauri crate"
     else
         tauri_minor="$(printf '%s\n' "${tauri_version}" | sed -n 's/^\([0-9]*\.[0-9]*\)\..*/\1/p')"
-        while IFS= read -r pin; do
-            location="${pin%%:*}:$(printf '%s\n' "${pin#*:}" | cut -d: -f1)"
-            location="${location#"${root}"/}"
-            cli_version="$(printf '%s\n' "${pin}" | sed -E 's/.*TAURI_CLI_VERSION[:=][[:space:]]*["'\'']?([^"'\''[:space:]#]*).*/\1/')"
-            cli_minor="$(printf '%s\n' "${cli_version}" | sed -n 's/^\([0-9]*\.[0-9]*\)\..*/\1/p')"
-            if [ -n "${cli_minor}" ] && [ "${cli_minor}" = "${tauri_minor}" ]; then
-                ok "${location} tauri-cli ${cli_version} matches tauri ${tauri_version} (${tauri_lock})"
-            else
-                fail "${location} tauri-cli '${cli_version}' is not tauri ${tauri_minor}.x (tauri ${tauri_version} in ${tauri_lock})"
-            fi
-        done <<<"${cli_pins}"
+        cli_minor="$(printf '%s\n' "${cli_version}" | sed -n 's/^\([0-9]*\.[0-9]*\)\..*/\1/p')"
+        if [ -n "${cli_minor}" ] && [ "${cli_minor}" = "${tauri_minor}" ]; then
+            ok "${location} tauri-cli ${cli_version} matches tauri ${tauri_version} (Cargo.lock)"
+        else
+            fail "${location} tauri-cli '${cli_version}' is not tauri ${tauri_minor}.x (tauri ${tauri_version} in Cargo.lock)"
+        fi
     fi
 fi
 
