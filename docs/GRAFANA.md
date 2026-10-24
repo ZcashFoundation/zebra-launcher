@@ -68,11 +68,13 @@ Docker bridge cannot reach a host port bound to `127.0.0.1`.
 
 The launcher's **Grafana** tab embeds Grafana in an iframe once a Grafana URL is set.
 
-Without a URL, the tab shows a setup card: what the shipped stack provides, the compose
-command above with a Copy button (and the Linux override), the embedding requirement,
-and a URL field prefilled with `http://127.0.0.1:3000`. "Use this Grafana" checks the URL
-against the rule below and saves it into the launcher settings; the dashboards appear as
-soon as it is stored.
+Without a URL, the tab shows a setup card: what the stack in this repository provides and
+where to get it (an "Open the repository" button opens
+<https://github.com/ZcashFoundation/zebra-launcher> in the browser, since the installed app
+does not carry the compose files), the compose command above with a Copy button (and the
+Linux override), the embedding requirement, and a URL field prefilled with
+`http://127.0.0.1:3000`. "Use this Grafana" checks the URL against the rule below and saves
+it into the launcher settings; the dashboards appear as soon as it is stored.
 
 With a URL set, a toolbar sits above the dashboard:
 
@@ -90,6 +92,10 @@ storage. The embedded dashboard runs in kiosk mode (`kiosk`: no Grafana menus), 
 theme follows the launcher's appearance (`theme=dark` or `theme=light`). Under the toolbar
 a hint names the URL to check when the frame stays blank.
 
+The dashboard loads when the Grafana tab is first opened, not when the launcher starts,
+and stays loaded while other tabs are shown, so Grafana does not run (or refresh) for a
+user who never opens the tab.
+
 ### The URL
 
 The URL is the "Grafana dashboard URL" field in Settings → Metrics. The setup card writes
@@ -103,7 +109,8 @@ work:
 | A full dashboard URL | `http://127.0.0.1:3000/d/zebra-overview/zebra-overview?orgId=1&kiosk` | `http://127.0.0.1:3000/d/<uid>?orgId=1&kiosk&from=…` |
 
 The `/d/<uid>` segment is replaced by the picked dashboard and any slug after it is
-dropped; the query keys `kiosk`, `from`, `to`, `refresh` and `theme` are replaced by the
+dropped (a bare `/d` or `/d/` counts as the segment with no uid); the query keys `kiosk`,
+`from`, `to`, `refresh` and `theme` are replaced by the
 toolbar's values; other keys (`orgId`, `var-*`) and a path prefix are kept; a fragment is
 dropped; trailing slashes do not matter. The rules and their tests live in
 `ui/src/grafana_url.rs`.
