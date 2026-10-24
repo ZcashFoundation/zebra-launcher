@@ -224,7 +224,9 @@ impl AppState {
         self.logs.update(|logs| logs.merge(batch));
     }
 
-    /// Clears the Logs tab's badge: the user is looking at the page.
+    /// Clears the Logs tab's badge: the user is looking at the page. The shell calls it when
+    /// the Logs tab opens; [`AppState::record_logs`] covers the batches that arrive while the
+    /// tab is open. The Logs page itself has no part in the rule.
     pub fn mark_problems_seen(&self) {
         if self
             .insights

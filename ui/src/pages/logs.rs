@@ -153,15 +153,6 @@ pub fn Logs() -> impl IntoView {
         })
     };
 
-    // The Logs tab shows the problems, so the badge count resets while it is visible.
-    Effect::new(move |_| {
-        let visible = state.tab.get() == Tab::Logs;
-        let unseen = state.insights.with(|insights| insights.unseen_problems());
-        if visible && unseen > 0 {
-            state.insights.update(|insights| insights.mark_seen());
-        }
-    });
-
     let scroll_to_bottom = move || {
         if let Some(element) = scroller.get_untracked() {
             element.set_scroll_top(element.scroll_height());
