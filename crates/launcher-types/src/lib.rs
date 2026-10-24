@@ -448,6 +448,12 @@ impl Settings {
     pub const SCHEMA_VERSION: u32 = 2;
 }
 
+/// The shortest stop grace period that can be saved, in seconds. The settings
+/// form (`ui/src/pages/settings.rs`) applies the same bounds.
+pub const MIN_STOP_GRACE_SECS: u64 = 5;
+/// The longest stop grace period that can be saved, in seconds.
+pub const MAX_STOP_GRACE_SECS: u64 = 3600;
+
 impl Default for Settings {
     fn default() -> Self {
         Self {

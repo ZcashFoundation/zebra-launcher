@@ -6,16 +6,11 @@
 
 use std::{fs, io, path::PathBuf};
 
+pub use launcher_types::{MAX_STOP_GRACE_SECS, MIN_STOP_GRACE_SECS};
 use launcher_types::{Settings, is_loopback_http_url};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{fsutil, paths::Paths};
-
-/// The shortest stop grace period that can be saved, in seconds. The settings
-/// form (`ui/src/pages/settings.rs`) applies the same bounds.
-pub const MIN_STOP_GRACE_SECS: u64 = 5;
-/// The longest stop grace period that can be saved, in seconds.
-pub const MAX_STOP_GRACE_SECS: u64 = 3600;
 
 /// Loading, validating or saving settings failed.
 #[derive(Debug, thiserror::Error)]
