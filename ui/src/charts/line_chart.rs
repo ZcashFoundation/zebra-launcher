@@ -7,7 +7,7 @@ use wasm_bindgen::JsCast;
 use crate::{
     charts::{
         ChartData, Geometry, MAX_POINTS, PAD_B, PAD_L, PAD_R, PAD_T, VIEW_H, VIEW_W,
-        downsample_indices, geometry, hhmmss, nearest_index, summary, tz_offset_min,
+        downsample_indices, geometry, hhmmss, nearest_index, summary, tz_offset_min_at,
     },
     format::thousands,
 };
@@ -37,14 +37,16 @@ pub fn LineChart(
     #[prop(optional)]
     area: bool,
 ) -> impl IntoView {
-    let tz = tz_offset_min();
     let table = RwSignal::new(false);
     let hover = RwSignal::new(None::<usize>);
     // The plot's width in CSS pixels, measured by `Plot`, so one viewBox unit is one pixel and
     // text and strokes keep their size whatever the card's width.
     let width = RwSignal::new(VIEW_W);
-    let layout = Memo::new(move |_| data.with(|d| geometry(d, from_zero, tz, width.get())));
-    let label = Memo::new(move |_| data.with(|d| summary(title, d, tz)));
+    // Times read in the browser's zone at each instant (see `tz_offset_min_at`), so the labels
+    // stay right across a daylight-saving switch while the launcher runs.
+    let layout =
+        Memo::new(move |_| data.with(|d| geometry(d, from_zero, tz_offset_min_at, width.get())));
+    let label = Memo::new(move |_| data.with(|d| summary(title, d, tz_offset_min_at)));
     let legend = move || data.with(|d| d.series.len() >= 2);
 
     view! {
@@ -93,7 +95,7 @@ pub fn LineChart(
                     when=move || table.get()
                     fallback=move || view! { <Plot layout data label hover width area /> }
                 >
-                    <DataTable title data tz />
+                    <DataTable title data />
                 </Show>
             </Show>
         </div>
@@ -110,7 +112,6 @@ fn Plot(
     width: RwSignal<f64>,
     area: bool,
 ) -> impl IntoView {
-    let tz = tz_offset_min();
     let plot_ref = NodeRef::<leptos::html::Div>::new();
     let count = move || layout.with(|l| l.as_ref().map_or(0, |g| g.xs.len()));
     let highlighted = move || hover.get().filter(|index| *index < count());
@@ -296,7 +297,7 @@ fn Plot(
         };
         Some(view! {
             <div class=class style:left=format!("{:.2}%", x / width * 100.0)>
-                <div class="chart-tooltip-time">{hhmmss(time, tz)}</div>
+                <div class="chart-tooltip-time">{hhmmss(time, tz_offset_min_at(time))}</div>
                 {rows
                     .into_iter()
                     .map(|(class, name, value)| {
@@ -339,7 +340,7 @@ fn Plot(
 
 /// The chart's values as a table: at most [`MAX_POINTS`] rows, picked evenly.
 #[component]
-fn DataTable(title: &'static str, data: Signal<ChartData>, tz: i32) -> impl IntoView {
+fn DataTable(title: &'static str, data: Signal<ChartData>) -> impl IntoView {
     view! {
         <div class="chart-table-wrap">
             <table class="chart-table" aria-label=format!("{title} samples")>
@@ -364,7 +365,7 @@ fn DataTable(title: &'static str, data: Signal<ChartData>, tz: i32) -> impl Into
                                 .map(|index| {
                                     view! {
                                         <tr>
-                                            <td>{hhmmss(d.times[index], tz)}</td>
+                                            <td>{hhmmss(d.times[index], tz_offset_min_at(d.times[index]))}</td>
                                             {d
                                                 .series
                                                 .iter()

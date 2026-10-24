@@ -299,9 +299,14 @@ pub fn hhmmss(time: SystemTime, tz_offset_min: i32) -> String {
     )
 }
 
-/// The browser's zone, as minutes behind UTC, for [`hhmm`] and [`hhmmss`].
-pub fn tz_offset_min() -> i32 {
-    js_sys::Date::new_0().get_timezone_offset() as i32
+/// The browser's zone at `time`, as minutes behind UTC (the `Date.getTimezoneOffset()`
+/// convention), for [`hhmm`] and [`hhmmss`]. Per instant, so a label follows the
+/// daylight-saving rule in force at its own time, not at the time the chart was built.
+pub fn tz_offset_min_at(time: SystemTime) -> i32 {
+    let millis = time
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |since| since.as_millis() as f64);
+    js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(millis)).get_timezone_offset() as i32
 }
 
 /// Tick times for the x axis: at most four clock times on a clean step (15 s up to a day),
@@ -556,11 +561,13 @@ pub struct Geometry {
 }
 
 /// Lays out `data` for a plot `width` units wide; `None` with fewer than two samples. The y
-/// domain has nice bounds around the values, from zero when `from_zero`.
+/// domain has nice bounds around the values, from zero when `from_zero`. `tz_at` is the zone
+/// offset (minutes behind UTC) at an instant, so each time label reads in its own instant's
+/// zone across a daylight-saving switch.
 pub fn geometry(
     data: &ChartData,
     from_zero: bool,
-    tz_offset_min: i32,
+    tz_at: impl Fn(SystemTime) -> i32,
     width: f64,
 ) -> Option<Geometry> {
     let width = if width.is_finite() && width >= MIN_VIEW_W {
@@ -602,14 +609,16 @@ pub fn geometry(
         .zip(tick_labels(&ticks))
         .map(|(tick, label)| (y.apply(*tick), label))
         .collect();
-    let (times, with_seconds) = time_ticks(first, last, tz_offset_min);
+    // Ticks align to the clock of the newest sample's zone; each label then reads in its own.
+    let (times, with_seconds) = time_ticks(first, last, tz_at(last));
     let x_ticks = times
         .iter()
         .map(|time| {
+            let tz = tz_at(*time);
             let label = if with_seconds {
-                hhmmss(*time, tz_offset_min)
+                hhmmss(*time, tz)
             } else {
-                hhmm(*time, tz_offset_min)
+                hhmm(*time, tz)
             };
             (x.apply(since_first(*time)), label)
         })
@@ -638,8 +647,8 @@ pub fn geometry(
     })
 }
 
-/// The chart in one sentence, for its `aria-label`.
-pub fn summary(title: &str, data: &ChartData, tz_offset_min: i32) -> String {
+/// The chart in one sentence, for its `aria-label`. `tz_at` is as for [`geometry`].
+pub fn summary(title: &str, data: &ChartData, tz_at: impl Fn(SystemTime) -> i32) -> String {
     let n = data.len();
     let (Some(first), Some(last)) = (data.times.first(), data.times.last()) else {
         return format!("{title}: no samples yet");
@@ -655,8 +664,8 @@ pub fn summary(title: &str, data: &ChartData, tz_offset_min: i32) -> String {
         .collect();
     format!(
         "{title}: {n} samples from {} to {}. Latest: {}.",
-        hhmmss(*first, tz_offset_min),
-        hhmmss(*last, tz_offset_min),
+        hhmmss(*first, tz_at(*first)),
+        hhmmss(*last, tz_at(*last)),
         latest.join(", ")
     )
 }
@@ -944,7 +953,7 @@ mod tests {
         assert_eq!(data.len(), 4);
         assert_eq!(data.series[1].values, vec![3_120_000.0; 4]);
 
-        let g = geometry(&data, false, 0, VIEW_W).unwrap();
+        let g = geometry(&data, false, |_| 0, VIEW_W).unwrap();
         assert_eq!(g.width, VIEW_W);
         assert_eq!(g.xs.len(), 4);
         assert_eq!(g.xs[0], PAD_L);
@@ -964,7 +973,7 @@ mod tests {
 
         // From zero for a count.
         let peers = ChartData::from_samples(&samples, &[("Peers", "chart-series-1", Field::Peers)]);
-        let g = geometry(&peers, true, 0, 1000.0).unwrap();
+        let g = geometry(&peers, true, |_| 0, 1000.0).unwrap();
         assert_eq!(g.y_ticks[0].1, "0");
         assert_eq!(g.y_ticks[0].0, VIEW_H - PAD_B);
         assert_eq!((g.width, g.xs[3]), (1000.0, 1000.0 - PAD_R));
@@ -972,7 +981,7 @@ mod tests {
         // wash is empty and no two gridlines read the same.
         let idle: Vec<Sample> = (0..4).map(|i| sample(i * 5, 2_950_000, 0)).collect();
         let idle = ChartData::from_samples(&idle, &[("Peers", "chart-series-1", Field::Peers)]);
-        let g = geometry(&idle, true, 0, VIEW_W).unwrap();
+        let g = geometry(&idle, true, |_| 0, VIEW_W).unwrap();
         let labels: Vec<_> = g.y_ticks.iter().map(|(_, label)| label.as_str()).collect();
         assert_eq!(labels, vec!["0", "1", "2"]);
         assert_eq!(g.y_ticks[0].0, VIEW_H - PAD_B);
@@ -983,28 +992,52 @@ mod tests {
         );
         assert_eq!(g.end_label, "0");
         // A useless width falls back to the default.
-        assert_eq!(geometry(&peers, true, 0, 0.0).unwrap().width, VIEW_W);
-        assert_eq!(geometry(&peers, true, 0, f64::NAN).unwrap().width, VIEW_W);
+        assert_eq!(geometry(&peers, true, |_| 0, 0.0).unwrap().width, VIEW_W);
+        assert_eq!(
+            geometry(&peers, true, |_| 0, f64::NAN).unwrap().width,
+            VIEW_W
+        );
 
         // Too little data.
         assert_eq!(
             geometry(
                 &ChartData::from_samples(&samples[..1], &fields),
                 false,
-                0,
+                |_| 0,
                 VIEW_W
             ),
             None
         );
-        assert_eq!(geometry(&ChartData::default(), false, 0, VIEW_W), None);
+        assert_eq!(geometry(&ChartData::default(), false, |_| 0, VIEW_W), None);
 
         assert_eq!(
-            summary("Block height", &data, 0),
+            summary("Block height", &data, |_| 0),
             "Block height: 4 samples from 00:00:00 to 00:00:15. Latest: Height 2,950,300, Estimated height 3,120,000."
         );
         assert_eq!(
-            summary("Peers", &ChartData::default(), 0),
+            summary("Peers", &ChartData::default(), |_| 0),
             "Peers: no samples yet"
+        );
+    }
+
+    #[test]
+    fn time_labels_follow_each_instants_zone() {
+        // An autumn daylight-saving switch at 02:00 UTC: UTC+2 before it, UTC+1 from then on.
+        // Samples every five minutes from half an hour before to half an hour after.
+        let switch = at(1_000_000_800); // 2001-09-09 02:00:00 UTC
+        let tz_at = |time: SystemTime| if time < switch { -120 } else { -60 };
+        let samples: Vec<Sample> = (0..13)
+            .map(|i| sample(1_000_000_800 - 1800 + i * 300, 2_950_000 + i, 8))
+            .collect();
+        let data = ChartData::from_samples(&samples, &[("Peers", "chart-series-1", Field::Peers)]);
+        let g = geometry(&data, true, tz_at, VIEW_W).unwrap();
+        let labels: Vec<_> = g.x_ticks.iter().map(|(_, label)| label.as_str()).collect();
+        // The wall clock read 03:30, then 03:00 at the switch, then 03:30 again. One offset
+        // for every tick would have read 03:30, 04:00, 04:30.
+        assert_eq!(labels, vec!["03:30", "03:00", "03:30"]);
+        assert_eq!(
+            summary("Peers", &data, tz_at),
+            "Peers: 13 samples from 03:30:00 to 03:30:00. Latest: Peers 8."
         );
     }
 }
