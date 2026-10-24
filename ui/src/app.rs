@@ -16,7 +16,6 @@ use crate::{
         status_strip::StatusStrip,
         updates::{HealthFailureBanner, UpdateBanner},
     },
-    format::update_needs_attention,
     insights::Insights,
     log_view::LogBuffer,
     pages::{
@@ -25,6 +24,7 @@ use crate::{
     },
     stats_history::StatsHistory,
     theme,
+    update_text::update_needs_attention,
 };
 
 /// The five pages.

@@ -24,6 +24,7 @@ mod mock;
 mod stats_history;
 mod tauri;
 mod theme;
+mod update_text;
 
 mod components {
     pub mod config_form;
