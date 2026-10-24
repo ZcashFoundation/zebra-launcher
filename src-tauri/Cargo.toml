@@ -3,7 +3,6 @@ name = "zebra-launcher"
 description = "Zebra Launcher: a desktop app that runs and supervises zebrad"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

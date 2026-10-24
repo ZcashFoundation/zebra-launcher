@@ -245,7 +245,7 @@ Re-capture them when the pinned zebrad changes its log wording, normally as part
    metrics port already bound, `zebrad generate -o`).
 3. Replace absolute paths with `<DATA_DIR>`, and rename the files for the new version.
 4. Update the README (version, git commit, date, exit codes) and the test paths in
-   `crates/launcher-core/tests/fixtures.rs`.
+   `crates/launcher-core/tests/log_fixtures.rs`.
 5. Run `cargo test -p launcher-core`. A failing classifier test means zebrad changed a
    line the supervisor relies on: update the classifier and `fake-zebrad` together.
 

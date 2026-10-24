@@ -3,7 +3,6 @@ name = "launcher-core"
 description = "Zebra Launcher logic that does not depend on Tauri: zebrad supervision, logs, config, paths"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

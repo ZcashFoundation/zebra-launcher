@@ -1,10 +1,10 @@
 //! Contract tests against a real zebrad.
 //!
-//! Skipped unless `ZEBRAD_BIN` names a zebrad binary, so `cargo test` stays
-//! hermetic. Run them with:
+//! Ignored by default, so `cargo test` stays hermetic; CI runs them on bump pull
+//! requests with a fetched release binary. Run them by hand with:
 //!
 //! ```sh
-//! ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-core --test real_zebrad -- --nocapture
+//! ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-core --test real_zebrad -- --include-ignored --nocapture
 //! ```
 //!
 //! They start zebrad on Regtest through the supervisor, with every listener on
@@ -42,7 +42,8 @@ async fn within<F: Future>(limit: Duration, what: &str, future: F) -> F::Output 
         .unwrap_or_else(|_| panic!("{what} did not finish within {limit:?}"))
 }
 
-/// The zebrad under test, or `None` (with a note) when the test should be skipped.
+/// The zebrad under test. The tests are `#[ignore]`, so reaching this without `ZEBRAD_BIN`
+/// means `--include-ignored` was passed by mistake: fail loudly instead of passing silently.
 fn zebrad_bin() -> Option<PathBuf> {
     match std::env::var_os("ZEBRAD_BIN").filter(|v| !v.is_empty()) {
         Some(path) => {
@@ -54,12 +55,10 @@ fn zebrad_bin() -> Option<PathBuf> {
             );
             Some(path)
         }
-        None => {
-            eprintln!(
-                "skipping: set ZEBRAD_BIN to a zebrad binary to run the real-zebrad contract tests"
-            );
-            None
-        }
+        None => panic!(
+            "ZEBRAD_BIN is not set: these contract tests are ignored by default and run only with \
+             `--include-ignored` and ZEBRAD_BIN pointing at a zebrad binary"
+        ),
     }
 }
 
@@ -176,6 +175,7 @@ async fn start_running(config: SupervisorConfig) -> SupervisorHandle {
     handle
 }
 
+#[ignore = "needs ZEBRAD_BIN; run with -- --include-ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn regtest_starts_reports_and_stops_cleanly() {
     let Some(zebrad) = zebrad_bin() else {
@@ -303,6 +303,7 @@ async fn regtest_starts_reports_and_stops_cleanly() {
     }
 }
 
+#[ignore = "needs ZEBRAD_BIN; run with -- --include-ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_instance_on_the_same_state_fails_with_db_locked() {
     let Some(zebrad) = zebrad_bin() else {

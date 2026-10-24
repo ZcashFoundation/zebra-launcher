@@ -148,8 +148,8 @@ jobs:
           cache: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.gate.outputs.run == 'true'
-      # --include-ignored: still runs them once the no-ZEBRAD_BIN skip is an
-      # `#[ignore]` rather than a silent pass.
+      # The contract tests are `#[ignore]` so plain `cargo test` stays hermetic;
+      # --include-ignored runs them here, and they fail loudly without ZEBRAD_BIN.
       - name: Run the contract tests
         if: steps.gate.outputs.run == 'true'
         env:

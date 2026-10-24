@@ -22,8 +22,8 @@ use tokio::{
 
 use super::{
     FoundUpdate, Jitter, NodeControl, PendingUpdate, UpdateBackend, UpdaterRecord, clear_marker,
-    eos_warning_active, next_check, node_is_running, save_record, should_auto_download,
-    should_auto_install, stale_check_warning, write_marker,
+    eos_warning_active, next_check, save_record, should_auto_download, should_auto_install,
+    stale_check_warning, write_marker,
 };
 
 /// Download progress is published at most this often.
@@ -717,7 +717,7 @@ impl<B: UpdateBackend, N: NodeControl> Actor<B, N> {
         let pending = PendingUpdate {
             from_version: self.config.current_version.clone(),
             to_version: version.clone(),
-            zebrad_was_running: node_is_running(&self.status.borrow()),
+            zebrad_was_running: self.status.borrow().phase.is_active(),
             written_at: SystemTime::now(),
         };
         // The supervisor's grace is fixed at launch; the settings may have

@@ -120,7 +120,7 @@ little). `ExitClass` has these variants:
 | `PortInUse` | panic `... already in use` while opening a listener | `Failed`, not retried |
 | `SpawnFailed` | the process could not be started, for example because the sidecar is missing | `Failed`, not retried |
 | `Crash` | any other exit the launcher did not ask for: non-zero code, signal or panic | `Backoff`: 1 s doubling to 60 s; `Failed{Crash}` after 5 crashes in 10 min |
-| `Clean` | exit code 0, or any exit after a stop the launcher requested that has none of the causes above (a kill after the grace period is `Clean` with `detail: "killed by the launcher"`) | `Stopped` |
+| `Clean` | exit code 0, or a kill by the launcher after the grace period (`detail: "killed by the launcher"`); a non-zero exit or panic during a requested stop keeps its own class and is still not restarted | `Stopped` |
 
 The end-of-support warning (`Your Zebra release is too old`) is a log event
 (`LogEvent::EosWarn`), not an exit class: zebrad keeps running and the UI shows a banner.

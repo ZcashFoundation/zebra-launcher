@@ -5,9 +5,6 @@ members = ["crates/launcher-types", "crates/launcher-core", "ui", "src-tauri"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# The floor the crates declare (Tauri 2.12 needs 1.90). Not checked by CI; everything
-# builds with the channel in rust-toolchain.toml.
-rust-version = "1.90"
 license = "MIT"
 repository = "https://github.com/ZcashFoundation/zebra-launcher"
 publish = false

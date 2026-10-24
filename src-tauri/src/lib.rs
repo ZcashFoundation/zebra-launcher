@@ -240,7 +240,6 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
 
     let mut command = ZebradCommand::new(sidecar::resolve(&paths), paths.zebrad_config());
     command.shutdown_on_stdin_close = std::env::var_os(STDIN_CLOSE_ENV).is_some_and(|v| v == "1");
-    command.kill_on_launcher_exit = true;
     let mut supervisor_config = SupervisorConfig::new(command);
     supervisor_config.stop_grace = Duration::from_secs(current.stop_grace_secs);
     supervisor_config.pidfile = Some(paths.pidfile());
@@ -314,10 +313,7 @@ pub(crate) fn report_stale_process<R: tauri::Runtime>(app: &AppHandle<R>, stale:
         pid = stale.pid,
         "a zebrad from an earlier launcher run is still running"
     );
-    let info = StaleProcessInfo {
-        pid: stale.pid,
-        binary: stale.binary.display().to_string(),
-    };
+    let info = StaleProcessInfo::from(stale);
     if let Err(err) = app.emit(events::STALE_PROCESS, info) {
         tracing::warn!(%err, "could not emit stale_process");
     }

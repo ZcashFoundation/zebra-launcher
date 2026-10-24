@@ -219,7 +219,8 @@ pub enum LogEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExitClass {
-    /// Exit code 0 after a requested shutdown.
+    /// Exit code 0, or a kill by the launcher after the stop grace period. A non-zero exit
+    /// or a panic during a requested stop keeps its own class.
     Clean,
     /// The configuration could not be loaded.
     ConfigError,

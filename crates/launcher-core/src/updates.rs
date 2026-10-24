@@ -348,15 +348,6 @@ impl NodeControl for SupervisorHandle {
     }
 }
 
-/// Whether zebrad counts as running for the update flow: it must be brought
-/// back after the install.
-pub fn node_is_running(status: &Status) -> bool {
-    matches!(
-        status.phase,
-        Phase::Starting | Phase::Running | Phase::Backoff { .. }
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Health gate
 // ---------------------------------------------------------------------------
