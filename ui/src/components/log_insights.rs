@@ -1,8 +1,9 @@
 //! Cards that show what the log stream says: sync stage, recent problems, activity and the
 //! startup timeline. Backed by [`crate::insights::Insights`].
 //!
-//! The chart geometry and the sentences are pure functions, tested natively; the components
-//! only wire them to signals.
+//! The chart geometry ([`crate::charts::activity`]) and the sentences
+//! ([`crate::insight_text`]) are pure functions, tested natively; the components only wire
+//! them to signals.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,8 +25,7 @@ use crate::{
         checkpoints_line, earlier_runs_line, mempool_line, peers_line, run_head, shutdown_line,
     },
     insights::{
-        ACTIVITY_MINUTES, Problem, ProblemLevel, Run, SyncSnapshot, Tone, compact, elapsed_text,
-        pick_filter,
+        ACTIVITY_MINUTES, Problem, ProblemLevel, Run, SyncSnapshot, Tone, elapsed_text, pick_filter,
     },
 };
 
@@ -102,12 +102,12 @@ pub fn LogActivityChart() -> impl IntoView {
         let grid = layout
             .ticks
             .iter()
-            .map(|tick| {
+            .map(|(tick, label)| {
                 let y = layout.y_of(*tick);
                 view! {
                     <line class="insight-grid-line" x1=PLOT_LEFT x2=PLOT_RIGHT y1=y y2=y />
                     <text class="insight-tick" x=PLOT_LEFT - 6.0 y=y + 3.5 text-anchor="end">
-                        {compact(u64::from(*tick))}
+                        {label.clone()}
                     </text>
                 }
             })

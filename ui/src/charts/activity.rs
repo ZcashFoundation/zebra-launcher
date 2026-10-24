@@ -2,7 +2,10 @@
 //! stacked columns on a nice scale, the segment paths and the tooltip's placement. The view is
 //! [`crate::components::log_insights::LogActivityChart`]. Pure Rust, tested natively.
 
-use crate::insights::{ACTIVITY_MINUTES, MinuteBucket};
+use crate::{
+    charts::{nice_ticks, tick_labels},
+    insights::{ACTIVITY_MINUTES, MinuteBucket},
+};
 
 /// The chart's drawing space; it is scaled to the card's width.
 pub const VIEW_WIDTH: f32 = 640.0;
@@ -100,41 +103,36 @@ impl Column {
 /// Where everything goes, for `buckets` oldest first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Geometry {
-    /// Three evenly spaced tick values; the last is the top of the scale.
-    pub ticks: [u32; 3],
+    /// The gridlines above the axis, `(value, label)`, on the line charts' clean steps; the
+    /// last is the top of the scale.
+    pub ticks: Vec<(u32, String)>,
+    /// The value at the top of the plot.
+    pub top: u32,
     pub columns: Vec<Column>,
 }
 
 impl Geometry {
     pub fn y_of(&self, value: u32) -> f32 {
-        let top = self.ticks[2].max(1) as f32;
+        let top = self.top.max(1) as f32;
         PLOT_BOTTOM - (value as f32 / top) * (PLOT_BOTTOM - PLOT_TOP)
     }
 }
 
-/// A tick step that reads well: 1, 2, 3, 4, 5, 6, 8 or 10 times a power of ten, at least
-/// `raw`.
-pub fn nice_step(raw: f64) -> u32 {
-    if raw <= 1.0 {
-        return 1;
-    }
-    let magnitude = 10f64.powf(raw.log10().floor());
-    for factor in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0] {
-        let candidate = factor * magnitude;
-        if candidate >= raw {
-            return candidate.round() as u32;
-        }
-    }
-    (10.0 * magnitude).round() as u32
-}
-
-/// Lays out `buckets` (oldest first) as stacked columns with three y ticks.
+/// Lays out `buckets` (oldest first) as stacked columns on a scale with the same ticks the
+/// line charts would draw for it.
 pub fn geometry(buckets: &[MinuteBucket]) -> Geometry {
     let max = buckets.iter().map(MinuteBucket::total).max().unwrap_or(0);
-    let step = nice_step(f64::from(max) / 3.0);
-    let ticks = [step, 2 * step, 3 * step];
+    let values = nice_ticks(0.0, f64::from(max), 3);
+    let ticks: Vec<(u32, String)> = values
+        .iter()
+        .zip(tick_labels(&values))
+        .map(|(value, label)| (value.round() as u32, label))
+        .filter(|(value, _)| *value > 0)
+        .collect();
+    let top = ticks.last().map_or(1, |(value, _)| *value);
     let mut layout = Geometry {
         ticks,
+        top,
         columns: Vec::with_capacity(buckets.len()),
     };
     let slots = buckets.len().max(1) as f32;
@@ -236,17 +234,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn nice_steps() {
-        assert_eq!(nice_step(0.0), 1);
-        assert_eq!(nice_step(1.0), 1);
-        assert_eq!(nice_step(1.1), 2);
-        assert_eq!(nice_step(2.4), 3);
-        assert_eq!(nice_step(7.0), 8);
-        assert_eq!(nice_step(9.0), 10);
-        assert_eq!(nice_step(33.4), 40);
-        assert_eq!(nice_step(150.0), 200);
-        assert_eq!(nice_step(1000.0), 1000);
+    fn tick_values(layout: &Geometry) -> Vec<u32> {
+        layout.ticks.iter().map(|(value, _)| *value).collect()
     }
 
     #[test]
@@ -259,8 +248,10 @@ mod tests {
             })
             .collect();
         let layout = geometry(&buckets);
-        // 50 lines at most: a step of 20 gives ticks 20, 40, 60.
-        assert_eq!(layout.ticks, [20, 40, 60]);
+        // 50 lines at most: the line charts' 1-2-5 steps give 20, 40, 60.
+        assert_eq!(tick_values(&layout), [20, 40, 60]);
+        assert_eq!(layout.top, 60);
+        assert_eq!(layout.ticks[0].1, "20");
         assert_eq!(layout.columns.len(), ACTIVITY_MINUTES);
         let slot = (PLOT_RIGHT - PLOT_LEFT) / 60.0;
         let column = &layout.columns[59];
@@ -287,10 +278,21 @@ mod tests {
         assert!(sliver.segments[0].top);
         // Empty columns draw nothing.
         assert!(layout.columns[0].segments.is_empty());
-        // Nothing at all still has a scale.
+        // Nothing at all still has a scale, above zero.
         let empty = geometry(&[]);
-        assert_eq!(empty.ticks, [1, 2, 3]);
+        assert_eq!(tick_values(&empty), [1, 2]);
+        assert_eq!(empty.top, 2);
         assert!(empty.columns.is_empty());
+        // Thousands of lines a minute: the labels are compact, as on the line charts.
+        let busy = [bucket(0, 25_000, 0, 0, 0)];
+        let layout = geometry(&busy);
+        assert_eq!(tick_values(&layout), [10_000, 20_000, 30_000]);
+        let labels: Vec<&str> = layout
+            .ticks
+            .iter()
+            .map(|(_, label)| label.as_str())
+            .collect();
+        assert_eq!(labels, ["10K", "20K", "30K"]);
     }
 
     #[test]

@@ -750,20 +750,6 @@ pub fn elapsed_text(elapsed: Duration) -> String {
     }
 }
 
-/// `1,234` below ten thousand, then `12.3K`, `2.95M`: a count that must fit a tick label.
-pub fn compact(value: u64) -> String {
-    fn trimmed(value: f64, decimals: usize) -> String {
-        let text = format!("{value:.decimals$}");
-        let text = text.trim_end_matches('0');
-        text.trim_end_matches('.').to_owned()
-    }
-    match value {
-        0..10_000 => crate::format::thousands(value),
-        10_000..1_000_000 => format!("{}K", trimmed(value as f64 / 1_000.0, 1)),
-        _ => format!("{}M", trimmed(value as f64 / 1_000_000.0, 2)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1490,12 +1476,5 @@ mod tests {
         assert_eq!(elapsed_text(Duration::from_millis(1_234)), "+1.2 s");
         assert_eq!(elapsed_text(Duration::from_secs(45)), "+45 s");
         assert_eq!(elapsed_text(Duration::from_secs(190)), "+3 min");
-        assert_eq!(compact(0), "0");
-        assert_eq!(compact(999), "999");
-        assert_eq!(compact(9_999), "9,999");
-        assert_eq!(compact(12_345), "12.3K");
-        assert_eq!(compact(20_000), "20K");
-        assert_eq!(compact(2_950_000), "2.95M");
-        assert_eq!(compact(3_000_000), "3M");
     }
 }
