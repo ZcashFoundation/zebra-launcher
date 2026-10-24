@@ -10,7 +10,7 @@ All platforms:
 - [rustup](https://rustup.rs). The toolchain, `rustfmt`, `clippy` and the
   `wasm32-unknown-unknown` target come from [`rust-toolchain.toml`](../rust-toolchain.toml)
   and are installed on first use; do not override them.
-- Trunk and the Tauri CLI (needed from M5, when the `ui` crate and the new `src-tauri` land):
+- Trunk and the Tauri CLI:
 
   ```sh
   cargo install --locked trunk tauri-cli
@@ -22,7 +22,7 @@ All platforms:
   version of the `tauri` crate. See [Bumping the pinned tools](#bumping-the-pinned-tools).
 - `cargo install --locked cargo-deny` to run the license and advisory checks locally.
 
-No Node, npm or pnpm is needed once M5 lands.
+No Node, npm or pnpm is needed.
 
 ### Linux (Debian, Ubuntu)
 
@@ -47,9 +47,7 @@ WebView2 runtime (preinstalled on Windows 11). See Tauri's
 
 The Tauri build needs a sidecar file at
 `src-tauri/binaries/zebra-launcher-zebrad-<host target triple>` (`.exe` on Windows).
-Binaries are never committed. The prefixed name takes effect with the rewritten app
-crate (milestone M5); until then the old `src-tauri/tauri.conf.json` still expects
-`binaries/zebrad-<triple>`.
+Binaries are never committed.
 
 - **Fake sidecar:** `scripts/dev-sidecar.sh` (Windows: `scripts/dev-sidecar.ps1`) builds
   `fake-zebrad` and copies it into place. It takes no arguments. fake-zebrad starts
@@ -57,9 +55,9 @@ crate (milestone M5); until then the old `src-tauri/tauri.conf.json` still expec
   `FAKE_ZEBRAD_MODE` environment variable (`ok`, `crash`, `config-error`, `eos-warn`,
   `eos-halt`, `port-in-use`, `db-locked`, `hang-on-signal`, `stderr-flood`, `non-utf8`,
   `stdin-close`), which it inherits from the launcher.
-- **Real zebrad:** the version in [`ZEBRAD_VERSION`](../ZEBRAD_VERSION), fetched or built by
-  the M9 scripts (`scripts/fetch-zebrad-linux.sh`, `scripts/build-zebrad.sh`).
-  <!-- TODO(M9): document fetching or building the real sidecar. -->
+- **Real zebrad:** the version in [`ZEBRAD_VERSION`](../ZEBRAD_VERSION), fetched
+  (`scripts/fetch-zebrad-linux.sh`, Linux) or built from the Zebra tag
+  (`scripts/build-zebrad.sh`, `scripts/build-zebrad.ps1`); see [SIDECARS.md](SIDECARS.md).
 
 Then, from the repository root:
 
@@ -86,7 +84,9 @@ and `zebrad.log` in the log directory). The `open_path` command opens them.
 
 On Linux, if the window is blank, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
-To see the Grafana embed, start the stack in [GRAFANA.md](GRAFANA.md).
+To see dashboards in the Grafana tab, start the stack in [GRAFANA.md](GRAFANA.md). Without
+Tauri, `trunk serve` in `ui/` shows the UI against a mock backend at http://localhost:1420
+(`?running` starts it with a running node; see the flags at the top of `ui/src/mock.rs`).
 
 ### Release build
 

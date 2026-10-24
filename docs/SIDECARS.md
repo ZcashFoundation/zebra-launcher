@@ -286,5 +286,10 @@ To bump by hand, or to finish the watcher's pull request:
    with the new tag's toolchain, and the first run after a bump takes 30–60
    minutes without a cache.
 6. Read Zebra's changelog for config or CLI changes the launcher depends on,
-   such as the config schema or log lines that the status parser reads. Then
-   open the PR.
+   such as the config schema or log lines that the status parser reads.
+7. Re-capture `crates/launcher-core/tests/fixtures/zebrad-<ver>-generate.toml`
+   with the new zebrad (`zebrad generate -o <file>`, see the fixtures README)
+   and update the configuration form's schema in
+   `ui/src/config_form/schema.rs`: keys, defaults, kinds and explanations.
+   `cargo test -p ui` fails until the schema and the fixture agree, which is
+   what catches a key zebrad added, removed or re-defaulted. Then open the PR.

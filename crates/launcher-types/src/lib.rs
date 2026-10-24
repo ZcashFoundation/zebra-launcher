@@ -285,6 +285,19 @@ pub enum UpdateMode {
     Auto,
 }
 
+/// The launcher's appearance: which of its light and dark looks the UI uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    /// Follow the operating system's light or dark preference, and change with it.
+    #[default]
+    System,
+    /// Always the light look.
+    Light,
+    /// Always the dark look.
+    Dark,
+}
+
 /// The launcher's own settings, stored in `launcher.json`.
 ///
 /// Missing fields take their default, so older files keep loading.
@@ -317,6 +330,9 @@ pub struct Settings {
     /// schema version 2 belongs to a user who already ran the launcher, so
     /// loading it sets this to `true`.
     pub first_run_done: bool,
+    /// The light or dark look, or following the operating system. Files
+    /// without it follow the system.
+    pub theme: Theme,
 }
 
 impl Settings {
@@ -336,6 +352,7 @@ impl Default for Settings {
             network: Network::Mainnet,
             stop_grace_secs: 60,
             first_run_done: false,
+            theme: Theme::System,
         }
     }
 }
@@ -784,5 +801,15 @@ mod tests {
                 ..Settings::default()
             }
         );
+        assert_eq!(settings.theme, Theme::System);
+    }
+
+    #[test]
+    fn theme_is_snake_case_on_the_wire() {
+        assert_eq!(serde_json::to_value(Theme::System).unwrap(), "system");
+        assert_eq!(serde_json::to_value(Theme::Light).unwrap(), "light");
+        let settings: Settings =
+            serde_json::from_str(r#"{"theme":"dark"}"#).expect("settings with a theme parse");
+        assert_eq!(settings.theme, Theme::Dark);
     }
 }

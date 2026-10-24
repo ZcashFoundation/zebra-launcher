@@ -73,9 +73,9 @@ pub fn Configure() -> impl IntoView {
     };
     load(false);
 
-    // A reset, here or in the update recovery panel, replaces the file: re-read it. An open
-    // edit keeps its token, so saving it is refused as a conflict, and Discard re-reads; a save
-    // in progress re-reads when it finishes.
+    // A reset (here or in the update recovery panel) or a save from the Settings form replaces
+    // the file: re-read it. An open edit keeps its token, so saving it is refused as a conflict,
+    // and Discard re-reads; a save in progress re-reads when it finishes.
     let state = AppState::get();
     Effect::new(move |previous: Option<u64>| {
         let changed = state.config_changed.get();
@@ -87,7 +87,7 @@ pub fn Configure() -> impl IntoView {
                     load(false);
                 }
                 Mode::Editing => notice.set(Some(Notice::Conflict(
-                    "zebrad.toml was reset while you were editing; saving this edit is refused."
+                    "zebrad.toml was changed from another page (the Settings form or a reset) while you were editing; saving this edit is refused."
                         .into(),
                 ))),
                 Mode::Applying => {}
@@ -256,6 +256,9 @@ pub fn Configure() -> impl IntoView {
                     <h2>"zebrad configuration"</h2>
                     <p class="muted path">
                         {move || document.with(|doc| doc.as_ref().map(|doc| doc.path.clone()))}
+                    </p>
+                    <p class="muted cfg-note">
+                        "Prefer the form in Settings for individual settings; this page edits the file as text."
                     </p>
                 </div>
                 <div class="buttons">{buttons}</div>

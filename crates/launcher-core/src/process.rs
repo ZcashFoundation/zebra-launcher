@@ -207,6 +207,7 @@ fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
         }
     }
     cmd.env("ZEBRA_TRACING__USE_COLOR", "false");
+    cmd.env("ZEBRA_TRACING__FORCE_USE_COLOR", "false");
     cmd.envs(
         command
             .env

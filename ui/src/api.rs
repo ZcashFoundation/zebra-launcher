@@ -168,19 +168,6 @@ pub async fn subscribe_logs(
     Ok(())
 }
 
-#[derive(Serialize)]
-struct LogHistoryArgs {
-    since: u64,
-}
-
-/// The buffered lines with `seq >= since`.
-pub async fn log_history(since: u64) -> ApiResult<Vec<LogLine>> {
-    if !is_tauri() {
-        return Ok(wire(mock::log_history(since).await)?);
-    }
-    Ok(tauri::invoke("log_history", &LogHistoryArgs { since }).await?)
-}
-
 pub async fn read_config() -> ApiResult<ConfigDocument> {
     if !is_tauri() {
         return Ok(wire(mock::read_config().await.map_err(ApiError)?)?);

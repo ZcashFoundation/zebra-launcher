@@ -14,7 +14,7 @@ sections name the milestone where that matters.
 +--------------------------- Zebra Launcher (one process) ---------------------------+
 |                                                                                    |
 |  ui/  Leptos CSR (wasm) --- invoke / Channel<Vec<LogLine>> ---> src-tauri/         |
-|   |   Dashboard, Logs, Configure, Settings                       commands, tray,   |
+|   |   Dashboard, Logs, Grafana, Configure, Settings              commands, tray,   |
 |   |                                                              updater, exit     |
 |   +-- <iframe> Grafana (no IPC)                                      |             |
 |                                                                      v             |
@@ -63,8 +63,8 @@ The actor also writes a rotating `zebrad.log` for post-crash support. The Tauri 
 bridge lags behind the broadcast, the dropped lines are replaced by one synthetic line
 with `stream: Launcher`, level `WARN`, no timestamp and the message `N lines dropped`,
 which takes the `seq` of the last dropped line. The UI shows that marker, together with
-any `seq` jump before it, as one "… N lines dropped" row, and a real line later fetched
-with `log_history` replaces the marker.
+any `seq` jump before it, as one "… N lines dropped" row; a real line with the same
+`seq` arriving later (the `log_history` command exists for that) replaces the marker.
 
 ## UI and backend IPC
 
@@ -78,12 +78,14 @@ change), `update_state` (its `UpdateState`, when that changed) and
 healthy).
 
 At startup the UI subscribes first and then fetches a snapshot (`get_status`,
-`get_node_stats`, `get_update_info`, `log_history`), so no change falls between the two.
+`get_node_stats`, `get_update_info`), so no change falls between the two; the log
+subscription itself streams the retained history before live lines, so logs need no
+snapshot request.
 An event that arrives while a snapshot request is in flight is newer than the snapshot,
 so the UI drops the `get_status`, `get_node_stats` and `get_update_info` snapshots once
 an event of the same kind has arrived (for the updater: `update_info`; an
 `update_state` that arrives before any `update_info` replaces the snapshot's state).
-Log batches and history are merged by `seq`, so their order does not matter.
+Log batches are merged by `seq`, so their order does not matter.
 `stale_process` may be emitted before the UI listens, so the stale-process banner is
 driven by `status.stale`, which the snapshot carries; likewise `update_health_failed`
 is also in `UpdateInfo.health_failure`. A payload that does not deserialize is shown in
@@ -123,8 +125,9 @@ pinned by fixtures captured from real zebrad; see
 
 **Spawn environment.** `zebrad -c <app_config_dir>/zebrad.toml start`. Every inherited
 `ZEBRA_*` variable is removed with `env_remove` (never `env_clear`, which would drop
-`PATH`, `HOME`, `SystemRoot` and `LOCALAPPDATA`). `ZEBRA_TRACING__USE_COLOR=false` is
-forced; `ZEBRA_TRACING__PROGRESS_BAR` and `ZEBRA_TRACING__LOG_FILE` are unset.
+`PATH`, `HOME`, `SystemRoot` and `LOCALAPPDATA`). `ZEBRA_TRACING__USE_COLOR=false` and
+`ZEBRA_TRACING__FORCE_USE_COLOR=false` are forced; `ZEBRA_TRACING__PROGRESS_BAR` and
+`ZEBRA_TRACING__LOG_FILE` are unset.
 
 ## Process control per OS
 
@@ -184,6 +187,19 @@ edits, never full `zebrad generate` output. Every zebrad section is
 | `metrics.endpoint_addr` | `127.0.0.1:9999` |
 | `state.cache_dir` | `<chosen data dir>/state` |
 | `zcashd_compat` | forced off (unsupported) |
+
+**Configuration form.** Settings shows every key of the bundled zebrad's `zebrad.toml` as
+a form (`ui/src/config_form.rs`, schema in `ui/src/config_form/schema.rs`: section, kind,
+default, control and a plain-words explanation for the tooltip, derived from zebrad's doc
+comments at the pinned commit). The form reads the file with `toml_edit`, shows a field's
+value or its default, validates per kind (bounds, loopback addresses, humantime durations,
+peer lists) and renders only the changed keys back into the same document, so comments and
+unknown keys survive and a field reset to its default is removed from the file. Managed
+keys and the keys the launcher forces through environment variables are read-only. Saving
+goes through `apply_config` like the raw editor on the Configure page, with the same
+conflict detection and rollback. A unit test pins the schema to the `zebrad generate`
+fixture, so a zebrad bump that adds, removes or re-defaults a key fails `cargo test -p ui`
+until the schema is updated.
 
 The managed keys are launcher-owned: the supervisor and the RPC monitor rely on them.
 `config::ensure` rewrites them at every start, and `config::begin_apply_with_managed`
@@ -276,8 +292,29 @@ Show / second launch (single-instance) / macOS dock -> show + focus the window
 `rpc.rs` and `monitor.rs` poll zebrad's cookie-authenticated RPC every 5 s
 (`getblockchaininfo`, `getinfo`, `getmempoolinfo`, `getpeerinfo` count; hourly
 `getdeprecationinfo` on Mainnet only) and publish `watch<NodeStats>`. That feeds the
-status strip, the primary metrics view. Grafana is optional and run by the user; see
-[GRAFANA.md](GRAFANA.md).
+status strip and the dashboard, the primary metrics view. Grafana is optional and run by
+the user, embedded in its own tab; see [GRAFANA.md](GRAFANA.md).
+
+**Dashboard.** The UI keeps every published `NodeStats` in `ui/src/stats_history.rs`
+(up to 4 h of 5 s samples, since the launcher opened; nothing is persisted). From it the
+dashboard draws a sync meter with the block rate and the time to the tip, stat tiles
+with sparklines, and inline SVG line charts of height, peers and mempool size
+(`ui/src/charts.rs`, no chart library) over a range the user picks (15 min to all).
+Every chart has a hover crosshair, keyboard navigation and a table view.
+
+**Log analysis.** `ui/src/insights.rs` folds every log batch, in `seq` order, into a
+summary of the run: the sync stage from zebrad's `sync::progress` lines (syncing, near
+the tip, at the tip, slow, stalled, waiting for genesis), deduplicated warnings, errors
+and stderr lines with counts, lines per minute by level over the last hour, and the
+startup milestones of the current run (state opened, peers, RPC, first progress report)
+with the peer, checkpoint and mempool facts. The Logs page shows these cards in a
+collapsible analysis panel and the dashboard shows the stage, the recent problems and
+the activity chart; picking a problem filters the Logs page to it. The Logs tab carries
+a count of problems that arrived while the page was not shown.
+
+**Appearance.** `Settings.theme` (`system`, `light`, `dark`) is resolved against the
+system preference in `ui/src/theme.rs` and applied as `data-theme` on `<html>`; every
+colour in the stylesheets is a token, and the embedded Grafana follows the same theme.
 
 On Mainnet, zebrad warns 42 days and halts 56 days after its estimated release height,
 so an install that never updates stops working. The UI shows an EOS countdown, a warning
