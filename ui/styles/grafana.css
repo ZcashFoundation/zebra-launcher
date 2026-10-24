@@ -1,1 +1,125 @@
 /* The Grafana tab: toolbar, setup card and the embedded dashboard (see ui/src/pages/grafana.rs). */
+
+/* The section is a flex column; the frame takes whatever height the toolbar leaves. */
+.page-grafana {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.grafana-loading {
+  margin: 0;
+  padding: 16px 20px;
+}
+
+/* Toolbar */
+
+.grafana-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.grafana-toolbar select {
+  max-width: 100%;
+}
+
+.grafana-host {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.grafana-host .muted {
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.grafana-hint {
+  margin: 0;
+  padding: 6px 12px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.grafana-hint code {
+  overflow-wrap: anywhere;
+}
+
+/* The embedded dashboard */
+
+.grafana-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: var(--bg);
+}
+
+/* Setup card (no URL set) */
+
+.grafana-setup-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 20px;
+}
+
+.grafana-setup {
+  max-width: 640px;
+}
+
+.grafana-setup p {
+  margin: 8px 0;
+}
+
+.grafana-command {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.grafana-command pre {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 8px;
+  background: var(--bg);
+  border-radius: 4px;
+  overflow-x: auto;
+  user-select: text;
+}
+
+.grafana-linux {
+  font-size: 12px;
+}
+
+.grafana-connect {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.grafana-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0 10px;
+}
+
+.grafana-field input {
+  max-width: 420px;
+}
+
+.grafana-connect .buttons {
+  flex-wrap: wrap;
+}
