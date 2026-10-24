@@ -1,4 +1,4 @@
-//! The app shell: shared state, backend subscriptions, the header, the four pages and the
+//! The app shell: shared state, backend subscriptions, the header, the five pages and the
 //! first-run wizard.
 
 use std::time::{Duration, SystemTime};
