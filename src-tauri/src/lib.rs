@@ -65,7 +65,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         // Rust-side only: the UI gets no updater permissions; see updater.rs.
         .plugin(tauri_plugin_updater::Builder::new().build())
-        // Keep in sync with build.rs and capabilities/main.json.
+        // build.rs fails the build unless this list, its COMMANDS and the
+        // allow-* permissions in capabilities/main.json agree.
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::subscribe_logs,
