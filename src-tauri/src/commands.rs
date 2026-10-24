@@ -12,14 +12,15 @@ use std::{
 };
 
 use launcher_core::{
+    apply,
     config::{self, ConfigEditError},
     diagnostics,
     firstrun::{self, LegacyLocations},
-    supervisor::{StartOptions, SupervisorError},
+    supervisor::StartOptions,
 };
 use launcher_types::{
-    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, ExitClass,
-    FirstRunInfo, ImportOutcome, LogLine, NodeStats, OpenTarget, Settings, Status,
+    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
+    ImportOutcome, LogLine, NodeStats, OpenTarget, Settings, Status,
 };
 use tauri::{AppHandle, Runtime, State, ipc::Channel};
 use tauri_plugin_dialog::DialogExt;
@@ -152,40 +153,25 @@ fn apply_error(kind: ApplyErrorKind, message: impl Display) -> ApplyError {
     }
 }
 
-fn io_error(err: impl Display) -> ApplyError {
-    apply_error(ApplyErrorKind::Io, err)
-}
-
-fn edit_error(err: ConfigEditError) -> ApplyError {
-    let kind = match &err {
-        ConfigEditError::InvalidToml(_) => ApplyErrorKind::InvalidToml,
-        ConfigEditError::Forbidden { .. } => ApplyErrorKind::Forbidden,
-        ConfigEditError::Conflict => ApplyErrorKind::Conflict,
-        ConfigEditError::ApplyInProgress => ApplyErrorKind::ApplyInProgress,
-        ConfigEditError::Io(_) => ApplyErrorKind::Io,
-    };
-    apply_error(kind, err)
-}
-
 /// Saves `text` as `zebrad.toml` and, if zebrad was running, restarts it
-/// with the new file.
+/// with the new file: [`apply::apply_and_restart`], behind this app's
+/// permits.
 ///
-/// `token` is the one `read_config` returned. The launcher-managed keys are
-/// set to the launcher's values before the file is checked and written.
-/// When zebrad is not running (stopped, or failed and waiting for the user)
-/// the file is saved and the outcome is `applied`; zebrad reads it on its
-/// next start. Otherwise zebrad is restarted: if it refuses the file as a
-/// configuration error, the previous file is restored, zebrad is started
-/// with it, and the outcome is `rolled_back` with zebrad's message. Any
-/// other start failure keeps the new file (zebrad got past loading it) and
-/// shows up in the status. Rejections leave the file unchanged.
+/// `token` is the one `read_config` returned. When zebrad is not running
+/// (stopped, or failed and waiting for the user) the file is saved and the
+/// outcome is `applied`; zebrad reads it on its next start. Otherwise zebrad
+/// is restarted: if it refuses the file as a configuration error, the
+/// previous file is restored, zebrad is started with it, and the outcome is
+/// `rolled_back` with zebrad's message. Any other start failure keeps the
+/// new file (zebrad got past loading it) and shows up in the status.
+/// Rejections leave the file unchanged.
 #[tauri::command]
 pub async fn apply_config(
     state: State<'_, AppState>,
     text: String,
     token: String,
 ) -> Result<ApplyOutcome, ApplyError> {
-    let _permit = state
+    let _config = state
         .config_writer
         .clone()
         .try_acquire_owned()
@@ -195,82 +181,23 @@ pub async fn apply_config(
                 ConfigEditError::ApplyInProgress,
             )
         })?;
-
-    let paths = state.paths.clone();
-    let keys = managed_keys(&state.settings.current(), &paths);
-    let pending = blocking(move || config::begin_apply_with_managed(&paths, &text, &token, &keys))
-        .await
-        .map_err(io_error)?
-        .map_err(edit_error)?;
-
-    // A stopping zebrad is left stopped: the file waits for the next start.
-    if !state.supervisor.status().phase.is_active() {
-        blocking(move || pending.commit())
-            .await
-            .map_err(io_error)?
-            .map_err(io_error)?;
-        tracing::info!("saved the new configuration; zebrad uses it on its next start");
-        return Ok(ApplyOutcome::Applied);
-    }
-
     // Held across the stop and the start, so the node data cannot change
-    // while zebrad is briefly stopped.
-    let _start = match state.start_permit() {
-        Ok(permit) => permit,
-        Err(err) => {
-            let _ = blocking(move || pending.rollback()).await;
-            return Err(io_error(err));
-        }
-    };
-    if let Err(err) = state.supervisor.stop().await {
-        // The launcher is exiting. Restore the file now; if that fails, the
-        // pending marker makes the next launch do it.
-        let _ = blocking(move || pending.rollback()).await;
-        return Err(io_error(err.to_string()));
-    }
+    // while zebrad is briefly stopped. Taken before anything is written, so
+    // a refusal leaves the file unchanged.
+    let _start = state
+        .start_permit()
+        .map_err(|err| apply_error(ApplyErrorKind::Io, err))?;
 
-    match tokio::time::timeout(APPLY_START_TIMEOUT, state.supervisor.start()).await {
-        Ok(Err(SupervisorError::ExitedDuringStart(exit)))
-            if exit.class == ExitClass::ConfigError =>
-        {
-            let error = exit
-                .detail
-                .unwrap_or_else(|| "zebrad could not load the configuration".to_string());
-            tracing::warn!(%error, "zebrad refused the new configuration; rolling back");
-            blocking(move || pending.rollback())
-                .await
-                .map_err(io_error)?
-                .map_err(|err| {
-                    io_error(format!(
-                        "zebrad refused the new configuration ({error}), and the previous one could not be restored: {err}"
-                    ))
-                })?;
-            match tokio::time::timeout(APPLY_START_TIMEOUT, state.supervisor.start()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    tracing::warn!(%err, "zebrad did not start with the restored configuration")
-                }
-                Err(_) => {
-                    tracing::warn!("zebrad is still starting with the restored configuration")
-                }
-            }
-            Ok(ApplyOutcome::RolledBack { error })
-        }
-        started => {
-            match started {
-                Ok(Ok(())) => tracing::info!("zebrad started with the new configuration"),
-                Ok(Err(err)) => {
-                    tracing::warn!(%err, "zebrad accepted the new configuration but did not start")
-                }
-                Err(_) => tracing::info!("zebrad is still starting with the new configuration"),
-            }
-            blocking(move || pending.commit())
-                .await
-                .map_err(io_error)?
-                .map_err(io_error)?;
-            Ok(ApplyOutcome::Applied)
-        }
-    }
+    let keys = managed_keys(&state.settings.current(), &state.paths);
+    apply::apply_and_restart(
+        &state.paths,
+        &state.supervisor,
+        text,
+        token,
+        &keys,
+        APPLY_START_TIMEOUT,
+    )
+    .await
 }
 
 /// The launcher settings.
