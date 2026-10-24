@@ -6,7 +6,7 @@
 
 use std::{fs, io, path::PathBuf};
 
-pub use launcher_types::{MAX_STOP_GRACE_SECS, MIN_STOP_GRACE_SECS};
+pub use launcher_types::{MAX_STOP_GRACE_SECS, MIN_STOP_GRACE_SECS, STOP_GRACE_SECS};
 use launcher_types::{Settings, is_loopback_http_url};
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -43,7 +43,7 @@ pub fn validate(settings: &Settings) -> Result<(), SettingsError> {
     {
         return Err(SettingsError::InvalidGrafanaUrl(url.clone()));
     }
-    if !(MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS).contains(&settings.stop_grace_secs) {
+    if !STOP_GRACE_SECS.contains(&settings.stop_grace_secs) {
         return Err(SettingsError::InvalidStopGrace(settings.stop_grace_secs));
     }
     Ok(())
@@ -258,7 +258,7 @@ fn sanitize(settings: &mut Settings) {
         tracing::warn!(%url, "launcher.json has an invalid Grafana URL; ignoring it");
         settings.grafana_url = None;
     }
-    if !(MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS).contains(&settings.stop_grace_secs) {
+    if !STOP_GRACE_SECS.contains(&settings.stop_grace_secs) {
         let default = Settings::default().stop_grace_secs;
         tracing::warn!(
             secs = settings.stop_grace_secs,

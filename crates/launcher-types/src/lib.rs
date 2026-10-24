@@ -8,6 +8,7 @@
 use std::{
     fmt,
     net::SocketAddr,
+    ops::RangeInclusive,
     str::FromStr,
     time::{Duration, SystemTime},
 };
@@ -448,11 +449,15 @@ impl Settings {
     pub const SCHEMA_VERSION: u32 = 2;
 }
 
-/// The shortest stop grace period that can be saved, in seconds. The settings
-/// form (`ui/src/pages/settings.rs`) applies the same bounds.
+/// The shortest stop grace period that can be saved, in seconds
+/// ([`Settings::stop_grace_secs`]). The backend validates against these
+/// bounds and the settings form applies them to its field.
 pub const MIN_STOP_GRACE_SECS: u64 = 5;
 /// The longest stop grace period that can be saved, in seconds.
 pub const MAX_STOP_GRACE_SECS: u64 = 3600;
+/// The stop grace periods that can be saved, in seconds:
+/// [`MIN_STOP_GRACE_SECS`]`..=`[`MAX_STOP_GRACE_SECS`].
+pub const STOP_GRACE_SECS: RangeInclusive<u64> = MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -1007,6 +1012,14 @@ mod tests {
             }
         );
         assert_eq!(settings.theme, Theme::System);
+    }
+
+    #[test]
+    fn stop_grace_bounds_hold_the_default() {
+        assert_eq!(STOP_GRACE_SECS, MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS);
+        assert!(STOP_GRACE_SECS.contains(&Settings::default().stop_grace_secs));
+        assert!(!STOP_GRACE_SECS.contains(&(MIN_STOP_GRACE_SECS - 1)));
+        assert!(!STOP_GRACE_SECS.contains(&(MAX_STOP_GRACE_SECS + 1)));
     }
 
     #[test]
