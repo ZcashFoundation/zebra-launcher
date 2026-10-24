@@ -17,6 +17,7 @@ use crate::{
     clock,
     components::{
         log_insights::{LogActivityChart, RecentProblems, SyncStageCard},
+        rows::Rows,
         status_strip::phase_detail,
         updates::CheckForUpdate,
     },
@@ -408,22 +409,5 @@ pub fn Dashboard() -> impl IntoView {
             </div>
             {grafana}
         </div>
-    }
-}
-
-#[component]
-fn Rows(rows: Signal<Vec<(&'static str, String)>>) -> impl IntoView {
-    view! {
-        <dl class="rows">
-            {move || {
-                rows.get()
-                    .into_iter()
-                    .map(|(label, value)| view! {
-                        <dt>{label}</dt>
-                        <dd>{value}</dd>
-                    })
-                    .collect_view()
-            }}
-        </dl>
     }
 }

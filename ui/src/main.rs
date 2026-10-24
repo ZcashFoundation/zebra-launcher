@@ -31,6 +31,7 @@ mod components {
     pub mod nav;
     pub mod outcome_note;
     pub mod reset_config;
+    pub mod rows;
     pub mod stale_banner;
     pub mod status_strip;
     pub mod tooltip;
