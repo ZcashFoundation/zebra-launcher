@@ -17,11 +17,13 @@
 #
 # tauri-cli, trunk, wasm-bindgen and wasm-opt (binaryen) are their GitHub
 # release binaries for the exact pinned versions, checked against the
-# per-platform sha256 pins in .github/tool-versions.env. Nothing is compiled
-# from crates.io, and nothing is installed without a recorded hash. To
-# compile, trunk then runs offline (TRUNK_OFFLINE=true in $GITHUB_ENV), so it
-# cannot download its own wasm-bindgen or wasm-opt: it uses the pinned ones on
-# PATH, at exactly the versions it requires, or fails.
+# per-platform sha256 pins in .github/tool-versions.env by
+# scripts/install-pinned-tools.sh, which shellcheck covers and which can be
+# dry-run locally. Nothing is compiled from crates.io, and nothing is installed
+# without a recorded hash. To compile, trunk then runs offline
+# (TRUNK_OFFLINE=true in $GITHUB_ENV), so it cannot download its own
+# wasm-bindgen or wasm-opt: it uses the pinned ones on PATH, at exactly the
+# versions it requires, or fails.
 #
 # With `bundler: "false"` only the pins and the frontend tools are installed:
 # for a job on a plain runner that already has the toolchain and only needs
@@ -132,182 +134,11 @@ runs:
     # sha256 in .github/tool-versions.env before it is unpacked; a missing or
     # wrong hash fails the job. tauri-cli and trunk go into $CARGO_HOME/bin,
     # which is on PATH, so `cargo tauri` finds cargo-tauri; wasm-bindgen and
-    # wasm-opt into $RUNNER_TEMP/frontend-tools, put first on PATH.
+    # wasm-opt into $RUNNER_TEMP/frontend-tools, put first on PATH. The script
+    # takes the inputs as COMPILE and BUNDLER and reads the pins file itself.
     - name: Install tauri-cli, trunk, wasm-bindgen and wasm-opt
       shell: bash
       env:
         COMPILE: ${{ inputs.compile }}
         BUNDLER: ${{ inputs.bundler }}
-      run: |
-        set -euo pipefail
-        host="$(rustc -vV | sed -n 's/^host: //p')"
-        bin="${CARGO_HOME:-${HOME}/.cargo}/bin"
-        work="${RUNNER_TEMP}/tauri-tools"
-        rm -rf "${work}"
-        mkdir -p "${work}" "${bin}"
-        case "${host}" in
-          *-windows-*) exe=.exe ;;
-          *) exe="" ;;
-        esac
-
-        to_posix() {
-          if command -v cygpath > /dev/null 2>&1; then
-            cygpath -u "$1"
-          else
-            printf '%s\n' "$1"
-          fi
-        }
-
-        sha256_of() {
-          if command -v sha256sum > /dev/null 2>&1; then
-            # Read from stdin: with a file operand GNU sha256sum prefixes the hash with
-          # a backslash when the path contains one (Windows paths do).
-          sha256sum < "$1" | cut -d' ' -f1
-          else
-            shasum -a 256 < "$1" | cut -d' ' -f1
-          fi
-        }
-
-        # unpack NAME URL TRIPLE DIR: downloads URL, checks it against
-        # <NAME>_SHA256_<TRIPLE> and unpacks it into DIR.
-        unpack() {
-          local name="$1" url="$2" triple="$3" dir="$4"
-          local var want got archive
-          var="${name}_SHA256_$(printf '%s' "${triple}" | tr 'a-z-' 'A-Z_')"
-          want="${!var:-}"
-          if [ -z "${want}" ]; then
-            echo "::error::${var} is not in .github/tool-versions.env"
-            exit 1
-          fi
-          archive="${work}/${url##*/}"
-          curl --proto '=https' --tlsv1.2 -sSfL --retry 3 -o "${archive}" "${url}"
-          got="$(sha256_of "${archive}")"
-          if [ "${got}" != "${want}" ]; then
-            echo "::error::${url##*/} has sha256 ${got}, expected ${want} (${var})"
-            exit 1
-          fi
-          echo "${url##*/}: sha256 ${got} OK"
-          mkdir -p "${dir}"
-          case "${archive}" in
-            *.zip)
-              if command -v 7z > /dev/null 2>&1; then
-                7z x -y -o"${dir}" "${archive}" > /dev/null
-              else
-                unzip -q -o "${archive}" -d "${dir}"
-              fi
-              ;;
-            # Git Bash's tar reads "D:\..." as a remote host; hand it POSIX paths.
-            *) tar -xzf "$(to_posix "${archive}")" -C "$(to_posix "${dir}")" ;;
-          esac
-        }
-
-        # fetch NAME URL TRIPLE BINARY [DEST]: unpack, then installs BINARY
-        # (a path inside the archive) into DEST (default ${bin}).
-        fetch() {
-          local name="$1" url="$2" triple="$3" binary="$4" dest="${5:-${bin}}"
-          unpack "${name}" "${url}" "${triple}" "${work}/${name}"
-          cp "${work}/${name}/${binary}" "${dest}/${binary##*/}"
-          chmod +x "${dest}/${binary##*/}"
-        }
-
-        if [ "${BUNDLER}" = true ]; then
-          case "${host}" in
-            *-linux-*) cli_ext=tgz ;;
-            *) cli_ext=zip ;;
-          esac
-          fetch TAURI_CLI \
-            "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v${TAURI_CLI_VERSION}/cargo-tauri-${host}.${cli_ext}" \
-            "${host}" "cargo-tauri${exe}"
-          [ "$(cargo tauri --version)" = "tauri-cli ${TAURI_CLI_VERSION}" ] \
-            || { echo "::error::cargo tauri --version is '$(cargo tauri --version)', expected tauri-cli ${TAURI_CLI_VERSION}"; exit 1; }
-          cargo tauri --version
-        fi
-
-        if [ "${COMPILE}" = true ]; then
-          case "${host}" in
-            *-windows-*) trunk_triple="${host}"; trunk_ext=zip ;;
-            *-linux-gnu) trunk_triple="${host%-gnu}-musl"; trunk_ext=tar.gz ;;
-            *) trunk_triple="${host}"; trunk_ext=tar.gz ;;
-          esac
-          fetch TRUNK \
-            "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${trunk_triple}.${trunk_ext}" \
-            "${trunk_triple}" "trunk${exe}"
-          [ "$(trunk --version)" = "trunk ${TRUNK_VERSION}" ] \
-            || { echo "::error::trunk --version is '$(trunk --version)', expected trunk ${TRUNK_VERSION}"; exit 1; }
-          trunk --version
-
-          # wasm-bindgen and wasm-opt for trunk, in a directory of their own
-          # put first on PATH. Then trunk runs offline (TRUNK_OFFLINE), so it
-          # never downloads them itself: offline it takes a tool from PATH
-          # only at exactly the version it requires, else it fails.
-          tools="${RUNNER_TEMP}/frontend-tools"
-          if command -v cygpath > /dev/null 2>&1; then
-            tools="$(cygpath -u "${tools}")"
-          fi
-          rm -rf "${tools}"
-          mkdir -p "${tools}/bin"
-
-          # wasm-bindgen: trunk requires the version of the wasm-bindgen
-          # crate in Cargo.lock, which must be the pinned one.
-          lock_version="$(scripts/cargo-lock-version.sh wasm-bindgen)" \
-            || { echo "::error::cannot read the wasm-bindgen version from Cargo.lock"; exit 1; }
-          if [ "${lock_version}" != "${WASM_BINDGEN_VERSION}" ]; then
-            echo "::error::Cargo.lock has wasm-bindgen ${lock_version}, but WASM_BINDGEN_VERSION is ${WASM_BINDGEN_VERSION} (.github/tool-versions.env)"
-            exit 1
-          fi
-          case "${host}" in
-            *-linux-gnu) wb_triple="${host%-gnu}-musl" ;;
-            *) wb_triple="${host}" ;;
-          esac
-          fetch WASM_BINDGEN \
-            "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${wb_triple}.tar.gz" \
-            "${wb_triple}" "wasm-bindgen-${WASM_BINDGEN_VERSION}-${wb_triple}/wasm-bindgen${exe}" "${tools}/bin"
-
-          # wasm-opt: the whole binaryen tree, since on macOS bin/wasm-opt
-          # loads lib/libbinaryen.dylib.
-          case "${host}" in
-            x86_64-unknown-linux-gnu) by_triple=x86_64-linux ;;
-            aarch64-unknown-linux-gnu) by_triple=aarch64-linux ;;
-            aarch64-apple-darwin) by_triple=arm64-macos ;;
-            x86_64-apple-darwin) by_triple=x86_64-macos ;;
-            x86_64-pc-windows-msvc) by_triple=x86_64-windows ;;
-            *) echo "::error::no pinned binaryen for ${host}"; exit 1 ;;
-          esac
-          unpack BINARYEN \
-            "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${by_triple}.tar.gz" \
-            "${by_triple}" "${tools}"
-          binaryen_bin="${tools}/binaryen-${BINARYEN_VERSION}/bin"
-
-          export PATH="${tools}/bin:${binaryen_bin}:${PATH}"
-          for dir in "${tools}/bin" "${binaryen_bin}"; do
-            if command -v cygpath > /dev/null 2>&1; then
-              dir="$(cygpath -w "${dir}")"
-            fi
-            printf '%s\n' "${dir}" >> "${GITHUB_PATH}"
-          done
-          # GITHUB_PATH entries come first in later steps, the last one added
-          # first of all; check the order trunk will see here too.
-          # (Git Bash may report a Windows .exe with or without its suffix.)
-          case "$(command -v wasm-bindgen)" in
-            "${tools}/bin/wasm-bindgen" | "${tools}/bin/wasm-bindgen${exe}") ;;
-            *) echo "::error::wasm-bindgen on PATH is $(command -v wasm-bindgen), not the pinned one"; exit 1 ;;
-          esac
-          case "$(command -v wasm-opt)" in
-            "${binaryen_bin}/wasm-opt" | "${binaryen_bin}/wasm-opt${exe}") ;;
-            *) echo "::error::wasm-opt on PATH is $(command -v wasm-opt), not the pinned one"; exit 1 ;;
-          esac
-          # The version strings exactly as trunk parses them (src/tools.rs).
-          wb_version="$(wasm-bindgen --version | tr -d '\r' | cut -d' ' -f2)"
-          [ "${wb_version}" = "${WASM_BINDGEN_VERSION}" ] \
-            || { echo "::error::wasm-bindgen --version reports ${wb_version}, expected ${WASM_BINDGEN_VERSION}"; exit 1; }
-          wo_version="version_$(wasm-opt --version | tr -d '\r' | cut -d' ' -f3)"
-          [ "${wo_version}" = "${BINARYEN_VERSION}" ] \
-            || { echo "::error::wasm-opt --version reports ${wo_version}, expected ${BINARYEN_VERSION}"; exit 1; }
-          wasm-bindgen --version
-          wasm-opt --version
-          {
-            echo "TRUNK_OFFLINE=true"
-            echo "TRUNK_TOOLS_WASM_OPT=${BINARYEN_VERSION}"
-          } >> "${GITHUB_ENV}"
-        fi
-        rm -rf "${work}"
+      run: scripts/install-pinned-tools.sh
