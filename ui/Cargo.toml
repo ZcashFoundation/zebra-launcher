@@ -21,15 +21,12 @@ web-sys = { version = "0.3", features = [
     "DomTokenList",
     "Element",
     "HtmlElement",
-    "HtmlInputElement",
-    "HtmlSelectElement",
     "Location",
     "MediaQueryList",
     "MediaQueryListEvent",
     "Navigator",
     "ResizeObserver",
     "Storage",
-    "SvgElement",
     "Window",
 ] }
 serde = { workspace = true }
