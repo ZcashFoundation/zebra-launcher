@@ -63,6 +63,42 @@ jobs:
         with:
           command: check
 
+  # The bash in scripts/ and docs/observability/, and the workflows (actionlint
+  # also hands every `run:` block to shellcheck). actionlint does not read
+  # composite actions, so .github/actions/setup-tauri/action.yml is not covered.
+  lint-scripts:
+    name: shellcheck and actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Release binaries at the versions pinned in .github/tool-versions.env,
+      # each checked against its sha256 pin before it runs, as setup-tauri does
+      # for the build tools. scripts/refresh-tool-pins.sh refreshes the pins.
+      - name: Install shellcheck and actionlint (pinned)
+        run: |
+          set -euo pipefail
+          pin() { sed -n "s/^$1=//p" .github/tool-versions.env | tr -d '\r'; }
+          bin="${RUNNER_TEMP}/lint-tools"
+          mkdir -p "${bin}"
+          fetch() { # fetch URL SHA256 ARCHIVE
+            curl --proto '=https' --tlsv1.2 -sSfL --retry 3 -o "$3" "$1"
+            echo "$2  $3" | sha256sum -c -
+          }
+          version="$(pin SHELLCHECK_VERSION)"
+          fetch "https://github.com/koalaman/shellcheck/releases/download/v${version}/shellcheck-v${version}.linux.x86_64.tar.xz" \
+            "$(pin SHELLCHECK_SHA256_X86_64_LINUX)" "${RUNNER_TEMP}/shellcheck.tar.xz"
+          tar -xJf "${RUNNER_TEMP}/shellcheck.tar.xz" -C "${bin}" --strip-components=1 "shellcheck-v${version}/shellcheck"
+          version="$(pin ACTIONLINT_VERSION)"
+          fetch "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz" \
+            "$(pin ACTIONLINT_SHA256_X86_64_LINUX)" "${RUNNER_TEMP}/actionlint.tar.gz"
+          tar -xzf "${RUNNER_TEMP}/actionlint.tar.gz" -C "${bin}" actionlint
+          echo "${bin}" >> "${GITHUB_PATH}"
+          "${bin}/shellcheck" --version
+          "${bin}/actionlint" -version
+      - run: shellcheck scripts/*.sh docs/observability/*.sh
+      - run: actionlint
+
   test-os:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -130,6 +130,10 @@ cargo fmt --all --check
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --locked
 cargo test --workspace --locked
 cargo deny check
+scripts/check-versions.sh
+RUSTFLAGS="-D warnings" cargo clippy -p ui --target wasm32-unknown-unknown --locked
+(cd ui && trunk build --release)
+shellcheck scripts/*.sh docs/observability/*.sh && actionlint   # CI pins their versions
 ```
 
 Run `scripts/dev-sidecar.sh` first: the app crate's build script fails without the
@@ -142,9 +146,9 @@ target, creates the placeholder sidecar file the build script wants, and provide
 stub C compiler and archiver that the `ring`, `embed-resource` and `vswhom-sys` build
 scripts ask for on a non-Windows host. Run it whenever you touch `cfg(windows)` code.
 
-From M5, also `trunk build` in `ui/`. Windows and macOS CI run clippy and tests too, so
-`cfg(windows)` and `cfg(target_os = "macos")` code is checked; when you change it, run
-clippy for that target or rely on CI.
+Windows and macOS CI run clippy and tests too, so `cfg(windows)` and
+`cfg(target_os = "macos")` code is checked; when you change it, run
+`scripts/check-windows.sh` or clippy for that target, or rely on CI.
 
 Tests in `launcher-core` drive the `fake-zebrad` binary (`CARGO_BIN_EXE_fake-zebrad`)
 and put a timeout on every await, so a hang fails the test instead of stalling CI.
@@ -169,8 +173,9 @@ Use instead:
 
 Dependabot bumps the crates (the `tauri` and `wasm` groups in
 [`.github/dependabot.yml`](../.github/dependabot.yml)) but not the CLI tools CI downloads:
-tauri-cli, trunk, wasm-bindgen and wasm-opt (binaryen), pinned with a sha256 per
-platform in [`.github/tool-versions.env`](../.github/tool-versions.env). A Dependabot PR
+tauri-cli, trunk, wasm-bindgen and wasm-opt (binaryen), and the linters shellcheck and
+actionlint, pinned with a sha256 per platform in
+[`.github/tool-versions.env`](../.github/tool-versions.env). A Dependabot PR
 that moves the `wasm-bindgen` crate fails `scripts/check-versions.sh` until
 `WASM_BINDGEN_VERSION` follows it, and a `tauri` minor bump needs a matching tauri-cli.
 Refresh a pin with
@@ -181,8 +186,9 @@ scripts/refresh-tool-pins.sh wasm-bindgen 0.2.130          # dry run: prints the
 scripts/refresh-tool-pins.sh --write wasm-bindgen 0.2.130  # rewrites the version and hashes
 ```
 
-It takes `wasm-bindgen`, `binaryen`, `tauri-cli` or `trunk` and a version, downloads the
-release asset for every platform the file already pins, hashes it, and, with `gh`
+It takes `wasm-bindgen`, `binaryen`, `tauri-cli`, `trunk`, `shellcheck` or `actionlint`
+and a version, downloads the release asset for every platform the file already pins,
+hashes it, and, with `gh`
 installed, checks each hash against the `digest` GitHub reports for the asset; it writes
 nothing unless every platform downloaded and matched. Then update the comments above the
 lines (the date the hashes were computed, notes such as trunk's default wasm-opt
