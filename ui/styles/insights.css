@@ -12,7 +12,7 @@
 
 .logs-toolbar button.active {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .logs-toolbar .logs-target {
@@ -229,7 +229,7 @@
 
 .insight-toggle[aria-pressed="true"] {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .insight-plot {
@@ -310,7 +310,7 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 2px 8px var(--shadow);
 }
 
 /* Near the plot's edges the tooltip hangs inward rather than being centred on the column. */
