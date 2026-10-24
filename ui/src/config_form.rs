@@ -340,17 +340,22 @@ fn ip_without_port(text: &str) -> Option<IpAddr> {
     })
 }
 
-/// The units humantime accepts.
+/// The units humantime 2.3.0 (pinned by zebrad 7.0.0) accepts.
 const DURATION_UNITS: &[&str] = &[
-    "ns", "nsec", "us", "usec", "ms", "msec", "s", "sec", "secs", "second", "seconds", "m", "min",
-    "mins", "minute", "minutes", "h", "hr", "hour", "hours", "d", "day", "days", "w", "week",
-    "weeks", "M", "month", "months", "y", "year", "years",
+    "ns", "nsec", "nanos", "us", "usec", "µs", "ms", "msec", "millis", "s", "sec", "secs",
+    "second", "seconds", "m", "min", "mins", "minute", "minutes", "h", "hr", "hrs", "hour",
+    "hours", "d", "day", "days", "w", "wk", "wks", "week", "weeks", "M", "month", "months", "y",
+    "yr", "yrs", "year", "years",
 ];
 
-/// A humantime duration: one or more `<number><unit>` parts, such as `1m 1s` or `500ms`.
+/// A humantime 2.3.0 duration: `0`, or one or more `<number>[.<fraction>]<unit>` parts such as
+/// `1m 1s`, `500ms` or `1.5h`.
 fn validate_duration(text: &str) -> Result<(), String> {
     const MESSAGE: &str =
         "Enter a duration such as 1m 1s or 500ms, using the units ms, s, m, h or d.";
+    if text == "0" {
+        return Ok(());
+    }
     let mut rest = text;
     let mut parts = 0;
     while !rest.is_empty() {
@@ -360,9 +365,23 @@ fn validate_duration(text: &str) -> Result<(), String> {
         if rest[..digits_end].parse::<u64>().is_err() {
             return Err(MESSAGE.to_owned());
         }
-        rest = rest[digits_end..].trim_start();
+        rest = &rest[digits_end..];
+        // A fraction has at least one digit after the dot. humantime also refuses a fraction
+        // that does not come to whole nanoseconds (such as `1.0000000001s`); that is left to
+        // zebrad, which rejects the file when it starts.
+        if let Some(fraction) = rest.strip_prefix('.') {
+            let fraction_end = fraction
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(fraction.len());
+            if fraction_end == 0 {
+                return Err(MESSAGE.to_owned());
+            }
+            rest = &fraction[fraction_end..];
+        }
+        rest = rest.trim_start();
+        // `is_alphabetic`, not `is_ascii_alphabetic`, so `µs` reaches the lookup.
         let unit_end = rest
-            .find(|c: char| !c.is_ascii_alphabetic())
+            .find(|c: char| !c.is_alphabetic())
             .unwrap_or(rest.len());
         if !DURATION_UNITS.contains(&&rest[..unit_end]) {
             return Err(MESSAGE.to_owned());
@@ -1100,6 +1119,7 @@ enabled = false
     #[test]
     fn durations() {
         let field = get(("network", "crawl_new_peer_interval"));
+        // Everything humantime 2.3.0 (pinned by zebrad 7.0.0) parses.
         for ok in [
             "1m 1s",
             "500ms",
@@ -1109,6 +1129,17 @@ enabled = false
             "3 h",
             "1h 30m 15s",
             "1w",
+            "0",
+            "1.5h",
+            "2.5m",
+            "31.1ms",
+            "1.50h 2s",
+            "90millis",
+            "7hrs",
+            "163µs",
+            "2wks",
+            "1yr",
+            "10nanos",
         ] {
             assert_eq!(validate(field, ok), Ok(()), "{ok:?}");
         }
@@ -1120,9 +1151,13 @@ enabled = false
             "5 parsecs",
             "1m,1s",
             "m",
-            "1.5h",
+            "1.s",
+            ".5s",
+            "1.5",
+            "1,5h",
             "99999999999999999999s",
             "1m -1s",
+            "1μs",
         ] {
             assert_eq!(validate(field, bad), message, "{bad:?}");
         }
