@@ -307,17 +307,22 @@ fn Embedded(url: String) -> impl IntoView {
             "Blank? Make sure Grafana is running at " <code>{url}</code>
             " and allows embedding (see docs/GRAFANA.md)."
         </p>
-        {move || {
-            reloads.track();
-            view! {
-                <iframe
-                    class="grafana-frame"
-                    title="Grafana dashboard"
-                    src=src.get()
-                    sandbox="allow-scripts allow-same-origin allow-forms"
-                    referrerpolicy="no-referrer"
-                ></iframe>
+        // Keyed on the reload counter, so Reload replaces the frame (a rebuilt frame with the
+        // same src would be left alone); a pick or theme change updates the src in place.
+        <For
+            each=move || [reloads.get()]
+            key=|generation| *generation
+            children=move |_| {
+                view! {
+                    <iframe
+                        class="grafana-frame"
+                        title="Grafana dashboard"
+                        src=move || src.get()
+                        sandbox="allow-scripts allow-same-origin allow-forms"
+                        referrerpolicy="no-referrer"
+                    ></iframe>
+                }
             }
-        }}
+        />
     }
 }
