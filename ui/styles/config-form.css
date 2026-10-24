@@ -383,6 +383,23 @@
   top: calc(100% + 6px);
 }
 
+/* A transparent strip over the 6px gap keeps the pointer inside .help while it moves onto the
+   box, so the box can be read and its text selected (WCAG 1.4.13). As a part of the box it is
+   only there while the box is shown. */
+.help-tip::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 6px;
+}
+
+.help-tip.help-below::before {
+  top: auto;
+  bottom: 100%;
+}
+
 /* The Configure page's pointer to this form. */
 .cfg-note {
   margin: 4px 0 0;
