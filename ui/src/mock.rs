@@ -236,6 +236,15 @@ impl Mock {
         self.status.with_untracked(|status| status.phase.clone())
     }
 
+    /// Whether Start begins a run: the node is settled, or it waits in backoff and Start
+    /// brings the restart forward, as `format::controls` allows.
+    fn start_allowed(&self) -> bool {
+        matches!(
+            self.phase(),
+            Phase::Stopped | Phase::Failed { .. } | Phase::Backoff { .. }
+        )
+    }
+
     /// Like the backend's guard for data changes, with its message.
     fn require_stopped(&self) -> Result<(), String> {
         if format::data_change_allowed(&self.phase()) {
@@ -423,10 +432,7 @@ pub async fn start_zebrad() -> Result<(), String> {
     if mock.refuse_start_while_running && matches!(mock.phase(), Phase::Starting | Phase::Running) {
         return Err("(mock) another start is in progress".into());
     }
-    if matches!(
-        mock.phase(),
-        Phase::Stopped | Phase::Failed { .. } | Phase::Backoff { .. }
-    ) {
+    if mock.start_allowed() {
         mock.start();
     }
     Ok(())
@@ -436,10 +442,7 @@ pub async fn start_zebrad_killing_stale() {
     sleep(500).await;
     let mock = mock();
     mock.status.update(|status| status.stale = None);
-    if matches!(
-        mock.phase(),
-        Phase::Stopped | Phase::Failed { .. } | Phase::Backoff { .. }
-    ) {
+    if mock.start_allowed() {
         mock.start();
     }
 }
@@ -461,7 +464,7 @@ pub fn subscribe_logs(on_batch: impl Fn(Vec<LogLine>) + 'static) {
     let batches = AtomicU64::new(0);
     set_interval(
         move || {
-            if matches!(mock.phase(), Phase::Stopped | Phase::Failed { .. }) {
+            if mock.phase().is_settled() {
                 return;
             }
             let batch_number = batches.fetch_add(1, Ordering::Relaxed);
