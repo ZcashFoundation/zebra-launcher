@@ -14,7 +14,7 @@ sections name the milestone where that matters.
 +--------------------------- Zebra Launcher (one process) ---------------------------+
 |                                                                                    |
 |  ui/  Leptos CSR (wasm) --- invoke / Channel<Vec<LogLine>> ---> src-tauri/         |
-|   |   Dashboard, Logs, Configure, Settings                       commands, tray,   |
+|   |   Dashboard, Logs, Grafana, Configure, Settings              commands, tray,   |
 |   |                                                              updater, exit     |
 |   +-- <iframe> Grafana (no IPC)                                      |             |
 |                                                                      v             |
@@ -276,8 +276,29 @@ Show / second launch (single-instance) / macOS dock -> show + focus the window
 `rpc.rs` and `monitor.rs` poll zebrad's cookie-authenticated RPC every 5 s
 (`getblockchaininfo`, `getinfo`, `getmempoolinfo`, `getpeerinfo` count; hourly
 `getdeprecationinfo` on Mainnet only) and publish `watch<NodeStats>`. That feeds the
-status strip, the primary metrics view. Grafana is optional and run by the user; see
-[GRAFANA.md](GRAFANA.md).
+status strip and the dashboard, the primary metrics view. Grafana is optional and run by
+the user, embedded in its own tab; see [GRAFANA.md](GRAFANA.md).
+
+**Dashboard.** The UI keeps every published `NodeStats` in `ui/src/stats_history.rs`
+(up to 4 h of 5 s samples, since the launcher opened; nothing is persisted). From it the
+dashboard draws a sync meter with the block rate and the time to the tip, stat tiles
+with sparklines, and inline SVG line charts of height, peers and mempool size
+(`ui/src/charts.rs`, no chart library) over a range the user picks (15 min to all).
+Every chart has a hover crosshair, keyboard navigation and a table view.
+
+**Log analysis.** `ui/src/insights.rs` folds every log batch, in `seq` order, into a
+summary of the run: the sync stage from zebrad's `sync::progress` lines (syncing, near
+the tip, at the tip, slow, stalled, waiting for genesis), deduplicated warnings, errors
+and stderr lines with counts, lines per minute by level over the last hour, and the
+startup milestones of the current run (state opened, peers, RPC, first progress report)
+with the peer, checkpoint and mempool facts. The Logs page shows these cards in a
+collapsible analysis panel and the dashboard shows the stage, the recent problems and
+the activity chart; picking a problem filters the Logs page to it. The Logs tab carries
+a count of problems that arrived while the page was not shown.
+
+**Appearance.** `Settings.theme` (`system`, `light`, `dark`) is resolved against the
+system preference in `ui/src/theme.rs` and applied as `data-theme` on `<html>`; every
+colour in the stylesheets is a token, and the embedded Grafana follows the same theme.
 
 On Mainnet, zebrad warns 42 days and halts 56 days after its estimated release height,
 so an install that never updates stops working. The UI shows an EOS countdown, a warning

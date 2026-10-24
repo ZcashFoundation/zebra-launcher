@@ -14,11 +14,24 @@ To install the Zebra Launcher:
 
 Note: It currently requires a 64-bit processor, and on macOS, an ARM-based processor such as the Apple M1.
 
-## Screenshots
+## What it does
 
-<img src="https://github.com/ZcashFoundation/zebra-app/assets/5491350/4fb8b310-15e7-47be-8650-18a24b733ebc" width="400">
-&nbsp;
-<img src="https://github.com/ZcashFoundation/zebra-app/assets/5491350/564bef27-5b82-4f1e-8e9f-af709bf48528" width="400">
+- Runs the bundled `zebrad` as a supervised child process: start, stop and restart from
+  the window or the tray, graceful shutdown, crash backoff, and a clear reason when
+  zebrad cannot run (bad config, port in use, database locked, end of support).
+- **Dashboard:** sync progress with the block rate and the time left to the tip, stat
+  tiles and charts of height, peers and mempool since the launcher opened, the sync
+  stage and recent problems read from zebrad's own log, and the node's addresses.
+- **Logs:** zebrad's output with level, target and text filters, match highlighting,
+  and an analysis panel (sync stage, deduplicated warnings and errors, lines per
+  minute, the startup timeline of the current run).
+- **Grafana:** your own Grafana embedded, with a picker for the 14 Zebra dashboards the
+  repository ships, a time range and a refresh interval ([GRAFANA.md](docs/GRAFANA.md)).
+- **Configure:** edit the managed `zebrad.toml` with validation and automatic rollback
+  when zebrad rejects a change.
+- **Settings:** opt-in launcher updates (off, notify, automatic), close to tray, light or
+  dark appearance, the chain data folder with its free space, diagnostics for bug
+  reports, and deleting the node data.
 
 ## Documentation
 
@@ -30,24 +43,24 @@ Note: It currently requires a 64-bit processor, and on macOS, an ARM-based proce
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Uninstall](docs/UNINSTALL.md)
 
-## Developer Setup
+## Developer setup
 
-1. Make sure all of the [Tauri prerequisites](https://beta.tauri.app/guides/prerequisites/) are installed.
-2. Install `pnpm`
-3. Run `pnpm i` to install npm packages
-4. Run `pnpm tauri dev` to start the Tauri app.
-5. Add an empty `dist` folder to the root of this project to fix the Rust warning in `src-tauri/src/main.rs`
-6. Install `Prettier` for formatting .ts/.tsx/.css files
+Rust only: no Node, npm or pnpm. See [DEVELOPMENT.md](docs/DEVELOPMENT.md) for the
+prerequisites per platform, the quality gate and the test setup.
 
-#### Recommended IDE Setup
+```sh
+scripts/dev-sidecar.sh                    # builds a fake zebrad for development
+cargo install --locked trunk tauri-cli    # once
+cargo tauri dev
+```
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+`trunk serve` in `ui/` shows the UI alone against a mock backend at
+http://localhost:1420.
 
 ## Release
 
-The bundled `zebrad` version is pinned in `ZEBRAD_VERSION`. Binaries are no
-longer committed: the release pipeline being built will fetch the Linux
-`zebrad` from Zebra's signed releases and build the macOS and Windows ones
-from that tag in CI. Until it lands, the prototype under `src-tauri` only
-builds with a `zebrad-<target-triple>` sidecar placed in `src-tauri/binaries/`
-by hand.
+The bundled `zebrad` version is pinned in [`ZEBRAD_VERSION`](ZEBRAD_VERSION). Binaries
+are never committed: CI fetches the Linux `zebrad` from Zebra's signed releases and
+builds the macOS and Windows ones from the same tag ([SIDECARS.md](docs/SIDECARS.md)).
+Releases are built, signed and published by the workflow described in
+[RELEASING.md](docs/RELEASING.md).
