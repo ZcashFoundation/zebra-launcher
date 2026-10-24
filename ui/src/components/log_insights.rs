@@ -11,6 +11,7 @@ use wasm_bindgen::JsValue;
 
 use crate::{
     app::AppState,
+    components::rows::{Rows, text_rows},
     format::{relative, thousands},
     insights::{
         ACTIVITY_MINUTES, Checkpoints, Mempool, MinuteBucket, Peers, Problem, ProblemLevel, Run,
@@ -636,15 +637,7 @@ pub fn SyncStageCard() -> impl IntoView {
                 {tone_icon(tone)}
                 <strong>{stage.stage_text()}</strong>
             </div>
-            <dl class="rows insight-rows">
-                {rows
-                    .into_iter()
-                    .map(|(label, value)| view! {
-                        <dt>{label}</dt>
-                        <dd>{value}</dd>
-                    })
-                    .collect_view()}
-            </dl>
+            <Rows rows=text_rows(rows) class="insight-rows" />
             <p class="muted insight-foot">
                 "From zebrad's progress log, updated every minute · last "
                 {move || relative(at, state.now.get())}
