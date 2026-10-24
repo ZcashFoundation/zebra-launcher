@@ -255,30 +255,37 @@
   text-align: center;
 }
 
-/* The action bar sticks to the bottom of the page while the form is in view. Its wrapper
-   generates no box, so the bar moves within the whole form, not within the wrapper. */
+/* The footer (the failure banner and the action bar) sticks to the bottom of the page while the
+   form is in view, so a failed save is seen from wherever Save was pressed. Its containing block
+   is the whole form, so it moves within the form. */
 
 .cfg-footer {
-  display: contents;
+  position: sticky;
+  /* The sticky area is inset by the scrolling page's padding (16px in styles.css); this puts
+     the footer on the page's bottom edge instead of 16px above it with content showing under. */
+  bottom: -16px;
+  z-index: 2;
+  padding-top: 8px;
+  background: var(--bg);
 }
 
 .cfg-footer .banner {
   margin: 0 0 8px;
 }
 
+/* zebrad's error can be long; the stuck footer must not take the whole viewport. */
+.cfg-footer .error-panel pre {
+  max-height: 30vh;
+  overflow: auto;
+}
+
 .cfg-bar {
-  position: sticky;
-  /* The sticky area is inset by the scrolling page's padding (16px in styles.css); this puts
-     the bar on the page's bottom edge instead of 16px above it with content showing under. */
-  bottom: -16px;
-  z-index: 2;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 16px;
-  margin: 8px 0 0;
+  margin: 0;
   padding: 10px 0;
-  background: var(--bg);
   border-top: 1px solid var(--border);
 }
 
