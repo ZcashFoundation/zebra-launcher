@@ -323,6 +323,9 @@ pub fn is_synced(fraction: f64) -> bool {
     fraction >= SYNCED_PROGRESS
 }
 
+// Re-exported for pages/configure.rs until it imports from `config_view`.
+pub use crate::config_view::highlight_toml;
+
 /// `0.1.0` as `v0.1.0`; a version that already starts with `v` is left alone.
 pub fn version_tag(version: &str) -> String {
     if version.starts_with('v') {
@@ -330,62 +333,6 @@ pub fn version_tag(version: &str) -> String {
     } else {
         format!("v{version}")
     }
-}
-
-/// A highlighting class for a span of TOML text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TomlClass {
-    Plain,
-    Comment,
-    Section,
-    Key,
-    String,
-    Literal,
-}
-
-impl TomlClass {
-    pub fn css(self) -> &'static str {
-        match self {
-            TomlClass::Plain => "",
-            TomlClass::Comment => "toml-comment",
-            TomlClass::Section => "toml-section",
-            TomlClass::Key => "toml-key",
-            TomlClass::String => "toml-string",
-            TomlClass::Literal => "toml-literal",
-        }
-    }
-}
-
-/// Splits TOML text into classified spans, line by line, for the read-only config view.
-/// Deliberately simple: it only has to look right for config files, not parse them.
-pub fn highlight_toml(text: &str) -> Vec<(TomlClass, String)> {
-    let mut spans = Vec::new();
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
-            spans.push((TomlClass::Comment, line.to_owned()));
-        } else if trimmed.starts_with('[') {
-            spans.push((TomlClass::Section, line.to_owned()));
-        } else if let Some((key, value)) = line.split_once('=') {
-            spans.push((TomlClass::Key, key.to_owned()));
-            spans.push((TomlClass::Plain, "=".to_owned()));
-            let value_start = value.len() - value.trim_start().len();
-            spans.push((TomlClass::Plain, value[..value_start].to_owned()));
-            let value = &value[value_start..];
-            let class = match value.trim_end() {
-                v if v.starts_with('"') || v.starts_with('\'') => TomlClass::String,
-                "true" | "false" => TomlClass::Literal,
-                v if v.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '+') => {
-                    TomlClass::Literal
-                }
-                _ => TomlClass::Plain,
-            };
-            spans.push((class, value.to_owned()));
-        } else {
-            spans.push((TomlClass::Plain, line.to_owned()));
-        }
-    }
-    spans
 }
 
 #[cfg(test)]
@@ -642,18 +589,5 @@ mod tests {
     fn version_tags() {
         assert_eq!(version_tag("0.1.0"), "v0.1.0");
         assert_eq!(version_tag("v0.2.0"), "v0.2.0");
-    }
-
-    #[test]
-    fn toml_highlighting_round_trips() {
-        let text = "# comment\n[rpc]\nlisten_addr = \"127.0.0.1:8232\"\nenable_cookie_auth = true\npeers = [\n  \"a\",\n]\n";
-        let spans = highlight_toml(text);
-        let joined: String = spans.iter().map(|(_, text)| text.as_str()).collect();
-        assert_eq!(joined, text);
-        assert_eq!(spans[0].0, TomlClass::Comment);
-        assert_eq!(spans[1].0, TomlClass::Section);
-        assert_eq!(spans[2], (TomlClass::Key, "listen_addr ".into()));
-        assert_eq!(spans[5], (TomlClass::String, "\"127.0.0.1:8232\"\n".into()));
-        assert_eq!(spans[9], (TomlClass::Literal, "true\n".into()));
     }
 }

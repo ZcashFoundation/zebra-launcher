@@ -136,6 +136,62 @@ pub fn change_summary(changed: usize, removed: usize) -> String {
     }
 }
 
+/// A highlighting class for a span of TOML text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TomlClass {
+    Plain,
+    Comment,
+    Section,
+    Key,
+    String,
+    Literal,
+}
+
+impl TomlClass {
+    pub fn css(self) -> &'static str {
+        match self {
+            TomlClass::Plain => "",
+            TomlClass::Comment => "toml-comment",
+            TomlClass::Section => "toml-section",
+            TomlClass::Key => "toml-key",
+            TomlClass::String => "toml-string",
+            TomlClass::Literal => "toml-literal",
+        }
+    }
+}
+
+/// Splits TOML text into classified spans, line by line, for the read-only config view.
+/// Deliberately simple: it only has to look right for config files, not parse them.
+pub fn highlight_toml(text: &str) -> Vec<(TomlClass, String)> {
+    let mut spans = Vec::new();
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            spans.push((TomlClass::Comment, line.to_owned()));
+        } else if trimmed.starts_with('[') {
+            spans.push((TomlClass::Section, line.to_owned()));
+        } else if let Some((key, value)) = line.split_once('=') {
+            spans.push((TomlClass::Key, key.to_owned()));
+            spans.push((TomlClass::Plain, "=".to_owned()));
+            let value_start = value.len() - value.trim_start().len();
+            spans.push((TomlClass::Plain, value[..value_start].to_owned()));
+            let value = &value[value_start..];
+            let class = match value.trim_end() {
+                v if v.starts_with('"') || v.starts_with('\'') => TomlClass::String,
+                "true" | "false" => TomlClass::Literal,
+                v if v.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '+') => {
+                    TomlClass::Literal
+                }
+                _ => TomlClass::Plain,
+            };
+            spans.push((class, value.to_owned()));
+        } else {
+            spans.push((TomlClass::Plain, line.to_owned()));
+        }
+    }
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,5 +341,18 @@ mod tests {
         assert_eq!(change_summary(0, 2), "2 lines removed");
         assert_eq!(change_summary(3, 1), "3 lines changed, 1 removed");
         assert_eq!(change_summary(1, 2), "1 line changed, 2 removed");
+    }
+
+    #[test]
+    fn toml_highlighting_round_trips() {
+        let text = "# comment\n[rpc]\nlisten_addr = \"127.0.0.1:8232\"\nenable_cookie_auth = true\npeers = [\n  \"a\",\n]\n";
+        let spans = highlight_toml(text);
+        let joined: String = spans.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(joined, text);
+        assert_eq!(spans[0].0, TomlClass::Comment);
+        assert_eq!(spans[1].0, TomlClass::Section);
+        assert_eq!(spans[2], (TomlClass::Key, "listen_addr ".into()));
+        assert_eq!(spans[5], (TomlClass::String, "\"127.0.0.1:8232\"\n".into()));
+        assert_eq!(spans[9], (TomlClass::Literal, "true\n".into()));
     }
 }
