@@ -17,7 +17,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use launcher_types::{ApplyErrorKind, ApplyOutcome, ConfigDocument, Phase};
+use launcher_types::{ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, Phase};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -267,6 +267,78 @@ fn typed_forbidden<'a>(
         .find(|id| saved.get(*id).is_none())
 }
 
+/// What a re-read does with the draft, and what it tells the user. A draft without edits is
+/// replaced quietly. An edited one is kept as it is when a field edit cannot put it back
+/// (`keeps_draft`, asked only then), else its field edits are set again on top of the fresh
+/// file; both ways the user is told how it was treated, once the file is seen to differ.
+fn reload_plan(edited: bool, keeps_draft: impl FnOnce() -> bool) -> (Reload, Option<Notice>) {
+    if !edited {
+        return (Reload::Replace, None);
+    }
+    let kept = keeps_draft();
+    (Reload::of_edited(kept), Some(Notice::Conflict { kept }))
+}
+
+/// True when a re-read must keep the draft as it is rather than set its changed fields again
+/// on the fresh file: it is edited as text, it is not TOML (`current` is `None`), or it is
+/// more than the saved file with the form's values written in (a comment, an unknown key, a
+/// forbidden key or another text edit). `values` and `errors` are the form's; a field whose
+/// text is invalid holds the draft's value in the file, as `sync_draft` rendered it.
+fn draft_must_be_kept(
+    text_mode: bool,
+    current: Option<&FormState>,
+    saved: &str,
+    draft: &str,
+    values: &FormState,
+    errors: &BTreeMap<FieldId, String>,
+) -> bool {
+    if text_mode {
+        return true;
+    }
+    let Some(current) = current else {
+        return true;
+    };
+    !draft_is_form_only(saved, draft, &render_values(values, errors, current))
+}
+
+/// The reload to do once the file is read, given the one asked for: a `Replace` would lose a
+/// draft edited while the file was read, so it becomes the re-read `plan` for the edited draft
+/// (asked only then); `KeepDraft` and `ReapplyPending` already keep the edit.
+fn reload_override(
+    requested: Reload,
+    edited_meanwhile: bool,
+    plan: impl FnOnce() -> Reload,
+) -> Reload {
+    if requested == Reload::Replace && edited_meanwhile {
+        plan()
+    } else {
+        requested
+    }
+}
+
+/// What a save's outcome means for the draft and the user. Applied: the fresh file replaces the
+/// draft. Rolled back: the draft stays, against the restored file. Conflict: the file is re-read
+/// around the draft as an edited draft's re-read is (`keeps_draft`, asked only then). Any other
+/// failure leaves the file and the draft as they are. `restarted` is whether the save was to
+/// restart zebrad.
+fn after_apply(
+    result: Result<ApplyOutcome, ApplyError>,
+    restarted: bool,
+    keeps_draft: impl FnOnce() -> bool,
+) -> (Option<Reload>, Notice) {
+    match result {
+        Ok(ApplyOutcome::Applied) => (Some(Reload::Replace), Notice::Saved { restarted }),
+        Ok(ApplyOutcome::RolledBack { error }) => {
+            (Some(Reload::KeepDraft), Notice::RolledBack(error))
+        }
+        Err(error) if error.kind == ApplyErrorKind::Conflict => {
+            let kept = keeps_draft();
+            (Some(Reload::of_edited(kept)), Notice::Conflict { kept })
+        }
+        Err(error) => (None, Notice::Failed(error.message)),
+    }
+}
+
 /// The draft of `zebrad.toml` and everything that reads or writes it. Every field is a signal
 /// or a memo, so the struct is `Copy` and is shared by the form pane, the file pane and the
 /// action bar.
@@ -442,41 +514,35 @@ impl ConfigEditor {
             .with(|document| document.as_ref().map(|document| document.path.clone()))
     }
 
-    /// How to re-read the file around the current draft, and what to tell the user: a draft
-    /// that holds more than the form's values is kept as it is, one that is the file with the
-    /// form's edits is put back on top of the fresh file, and no draft is replaced quietly.
+    /// How to re-read the file around the current draft, and what to tell the user:
+    /// [`reload_plan`] over the draft's state.
     fn pending_reload(self) -> (Reload, Option<Notice>) {
-        if !self.edited.get_untracked() {
-            return (Reload::Replace, None);
-        }
-        let kept = self.keeps_draft();
-        (Reload::of_edited(kept), Some(Notice::Conflict { kept }))
+        reload_plan(self.edited.get_untracked(), || self.keeps_draft())
     }
 
-    /// True when a re-read must keep the draft as it is: it is edited as text, or it is more than
-    /// the saved file with the form's values written in (a comment, an unknown key, a forbidden
-    /// key or text that is not TOML), which setting the changed fields again cannot put back.
+    /// True when a re-read must keep the draft as it is: [`draft_must_be_kept`] over the
+    /// draft's state.
     fn keeps_draft(self) -> bool {
-        if self.text_mode.get_untracked() {
-            return true;
-        }
-        let Some(current) = self.parsed.with_untracked(|parsed| {
+        let current = self.parsed.with_untracked(|parsed| {
             parsed
                 .as_ref()
                 .ok()
                 .map(|parsed| normalised(FIELDS.iter(), &parsed.form))
-        }) else {
-            return true;
-        };
-        let saved = self.saved_text_untracked();
-        // What `sync_draft` rendered: an invalid text keeps the draft's own value.
-        let values = self.values.with_untracked(|values| {
-            self.errors
-                .with_untracked(|errors| render_values(values, errors, &current))
         });
-        !self
-            .draft
-            .with_untracked(|draft| draft_is_form_only(&saved, draft, &values))
+        let saved = self.saved_text_untracked();
+        let draft = self.draft.get_untracked();
+        self.values.with_untracked(|values| {
+            self.errors.with_untracked(|errors| {
+                draft_must_be_kept(
+                    self.text_mode.get_untracked(),
+                    current.as_ref(),
+                    &saved,
+                    &draft,
+                    values,
+                    errors,
+                )
+            })
+        })
     }
 
     /// Re-reads the file around the draft as [`Self::pending_reload`] says and, when the file
@@ -509,11 +575,7 @@ impl ConfigEditor {
             }
         };
         let edited_meanwhile = self.draft.with_untracked(|draft| *draft != draft_before);
-        let mode = if mode == Reload::Replace && edited_meanwhile {
-            self.pending_reload().0
-        } else {
-            mode
-        };
+        let mode = reload_override(mode, edited_meanwhile, || self.pending_reload().0);
         match mode {
             Reload::Replace => {
                 self.document.set(Some(fresh));
@@ -624,10 +686,7 @@ impl ConfigEditor {
             && self.render_error.with(Option::is_none)
     }
 
-    /// Applies the draft. Applied: the file is re-read and becomes the draft. Rolled back: the
-    /// draft stays, against the restored file. Conflict: the file is re-read and the draft kept
-    /// as it is, or, when it is the file with the form's edits and nothing more, its edits put
-    /// back on top of the fresh file.
+    /// Applies the draft and treats the outcome as [`after_apply`] says.
     pub fn save(self) {
         if !untrack(|| self.can_save()) {
             return;
@@ -641,24 +700,13 @@ impl ConfigEditor {
         self.saving.set(true);
         self.notice.set(None);
         spawn_local(async move {
-            let next = match api::apply_config(text, token).await {
-                Ok(ApplyOutcome::Applied) => {
-                    self.reload(Reload::Replace).await;
-                    Notice::Saved { restarted }
-                }
-                Ok(ApplyOutcome::RolledBack { error }) => {
-                    self.reload(Reload::KeepDraft).await;
-                    Notice::RolledBack(error)
-                }
-                Err(error) if error.kind == ApplyErrorKind::Conflict => {
-                    let kept = self.keeps_draft();
-                    self.reload(Reload::of_edited(kept)).await;
-                    Notice::Conflict { kept }
-                }
-                Err(error) => Notice::Failed(error.message),
-            };
+            let result = api::apply_config(text, token).await;
+            let (reload, notice) = after_apply(result, restarted, || self.keeps_draft());
+            if let Some(reload) = reload {
+                self.reload(reload).await;
+            }
             self.saving.set(false);
-            self.show_notice(next);
+            self.show_notice(notice);
         });
     }
 
@@ -967,6 +1015,178 @@ mod tests {
         assert_eq!(save_label(false), "Save");
         assert!(saved_message(true).contains("restarted"));
         assert_eq!(saved_message(false), "Saved.");
+    }
+
+    /// `ApplyError` of a kind, with a message naming it.
+    fn apply_error(kind: ApplyErrorKind) -> ApplyError {
+        ApplyError {
+            kind,
+            message: format!("{kind:?}"),
+        }
+    }
+
+    #[test]
+    fn a_reread_replaces_an_unedited_draft_quietly_and_names_what_it_did_to_an_edited_one() {
+        // Nothing to lose: the fresh file replaces the draft and nothing is said. Whether the
+        // draft could be rebuilt is not even asked.
+        assert_eq!(
+            reload_plan(false, || unreachable!("asked for an unedited draft")),
+            (Reload::Replace, None)
+        );
+        // Edited and rebuildable: the field edits go back on top of the fresh file.
+        assert_eq!(
+            reload_plan(true, || false),
+            (
+                Reload::ReapplyPending,
+                Some(Notice::Conflict { kept: false })
+            )
+        );
+        // Edited as text, or more than the form's values: kept as it is.
+        assert_eq!(
+            reload_plan(true, || true),
+            (Reload::KeepDraft, Some(Notice::Conflict { kept: true }))
+        );
+    }
+
+    #[test]
+    fn a_draft_is_kept_unless_it_is_the_file_with_the_forms_values() {
+        // The real schema: `rpc.parallel_cpu_threads` is a user field.
+        let saved = "# Managed\n\n[rpc]\nparallel_cpu_threads = 4\n";
+        let mut values = values_of(saved);
+        values.set(PORT.id(), Some("8".to_owned()));
+        let draft = render_config(saved, &values).expect("renders");
+        let current = values_of(&draft);
+        let no_errors = BTreeMap::new();
+        // The file with the form's edits and nothing more: the edits can be set again.
+        assert!(!draft_must_be_kept(
+            false,
+            Some(&current),
+            saved,
+            &draft,
+            &values,
+            &no_errors
+        ));
+        // Edited as text: kept whatever it holds.
+        assert!(draft_must_be_kept(
+            true,
+            Some(&current),
+            saved,
+            &draft,
+            &values,
+            &no_errors
+        ));
+        // Not TOML: kept, there are no values to set again.
+        assert!(draft_must_be_kept(
+            false,
+            None,
+            saved,
+            "not = [toml",
+            &values,
+            &no_errors
+        ));
+        // A comment typed as text is more than the form's values.
+        let commented = format!("# tuned for my box\n{draft}");
+        assert!(draft_must_be_kept(
+            false,
+            Some(&values_of(&commented)),
+            saved,
+            &commented,
+            &values,
+            &no_errors
+        ));
+        // A field whose text is invalid holds the draft's value in the file, so the draft is
+        // still the file with the form's values: not kept, the edit is set again (and stays
+        // invalid in the form).
+        let mut typing = values.clone();
+        typing.set(PORT.id(), Some("abc".to_owned()));
+        let errors = validation_errors([PORT].iter(), &typing);
+        assert!(
+            errors.contains_key(&PORT.id()),
+            "the test needs an invalid text"
+        );
+        assert!(!draft_must_be_kept(
+            false,
+            Some(&current),
+            saved,
+            &draft,
+            &typing,
+            &errors
+        ));
+    }
+
+    #[test]
+    fn a_reload_replaces_the_draft_only_when_nothing_was_typed_meanwhile() {
+        // Nothing typed while the file was read: the reload asked for happens.
+        assert_eq!(
+            reload_override(Reload::Replace, false, || unreachable!("no plan needed")),
+            Reload::Replace
+        );
+        // Typed meanwhile: a replace would lose it, so the edited draft's plan is used.
+        assert_eq!(
+            reload_override(Reload::Replace, true, || Reload::ReapplyPending),
+            Reload::ReapplyPending
+        );
+        assert_eq!(
+            reload_override(Reload::Replace, true, || Reload::KeepDraft),
+            Reload::KeepDraft
+        );
+        // The reloads that keep the draft are not second-guessed.
+        for requested in [Reload::KeepDraft, Reload::ReapplyPending] {
+            assert_eq!(
+                reload_override(requested, true, || unreachable!("already keeps the draft")),
+                requested
+            );
+        }
+    }
+
+    #[test]
+    fn a_saves_outcome_decides_the_reload_and_the_notice() {
+        for restarted in [false, true] {
+            assert_eq!(
+                after_apply(Ok(ApplyOutcome::Applied), restarted, || unreachable!()),
+                (Some(Reload::Replace), Notice::Saved { restarted })
+            );
+        }
+        assert_eq!(
+            after_apply(
+                Ok(ApplyOutcome::RolledBack {
+                    error: "bad port".to_owned()
+                }),
+                true,
+                || unreachable!()
+            ),
+            (
+                Some(Reload::KeepDraft),
+                Notice::RolledBack("bad port".to_owned())
+            )
+        );
+        // A conflict re-reads the file around the draft as an edited draft's re-read does.
+        assert_eq!(
+            after_apply(Err(apply_error(ApplyErrorKind::Conflict)), true, || true),
+            (Some(Reload::KeepDraft), Notice::Conflict { kept: true })
+        );
+        assert_eq!(
+            after_apply(Err(apply_error(ApplyErrorKind::Conflict)), true, || false),
+            (
+                Some(Reload::ReapplyPending),
+                Notice::Conflict { kept: false }
+            )
+        );
+        // Every other failure wrote nothing: no reload, the message as it is.
+        for kind in [
+            ApplyErrorKind::InvalidToml,
+            ApplyErrorKind::Forbidden,
+            ApplyErrorKind::ApplyInProgress,
+            ApplyErrorKind::Io,
+            ApplyErrorKind::Busy,
+            ApplyErrorKind::Closed,
+            ApplyErrorKind::Internal,
+        ] {
+            assert_eq!(
+                after_apply(Err(apply_error(kind)), true, || unreachable!("{kind:?}")),
+                (None, Notice::Failed(format!("{kind:?}")))
+            );
+        }
     }
 
     #[test]
