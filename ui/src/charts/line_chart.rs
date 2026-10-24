@@ -118,15 +118,19 @@ fn Plot(
     let classes = move || data.with(|d| d.series.iter().map(|s| s.class).collect::<Vec<_>>());
 
     // Measure the plot once mounted, with every new sample (which also catches layout changes
-    // without a window resize) and on window resizes. A hidden page measures zero: skipped.
+    // without a window resize), on window resizes, and whenever the active tab changes. A
+    // hidden page measures zero, which is skipped, so a resize made while another tab was
+    // open is only seen once the dashboard shows again.
     let measure = move |plot: &web_sys::HtmlDivElement| {
         let measured = plot.get_bounding_client_rect().width();
         if measured > 0.0 && (measured - width.get_untracked()).abs() >= 0.5 {
             width.set(measured);
         }
     };
+    let state = crate::app::AppState::get();
     Effect::new(move |_| {
         data.track();
+        state.tab.track();
         if let Some(plot) = plot_ref.get() {
             measure(&plot);
         }
@@ -323,7 +327,12 @@ fn Plot(
                 height="220"
                 tabindex="0"
                 role="img"
-                aria-label=move || label.get()
+                aria-label=move || {
+                    format!(
+                        "{} Use the left and right arrow keys to read one sample, or the Table button for all of them.",
+                        label.get()
+                    )
+                }
                 on:pointermove=move |ev| hover.set(locate(&ev))
                 on:pointerleave=move |_| hover.set(None)
                 on:focus=on_focus
@@ -333,7 +342,8 @@ fn Plot(
                 {axes_and_lines}
                 {crosshair}
             </svg>
-            {tooltip}
+            // A persistent live region, so a tooltip moved by the arrow keys is announced.
+            <div class="chart-tooltip-layer" role="status">{tooltip}</div>
         </div>
     }
 }
