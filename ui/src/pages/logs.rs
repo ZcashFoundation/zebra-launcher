@@ -1,15 +1,13 @@
 //! The log viewer: zebrad's output with level colours, filters, follow-at-bottom and copy,
 //! and the analysis panel built from [`crate::insights::Insights`].
 
-use std::time::Duration;
-
 use launcher_types::{LogLevel, LogLine, LogStream};
 use leptos::{html, prelude::*, task::spawn_local};
 
 use crate::{
     app::{AppState, Tab},
     clipboard::copy_to_clipboard,
-    components::log_insights::LogInsightsPanel,
+    components::{log_insights::LogInsightsPanel, outcome_note::OutcomeNote, transient::Transient},
     log_view::{LogEntry, LogFilter, entries_text, split_matches, time_of_day},
 };
 
@@ -120,9 +118,7 @@ pub fn Logs() -> impl IntoView {
     let following = RwSignal::new(true);
     let analysis_open = RwSignal::new(true);
     let nowrap = RwSignal::new(false);
-    let copy_note = RwSignal::new(None::<String>);
-    // Bumped by every copy, so the timer of an earlier copy does not clear a newer note.
-    let copy_generation = StoredValue::new(0u64);
+    let copy_note = Transient::<Result<String, String>>::new();
     let scroller = NodeRef::<html::Div>::new();
 
     let entries = Memo::new(move |_| {
@@ -202,21 +198,10 @@ pub fn Logs() -> impl IntoView {
         let count = entries.len();
         let text = entries_text(&entries);
         spawn_local(async move {
-            let note = match copy_to_clipboard(&text).await {
-                Ok(()) => format!("Copied {count} lines"),
-                Err(error) => format!("Copy failed: {error}"),
-            };
-            copy_generation.update_value(|generation| *generation += 1);
-            let mine = copy_generation.get_value();
-            copy_note.set(Some(note));
-            set_timeout(
-                move || {
-                    if copy_generation.get_value() == mine {
-                        copy_note.set(None);
-                    }
-                },
-                Duration::from_secs(3),
-            );
+            copy_note.report(match copy_to_clipboard(&text).await {
+                Ok(()) => Ok(format!("Copied {count} lines")),
+                Err(error) => Err(format!("Copy failed: {error}")),
+            });
         });
     };
 
@@ -324,7 +309,7 @@ pub fn Logs() -> impl IntoView {
                 "Wrap"
             </button>
             <button on:click=copy_visible>"Copy visible"</button>
-            {move || copy_note.get().map(|note| view! { <span class="muted">{note}</span> })}
+            <OutcomeNote outcome=copy_note.signal() />
             <span class="spacer"></span>
             <span class="muted">
                 {move || {

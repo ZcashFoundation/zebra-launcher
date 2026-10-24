@@ -29,10 +29,12 @@ mod components {
     pub mod config_form;
     pub mod log_insights;
     pub mod nav;
+    pub mod outcome_note;
     pub mod reset_config;
     pub mod stale_banner;
     pub mod status_strip;
     pub mod tooltip;
+    pub mod transient;
     pub mod update_mode_choice;
     pub mod updates;
 }

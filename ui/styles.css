@@ -158,6 +158,17 @@ pre {
   color: var(--ok);
 }
 
+/* The outcome of an action (components/outcome_note.rs): beside its button, or as a line under
+   it. Empty until there is one, taking no room, so the live region is there before its text
+   changes. */
+.outcome-note {
+  margin: 0;
+}
+
+p.outcome-note:not(:empty) {
+  margin: 6px 0 0;
+}
+
 /* Text for assistive technology only. `.cfg-sr-only` is the Configure page's old name for it
    and goes once pages/configure.rs uses `visually-hidden`. */
 .visually-hidden,
