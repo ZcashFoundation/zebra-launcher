@@ -687,17 +687,27 @@ fn field_row(field: &'static Field, form: Form, shown: Memo<BTreeSet<FieldId>>) 
             field,
             input_id.clone(),
             hint_id,
-            in_file,
+            Signal::derive(move || in_file.get().unwrap_or_else(|| display_default(field))),
             "Managed by the launcher",
             note,
         )
         .into_any(),
-        Control::Forced { note } => locked_control(
+        // The value the launcher forces, not the one in the file, which never takes effect.
+        Control::Forced { note, value } => locked_control(
             field,
             input_id.clone(),
             hint_id,
-            in_file,
+            Signal::derive(move || value.unwrap_or("not set").to_owned()),
             "Set by the launcher",
+            note,
+        )
+        .into_any(),
+        Control::Forbidden { note } => locked_control(
+            field,
+            input_id.clone(),
+            hint_id,
+            Signal::derive(move || in_file.get().unwrap_or_else(|| "not set".to_owned())),
+            "Not allowed by the launcher",
             note,
         )
         .into_any(),
@@ -929,13 +939,12 @@ fn user_control(
     }
 }
 
-/// A field the launcher controls: its value from the file, read-only, with a badge and the
-/// schema's note.
+/// A field the launcher controls: `shown` read-only, with a badge and the schema's note.
 fn locked_control(
     field: &'static Field,
     input_id: String,
     hint_id: String,
-    in_file: Signal<Option<String>>,
+    shown: Signal<String>,
     badge: &'static str,
     note: &'static str,
 ) -> impl IntoView {
@@ -947,7 +956,7 @@ fn locked_control(
                 id=input_id
                 aria-describedby=hint_id.clone()
                 readonly=true
-                prop:value=move || in_file.get().unwrap_or_else(|| display_default(field))
+                prop:value=move || shown.get()
             />
             <span class="cfg-badge">{badge}</span>
         </div>

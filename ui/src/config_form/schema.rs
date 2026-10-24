@@ -57,8 +57,8 @@ const PUBLIC_ADDR: Kind = Kind::SocketAddr {
 pub const SKIPPED_SECTIONS: &[&str] = &["zcashd_compat"];
 
 const COLOUR_NOTE: &str = "The launcher turns colour off so the Logs page can parse the output.";
-const OUTPUT_NOTE: &str =
-    "The launcher keeps zebrad's output on the Logs page and in its own log file.";
+const OUTPUT_NOTE: &str = "The launcher refuses a file that sets it: zebrad's output stays on the \
+                           Logs page and in the launcher's log file. Saving removes it.";
 
 /// The sections, in display order.
 pub const SECTIONS: &[Section] = &[
@@ -576,7 +576,10 @@ pub const FIELDS: &[Field] = &[
         kind: Kind::Bool,
         default: Some("true"),
         doc: "When true the node colours its log output when it writes to a terminal.",
-        control: Control::Forced { note: COLOUR_NOTE },
+        control: Control::Forced {
+            note: COLOUR_NOTE,
+            value: Some("false"),
+        },
     },
     Field {
         section: "tracing",
@@ -586,7 +589,10 @@ pub const FIELDS: &[Field] = &[
         default: Some("false"),
         doc: "When true the node colours its log output even when it is not writing to a \
               terminal.",
-        control: Control::Forced { note: COLOUR_NOTE },
+        control: Control::Forced {
+            note: COLOUR_NOTE,
+            value: Some("false"),
+        },
     },
     Field {
         section: "tracing",
@@ -643,7 +649,7 @@ pub const FIELDS: &[Field] = &[
         doc: "Shows progress bars for syncing, the mempool and peers in the terminal and moves \
               the logs to a file. Only works when zebrad is built with the progress-bar \
               feature.",
-        control: Control::Forced { note: OUTPUT_NOTE },
+        control: Control::Forbidden { note: OUTPUT_NOTE },
     },
     Field {
         section: "tracing",
@@ -652,7 +658,7 @@ pub const FIELDS: &[Field] = &[
         kind: Kind::Path,
         default: None,
         doc: "Writes the node's logs to this file instead of the terminal.",
-        control: Control::Forced { note: OUTPUT_NOTE },
+        control: Control::Forbidden { note: OUTPUT_NOTE },
     },
     Field {
         section: "tracing",

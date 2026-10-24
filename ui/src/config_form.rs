@@ -61,8 +61,15 @@ pub enum Control {
     /// with `note` saying where it is changed, if anywhere.
     Managed { note: &'static str },
     /// The launcher overrides it with an environment variable on every start, so a value in
-    /// the file never takes effect; shown read-only with `note`.
-    Forced { note: &'static str },
+    /// the file never takes effect; shown read-only as `value` (`None`: the launcher forces
+    /// the key unset) with `note`.
+    Forced {
+        note: &'static str,
+        value: Option<&'static str>,
+    },
+    /// The launcher refuses a file that sets it (`validate` in launcher-core), so a value found
+    /// in the file is removed on save; shown read-only with `note`.
+    Forbidden { note: &'static str },
 }
 
 /// One key of `zebrad.toml`.
@@ -230,7 +237,7 @@ fn item_text(kind: Kind, item: &Item) -> Option<String> {
 
 /// The text as it is written to the file: trimmed, and for a list one trimmed entry per line
 /// with blank lines dropped. Empty means "use the default".
-fn normalize(kind: Kind, text: &str) -> String {
+pub fn normalize(kind: Kind, text: &str) -> String {
     match kind {
         Kind::StringList => list_entries(text).collect::<Vec<_>>().join("\n"),
         _ => text.trim().to_owned(),
@@ -388,8 +395,14 @@ fn is_host_name(host: &str) -> bool {
 pub fn render_config(original: &str, form: &FormState) -> Result<String, String> {
     let mut doc = parse_document(original)?;
     for field in FIELDS {
-        if field.control != Control::User {
-            continue;
+        match field.control {
+            Control::User => {}
+            // A value zebrad.toml must not carry: dropped so the launcher accepts the file.
+            Control::Forbidden { .. } => {
+                remove_value(&mut doc, field);
+                continue;
+            }
+            Control::Managed { .. } | Control::Forced { .. } => continue,
         }
         let text = form
             .get(field.id())
@@ -671,7 +684,10 @@ mod tests {
         }
         for field in FIELDS {
             assert_sentence(field.doc, &field.path());
-            if let Control::Managed { note } | Control::Forced { note } = field.control {
+            if let Control::Managed { note }
+            | Control::Forced { note, .. }
+            | Control::Forbidden { note } = field.control
+            {
                 assert_sentence(note, &field.path());
             }
         }
@@ -726,12 +742,16 @@ mod tests {
             .collect();
         assert_eq!(
             forced,
-            BTreeSet::from([
-                ("tracing", "use_color"),
-                ("tracing", "force_use_color"),
-                ("tracing", "progress_bar"),
-                ("tracing", "log_file"),
-            ])
+            BTreeSet::from([("tracing", "use_color"), ("tracing", "force_use_color")])
+        );
+        let forbidden: BTreeSet<FieldId> = FIELDS
+            .iter()
+            .filter(|field| matches!(field.control, Control::Forbidden { .. }))
+            .map(Field::id)
+            .collect();
+        assert_eq!(
+            forbidden,
+            BTreeSet::from([("tracing", "progress_bar"), ("tracing", "log_file")])
         );
     }
 
