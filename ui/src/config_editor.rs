@@ -228,7 +228,7 @@ pub fn save_label(restarts: bool) -> &'static str {
     }
 }
 
-pub fn saved_text(restarted: bool) -> &'static str {
+pub fn saved_message(restarted: bool) -> &'static str {
     if restarted {
         "Saved. zebrad restarted with the new configuration."
     } else {
@@ -416,6 +416,32 @@ impl ConfigEditor {
         editor
     }
 
+    /// The saved file's text, tracked; empty until the first read.
+    pub fn saved_text(self) -> String {
+        self.document
+            .with(|document| document.as_ref().map(|document| document.text.clone()))
+            .unwrap_or_default()
+    }
+
+    /// [`Self::saved_text`] without tracking, for the editor's own steps.
+    fn saved_text_untracked(self) -> String {
+        self.document
+            .with_untracked(|document| document.as_ref().map(|document| document.text.clone()))
+            .unwrap_or_default()
+    }
+
+    /// The saved file's compare-and-swap token, untracked; `None` until the first read.
+    fn saved_token(self) -> Option<String> {
+        self.document
+            .with_untracked(|document| document.as_ref().map(|document| document.token.clone()))
+    }
+
+    /// The saved file's path, tracked, for display; `None` until the first read.
+    pub fn path(self) -> Option<String> {
+        self.document
+            .with(|document| document.as_ref().map(|document| document.path.clone()))
+    }
+
     /// How to re-read the file around the current draft, and what to tell the user: a draft
     /// that holds more than the form's values is kept as it is, one that is the file with the
     /// form's edits is put back on top of the fresh file, and no draft is replaced quietly.
@@ -442,10 +468,7 @@ impl ConfigEditor {
         }) else {
             return true;
         };
-        let saved = self
-            .document
-            .with_untracked(|document| document.as_ref().map(|document| document.text.clone()))
-            .unwrap_or_default();
+        let saved = self.saved_text_untracked();
         // What `sync_draft` rendered: an invalid text keeps the draft's own value.
         let values = self.values.with_untracked(|values| {
             self.errors
@@ -461,14 +484,10 @@ impl ConfigEditor {
     /// failed read leaves the draft and shows the error instead.
     async fn reload_pending(self) {
         let (mode, notice) = self.pending_reload();
-        let text = move || {
-            self.document
-                .with_untracked(|document| document.as_ref().map(|document| document.text.clone()))
-        };
-        let before = text();
+        let before = self.saved_text_untracked();
         self.reload(mode).await;
         if let Some(notice) = notice
-            && text() != before
+            && self.saved_text_untracked() != before
             && self.load.with_untracked(|load| *load == Load::Ready)
         {
             self.show_notice(notice);
@@ -520,10 +539,7 @@ impl ConfigEditor {
 
     /// Makes the draft the saved file again, the form reading its values from it.
     fn reset_draft(self) {
-        let text = self
-            .document
-            .with_untracked(|document| document.as_ref().map(|document| document.text.clone()))
-            .unwrap_or_default();
+        let text = self.saved_text_untracked();
         self.edits.set(values_of(&text));
         self.draft.set(text);
         self.render_error.set(None);
@@ -617,10 +633,7 @@ impl ConfigEditor {
             return;
         }
         self.sync_draft();
-        let Some(token) = self
-            .document
-            .with_untracked(|document| document.as_ref().map(|document| document.token.clone()))
-        else {
+        let Some(token) = self.saved_token() else {
             return;
         };
         let text = self.draft.get_untracked();
@@ -952,8 +965,8 @@ mod tests {
         assert_eq!(text_only_note(2, true), None);
         assert_eq!(save_label(true), "Save and restart zebrad");
         assert_eq!(save_label(false), "Save");
-        assert!(saved_text(true).contains("restarted"));
-        assert_eq!(saved_text(false), "Saved.");
+        assert!(saved_message(true).contains("restarted"));
+        assert_eq!(saved_message(false), "Saved.");
     }
 
     #[test]

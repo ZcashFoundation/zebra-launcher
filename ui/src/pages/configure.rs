@@ -19,7 +19,7 @@ use wasm_bindgen::{JsCast, closure::Closure};
 use crate::{
     components::{config_form_view::ZebradConfigForm, reset_config::ResetConfigButton},
     config_editor::{
-        ConfigEditor, Load, Notice, changed_list, changes_text, save_label, saved_text,
+        ConfigEditor, Load, Notice, changed_list, changes_text, save_label, saved_message,
         text_only_note,
     },
     config_view::{LineChange, change_summary, key_line, line_changes, scroll_to_reveal},
@@ -32,11 +32,6 @@ const FLASH_FOR: Duration = Duration::from_millis(1200);
 #[component]
 pub fn Configure() -> impl IntoView {
     let editor = ConfigEditor::new();
-    let path = move || {
-        editor
-            .document
-            .with(|document| document.as_ref().map(|document| document.path.clone()))
-    };
     let has_document = move || editor.document.with(Option::is_some);
     // Ctrl (or Cmd) + S saves, from anywhere on the page.
     let on_key = move |event: web_sys::KeyboardEvent| {
@@ -106,7 +101,7 @@ pub fn Configure() -> impl IntoView {
     };
     let saved_view = move || {
         editor.notice.get().and_then(|notice| match notice {
-            Notice::Saved { restarted } => Some(saved_text(restarted)),
+            Notice::Saved { restarted } => Some(saved_message(restarted)),
             _ => None,
         })
     };
@@ -176,7 +171,7 @@ pub fn Configure() -> impl IntoView {
                 <div>
                     <h2>"zebrad configuration"</h2>
                     <p class="muted path">
-                        {move || path().map(|path| view! { <code>{path}</code> })}
+                        {move || editor.path().map(|path| view! { <code>{path}</code> })}
                     </p>
                     <p class="muted cfg-lead">
                         "Change a setting in the form and zebrad.toml follows, with the changed lines marked. The file can also be edited as text."
@@ -265,23 +260,13 @@ fn FilePane(editor: ConfigEditor) -> impl IntoView {
     // Bumped by every flash, so the timer of an earlier one does not end a newer one.
     let flash_generation = StoredValue::new(0u64);
     let lines = Memo::new(move |_| {
-        let saved = editor.document.with(|document| {
-            document
-                .as_ref()
-                .map(|document| document.text.clone())
-                .unwrap_or_default()
-        });
+        let saved = editor.saved_text();
         editor.draft.with(|draft| line_changes(&saved, draft))
     });
     let summary = move || {
         lines.with(|(lines, removed)| {
             change_summary(lines.iter().filter(|line| line.changed).count(), *removed)
         })
-    };
-    let path = move || {
-        editor
-            .document
-            .with(|document| document.as_ref().map(|document| document.path.clone()))
     };
 
     // A form edit brings its key's line into view and flashes it, restarting the flash when the
@@ -369,7 +354,7 @@ fn FilePane(editor: ConfigEditor) -> impl IntoView {
     view! {
         <aside class="cfg-pane-file" aria-labelledby="cfg-file-title">
             <div class="cfg-file-head">
-                <span class="cfg-file-title" id="cfg-file-title" title=path>
+                <span class="cfg-file-title" id="cfg-file-title" title=move || editor.path()>
                     "zebrad.toml"
                 </span>
                 <span class="muted cfg-file-summary">{summary}</span>
