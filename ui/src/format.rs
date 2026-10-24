@@ -2,7 +2,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::{ExitClass, Phase, Theme};
+use launcher_types::{ExitClass, Phase};
 
 /// A short label for a phase, for the badge.
 pub fn phase_label(phase: &Phase) -> &'static str {
@@ -146,27 +146,6 @@ pub fn data_change_allowed(phase: &Phase) -> bool {
     matches!(phase, Phase::Stopped | Phase::Failed { .. })
 }
 
-/// The label and explanation of an appearance, for the Settings radios.
-pub fn theme_text(theme: Theme) -> (&'static str, &'static str) {
-    match theme {
-        Theme::System => (
-            "System",
-            "Follow the operating system's light or dark setting.",
-        ),
-        Theme::Light => ("Light", "Always light."),
-        Theme::Dark => ("Dark", "Always dark."),
-    }
-}
-
-/// The `value` of an appearance radio, the same word as on the wire.
-pub fn theme_value(theme: Theme) -> &'static str {
-    match theme {
-        Theme::System => "system",
-        Theme::Light => "light",
-        Theme::Dark => "dark",
-    }
-}
-
 /// The shortcut for the tab at `number` (1 to 5), as a tooltip: `Ctrl+1`, or `⌘1` on a Mac.
 pub fn shortcut_label(number: usize, mac: bool) -> String {
     if mac {
@@ -201,6 +180,8 @@ pub use crate::config_view::highlight_toml;
 pub use crate::update_text::{
     NOTES_EXCERPT_CHARS, download_progress, notes_excerpt, update_mode_text, update_state_text,
 };
+// Re-exported for pages/settings.rs until it imports from `theme`.
+pub use crate::theme::{theme_text, theme_value};
 
 /// `0.1.0` as `v0.1.0`; a version that already starts with `v` is left alone.
 pub fn version_tag(version: &str) -> String {
@@ -306,14 +287,6 @@ mod tests {
         for phase in [Phase::Starting, Phase::Running, Phase::Stopping] {
             assert!(!data_change_allowed(&phase), "{phase:?}");
         }
-    }
-
-    #[test]
-    fn theme_words() {
-        assert_eq!(theme_text(Theme::System).0, "System");
-        assert_eq!(theme_value(Theme::System), "system");
-        assert_eq!(theme_value(Theme::Light), "light");
-        assert_eq!(theme_value(Theme::Dark), "dark");
     }
 
     #[test]
