@@ -193,7 +193,6 @@
 }
 
 .cfg-field input[type="text"],
-.cfg-field input[type="number"],
 .cfg-field select,
 .cfg-field textarea {
   width: 100%;

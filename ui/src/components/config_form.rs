@@ -821,14 +821,16 @@ fn user_control(
             </div>
         }
         .into_any(),
-        Kind::Integer { min, max } => view! {
+        // A text input, not a number one: a number input's value is "" while it holds a
+        // not-yet-valid number such as a lone "-", and writing that "" back as the controlled
+        // value erases the minus sign as it is typed. `validate` checks the range instead.
+        Kind::Integer { .. } => view! {
             <input
-                type="number"
+                type="text"
                 inputmode="numeric"
+                spellcheck="false"
                 id=input_id
                 aria-describedby=hint_id.clone()
-                min=min.map(|min| min.to_string())
-                max=max.map(|max| max.to_string())
                 class:invalid=invalid
                 prop:value=move || shown.get()
                 on:input=on_text
