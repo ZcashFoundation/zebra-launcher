@@ -12,9 +12,12 @@
 
 mod schema;
 
-use std::{collections::BTreeMap, net::SocketAddr};
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
+};
 
-use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
+use toml_edit::{Array, DocumentMut, Item, RawString, Table, Value, value};
 
 pub use schema::{FIELDS, SECTIONS, SKIPPED_SECTIONS};
 
@@ -38,7 +41,9 @@ pub enum Kind {
     Integer { min: Option<i64>, max: Option<i64> },
     /// Free text.
     Text,
-    /// `host:port`; with `loopback_only` the host must be a loopback address.
+    /// `ip:port`. With `loopback_only` the IP must be a loopback address (`LOOPBACK_KEYS` in
+    /// launcher-core require the port); without it the port may be left out, as zebrad then
+    /// uses the network's default port.
     SocketAddr { loopback_only: bool },
     /// A humantime duration such as `1m 1s` or `500ms`.
     Duration,
@@ -171,8 +176,9 @@ pub struct ParsedConfig {
     /// [`render_config`]). Keys of [`SKIPPED_SECTIONS`] are not listed: they are left out of
     /// the schema on purpose and kept untouched too.
     pub unknown: Vec<String>,
-    /// Keys the schema knows whose value could not be shown in the form (an unexpected TOML
-    /// type); they are left untouched.
+    /// Keys the schema knows whose value could not be shown in the form: an unexpected TOML
+    /// type, or an empty value such as `[]` or `""`, which the form would read as "use the
+    /// default". They are left untouched.
     pub unreadable: Vec<String>,
 }
 
@@ -211,9 +217,11 @@ fn parse_document(text: &str) -> Result<DocumentMut, String> {
         .map_err(|error| error.to_string())
 }
 
-/// The form text of a TOML item read as `kind`, or `None` when the item has another type.
+/// The form text of a TOML item read as `kind`, or `None` when the item has another type or an
+/// empty value (`[]`, `""`): empty text means "use the default" in the form, so such a value
+/// cannot be shown and is left in the file untouched.
 fn item_text(kind: Kind, item: &Item) -> Option<String> {
-    match kind {
+    let text = match kind {
         Kind::Bool => item.as_bool().map(|flag| flag.to_string()),
         Kind::Integer { .. } => item.as_integer().map(|number| number.to_string()),
         Kind::Text | Kind::Path | Kind::Choice(_) | Kind::SocketAddr { .. } | Kind::Duration => {
@@ -232,7 +240,8 @@ fn item_text(kind: Kind, item: &Item) -> Option<String> {
             .as_bool()
             .map(|flag| flag.to_string())
             .or_else(|| item.as_str().map(str::to_owned)),
-    }
+    };
+    text.filter(|text| !normalize(kind, text).is_empty())
 }
 
 /// The text as it is written to the file: trimmed, and for a list one trimmed entry per line
@@ -252,29 +261,31 @@ fn list_entries(text: &str) -> impl Iterator<Item = &str> {
 /// Checks one field's text against its kind. Empty text is "use the default" and always
 /// valid: a user-controlled field is then removed from the file, and managed or forced fields
 /// are never written anyway.
-pub fn validate(field: &Field, text: &str) -> Result<(), String> {
-    let text = normalize(field.kind, text);
-    if text.is_empty() {
+pub fn validate(field: &Field, text_as_typed: &str) -> Result<(), String> {
+    let normalized = normalize(field.kind, text_as_typed);
+    if normalized.is_empty() {
         return Ok(());
     }
+    let text = normalized.as_str();
     match field.kind {
-        Kind::Bool => match text.as_str() {
+        Kind::Bool => match text {
             "true" | "false" => Ok(()),
             _ => Err("Enter true or false.".to_owned()),
         },
-        Kind::Integer { min, max } => validate_integer(&text, min, max),
+        Kind::Integer { min, max } => validate_integer(text, min, max),
         // Any non-empty text is a path or free text.
         Kind::Text | Kind::Path | Kind::BoolOrPath => Ok(()),
-        Kind::SocketAddr { loopback_only } => validate_socket_addr(&text, loopback_only),
-        Kind::Duration => validate_duration(&text),
+        Kind::SocketAddr { loopback_only } => validate_socket_addr(text, loopback_only),
+        Kind::Duration => validate_duration(text),
         Kind::Choice(choices) => {
-            if choices.contains(&text.as_str()) {
+            if choices.contains(&text) {
                 Ok(())
             } else {
                 Err(format!("Choose one of: {}.", choices.join(", ")))
             }
         }
-        Kind::StringList => validate_list(field, &text),
+        // The text as typed, so the line numbers in the message match the textarea rows.
+        Kind::StringList => validate_list(field, text_as_typed),
     }
 }
 
@@ -292,13 +303,25 @@ fn validate_integer(text: &str, min: Option<i64>, max: Option<i64>) -> Result<()
     Ok(())
 }
 
+/// `ip:port`, or for a public address also a bare IP, which zebrad 7.0.0 completes with the
+/// network's default port (it does not resolve host names here).
 fn validate_socket_addr(text: &str, loopback_only: bool) -> Result<(), String> {
-    let addr: SocketAddr = text.parse().map_err(|_| {
-        "Enter an IP address and port such as 127.0.0.1:8232; put an IPv6 address in brackets, \
-         such as [::1]:8232."
-            .to_owned()
-    })?;
-    if loopback_only && !addr.ip().is_loopback() {
+    let ip = match text.parse::<SocketAddr>() {
+        Ok(addr) => addr.ip(),
+        Err(_) if !loopback_only => ip_without_port(text).ok_or_else(|| {
+            "Enter an IP address, with or without a port, such as 0.0.0.0:8233 or 0.0.0.0; \
+             put an IPv6 address in brackets, such as [::]:8233."
+                .to_owned()
+        })?,
+        Err(_) => {
+            return Err(
+                "Enter an IP address and port such as 127.0.0.1:8232; put an IPv6 address in \
+                 brackets, such as [::1]:8232."
+                    .to_owned(),
+            );
+        }
+    };
+    if loopback_only && !ip.is_loopback() {
         return Err(
             "Must be a loopback address such as 127.0.0.1:8232, so the node is not \
                     reachable from other machines."
@@ -308,17 +331,33 @@ fn validate_socket_addr(text: &str, loopback_only: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// The units humantime accepts.
+/// An address without a port as zebrad accepts it: `0.0.0.0`, `::` or `[::]`.
+fn ip_without_port(text: &str) -> Option<IpAddr> {
+    text.parse::<IpAddr>().ok().or_else(|| {
+        text.strip_prefix('[')?
+            .strip_suffix(']')?
+            .parse::<Ipv6Addr>()
+            .ok()
+            .map(IpAddr::V6)
+    })
+}
+
+/// The units humantime 2.3.0 (pinned by zebrad 7.0.0) accepts.
 const DURATION_UNITS: &[&str] = &[
-    "ns", "nsec", "us", "usec", "ms", "msec", "s", "sec", "secs", "second", "seconds", "m", "min",
-    "mins", "minute", "minutes", "h", "hr", "hour", "hours", "d", "day", "days", "w", "week",
-    "weeks", "M", "month", "months", "y", "year", "years",
+    "ns", "nsec", "nanos", "us", "usec", "µs", "ms", "msec", "millis", "s", "sec", "secs",
+    "second", "seconds", "m", "min", "mins", "minute", "minutes", "h", "hr", "hrs", "hour",
+    "hours", "d", "day", "days", "w", "wk", "wks", "week", "weeks", "M", "month", "months", "y",
+    "yr", "yrs", "year", "years",
 ];
 
-/// A humantime duration: one or more `<number><unit>` parts, such as `1m 1s` or `500ms`.
+/// A humantime 2.3.0 duration: `0`, or one or more `<number>[.<fraction>]<unit>` parts such as
+/// `1m 1s`, `500ms` or `1.5h`.
 fn validate_duration(text: &str) -> Result<(), String> {
     const MESSAGE: &str =
         "Enter a duration such as 1m 1s or 500ms, using the units ms, s, m, h or d.";
+    if text == "0" {
+        return Ok(());
+    }
     let mut rest = text;
     let mut parts = 0;
     while !rest.is_empty() {
@@ -328,9 +367,23 @@ fn validate_duration(text: &str) -> Result<(), String> {
         if rest[..digits_end].parse::<u64>().is_err() {
             return Err(MESSAGE.to_owned());
         }
-        rest = rest[digits_end..].trim_start();
+        rest = &rest[digits_end..];
+        // A fraction has at least one digit after the dot. humantime also refuses a fraction
+        // that does not come to whole nanoseconds (such as `1.0000000001s`); that is left to
+        // zebrad, which rejects the file when it starts.
+        if let Some(fraction) = rest.strip_prefix('.') {
+            let fraction_end = fraction
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(fraction.len());
+            if fraction_end == 0 {
+                return Err(MESSAGE.to_owned());
+            }
+            rest = &fraction[fraction_end..];
+        }
+        rest = rest.trim_start();
+        // `is_alphabetic`, not `is_ascii_alphabetic`, so `µs` reaches the lookup.
         let unit_end = rest
-            .find(|c: char| !c.is_ascii_alphabetic())
+            .find(|c: char| !c.is_alphabetic())
             .unwrap_or(rest.len());
         if !DURATION_UNITS.contains(&&rest[..unit_end]) {
             return Err(MESSAGE.to_owned());
@@ -344,13 +397,15 @@ fn validate_duration(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A peer list (`initial_*_peers`) holds `host:port` entries; other lists take any text.
+/// A peer list (`initial_*_peers`) holds `host:port` entries; other lists take any text. Blank
+/// lines are skipped but counted, so "Line N" is the row of the text as typed.
 fn validate_list(field: &Field, text: &str) -> Result<(), String> {
     if !field.key.ends_with("_peers") {
         return Ok(());
     }
-    for (index, entry) in text.lines().enumerate() {
-        if !is_host_port(entry) {
+    for (index, line) in text.lines().enumerate() {
+        let entry = line.trim();
+        if !entry.is_empty() && !is_host_port(entry) {
             return Err(format!(
                 "Line {}: enter a host name or IP address with a port, such as \
                  dnsseed.z.cash:8233.",
@@ -397,9 +452,10 @@ pub fn render_config(original: &str, form: &FormState) -> Result<String, String>
     for field in FIELDS {
         match field.control {
             Control::User => {}
-            // A value zebrad.toml must not carry: dropped so the launcher accepts the file.
+            // A key zebrad.toml must not carry, whatever its value: dropped so the launcher
+            // accepts the file.
             Control::Forbidden { .. } => {
-                remove_value(&mut doc, field);
+                remove_key(&mut doc, field);
                 continue;
             }
             Control::Managed { .. } | Control::Forced { .. } => continue,
@@ -450,8 +506,23 @@ fn set_value(doc: &mut DocumentMut, field: &Field, text: &str) -> Result<(), Str
 }
 
 /// Removes a readable value and, when that empties a section with no comment on its header,
-/// the section.
+/// the section. A value the form could not show (see [`item_text`]) is left alone: the user
+/// never saw it, so unsetting the field is not a request to drop it.
 fn remove_value(doc: &mut DocumentMut, field: &Field) {
+    let readable = doc
+        .as_table()
+        .get(field.section)
+        .and_then(Item::as_table_like)
+        .and_then(|table| table.get(field.key))
+        .is_some_and(|item| item_text(field.kind, item).is_some());
+    if readable {
+        remove_key(doc, field);
+    }
+}
+
+/// Removes a key whatever its value and, when that empties a section with no comment on its
+/// header, the section.
+fn remove_key(doc: &mut DocumentMut, field: &Field) {
     let root = doc.as_table_mut();
     let Some(item) = root.get_mut(field.section) else {
         return;
@@ -459,21 +530,18 @@ fn remove_value(doc: &mut DocumentMut, field: &Field) {
     let Some(table) = item.as_table_like_mut() else {
         return;
     };
-    let readable = table
-        .get(field.key)
-        .is_some_and(|item| item_text(field.kind, item).is_some());
-    if !readable {
+    if table.remove(field.key).is_none() {
         return;
     }
-    table.remove(field.key);
     let emptied = table.is_empty();
     if emptied && !has_comment(item) {
         remove_section(root, field.section);
     }
 }
 
-/// Removes a top-level table. The blank lines before it move to the table that follows, so
-/// removing the first section does not leave the file starting with blank lines.
+/// Removes a top-level table. The blank lines before it replace those before the table that
+/// follows, so removing the first section does not leave the file starting with blank lines;
+/// a comment on the following header stays.
 fn remove_section(root: &mut Table, section: &str) {
     let tables: Vec<String> = root
         .iter()
@@ -484,13 +552,21 @@ fn remove_section(root: &mut Table, section: &str) {
         .iter()
         .position(|key| key == section)
         .and_then(|index| tables.get(index + 1));
-    let prefix = root.remove(section).and_then(|item| {
-        item.as_table()
-            .and_then(|table| table.decor().prefix().cloned())
+    // Blank lines only: a table with a comment on its header is never removed.
+    let blank = root.remove(section).and_then(|item| {
+        item.as_table().and_then(|table| {
+            table
+                .decor()
+                .prefix()
+                .and_then(RawString::as_str)
+                .map(str::to_owned)
+        })
     });
-    if let (Some(next), Some(prefix)) = (next, prefix)
+    if let (Some(next), Some(blank)) = (next, blank)
         && let Some(table) = root.get_mut(next).and_then(Item::as_table_mut)
+        && let Some(kept) = table.decor().prefix().map_or(Some(""), RawString::as_str)
     {
+        let prefix = format!("{blank}{}", kept.trim_start());
         table.decor_mut().set_prefix(prefix);
     }
 }
@@ -889,6 +965,34 @@ enabled = false
     }
 
     #[test]
+    fn empty_values_in_the_file_are_kept() {
+        let text = "[network]\ninitial_mainnet_peers = []\n\n[mining]\nminer_memo = \" \"\n\n\
+                    [tracing]\nfilter = \"\"\n";
+        let parsed = parse_config(text).expect("parses");
+        // Not read as "" (which the form takes for "use the default"), so no phantom change.
+        assert_eq!(parsed.form, FormState::default());
+        assert_eq!(
+            parsed.unreadable,
+            [
+                "mining.miner_memo",
+                "network.initial_mainnet_peers",
+                "tracing.filter"
+            ]
+        );
+        // Untouched on save, not removed.
+        assert_eq!(render_config(text, &parsed.form).expect("renders"), text);
+        // A value typed into the form still replaces it.
+        let form = form_with(("network", "initial_mainnet_peers"), "my-node.example:8233");
+        let rendered = render_config(text, &form).expect("renders");
+        assert!(
+            rendered.starts_with(
+                "[network]\ninitial_mainnet_peers = [\n    \"my-node.example:8233\",\n]\n"
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn inline_and_dotted_sections_are_read() {
         let text = "sync = { parallel_cpu_threads = 2 }\nhealth.min_connected_peers = 3\n";
         let parsed = parse_config(text).expect("parses");
@@ -1006,12 +1110,32 @@ enabled = false
         assert_eq!(validate(public, "0.0.0.0:8233"), Ok(()));
         assert_eq!(validate(public, "[::]:8233"), Ok(()));
         assert_eq!(validate(public, "203.0.113.9:8233"), Ok(()));
-        assert_eq!(validate(public, "203.0.113.9"), malformed);
+        // zebrad adds the network's default port to an address without one.
+        assert_eq!(validate(public, "203.0.113.9"), Ok(()));
+        assert_eq!(validate(public, "0.0.0.0"), Ok(()));
+        assert_eq!(validate(public, "[::]"), Ok(()));
+        assert_eq!(validate(public, "::"), Ok(()));
+        let public_malformed = Err(
+            "Enter an IP address, with or without a port, such as 0.0.0.0:8233 or 0.0.0.0; \
+             put an IPv6 address in brackets, such as [::]:8233."
+                .to_owned(),
+        );
+        // zebrad 7.0.0 does not resolve host names for these keys, despite its hint.
+        assert_eq!(validate(public, "myhost.example:8233"), public_malformed);
+        assert_eq!(validate(public, "myhost.example"), public_malformed);
+        assert_eq!(validate(public, "[::]:"), public_malformed);
+        assert_eq!(validate(public, "[0.0.0.0]"), public_malformed);
+        assert_eq!(validate(public, "0.0.0.0:99999"), public_malformed);
+        assert_eq!(
+            validate(get(("network", "external_addr")), "198.51.100.7"),
+            Ok(())
+        );
     }
 
     #[test]
     fn durations() {
         let field = get(("network", "crawl_new_peer_interval"));
+        // Everything humantime 2.3.0 (pinned by zebrad 7.0.0) parses.
         for ok in [
             "1m 1s",
             "500ms",
@@ -1021,6 +1145,17 @@ enabled = false
             "3 h",
             "1h 30m 15s",
             "1w",
+            "0",
+            "1.5h",
+            "2.5m",
+            "31.1ms",
+            "1.50h 2s",
+            "90millis",
+            "7hrs",
+            "163µs",
+            "2wks",
+            "1yr",
+            "10nanos",
         ] {
             assert_eq!(validate(field, ok), Ok(()), "{ok:?}");
         }
@@ -1032,9 +1167,13 @@ enabled = false
             "5 parsecs",
             "1m,1s",
             "m",
-            "1.5h",
+            "1.s",
+            ".5s",
+            "1.5",
+            "1,5h",
             "99999999999999999999s",
             "1m -1s",
+            "1μs",
         ] {
             assert_eq!(validate(field, bad), message, "{bad:?}");
         }
@@ -1092,7 +1231,10 @@ enabled = false
             ))
         };
         assert_eq!(validate(field, "dnsseed.z.cash"), line(1));
-        assert_eq!(validate(field, "a.example:8233\n\nb.example"), line(2));
+        // The row in the textarea, blank lines included.
+        assert_eq!(validate(field, "a.example:8233\n\nb.example"), line(3));
+        assert_eq!(validate(field, "\n\nbad"), line(3));
+        assert_eq!(validate(field, "  a.example:8233 \n  bad \n"), line(2));
         assert_eq!(validate(field, "bad_host:8233"), line(1));
         assert_eq!(validate(field, "host:99999"), line(1));
         assert_eq!(validate(field, "-host.example:8233"), line(1));
@@ -1145,6 +1287,28 @@ enabled = false
         assert_eq!(
             render_config(original, &form).expect("renders"),
             "[mempool]\ntx_cost_limit = 1\n"
+        );
+    }
+
+    #[test]
+    fn removing_a_section_keeps_the_next_headers_comment() {
+        let original =
+            "[sync]\nparallel_cpu_threads = 4\n\n# mempool tuning\n[mempool]\ntx_cost_limit = 1\n";
+        let mut form = parse_config(original).expect("parses").form;
+        form.set(("sync", "parallel_cpu_threads"), None);
+        assert_eq!(
+            render_config(original, &form).expect("renders"),
+            "# mempool tuning\n[mempool]\ntx_cost_limit = 1\n"
+        );
+
+        let original = "[network]\npeerset_initial_target_size = 30\n\n[sync]\n\
+                        parallel_cpu_threads = 4\n\n# mempool tuning\n[mempool]\ntx_cost_limit = 1\n";
+        let mut form = parse_config(original).expect("parses").form;
+        form.set(("sync", "parallel_cpu_threads"), None);
+        assert_eq!(
+            render_config(original, &form).expect("renders"),
+            "[network]\npeerset_initial_target_size = 30\n\n# mempool tuning\n[mempool]\n\
+             tx_cost_limit = 1\n"
         );
     }
 
@@ -1203,6 +1367,41 @@ enabled = false
         form.set(("tracing", "use_color"), Some("false".to_owned()));
         form.set(("tracing", "log_file"), Some("/tmp/zebrad.log".to_owned()));
         assert_eq!(render_config(FIXTURE, &form).expect("renders"), FIXTURE);
+    }
+
+    #[test]
+    fn forbidden_keys_are_read_for_display_and_removed_on_render() {
+        let original = "[tracing]\nlog_file = \"/tmp/z.log\"\nprogress_bar = 1\n\n\
+                        [sync]\nparallel_cpu_threads = 4\n";
+        let parsed = parse_config(original).expect("parses");
+        // Still read, so the locked control can show what the file holds.
+        assert_eq!(parsed.form.get(("tracing", "log_file")), Some("/tmp/z.log"));
+        assert_eq!(parsed.unreadable, ["tracing.progress_bar"]);
+        // Removed whatever the value's type: the launcher refuses the file while the key is
+        // present. The emptied section goes too.
+        assert_eq!(
+            render_config(original, &parsed.form).expect("renders"),
+            "[sync]\nparallel_cpu_threads = 4\n"
+        );
+        assert_eq!(
+            render_config(
+                "[tracing]\nlog_file = \"/tmp/z.log\"\n",
+                &FormState::default()
+            )
+            .expect("renders"),
+            ""
+        );
+        // Other tracing keys stay.
+        assert_eq!(
+            render_config(
+                "[tracing]\nfilter = \"debug\"\nprogress_bar = \"summary\"\n",
+                &parse_config("[tracing]\nfilter = \"debug\"\n")
+                    .expect("parses")
+                    .form
+            )
+            .expect("renders"),
+            "[tracing]\nfilter = \"debug\"\n"
+        );
     }
 
     #[test]
