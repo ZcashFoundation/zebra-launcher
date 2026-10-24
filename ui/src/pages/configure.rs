@@ -1,5 +1,5 @@
-//! The Configure page: zebrad's configuration as one draft with two views side by side, the
-//! form on the left and `zebrad.toml` on the right. A change in the form is written into the
+//! The Configure page: zebrad's configuration as one draft with two views, the form beside
+//! `zebrad.toml` (under it when the window is narrow). A change in the form is written into the
 //! file at once, its line marked and brought into view; the file can also be edited as text,
 //! and the form follows. One action bar saves or discards the draft.
 //!
@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use leptos::{html, prelude::*};
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::{
     components::{
@@ -132,6 +132,38 @@ pub fn Configure() -> impl IntoView {
             || editor.edited.get()
             || editor.load.with(|load| *load == Load::Loading)
     });
+    // The file pane's height budget: the scrolling page's height minus the stuck footer's (and
+    // its 8px gap), measured, so the header's and the footer's banners shrink the pane instead
+    // of hiding its bottom under the footer. A hidden tab measures 0 and is skipped.
+    let footer = NodeRef::<html::Div>::new();
+    let pane_room = RwSignal::new(None::<i32>);
+    Effect::new(move |_| {
+        let Some(footer) = footer.get() else {
+            return;
+        };
+        let Some(page) = footer.closest(".page").ok().flatten() else {
+            return;
+        };
+        let measure = {
+            let (footer, page) = (footer.clone(), page.clone());
+            move || {
+                let height = page.client_height();
+                if height > 0 {
+                    pane_room.set(Some(height - footer.offset_height() - 8));
+                }
+            }
+        };
+        // The page is mounted once for the app's lifetime (tabs are hidden, not dropped), so the
+        // observer lives as long as its targets and the closure is deliberately leaked, as the
+        // theme's media-query listener is.
+        let callback = Closure::<dyn FnMut()>::new(measure);
+        let Ok(observer) = web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()) else {
+            return;
+        };
+        observer.observe(&footer);
+        observer.observe(&page);
+        callback.forget();
+    });
 
     view! {
         <div class="configure cfg-page" on:keydown=on_key>
@@ -142,12 +174,19 @@ pub fn Configure() -> impl IntoView {
                         {move || path().map(|path| view! { <code>{path}</code> })}
                     </p>
                     <p class="muted cfg-lead">
-                        "Change a setting on the left and watch the file on the right. The file can also be edited as text."
+                        "Change a setting in the form and zebrad.toml follows, with the changed lines marked. The file can also be edited as text."
                     </p>
                 </div>
             </div>
             {load_view}
-            <div class="cfg-panes" hidden=move || !has_document()>
+            <div
+                class="cfg-panes"
+                hidden=move || !has_document()
+                style=(
+                    "--cfg-room",
+                    move || pane_room.get().map_or(String::new(), |px| format!("{px}px")),
+                )
+            >
                 <div class="cfg-pane-form">
                     <ZebradConfigForm editor />
                 </div>
@@ -155,7 +194,7 @@ pub fn Configure() -> impl IntoView {
             </div>
             // Sticky at the page's bottom under both panes, so the outcome of a save is seen
             // from wherever Save was pressed.
-            <div class="cfg-footer" hidden=move || !has_document()>
+            <div class="cfg-footer" hidden=move || !has_document() node_ref=footer>
                 {notice_view}
                 <div class="cfg-bar">
                     <div class="cfg-changes">
