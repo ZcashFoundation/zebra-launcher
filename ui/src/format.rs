@@ -2,7 +2,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::{ExitClass, Phase, UpdateMode, UpdateState};
+use launcher_types::{ExitClass, Phase, Theme, UpdateMode, UpdateState};
 
 /// A short label for a phase, for the badge.
 pub fn phase_label(phase: &Phase) -> &'static str {
@@ -263,6 +263,75 @@ pub fn update_state_text(state: &UpdateState, now: SystemTime) -> String {
     }
 }
 
+/// True while the updater wants a look: a release is available, on its way, ready, or failed.
+/// The Settings tab wears a badge then.
+pub fn update_needs_attention(state: &UpdateState) -> bool {
+    matches!(
+        state,
+        UpdateState::Available { .. }
+            | UpdateState::Downloading { .. }
+            | UpdateState::ReadyToInstall { .. }
+            | UpdateState::Error { .. }
+    )
+}
+
+/// The label and explanation of an appearance, for the Settings radios.
+pub fn theme_text(theme: Theme) -> (&'static str, &'static str) {
+    match theme {
+        Theme::System => (
+            "System",
+            "Follow the operating system's light or dark setting.",
+        ),
+        Theme::Light => ("Light", "Always light."),
+        Theme::Dark => ("Dark", "Always dark."),
+    }
+}
+
+/// The `value` of an appearance radio, the same word as on the wire.
+pub fn theme_value(theme: Theme) -> &'static str {
+    match theme {
+        Theme::System => "system",
+        Theme::Light => "light",
+        Theme::Dark => "dark",
+    }
+}
+
+/// The shortcut for the tab at `number` (1 to 5), as a tooltip: `Ctrl+1`, or `⌘1` on a Mac.
+pub fn shortcut_label(number: usize, mac: bool) -> String {
+    if mac {
+        format!("\u{2318}{number}")
+    } else {
+        format!("Ctrl+{number}")
+    }
+}
+
+/// From this verification progress on the chain is at its tip, as far as the bar can show.
+pub const SYNCED_PROGRESS: f64 = 0.9999;
+
+/// A verification progress fraction as a percentage from 0 to 100, for a progress bar's width
+/// and value. Not-a-number counts as nothing done.
+pub fn sync_percent(fraction: f64) -> f64 {
+    if fraction.is_finite() {
+        fraction.clamp(0.0, 1.0) * 100.0
+    } else {
+        0.0
+    }
+}
+
+/// True when the node is at the chain tip ([`SYNCED_PROGRESS`] or more).
+pub fn is_synced(fraction: f64) -> bool {
+    fraction >= SYNCED_PROGRESS
+}
+
+/// `0.1.0` as `v0.1.0`; a version that already starts with `v` is left alone.
+pub fn version_tag(version: &str) -> String {
+    if version.starts_with('v') {
+        version.to_owned()
+    } else {
+        format!("v{version}")
+    }
+}
+
 /// A highlighting class for a span of TOML text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TomlClass {
@@ -504,6 +573,75 @@ mod tests {
             ),
             "Downloading Zebra Launcher 0.2.0: 1.0 MB of 4.0 MB (25 %)."
         );
+    }
+
+    #[test]
+    fn update_states_that_need_attention() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        for wants in [
+            UpdateState::Available {
+                version: "0.2.0".into(),
+                notes: None,
+                pub_date: None,
+            },
+            UpdateState::Downloading {
+                version: "0.2.0".into(),
+                downloaded: 1,
+                total: None,
+            },
+            UpdateState::ReadyToInstall {
+                version: "0.2.0".into(),
+                countdown_secs: None,
+            },
+            UpdateState::Error {
+                message: "offline".into(),
+                at: now,
+            },
+        ] {
+            assert!(update_needs_attention(&wants), "{wants:?}");
+        }
+        for quiet in [
+            UpdateState::Idle,
+            UpdateState::Checking,
+            UpdateState::Installing {
+                version: "0.2.0".into(),
+            },
+            UpdateState::UpToDate { checked_at: now },
+        ] {
+            assert!(!update_needs_attention(&quiet), "{quiet:?}");
+        }
+    }
+
+    #[test]
+    fn theme_words() {
+        assert_eq!(theme_text(Theme::System).0, "System");
+        assert_eq!(theme_value(Theme::System), "system");
+        assert_eq!(theme_value(Theme::Light), "light");
+        assert_eq!(theme_value(Theme::Dark), "dark");
+    }
+
+    #[test]
+    fn shortcut_labels() {
+        assert_eq!(shortcut_label(1, false), "Ctrl+1");
+        assert_eq!(shortcut_label(5, true), "\u{2318}5");
+    }
+
+    #[test]
+    fn sync_bar_values() {
+        assert_eq!(sync_percent(0.0), 0.0);
+        assert_eq!(sync_percent(0.5), 50.0);
+        assert_eq!(sync_percent(1.5), 100.0);
+        assert_eq!(sync_percent(-0.1), 0.0);
+        assert_eq!(sync_percent(f64::NAN), 0.0);
+        assert!(!is_synced(0.9998));
+        assert!(is_synced(0.9999));
+        assert!(is_synced(1.0));
+    }
+
+    #[test]
+    fn version_tags() {
+        assert_eq!(version_tag("0.1.0"), "v0.1.0");
+        assert_eq!(version_tag("v0.2.0"), "v0.2.0");
     }
 
     #[test]

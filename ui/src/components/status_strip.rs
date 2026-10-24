@@ -8,7 +8,10 @@ use leptos::{prelude::*, task::spawn_local};
 use crate::{
     api,
     app::AppState,
-    format::{self, controls, exit_class_text, percent, phase_class, phase_label, thousands},
+    format::{
+        self, controls, exit_class_text, is_synced, percent, phase_class, phase_label,
+        sync_percent, thousands,
+    },
 };
 
 /// Extra words for the badge: the restart countdown or the failure reason.
@@ -156,6 +159,30 @@ pub fn StatusStrip() -> impl IntoView {
                     "Restart"
                 </button>
             </div>
+            {move || {
+                state
+                    .stats
+                    .with(|stats| stats.as_ref().map(|stats| stats.verification_progress))
+                    .map(|progress| {
+                        let percent = sync_percent(progress);
+                        view! {
+                            <div
+                                class="sync-bar"
+                                role="progressbar"
+                                aria-label="Chain sync progress"
+                                aria-valuemin="0"
+                                aria-valuemax="100"
+                                aria-valuenow=format!("{percent:.0}")
+                            >
+                                <div
+                                    class="sync-bar-fill"
+                                    class:synced=is_synced(progress)
+                                    style:width=format!("{percent:.2}%")
+                                ></div>
+                            </div>
+                        }
+                    })
+            }}
         </div>
         {move || {
             command_error

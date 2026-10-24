@@ -3,8 +3,10 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::{LogLine, NodeStats, Settings, Status, UpdateHealthFailure, UpdateInfo};
-use leptos::{prelude::*, task::spawn_local};
+use launcher_types::{
+    LogLine, NodeStats, Settings, Status, Theme, UpdateHealthFailure, UpdateInfo,
+};
+use leptos::{ev, prelude::*, task::spawn_local};
 
 use crate::{
     api, clock,
@@ -14,6 +16,7 @@ use crate::{
         status_strip::StatusStrip,
         updates::{HealthFailureBanner, UpdateBanner},
     },
+    format::update_needs_attention,
     insights::Insights,
     log_view::LogBuffer,
     pages::{
@@ -34,6 +37,43 @@ pub enum Tab {
     Settings,
 }
 
+/// A mark on a tab: something there wants a look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Badge {
+    /// There is something to see, without a number.
+    Dot,
+    /// How many new things there are.
+    // Constructed once the Logs tab's unseen-problem count is wired in `Tab::badge`; remove the
+    // attribute then (the build fails to say so).
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(
+            dead_code,
+            reason = "the Logs tab's count is wired by the orchestrator"
+        )
+    )]
+    Count(u32),
+}
+
+impl Badge {
+    /// The number shown in the badge, if any.
+    pub fn text(self) -> Option<String> {
+        match self {
+            Badge::Dot => None,
+            Badge::Count(count) => Some(count.to_string()),
+        }
+    }
+
+    /// What the badge means, for assistive technology.
+    pub fn label(self) -> String {
+        match self {
+            Badge::Dot => "needs attention".to_owned(),
+            Badge::Count(1) => "1 new".to_owned(),
+            Badge::Count(count) => format!("{count} new"),
+        }
+    }
+}
+
 impl Tab {
     pub const ALL: [Tab; 5] = [
         Tab::Dashboard,
@@ -50,6 +90,40 @@ impl Tab {
             Tab::Grafana => "Grafana",
             Tab::Configure => "Configure",
             Tab::Settings => "Settings",
+        }
+    }
+
+    /// The tab's position, 1 to 5: its keyboard shortcut is Ctrl (or Cmd) plus this digit.
+    pub fn number(self) -> usize {
+        Tab::ALL.iter().position(|tab| *tab == self).unwrap_or(0) + 1
+    }
+
+    /// The tab for a keyboard shortcut, from a keydown's `key` and `code`: `1` to `5`, or the
+    /// layout-independent `Digit1` to `Digit5`. The caller checks the modifier.
+    pub fn from_shortcut(key: &str, code: &str) -> Option<Tab> {
+        let digit = if key.len() == 1 && key.bytes().all(|b| b.is_ascii_digit()) {
+            key
+        } else {
+            code.strip_prefix("Digit")?
+        };
+        let number: usize = digit.parse().ok()?;
+        Tab::ALL.get(number.checked_sub(1)?).copied()
+    }
+
+    /// The mark on the tab, if anything there wants a look.
+    pub fn badge(self, state: &AppState) -> Option<Badge> {
+        match self {
+            Tab::Settings => state
+                .update
+                .with(|info| {
+                    info.as_ref()
+                        .is_some_and(|info| update_needs_attention(&info.state))
+                })
+                .then_some(Badge::Dot),
+            // The unseen-problem count from the log insights goes here (wired by the
+            // orchestrator once the insights module lands).
+            Tab::Logs => None,
+            Tab::Dashboard | Tab::Grafana | Tab::Configure => None,
         }
     }
 }
@@ -70,6 +144,9 @@ pub struct AppState {
     /// Whether the resolved appearance is dark (the setting, or the system preference when
     /// the setting follows it). Embedded pages pick their theme from it.
     pub resolved_dark: RwSignal<bool>,
+    /// The appearance chosen in the Settings form while it differs from the stored one, so the
+    /// choice shows at once; `None` otherwise. Set by the Settings page, read by `theme`.
+    pub preview_theme: RwSignal<Option<Theme>>,
     /// Ticks every second, for countdowns and "5 s ago" texts.
     pub now: RwSignal<SystemTime>,
     /// The last error from loading or subscribing, shown under the header.
@@ -136,6 +213,7 @@ pub fn App() -> impl IntoView {
         insights: RwSignal::new(Insights::default()),
         history: RwSignal::new(StatsHistory::default()),
         resolved_dark: RwSignal::new(true),
+        preview_theme: RwSignal::new(None),
         now: RwSignal::new(clock::now()),
         backend_error: RwSignal::new(None),
         update: RwSignal::new(None),
@@ -248,6 +326,19 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // Ctrl (or Cmd) + 1..5 switch tabs. The modifier keeps the shortcut out of the way of typing,
+    // so it works while an input has focus too; a handler that already claimed the key wins.
+    let shortcuts = window_event_listener(ev::keydown, move |event| {
+        if event.default_prevented() || !(event.ctrl_key() || event.meta_key()) || event.alt_key() {
+            return;
+        }
+        if let Some(tab) = Tab::from_shortcut(&event.key(), &event.code()) {
+            event.prevent_default();
+            state.tab.set(tab);
+        }
+    });
+    on_cleanup(move || shortcuts.remove());
+
     // Pages stay mounted while hidden, so a half-edited config or the log scroll position
     // survive switching tabs.
     let hidden = move |tab: Tab| move || state.tab.get() != tab;
@@ -300,5 +391,38 @@ pub fn App() -> impl IntoView {
             </main>
         </div>
         <FirstRun open=first_run_open />
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tabs_are_numbered_in_order() {
+        assert_eq!(Tab::Dashboard.number(), 1);
+        assert_eq!(Tab::Settings.number(), 5);
+    }
+
+    #[test]
+    fn shortcuts_map_digits_to_tabs() {
+        assert_eq!(Tab::from_shortcut("1", "Digit1"), Some(Tab::Dashboard));
+        assert_eq!(Tab::from_shortcut("5", "Digit5"), Some(Tab::Settings));
+        // Layouts where Ctrl changes the key: the code still names the digit.
+        assert_eq!(Tab::from_shortcut("&", "Digit1"), Some(Tab::Dashboard));
+        assert_eq!(Tab::from_shortcut("0", "Digit0"), None);
+        assert_eq!(Tab::from_shortcut("6", "Digit6"), None);
+        assert_eq!(Tab::from_shortcut("a", "KeyA"), None);
+        assert_eq!(Tab::from_shortcut("Enter", "Enter"), None);
+        assert_eq!(Tab::from_shortcut("1", "Numpad1"), Some(Tab::Dashboard));
+    }
+
+    #[test]
+    fn badge_texts() {
+        assert_eq!(Badge::Dot.text(), None);
+        assert_eq!(Badge::Count(3).text(), Some("3".into()));
+        assert_eq!(Badge::Dot.label(), "needs attention");
+        assert_eq!(Badge::Count(1).label(), "1 new");
+        assert_eq!(Badge::Count(12).label(), "12 new");
     }
 }
