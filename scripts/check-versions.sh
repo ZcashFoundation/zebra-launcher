@@ -3,18 +3,16 @@
 #
 #   1. ZEBRAD_VERSION is MAJOR.MINOR.PATCH, with no leading "v".
 #   2. ZEBRAD_COMMIT is a full 40-character lowercase hex commit SHA.
-#   3. VERSION in crates/launcher-core/src/bin/fake-zebrad.rs equals
-#      ZEBRAD_VERSION, so the fake reports the version the launcher bundles.
-#   4. The tauri-cli pin, `TAURI_CLI_VERSION=` in .github/tool-versions.env,
+#   3. The tauri-cli pin, `TAURI_CLI_VERSION=` in .github/tool-versions.env,
 #      has the MAJOR.MINOR of the `tauri` crate in Cargo.lock: the CLI that
 #      bundles the app must match the runtime it was built against. Skipped if
 #      nothing pins tauri-cli.
-#   5. src-tauri/tauri.conf.json sets plugins.updater.requireSignedVersion
+#   4. src-tauri/tauri.conf.json sets plugins.updater.requireSignedVersion
 #      to true, always. Its updater pubkey must also not be the placeholder,
 #      unless the environment variable UPDATER_ENABLED is "false"; only this
 #      pubkey part is skipped while UPDATER_ENABLED is unset (CI on pull
 #      requests). release.yml sets it.
-#   6. The wasm-bindgen CLI pin, `WASM_BINDGEN_VERSION=` in
+#   5. The wasm-bindgen CLI pin, `WASM_BINDGEN_VERSION=` in
 #      .github/tool-versions.env, equals the `wasm-bindgen` crate in Cargo.lock
 #      (read by scripts/cargo-lock-version.sh): trunk runs the CLI only at
 #      exactly that version. Skipped if nothing pins it.
@@ -73,22 +71,7 @@ else
     fail "ZEBRAD_COMMIT is '${commit}', expected a full 40-character lowercase hex SHA"
 fi
 
-# 3. fake-zebrad's VERSION
-fake="crates/launcher-core/src/bin/fake-zebrad.rs"
-if [ ! -f "${root}/${fake}" ]; then
-    fail "${fake} is missing"
-else
-    fake_versions="$(sed -n 's/^const VERSION: &str = "\([^"]*\)";$/\1/p' "${root}/${fake}")"
-    if [ -z "${fake_versions}" ] || [ "$(printf '%s\n' "${fake_versions}" | wc -l)" -ne 1 ]; then
-        fail "${fake} must have exactly one line 'const VERSION: &str = \"X.Y.Z\";'"
-    elif [ "${fake_versions}" = "${version}" ]; then
-        ok "${fake} VERSION is ${fake_versions}"
-    else
-        fail "${fake} VERSION is ${fake_versions}, but ZEBRAD_VERSION is ${version}"
-    fi
-fi
-
-# 4. tauri-cli pin vs. the tauri crate
+# 3. tauri-cli pin vs. the tauri crate
 cli_pin_line="$(grep -nE '^TAURI_CLI_VERSION=' "${root}/.github/tool-versions.env" 2>/dev/null || true)"
 if [ -z "${cli_pin_line}" ]; then
     skip "nothing sets TAURI_CLI_VERSION, so the tauri-cli/tauri check does not apply"
@@ -112,7 +95,7 @@ else
     fi
 fi
 
-# 5. updater signature settings
+# 4. updater signature settings
 # requireSignedVersion is always checked. The app is built with the minisign
 # public key in tauri.conf.json; a release with the updater enabled must not
 # ship the placeholder, or every update would fail to verify. The placeholder
@@ -134,7 +117,7 @@ else
     fail "${conf} has the placeholder updater public key, but UPDATER_ENABLED is '${UPDATER_ENABLED}': replace it (docs/SECURITY.md) or set the repository variable UPDATER_ENABLED=false"
 fi
 
-# 6. wasm-bindgen CLI pin vs. the wasm-bindgen crate
+# 5. wasm-bindgen CLI pin vs. the wasm-bindgen crate
 wb_pin_line="$(grep -nE '^WASM_BINDGEN_VERSION=' "${root}/.github/tool-versions.env" 2>/dev/null || true)"
 if [ -z "${wb_pin_line}" ]; then
     skip "nothing sets WASM_BINDGEN_VERSION, so the wasm-bindgen check does not apply"

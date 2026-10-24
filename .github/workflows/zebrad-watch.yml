@@ -224,8 +224,8 @@ jobs:
           Opened by \`zebrad-watch.yml\`; the launcher must ship it within 14 days
           ([zebrad bump SLA](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/RELEASING.md#zebrad-bump-sla)).
 
-          This changes \`ZEBRAD_VERSION\`, \`ZEBRAD_COMMIT\` and \`VERSION\` in
-          \`crates/launcher-core/src/bin/fake-zebrad.rs\` together; \`scripts/check-versions.sh\` passes.
+          This changes \`ZEBRAD_VERSION\` and \`ZEBRAD_COMMIT\` together (the fake zebrad
+          reads \`ZEBRAD_VERSION\` when it is built); \`scripts/check-versions.sh\` passes.
 
           Checklist ([docs/SIDECARS.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/SIDECARS.md#bumping-zebrad_version)):
 

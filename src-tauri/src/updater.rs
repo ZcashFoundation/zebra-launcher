@@ -201,6 +201,10 @@ impl<R: Runtime> NodeControl for GatedNode<R> {
     async fn start(&self) -> Result<(), String> {
         crate::start_node(&self.app, &self.state).await
     }
+
+    fn shutdown_cap(&self) -> Duration {
+        self.state.supervisor.shutdown_cap()
+    }
 }
 
 /// A seed for the check jitter that differs between launches and machines.

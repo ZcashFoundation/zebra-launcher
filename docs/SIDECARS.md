@@ -279,10 +279,9 @@ To bump by hand, or to finish the watcher's pull request:
      ```
 
      Check the result against the commit shown on the GitHub release page.
-3. Update `VERSION` in `crates/launcher-core/src/bin/fake-zebrad.rs` so the
-   fake reports the same version. Then run `scripts/check-versions.sh`.
-   `scripts/bump-zebrad.sh <ver> <commit>` does steps 2 and 3 and runs the
-   check.
+3. Run `scripts/check-versions.sh`. The fake zebrad reads `ZEBRAD_VERSION`
+   when it is built, so nothing else carries the version.
+   `scripts/bump-zebrad.sh <ver> <commit>` does step 2 and runs the check.
 4. Check the new Linux release locally:
    `scripts/fetch-zebrad-linux.sh --out /tmp/zebrad-check/zebrad`. The cosign
    and attestation checks fail if `ZEBRAD_COMMIT` is not the commit that
