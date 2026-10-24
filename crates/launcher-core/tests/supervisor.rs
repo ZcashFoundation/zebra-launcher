@@ -5,6 +5,7 @@
 
 use std::{
     future::Future,
+    io::{BufRead, BufReader},
     path::PathBuf,
     process::{Command, Stdio},
     sync::Arc,
@@ -546,6 +547,76 @@ async fn stale_pidfile_blocks_start_unless_killed() {
     // before its handler was up; either way it is gone.
     let _status = within(reaper).await.unwrap().expect("orphan reaped");
     assert!(!pidfile::is_alive(orphan_pid));
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_actor_answers_commands_while_a_stale_zebrad_is_terminated() {
+    let fx = fixture("ok");
+    // A left-behind zebrad that ignores the termination request, so the
+    // supervisor waits the whole stale-kill period for it (on Unix; Windows
+    // terminates it outright).
+    let mut orphan = Command::new(fake_zebrad())
+        .args([
+            "-c",
+            &fx.config.command.config.display().to_string(),
+            "start",
+        ])
+        .env("FAKE_ZEBRAD_MODE", "hang-on-signal")
+        .env("FAKE_ZEBRAD_HEARTBEAT_MS", "60000")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn orphan");
+    // Its signal handlers are installed before its first line.
+    let mut stdout = BufReader::new(orphan.stdout.take().expect("piped stdout"));
+    let mut first_line = String::new();
+    tokio::task::spawn_blocking(move || stdout.read_line(&mut first_line))
+        .await
+        .expect("task")
+        .expect("the orphan started");
+    let orphan_pid = orphan.id();
+    pidfile::write(
+        fx.config.pidfile.as_ref().unwrap(),
+        orphan_pid,
+        &fake_zebrad(),
+    )
+    .expect("write pidfile");
+
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    let starter = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.start_with(StartOptions { kill_stale: true }).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The actor is not blocked on the stale zebrad.
+    let history = timeout(Duration::from_secs(1), handle.history_since(0))
+        .await
+        .expect("the actor answers while the stale zebrad is waited for")
+        .expect("supervisor is alive");
+    assert!(
+        !contains(&history, "zebrad started"),
+        "{:#?}",
+        messages(&history)
+    );
+    #[cfg(unix)]
+    assert!(!starter.is_finished(), "the stale zebrad is still alive");
+
+    let result = within(starter).await.expect("task");
+    if cfg!(unix) {
+        assert!(
+            matches!(result, Err(SupervisorError::StaleProcess(ref s)) if s.pid == orphan_pid),
+            "{result:?}"
+        );
+        assert_eq!(
+            handle.status().stale.as_ref().map(|s| s.pid),
+            Some(orphan_pid)
+        );
+    } else {
+        result.expect("the stale zebrad was terminated");
+    }
+    orphan.kill().expect("kill orphan");
+    orphan.wait().expect("reap orphan");
     within(handle.shutdown()).await.expect("shutdown");
 }
 

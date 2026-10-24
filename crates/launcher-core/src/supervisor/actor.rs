@@ -22,7 +22,7 @@ use super::{Cmd, LogSubscription, StartOptions, SupervisorConfig, SupervisorErro
 use crate::{
     logfile::LogFileWriter,
     logs::{Detector, classify_event, classify_exit, parse_line},
-    pidfile,
+    pidfile::{self, StaleProcess},
     policy::{Decision, RestartTracker},
     process::{ChildHandle, SpawnedChild, Spawner, StopMethod},
 };
@@ -46,6 +46,19 @@ enum ChildEvent {
         run: u64,
         status: io::Result<std::process::ExitStatus>,
     },
+    /// The stale zebrad `pid` was asked to stop [`STALE_KILL_WAIT`] ago;
+    /// `alive` says whether it is still there.
+    StaleTerminated {
+        pid: u32,
+        alive: bool,
+    },
+}
+
+/// A start waiting for a stale zebrad to exit after it was terminated; see
+/// [`Actor::terminate_stale`].
+struct PendingStale {
+    stale: StaleProcess,
+    start_replies: Vec<oneshot::Sender<Result<(), SupervisorError>>>,
 }
 
 struct ExitOutcome {
@@ -166,6 +179,8 @@ pub(super) struct Actor {
     run: Option<Run>,
     next_run_id: u64,
     backoff_until: Option<Instant>,
+    /// A start waiting for a stale zebrad to exit; never set while `run` is.
+    pending_stale: Option<PendingStale>,
     /// Starts requested while a stop is in progress; served once zebrad has exited.
     pending_start: Vec<oneshot::Sender<Result<(), SupervisorError>>>,
     /// `Some` once a shutdown was requested; the actor exits when zebrad is gone.
@@ -202,6 +217,7 @@ impl Actor {
             run: None,
             next_run_id: 1,
             backoff_until: None,
+            pending_stale: None,
             pending_start: Vec::new(),
             shutdown_replies: None,
         })
@@ -303,52 +319,99 @@ impl Actor {
         self.spawn_run(options, vec![reply]).await;
     }
 
+    /// Starts a run unless a zebrad from an earlier launcher run is still
+    /// alive: that fails the start, or with `kill_stale` is terminated first
+    /// ([`Self::terminate_stale`]) and the start continues from
+    /// [`Self::on_stale_terminated`].
     async fn spawn_run(
         &mut self,
         options: StartOptions,
         start_replies: Vec<oneshot::Sender<Result<(), SupervisorError>>>,
     ) {
-        if let Some(path) = self.config.pidfile.clone() {
-            match pidfile::check(&path) {
+        if let Some(pending) = self.pending_stale.as_mut() {
+            // An earlier start is waiting for the stale zebrad to exit.
+            pending.start_replies.extend(start_replies);
+            return;
+        }
+        if let Some(path) = &self.config.pidfile {
+            match pidfile::check(path) {
                 Ok(Some(stale)) => {
-                    let mut alive = true;
                     if options.kill_stale {
-                        if let Err(err) = pidfile::terminate(stale.pid) {
-                            tracing::warn!(
-                                ?err,
-                                pid = stale.pid,
-                                "could not terminate stale zebrad"
-                            );
-                        }
-                        let deadline = Instant::now() + STALE_KILL_WAIT;
-                        while pidfile::is_alive(stale.pid) && Instant::now() < deadline {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                        alive = pidfile::is_alive(stale.pid);
-                        if !alive {
-                            let _ = pidfile::remove(&path);
-                            self.note(format!(
-                                "terminated a zebrad left behind by an earlier run (pid {})",
-                                stale.pid
-                            ));
-                        }
+                        self.terminate_stale(stale, start_replies);
+                    } else {
+                        self.report_stale(&stale, start_replies);
                     }
-                    if alive {
-                        let info = StaleProcessInfo {
-                            pid: stale.pid,
-                            binary: stale.binary.display().to_string(),
-                        };
-                        self.status.send_modify(|s| s.stale = Some(info));
-                        for reply in start_replies {
-                            let _ = reply.send(Err(SupervisorError::StaleProcess(stale.clone())));
-                        }
-                        return;
-                    }
+                    return;
                 }
                 Ok(None) => {}
                 Err(err) => tracing::warn!(?err, "could not read the zebrad pid file"),
             }
         }
+        self.launch(start_replies).await;
+    }
+
+    /// Fails `start_replies` with the stale zebrad and shows it in the status.
+    fn report_stale(
+        &mut self,
+        stale: &StaleProcess,
+        start_replies: Vec<oneshot::Sender<Result<(), SupervisorError>>>,
+    ) {
+        let info = StaleProcessInfo {
+            pid: stale.pid,
+            binary: stale.binary.display().to_string(),
+        };
+        self.status.send_modify(|s| s.stale = Some(info));
+        for reply in start_replies {
+            let _ = reply.send(Err(SupervisorError::StaleProcess(stale.clone())));
+        }
+    }
+
+    /// Asks the stale zebrad to stop and waits for it off the actor loop, so
+    /// commands keep being answered meanwhile; the outcome arrives as
+    /// [`ChildEvent::StaleTerminated`].
+    fn terminate_stale(
+        &mut self,
+        stale: StaleProcess,
+        start_replies: Vec<oneshot::Sender<Result<(), SupervisorError>>>,
+    ) {
+        let pid = stale.pid;
+        if let Err(err) = pidfile::terminate(pid) {
+            tracing::warn!(?err, pid, "could not terminate stale zebrad");
+        }
+        let tx = self.child_tx.clone();
+        tokio::spawn(async move {
+            let deadline = Instant::now() + STALE_KILL_WAIT;
+            while pidfile::is_alive(pid) && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let alive = pidfile::is_alive(pid);
+            let _ = tx.send(ChildEvent::StaleTerminated { pid, alive }).await;
+        });
+        self.pending_stale = Some(PendingStale {
+            stale,
+            start_replies,
+        });
+    }
+
+    async fn on_stale_terminated(&mut self, pid: u32, alive: bool) {
+        let Some(pending) = self.pending_stale.take_if(|p| p.stale.pid == pid) else {
+            return;
+        };
+        if alive {
+            self.report_stale(&pending.stale, pending.start_replies);
+            return;
+        }
+        if let Some(path) = &self.config.pidfile {
+            let _ = pidfile::remove(path);
+        }
+        self.note(format!(
+            "terminated a zebrad left behind by an earlier run (pid {pid})"
+        ));
+        self.launch(pending.start_replies).await;
+    }
+
+    /// Spawns zebrad; the stale check has passed.
+    async fn launch(&mut self, start_replies: Vec<oneshot::Sender<Result<(), SupervisorError>>>) {
         self.status.send_modify(|s| s.stale = None);
 
         match self.spawner.spawn(self.config.command.clone()).await {
@@ -478,6 +541,8 @@ impl Actor {
             }
             return;
         }
+        // Nothing is running. A start waiting for a stale zebrad to exit
+        // (`pending_stale`) goes ahead: it was asked for explicitly.
         if self.backoff_until.take().is_some() {
             self.status.send_modify(|s| s.phase = Phase::Stopped);
             self.note("scheduled restart cancelled".to_string());
@@ -491,7 +556,13 @@ impl Actor {
         self.shutdown_replies
             .get_or_insert_with(Vec::new)
             .extend(reply);
-        for reply in self.pending_start.drain(..) {
+        let waiting = self.pending_start.drain(..).chain(
+            self.pending_stale
+                .take()
+                .into_iter()
+                .flat_map(|p| p.start_replies),
+        );
+        for reply in waiting {
             let _ = reply.send(Err(SupervisorError::Closed));
         }
         self.on_stop(Vec::new());
@@ -558,6 +629,9 @@ impl Actor {
                         .on_exit(outcome, Instant::now() + self.config.exit_drain);
                 }
                 self.maybe_finalize().await;
+            }
+            ChildEvent::StaleTerminated { pid, alive } => {
+                self.on_stale_terminated(pid, alive).await
             }
             // Events from a previous run that are still draining.
             _ => {}
