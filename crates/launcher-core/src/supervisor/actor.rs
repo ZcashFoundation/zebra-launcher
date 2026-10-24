@@ -596,8 +596,11 @@ impl Actor {
         let forced = stop.as_ref().is_some_and(|stop| stop.forced);
         let stopped = requested || late_stop.is_some() || self.shutdown_replies.is_some();
         let mut class = classify_exit(exit.code, run.deterministic_cause);
-        if requested && !class.is_deterministic() {
-            // A stop the user asked for ended the run; the exit code says how.
+        if forced && !class.is_deterministic() {
+            // The launcher killed zebrad to finish the stop the user asked
+            // for; that is not a crash. (`classify_exit` already gives
+            // `Clean` for exit code 0.) A non-zero exit or a panic during a
+            // graceful stop stays a crash, with `requested` set.
             class = ExitClass::Clean;
         }
         let detail = run.detail.or_else(|| {

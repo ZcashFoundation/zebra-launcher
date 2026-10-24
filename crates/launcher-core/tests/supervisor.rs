@@ -180,6 +180,8 @@ async fn hanging_child_is_killed_after_the_grace_period() {
     let exit = handle.status().last_exit.expect("exit recorded");
     assert!(exit.requested);
     assert_ne!(exit.code, Some(0), "{exit:?}");
+    // The kill finished the stop the user asked for: not a crash.
+    assert_eq!(exit.class, ExitClass::Clean, "{exit:?}");
     assert_eq!(exit.detail.as_deref(), Some("killed by the launcher"));
     let history = within(handle.history_since(0)).await.expect("history");
     assert!(
@@ -191,6 +193,38 @@ async fn hanging_child_is_killed_after_the_grace_period() {
     #[cfg(unix)]
     assert!(
         contains(&history, "ignoring in hang-on-signal mode"),
+        "{:#?}",
+        messages(&history)
+    );
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crash_during_a_graceful_stop_is_not_clean() {
+    let mut fx = fixture("crash-on-stop");
+    // The graceful path on every platform, so the stop is never forced.
+    fx.config.command.shutdown_on_stdin_close = true;
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    within(handle.start()).await.expect("start");
+    within(handle.stop()).await.expect("stop");
+
+    let status = handle.status();
+    assert_eq!(
+        status.phase,
+        Phase::Stopped,
+        "a requested stop never restarts"
+    );
+    let exit = status.last_exit.expect("exit recorded");
+    assert_eq!(exit.code, Some(3), "{exit:?}");
+    assert_eq!(exit.class, ExitClass::Crash, "{exit:?}");
+    assert!(exit.requested, "{exit:?}");
+    assert_eq!(exit.detail, None, "not killed by the launcher: {exit:?}");
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(
+        contains(
+            &history,
+            "zebrad exited (exit code 3, Crash, stop requested)"
+        ),
         "{:#?}",
         messages(&history)
     );

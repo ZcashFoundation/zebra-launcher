@@ -10,6 +10,7 @@
 //! |---|---|
 //! | `ok` (default) | starts, logs a heartbeat, shuts down cleanly on request |
 //! | `crash` | exits with code 2 right after start-up |
+//! | `crash-on-stop` | like `ok`, but a shutdown request ends with exit code 3 |
 //! | `config-error` | prints zebrad's config error to stderr and exits 1 |
 //! | `eos-warn` | like `ok`, plus the end-of-support warning on every heartbeat |
 //! | `eos-halt` | aborts with the end-of-support panic after start-up |
@@ -242,7 +243,7 @@ async fn run(
         "opening database, this may take a few minutes",
     );
     if sleep_unless_shutdown(startup_delay, &mut shutdown, &mode).await {
-        return ExitCode::SUCCESS;
+        return shutdown_exit_code(&mode);
     }
     if mode == "db-locked" {
         panic_and_abort(
@@ -318,7 +319,7 @@ async fn run(
     let mut height: u64 = 1_000;
     loop {
         if sleep_unless_shutdown(heartbeat, &mut shutdown, &mode).await {
-            return ExitCode::SUCCESS;
+            return shutdown_exit_code(&mode);
         }
         height += 1;
         log(
@@ -338,6 +339,16 @@ async fn run(
             );
         }
     }
+}
+
+/// How the fake exits after a graceful shutdown: 0, or 3 in `crash-on-stop`
+/// mode, like a zebrad that fails while shutting down.
+fn shutdown_exit_code(mode: &str) -> ExitCode {
+    if mode == "crash-on-stop" {
+        eprintln!("fake-zebrad: simulated crash during shutdown");
+        return ExitCode::from(3);
+    }
+    ExitCode::SUCCESS
 }
 
 type ShutdownFuture = std::pin::Pin<
