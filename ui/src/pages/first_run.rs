@@ -6,7 +6,9 @@
 //! move the old chain state here, delete it, or leave it), update mode, and notes (firewall
 //! prompt, logs).
 
-use launcher_types::{FirstRunInfo, ImportOutcome, Network, Phase, Settings, UpdateMode};
+use launcher_types::{
+    FirstRunInfo, ImportOutcome, Network, OpenTarget, Phase, Settings, UpdateMode,
+};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -618,7 +620,7 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
 
     let open_logs = move |_| {
         spawn_local(async move {
-            if let Err(failure) = api::open_path("log_dir").await {
+            if let Err(failure) = api::open_path(OpenTarget::LogDir).await {
                 error.set(Some(format!("Could not open the log folder: {failure}")));
             }
         });

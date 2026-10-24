@@ -38,7 +38,7 @@ use std::{
 
 use launcher_types::{
     ConfigDocument, DataDirChoice, EosInfo, ExitClass, ExitInfo, FirstRunInfo, ImportOutcome,
-    LegacyInstall, LogLine, NodeStats, Phase, Settings, StaleProcessInfo, Status,
+    LegacyInstall, LogLine, NodeStats, OpenTarget, Phase, Settings, StaleProcessInfo, Status,
     UpdateHealthFailure, UpdateInfo, UpdateMode, UpdateState,
 };
 use leptos::prelude::*;
@@ -720,9 +720,9 @@ pub async fn complete_first_run() {
         .update(|settings| settings.first_run_done = true);
 }
 
-pub async fn open_path(target: &str) {
+pub async fn open_path(target: OpenTarget) {
     sleep(50).await;
-    leptos::logging::log!("(mock) open_path({target})");
+    leptos::logging::log!("(mock) open_path({target:?})");
 }
 
 #[cfg(test)]
