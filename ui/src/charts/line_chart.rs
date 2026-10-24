@@ -7,7 +7,7 @@ use wasm_bindgen::JsCast;
 use crate::{
     charts::{
         ChartData, Geometry, MAX_POINTS, PAD_B, PAD_L, PAD_R, PAD_T, VIEW_H, VIEW_W,
-        downsample_indices, geometry, hhmmss, nearest_index, summary, tz_offset_min,
+        downsample_indices, geometry, hhmmss, nearest_index, summary, tz_offset_min_at,
     },
     format::thousands,
 };
@@ -37,14 +37,16 @@ pub fn LineChart(
     #[prop(optional)]
     area: bool,
 ) -> impl IntoView {
-    let tz = tz_offset_min();
     let table = RwSignal::new(false);
     let hover = RwSignal::new(None::<usize>);
     // The plot's width in CSS pixels, measured by `Plot`, so one viewBox unit is one pixel and
     // text and strokes keep their size whatever the card's width.
     let width = RwSignal::new(VIEW_W);
-    let layout = Memo::new(move |_| data.with(|d| geometry(d, from_zero, tz, width.get())));
-    let label = Memo::new(move |_| data.with(|d| summary(title, d, tz)));
+    // Times read in the browser's zone at each instant (see `tz_offset_min_at`), so the labels
+    // stay right across a daylight-saving switch while the launcher runs.
+    let layout =
+        Memo::new(move |_| data.with(|d| geometry(d, from_zero, tz_offset_min_at, width.get())));
+    let label = Memo::new(move |_| data.with(|d| summary(title, d, tz_offset_min_at)));
     let legend = move || data.with(|d| d.series.len() >= 2);
 
     view! {
@@ -93,7 +95,7 @@ pub fn LineChart(
                     when=move || table.get()
                     fallback=move || view! { <Plot layout data label hover width area /> }
                 >
-                    <DataTable title data tz />
+                    <DataTable title data />
                 </Show>
             </Show>
         </div>
@@ -110,22 +112,25 @@ fn Plot(
     width: RwSignal<f64>,
     area: bool,
 ) -> impl IntoView {
-    let tz = tz_offset_min();
     let plot_ref = NodeRef::<leptos::html::Div>::new();
     let count = move || layout.with(|l| l.as_ref().map_or(0, |g| g.xs.len()));
     let highlighted = move || hover.get().filter(|index| *index < count());
     let classes = move || data.with(|d| d.series.iter().map(|s| s.class).collect::<Vec<_>>());
 
     // Measure the plot once mounted, with every new sample (which also catches layout changes
-    // without a window resize) and on window resizes. A hidden page measures zero: skipped.
+    // without a window resize), on window resizes, and whenever the active tab changes. A
+    // hidden page measures zero, which is skipped, so a resize made while another tab was
+    // open is only seen once the dashboard shows again.
     let measure = move |plot: &web_sys::HtmlDivElement| {
         let measured = plot.get_bounding_client_rect().width();
         if measured > 0.0 && (measured - width.get_untracked()).abs() >= 0.5 {
             width.set(measured);
         }
     };
+    let state = crate::app::AppState::get();
     Effect::new(move |_| {
         data.track();
+        state.tab.track();
         if let Some(plot) = plot_ref.get() {
             measure(&plot);
         }
@@ -296,7 +301,7 @@ fn Plot(
         };
         Some(view! {
             <div class=class style:left=format!("{:.2}%", x / width * 100.0)>
-                <div class="chart-tooltip-time">{hhmmss(time, tz)}</div>
+                <div class="chart-tooltip-time">{hhmmss(time, tz_offset_min_at(time))}</div>
                 {rows
                     .into_iter()
                     .map(|(class, name, value)| {
@@ -322,7 +327,12 @@ fn Plot(
                 height="220"
                 tabindex="0"
                 role="img"
-                aria-label=move || label.get()
+                aria-label=move || {
+                    format!(
+                        "{} Use the left and right arrow keys to read one sample, or the Table button for all of them.",
+                        label.get()
+                    )
+                }
                 on:pointermove=move |ev| hover.set(locate(&ev))
                 on:pointerleave=move |_| hover.set(None)
                 on:focus=on_focus
@@ -332,14 +342,15 @@ fn Plot(
                 {axes_and_lines}
                 {crosshair}
             </svg>
-            {tooltip}
+            // A persistent live region, so a tooltip moved by the arrow keys is announced.
+            <div class="chart-tooltip-layer" role="status">{tooltip}</div>
         </div>
     }
 }
 
 /// The chart's values as a table: at most [`MAX_POINTS`] rows, picked evenly.
 #[component]
-fn DataTable(title: &'static str, data: Signal<ChartData>, tz: i32) -> impl IntoView {
+fn DataTable(title: &'static str, data: Signal<ChartData>) -> impl IntoView {
     view! {
         <div class="chart-table-wrap">
             <table class="chart-table" aria-label=format!("{title} samples")>
@@ -364,7 +375,7 @@ fn DataTable(title: &'static str, data: Signal<ChartData>, tz: i32) -> impl Into
                                 .map(|index| {
                                     view! {
                                         <tr>
-                                            <td>{hhmmss(d.times[index], tz)}</td>
+                                            <td>{hhmmss(d.times[index], tz_offset_min_at(d.times[index]))}</td>
                                             {d
                                                 .series
                                                 .iter()

@@ -176,8 +176,10 @@
   font-weight: 500;
 }
 
+/* The text-grade warning token: the status tokens are mark colours and fail contrast as text on
+   the light panel. */
 .tile-value.tile-warning {
-  color: var(--status-warning);
+  color: var(--warn);
 }
 
 .tile-detail {
@@ -402,7 +404,13 @@
   text-align: center;
 }
 
-/* Tooltip */
+/* Tooltip, inside a live region the size of the plot so its moves are announced. */
+
+.chart-tooltip-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
 
 .chart-tooltip {
   position: absolute;
