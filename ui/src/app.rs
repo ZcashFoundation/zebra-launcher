@@ -43,15 +43,6 @@ pub enum Badge {
     /// There is something to see, without a number.
     Dot,
     /// How many new things there are.
-    // Constructed once the Logs tab's unseen-problem count is wired in `Tab::badge`; remove the
-    // attribute then (the build fails to say so).
-    #[cfg_attr(
-        target_arch = "wasm32",
-        expect(
-            dead_code,
-            reason = "the Logs tab's count is wired by the orchestrator"
-        )
-    )]
     Count(u32),
 }
 
@@ -120,9 +111,11 @@ impl Tab {
                         .is_some_and(|info| update_needs_attention(&info.state))
                 })
                 .then_some(Badge::Dot),
-            // The unseen-problem count from the log insights goes here (wired by the
-            // orchestrator once the insights module lands).
-            Tab::Logs => None,
+            // Warnings, errors and stderr lines that arrived while the Logs page was not shown.
+            Tab::Logs => {
+                let unseen = state.insights.with(|insights| insights.unseen_problems());
+                (unseen > 0).then_some(Badge::Count(unseen))
+            }
             Tab::Dashboard | Tab::Grafana | Tab::Configure => None,
         }
     }
@@ -159,6 +152,9 @@ pub struct AppState {
     /// Bumped whenever `zebrad.toml` was replaced outside the Configure page's own save (a
     /// `reset_config` from any page), so the Configure page (always mounted) re-reads it.
     pub config_changed: RwSignal<u64>,
+    /// A text filter another page asks the Logs page to apply (a problem picked on the
+    /// dashboard). The Logs page takes it and clears it.
+    pub log_filter_request: RwSignal<Option<String>>,
 }
 
 impl AppState {
@@ -188,9 +184,25 @@ impl AppState {
     /// Folds a batch of log lines into the insights and the log buffer.
     fn record_logs(&self, batch: Vec<LogLine>) {
         let now = clock::now();
-        self.insights
-            .update(|insights| insights.ingest(&batch, now));
+        let on_logs_page = self.tab.get_untracked() == Tab::Logs;
+        self.insights.update(|insights| {
+            insights.ingest(&batch, now);
+            // Problems that arrive while the Logs page is shown are seen as they come.
+            if on_logs_page {
+                insights.mark_seen();
+            }
+        });
         self.logs.update(|logs| logs.merge(batch));
+    }
+
+    /// Clears the Logs tab's badge: the user is looking at the page.
+    pub fn mark_problems_seen(&self) {
+        if self
+            .insights
+            .with_untracked(|insights| insights.unseen_problems() > 0)
+        {
+            self.insights.update(Insights::mark_seen);
+        }
     }
 
     /// The post-update health failure, from the event or the update info.
@@ -219,6 +231,7 @@ pub fn App() -> impl IntoView {
         update: RwSignal::new(None),
         update_health: RwSignal::new(None),
         config_changed: RwSignal::new(0),
+        log_filter_request: RwSignal::new(None),
     };
     provide_context(state);
     theme::init(&state);
@@ -338,6 +351,13 @@ pub fn App() -> impl IntoView {
         }
     });
     on_cleanup(move || shortcuts.remove());
+
+    // Opening the Logs page clears its badge.
+    Effect::new(move |_| {
+        if state.tab.get() == Tab::Logs {
+            state.mark_problems_seen();
+        }
+    });
 
     // Pages stay mounted while hidden, so a half-edited config or the log scroll position
     // survive switching tabs.

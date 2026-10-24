@@ -214,6 +214,15 @@ pub fn Logs() -> impl IntoView {
     };
 
     let on_pick = Callback::new(move |filter: String| text.set(filter));
+    // A problem picked on another page: apply its filter and take the request.
+    Effect::new(move |_| {
+        if let Some(filter) = state.log_filter_request.get() {
+            text.set(filter);
+            state
+                .log_filter_request
+                .update_untracked(|request| *request = None);
+        }
+    });
 
     view! {
         <div class="toolbar logs-toolbar">

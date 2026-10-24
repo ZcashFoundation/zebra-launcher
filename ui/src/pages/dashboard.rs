@@ -15,7 +15,11 @@ use crate::{
         widgets::{Meter, RangeControl, StatTile, Tone, check_icon},
     },
     clock,
-    components::{status_strip::phase_detail, updates::CheckForUpdate},
+    components::{
+        log_insights::{LogActivityChart, RecentProblems, SyncStageCard},
+        status_strip::phase_detail,
+        updates::CheckForUpdate,
+    },
     format::{exit_class_text, phase_label, relative, thousands},
     stats_history::{Field, Sample},
 };
@@ -295,6 +299,12 @@ pub fn Dashboard() -> impl IntoView {
         })
     });
 
+    // A problem picked here is shown filtered on the Logs page.
+    let show_in_logs = Callback::new(move |filter: String| {
+        state.log_filter_request.set(Some(filter));
+        state.tab.set(Tab::Logs);
+    });
+
     let grafana = view! {
         <div class="card hint">
             <h3>"Grafana"</h3>
@@ -373,6 +383,14 @@ pub fn Dashboard() -> impl IntoView {
                     area=true
                 />
             </div>
+            <section class="dash-insights" aria-label="From zebrad's log">
+                <SyncStageCard />
+                <RecentProblems limit=5 on_pick=show_in_logs />
+                <div class="card insight-card insight-activity">
+                    <h3>"Lines per minute"</h3>
+                    <LogActivityChart />
+                </div>
+            </section>
             <div class="cards">
                 <div class="card">
                     <h3>"Node"</h3>

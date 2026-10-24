@@ -478,3 +478,11 @@
 .chart-table td {
   font-variant-numeric: tabular-nums;
 }
+
+/* The log-analysis cards under the charts (styled by insights.css). */
+.dash-insights {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}

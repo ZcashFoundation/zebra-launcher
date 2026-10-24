@@ -30,7 +30,7 @@
 
 .log-row .msg mark {
   background: var(--accent);
-  color: #111;
+  color: var(--badge-text);
   border-radius: 2px;
   padding: 0 1px;
 }
