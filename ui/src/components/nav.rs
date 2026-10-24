@@ -90,7 +90,10 @@ pub fn Nav() -> impl IntoView {
                     network()
                         .map(|network| {
                             view! {
+                                // The label is read out but not shown: the pill speaks for
+                                // itself visually, and `title` only reaches mouse users.
                                 <span class=network_class(network) title="The network zebrad runs on">
+                                    <span class="visually-hidden">"Network: "</span>
                                     {network.as_str()}
                                 </span>
                             }
@@ -100,7 +103,9 @@ pub fn Nav() -> impl IntoView {
                     version()
                         .map(|version| {
                             view! {
+                                // Tells the launcher's version apart from zebrad's in the strip.
                                 <span class="launcher-version muted" title="Zebra Launcher version">
+                                    <span class="visually-hidden">"Launcher version "</span>
                                     {version}
                                 </span>
                             }
