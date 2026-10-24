@@ -1,7 +1,7 @@
-//! The zebrad configuration form: the left pane of the Configure page, with the filter, "Show
-//! only changed" and the sections with a row and a tooltip per key. The draft it edits is
-//! [`ConfigEditor`] (`crate::config_editor`); `pages/configure.rs` lays out the panes, the file
-//! view and the action bar.
+//! The form pane of the Configure page: the filter, "Show only changed" and the sections with a
+//! row and a tooltip per key, every row bound to one field of the [`ConfigEditor`] draft
+//! (`crate::config_editor`). The rows follow the schema in `crate::config_form`; the page, the
+//! file view and the action bar are `pages/configure.rs`.
 
 use std::collections::{BTreeMap, BTreeSet};
 

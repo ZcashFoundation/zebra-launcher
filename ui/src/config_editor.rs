@@ -1,7 +1,10 @@
-//! The zebrad configuration editor's model: one draft of `zebrad.toml` that the Configure
-//! page's form pane, file pane and action bar share. [`ConfigEditor`] holds the draft and the
-//! form's typing state and does the reads, saves and reloads; the form itself is
-//! `components::config_form_view::ZebradConfigForm`.
+//! The zebrad configuration editor's model: one draft of `zebrad.toml`, shared by the three
+//! parts of the Configure page. [`ConfigEditor`] holds the draft and the form's typing state
+//! and does the reads, saves and reloads; the form pane is `components::config_form_view`, and
+//! `pages/configure.rs` lays out the panes, the file view and the action bar. What each part
+//! shows follows the model: the page shows [`Load`] and [`Notice`] (the outcome of a read, a
+//! save or a reload), the form pane the draft's parse and render errors, and each row its own
+//! field's validation error.
 //!
 //! The draft text is what the file pane shows and what Save writes. The form's edits (`edits`)
 //! hold every field's text as typed, where a text that is empty once normalised the way the
