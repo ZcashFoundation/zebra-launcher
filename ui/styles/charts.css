@@ -215,28 +215,34 @@
   fill: var(--series-1);
 }
 
-/* Chart cards */
+/* Chart cards. The SVG scales its 640-unit viewBox to the card, so a card narrower than about
+   560 px shrinks the 11 px axis text below reading size: two columns, with the height chart
+   across both, until the window is wide enough for three. */
 
 .chart-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 12px;
 }
 
-@media (max-width: 1100px) {
-  .chart-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+.chart-grid > .chart-card:first-child {
+  grid-column: 1 / -1;
+}
 
-  .chart-grid > .chart-card:first-child {
-    grid-column: 1 / -1;
+@media (max-width: 1000px) {
+  .chart-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
-@media (max-width: 640px) {
+@media (min-width: 1800px) {
   .chart-grid {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .chart-grid > .chart-card:first-child {
+    grid-column: auto;
   }
 }
 
@@ -319,7 +325,7 @@
 .chart-svg {
   display: block;
   width: 100%;
-  height: auto;
+  height: 220px;
   overflow: visible;
   touch-action: none;
 }
@@ -391,7 +397,7 @@
 .chart-empty {
   display: grid;
   place-items: center;
-  aspect-ratio: 640 / 220;
+  height: 220px;
   padding: 12px;
   text-align: center;
 }

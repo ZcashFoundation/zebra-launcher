@@ -309,7 +309,11 @@ pub fn Dashboard() -> impl IntoView {
             <section class="card dash-hero" aria-labelledby="dash-hero-label">
                 <div class="dash-hero-head">
                     <h3 id="dash-hero-label">"Sync progress"</h3>
-                    <span class="dash-hero-figure">{move || hero.with(|hero| hero.figure.clone())}</span>
+                    <span class=move || {
+                        if hero.with(|hero| hero.waiting) { "dash-hero-figure muted" } else { "dash-hero-figure" }
+                    }>
+                        {move || hero.with(|hero| hero.figure.clone())}
+                    </span>
                 </div>
                 <Meter fraction=Signal::derive(move || hero.with(|hero| hero.fraction)) label="Sync progress" />
                 <p class=move || {

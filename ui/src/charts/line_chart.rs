@@ -40,7 +40,10 @@ pub fn LineChart(
     let tz = tz_offset_min();
     let table = RwSignal::new(false);
     let hover = RwSignal::new(None::<usize>);
-    let layout = Memo::new(move |_| data.with(|d| geometry(d, from_zero, tz)));
+    // The plot's width in CSS pixels, measured by `Plot`, so one viewBox unit is one pixel and
+    // text and strokes keep their size whatever the card's width.
+    let width = RwSignal::new(VIEW_W);
+    let layout = Memo::new(move |_| data.with(|d| geometry(d, from_zero, tz, width.get())));
     let label = Memo::new(move |_| data.with(|d| summary(title, d, tz)));
     let legend = move || data.with(|d| d.series.len() >= 2);
 
@@ -88,7 +91,7 @@ pub fn LineChart(
             >
                 <Show
                     when=move || table.get()
-                    fallback=move || view! { <Plot layout data label hover area /> }
+                    fallback=move || view! { <Plot layout data label hover width area /> }
                 >
                     <DataTable title data tz />
                 </Show>
@@ -104,12 +107,35 @@ fn Plot(
     data: Signal<ChartData>,
     label: Memo<String>,
     hover: RwSignal<Option<usize>>,
+    width: RwSignal<f64>,
     area: bool,
 ) -> impl IntoView {
     let tz = tz_offset_min();
+    let plot_ref = NodeRef::<leptos::html::Div>::new();
     let count = move || layout.with(|l| l.as_ref().map_or(0, |g| g.xs.len()));
     let highlighted = move || hover.get().filter(|index| *index < count());
     let classes = move || data.with(|d| d.series.iter().map(|s| s.class).collect::<Vec<_>>());
+
+    // Measure the plot once mounted, with every new sample (which also catches layout changes
+    // without a window resize) and on window resizes. A hidden page measures zero: skipped.
+    let measure = move |plot: &web_sys::HtmlDivElement| {
+        let measured = plot.get_bounding_client_rect().width();
+        if measured > 0.0 && (measured - width.get_untracked()).abs() >= 0.5 {
+            width.set(measured);
+        }
+    };
+    Effect::new(move |_| {
+        data.track();
+        if let Some(plot) = plot_ref.get() {
+            measure(&plot);
+        }
+    });
+    let resize = window_event_listener(leptos::ev::resize, move |_| {
+        if let Some(plot) = plot_ref.get_untracked() {
+            measure(&plot);
+        }
+    });
+    on_cleanup(move || resize.remove());
 
     // The sample nearest to the pointer, from its offset in the SVG's own box.
     let locate = move |ev: &web_sys::PointerEvent| -> Option<usize> {
@@ -118,8 +144,11 @@ fn Plot(
         if rect.width() <= 0.0 {
             return None;
         }
-        let x = (f64::from(ev.client_x()) - rect.left()) * VIEW_W / rect.width();
-        layout.with(|l| l.as_ref().map(|g| nearest_index(&g.xs, x)))
+        layout.with(|l| {
+            let g = l.as_ref()?;
+            let x = (f64::from(ev.client_x()) - rect.left()) * g.width / rect.width();
+            Some(nearest_index(&g.xs, x))
+        })
     };
     let on_key = move |ev: web_sys::KeyboardEvent| {
         let count = count();
@@ -148,26 +177,32 @@ fn Plot(
         }
     };
 
+    let view_box = move || {
+        let width = layout.with(|l| l.as_ref().map_or(VIEW_W, |g| g.width));
+        format!("0 0 {width:.0} {VIEW_H:.0}")
+    };
     let axes_and_lines = move || {
         layout.with(|l| {
             let g = l.as_ref()?;
             let classes = classes();
             let first_class = classes.first().copied().unwrap_or("chart-series-1");
             let n = g.xs.len();
+            let right = g.width - PAD_R;
             Some(view! {
                 <g class="chart-axes">
+                    <line
+                        class="chart-axis-line"
+                        x1=px(PAD_L)
+                        x2=px(right)
+                        y1=px(VIEW_H - PAD_B)
+                        y2=px(VIEW_H - PAD_B)
+                    />
                     {g
                         .y_ticks
                         .iter()
                         .map(|(y, text)| {
                             view! {
-                                <line
-                                    class="chart-grid-line"
-                                    x1=px(PAD_L)
-                                    x2=px(VIEW_W - PAD_R)
-                                    y1=px(*y)
-                                    y2=px(*y)
-                                />
+                                <line class="chart-grid-line" x1=px(PAD_L) x2=px(right) y1=px(*y) y2=px(*y) />
                                 <text class="chart-axis chart-axis-y" x=px(PAD_L - 8.0) y=px(*y + 4.0)>
                                     {text.clone()}
                                 </text>
@@ -236,7 +271,7 @@ fn Plot(
     };
     let tooltip = move || {
         let index = highlighted()?;
-        let x = layout.with(|l| l.as_ref().map(|g| g.xs[index]))?;
+        let (x, width) = layout.with(|l| l.as_ref().map(|g| (g.xs[index], g.width)))?;
         let (time, rows) = data.with(|d| {
             let rows: Vec<_> = d
                 .series
@@ -254,13 +289,13 @@ fn Plot(
             (d.times.get(index).copied(), rows)
         });
         let time = time?;
-        let class = if x > VIEW_W * 0.6 {
+        let class = if x > width * 0.6 {
             "chart-tooltip chart-tooltip-left"
         } else {
             "chart-tooltip"
         };
         Some(view! {
-            <div class=class style:left=format!("{:.2}%", x / VIEW_W * 100.0)>
+            <div class=class style:left=format!("{:.2}%", x / width * 100.0)>
                 <div class="chart-tooltip-time">{hhmmss(time, tz)}</div>
                 {rows
                     .into_iter()
@@ -279,12 +314,12 @@ fn Plot(
     };
 
     view! {
-        <div class="chart-plot">
+        <div class="chart-plot" node_ref=plot_ref>
             <svg
                 class="chart-svg"
-                viewBox="0 0 640 220"
+                viewBox=view_box
                 width="100%"
-                height="auto"
+                height="220"
                 tabindex="0"
                 role="img"
                 aria-label=move || label.get()
@@ -294,13 +329,6 @@ fn Plot(
                 on:blur=move |_| hover.set(None)
                 on:keydown=on_key
             >
-                <line
-                    class="chart-axis-line"
-                    x1=px(PAD_L)
-                    x2=px(VIEW_W - PAD_R)
-                    y1=px(VIEW_H - PAD_B)
-                    y2=px(VIEW_H - PAD_B)
-                />
                 {axes_and_lines}
                 {crosshair}
             </svg>

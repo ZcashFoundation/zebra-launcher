@@ -19,9 +19,12 @@ use crate::{
     stats_history::{Field, Sample},
 };
 
-/// The chart's drawing surface, in `viewBox` units: `0 0 640 220`.
+/// The chart's drawing surface: one `viewBox` unit per CSS pixel, as wide as the card gives
+/// (`VIEW_W` until measured, or when the measurement is useless) and `VIEW_H` tall.
 pub const VIEW_W: f64 = 640.0;
 pub const VIEW_H: f64 = 220.0;
+/// Narrower than this and the plot would have no room between its paddings.
+pub const MIN_VIEW_W: f64 = 240.0;
 /// Room for the y-axis labels.
 pub const PAD_L: f64 = 64.0;
 /// Room for the end-dot and the direct label after the last sample.
@@ -526,6 +529,8 @@ impl ChartData {
 /// Everything the chart view draws, in `viewBox` units.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Geometry {
+    /// The `viewBox` width the coordinates assume.
+    pub width: f64,
     /// The x of every sample.
     pub xs: Vec<f64>,
     /// The y of every sample, per series.
@@ -542,16 +547,26 @@ pub struct Geometry {
     pub end_label: String,
 }
 
-/// Lays out `data`; `None` with fewer than two samples. The y domain has nice bounds around
-/// the values, from zero when `from_zero`.
-pub fn geometry(data: &ChartData, from_zero: bool, tz_offset_min: i32) -> Option<Geometry> {
+/// Lays out `data` for a plot `width` units wide; `None` with fewer than two samples. The y
+/// domain has nice bounds around the values, from zero when `from_zero`.
+pub fn geometry(
+    data: &ChartData,
+    from_zero: bool,
+    tz_offset_min: i32,
+    width: f64,
+) -> Option<Geometry> {
+    let width = if width.is_finite() && width >= MIN_VIEW_W {
+        width
+    } else {
+        VIEW_W
+    };
     let n = data.len();
     let (first, last) = (*data.times.first()?, *data.times.last()?);
     let span = last.duration_since(first).ok()?.as_secs_f64();
     if n < 2 || data.series.is_empty() || span <= 0.0 {
         return None;
     }
-    let x = scale((0.0, span), (PAD_L, VIEW_W - PAD_R));
+    let x = scale((0.0, span), (PAD_L, width - PAD_R));
     let since_first =
         |time: SystemTime| time.duration_since(first).map_or(0.0, |d| d.as_secs_f64());
     let xs: Vec<f64> = data
@@ -604,6 +619,7 @@ pub fn geometry(data: &ChartData, from_zero: bool, tz_offset_min: i32) -> Option
     let area = area_path(&points(&ys[0]), baseline);
     let end_label = compact(data.series[0].values[n - 1].round().max(0.0) as u64);
     Some(Geometry {
+        width,
         xs,
         ys,
         lines,
@@ -910,7 +926,8 @@ mod tests {
         assert_eq!(data.len(), 4);
         assert_eq!(data.series[1].values, vec![3_120_000.0; 4]);
 
-        let g = geometry(&data, false, 0).unwrap();
+        let g = geometry(&data, false, 0, VIEW_W).unwrap();
+        assert_eq!(g.width, VIEW_W);
         assert_eq!(g.xs.len(), 4);
         assert_eq!(g.xs[0], PAD_L);
         assert_eq!(g.xs[3], VIEW_W - PAD_R);
@@ -929,16 +946,25 @@ mod tests {
 
         // From zero for a count.
         let peers = ChartData::from_samples(&samples, &[("Peers", "chart-series-1", Field::Peers)]);
-        let g = geometry(&peers, true, 0).unwrap();
+        let g = geometry(&peers, true, 0, 1000.0).unwrap();
         assert_eq!(g.y_ticks[0].1, "0");
         assert_eq!(g.y_ticks[0].0, VIEW_H - PAD_B);
+        assert_eq!((g.width, g.xs[3]), (1000.0, 1000.0 - PAD_R));
+        // A useless width falls back to the default.
+        assert_eq!(geometry(&peers, true, 0, 0.0).unwrap().width, VIEW_W);
+        assert_eq!(geometry(&peers, true, 0, f64::NAN).unwrap().width, VIEW_W);
 
         // Too little data.
         assert_eq!(
-            geometry(&ChartData::from_samples(&samples[..1], &fields), false, 0),
+            geometry(
+                &ChartData::from_samples(&samples[..1], &fields),
+                false,
+                0,
+                VIEW_W
+            ),
             None
         );
-        assert_eq!(geometry(&ChartData::default(), false, 0), None);
+        assert_eq!(geometry(&ChartData::default(), false, 0, VIEW_W), None);
 
         assert_eq!(
             summary("Block height", &data, 0),
