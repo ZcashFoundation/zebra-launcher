@@ -2,7 +2,7 @@
 //! Save sends the whole settings object to `set_settings`; the data directory is changed only
 //! through `choose_data_dir`, so Save always sends the stored one.
 
-use launcher_types::{Network, Settings, is_loopback_http_url};
+use launcher_types::{Network, Settings, Theme, is_loopback_http_url};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -10,8 +10,11 @@ use crate::{
     app::AppState,
     clipboard::copy_to_clipboard,
     components::{update_mode_choice::UpdateModeChoice, updates::UpdateStatus},
-    format::{bytes, data_change_allowed, is_low_space, state_dir},
+    format::{bytes, data_change_allowed, is_low_space, state_dir, theme_text, theme_value},
 };
+
+/// The appearance radios, in order.
+const THEMES: [Theme; 3] = [Theme::System, Theme::Light, Theme::Dark];
 
 /// The word to type before node data is deleted.
 const DELETE_WORD: &str = "delete";
@@ -115,6 +118,16 @@ pub fn SettingsPage() -> impl IntoView {
             reset();
         }
         loaded
+    });
+
+    // The Appearance choice shows at once: the shell's theme effect reads the draft's theme
+    // while it differs from the stored one. Save stores it; Revert puts the draft back.
+    Effect::new(move |_| {
+        let chosen = draft.with(|d| d.as_ref().map(|d| d.theme));
+        let stored = state.settings.with(|s| s.as_ref().map(|s| s.theme));
+        state
+            .preview_theme
+            .set(chosen.filter(|chosen| Some(*chosen) != stored));
     });
 
     let grafana_error =
@@ -252,6 +265,39 @@ pub fn SettingsPage() -> impl IntoView {
                 </fieldset>
 
                 <fieldset>
+                    <legend>"Appearance"</legend>
+                    {THEMES
+                        .into_iter()
+                        .map(|theme| {
+                            let (label, explanation) = theme_text(theme);
+                            view! {
+                                <label class="radio">
+                                    <input
+                                        type="radio"
+                                        name="theme"
+                                        value=theme_value(theme)
+                                        prop:checked=move || {
+                                            draft.with(|d| d.as_ref().is_some_and(|d| d.theme == theme))
+                                        }
+                                        on:change=move |_| {
+                                            draft.update(|d| {
+                                                if let Some(d) = d {
+                                                    d.theme = theme;
+                                                }
+                                            });
+                                            result.set(None);
+                                        }
+                                    />
+                                    <span>
+                                        {label} <span class="muted">{format!(" {explanation}")}</span>
+                                    </span>
+                                </label>
+                            }
+                        })
+                        .collect_view()}
+                </fieldset>
+
+                <fieldset>
                     <legend>"Node"</legend>
                     <label class="field">
                         <span>"Network"</span>
@@ -337,6 +383,7 @@ pub fn SettingsPage() -> impl IntoView {
             <section class="settings">
                 <Diagnostics />
                 <DeleteNodeData busy />
+                <About />
             </section>
         </Show>
     }
@@ -361,24 +408,33 @@ fn DataDirRow(
     let state = AppState::get();
     let allowed = data_change_open(state);
     let result = RwSignal::new(None::<Result<Option<u64>, String>>);
-    // The free space at a chosen folder, read (read-only) whenever the stored one changes.
-    // The default folder's is not known here; the first-run flow showed it.
+    // The free space at the folder in use, read (read-only) when the row mounts and whenever
+    // the stored folder changes. Without a stored folder the launcher's default one is in use;
+    // its path comes from the first-run info.
     let stored_dir = Memo::new(move |_| {
         state
             .settings
             .with(|s| s.as_ref().and_then(|s| s.data_dir.clone()))
     });
-    let stored_free = RwSignal::new(None::<u64>);
+    let default_dir = RwSignal::new(None::<String>);
+    spawn_local(async move {
+        if let Ok(info) = api::get_first_run_info().await {
+            default_dir.set(Some(info.default_data_dir));
+        }
+    });
+    let dir_in_use = Memo::new(move |_| stored_dir.get().or_else(|| default_dir.get()));
+    // `None` while unread; `Some(None)` when the backend could not tell.
+    let free_in_use = RwSignal::new(None::<Option<u64>>);
     Effect::new(move |_| {
-        let Some(dir) = stored_dir.get() else {
-            stored_free.set(None);
+        free_in_use.set(None);
+        let Some(dir) = dir_in_use.get() else {
             return;
         };
         spawn_local(async move {
             let free = api::free_space(dir.clone()).await.ok().flatten();
             // Unless the folder changed meanwhile.
-            if stored_dir.with_untracked(|current| current.as_ref() == Some(&dir)) {
-                stored_free.set(free);
+            if dir_in_use.with_untracked(|current| current.as_ref() == Some(&dir)) {
+                free_in_use.set(Some(free));
             }
         });
     });
@@ -424,24 +480,10 @@ fn DataDirRow(
                 }}
             </code>
             {move || {
-                stored_free
+                free_in_use
                     .get()
                     .filter(|_| result.with(Option::is_none))
-                    .map(|free| {
-                        view! {
-                            <span class="muted data-dir-free">
-                                {format!("{} free there.", bytes(free))}
-                            </span>
-                            {is_low_space(Some(free))
-                                .then(|| {
-                                    view! {
-                                        <span class="error">
-                                            "Mainnet needs hundreds of GB; this drive may fill up."
-                                        </span>
-                                    }
-                                })}
-                        }
-                    })
+                    .map(free_space_view)
             }}
             <div class="buttons">
                 <button
@@ -488,6 +530,101 @@ fn DataDirRow(
                     })
             }}
         </div>
+    }
+}
+
+/// The free space at the folder in use: `212.4 GB free`, in the warning tone with an icon when
+/// Mainnet would not fit, or `free space unknown`.
+fn free_space_view(free: Option<u64>) -> impl IntoView {
+    let low = is_low_space(free);
+    let text = match free {
+        Some(free) => format!("{} free", bytes(free)),
+        None => "free space unknown".to_owned(),
+    };
+    view! {
+        <span class="data-dir-free" class:warn=low class:muted=!low>
+            {low.then(|| view! { <WarningIcon /> })}
+            {text}
+            {low.then_some(" (Mainnet needs hundreds of GB; this drive may fill up)")}
+        </span>
+    }
+}
+
+/// A small warning triangle, decorative: the text next to it says what is wrong.
+#[component]
+fn WarningIcon() -> impl IntoView {
+    view! {
+        <svg class="icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path
+                d="M8 1.5 15 14H1Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linejoin="round"
+            />
+            <path d="M8 6v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+            <circle cx="8" cy="12" r="0.9" fill="currentColor" />
+        </svg>
+    }
+}
+
+/// What is installed and where it keeps its files, read-only.
+#[component]
+fn About() -> impl IntoView {
+    let state = AppState::get();
+    let error = RwSignal::new(None::<String>);
+    let open = move |target: &'static str, what: &'static str| {
+        error.set(None);
+        spawn_local(async move {
+            if let Err(failure) = api::open_path(target).await {
+                error.set(Some(format!("Could not open {what}: {failure}")));
+            }
+        });
+    };
+    let launcher = move || {
+        state.update.with(|info| {
+            info.as_ref()
+                .map_or_else(|| "…".to_owned(), |info| info.current_version.clone())
+        })
+    };
+    let zebrad = move || {
+        state.stats.with(|stats| {
+            stats
+                .as_ref()
+                .map_or_else(|| "not running".to_owned(), |s| s.zebrad_version.clone())
+        })
+    };
+    let network = move || {
+        state.settings.with(|settings| {
+            settings
+                .as_ref()
+                .map_or_else(|| "…".to_owned(), |s| s.network.to_string())
+        })
+    };
+    view! {
+        <fieldset class="about">
+            <legend>"About"</legend>
+            <dl class="rows">
+                <dt>"Zebra Launcher"</dt>
+                <dd>{launcher}</dd>
+                <dt>"zebrad"</dt>
+                <dd>{zebrad}</dd>
+                <dt>"Network"</dt>
+                <dd>{network}</dd>
+            </dl>
+            <div class="buttons">
+                <button type="button" on:click=move |_| open("log_dir", "the logs folder")>
+                    "Open logs folder"
+                </button>
+                <button type="button" on:click=move |_| open("data_dir", "the data folder")>
+                    "Open data folder"
+                </button>
+                <button type="button" on:click=move |_| open("config_dir", "the config folder")>
+                    "Open config folder"
+                </button>
+            </div>
+            {move || error.get().map(|error| view! { <p class="error">{error}</p> })}
+        </fieldset>
     }
 }
 

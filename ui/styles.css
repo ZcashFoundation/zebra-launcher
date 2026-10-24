@@ -1,18 +1,47 @@
-/* Zebra Launcher: one small dark theme, no frameworks, no remote fonts. */
+/* Zebra Launcher: one small theme in a dark and a light set, no frameworks, no remote fonts.
+   Every colour is a token on :root (the dark set, the default); the light set redefines them
+   under :root[data-theme="light"], which theme.rs sets on <html>. Rules below use var(--token)
+   only, never a literal colour, so both looks stay in step. */
 
 :root {
   --bg: #1c1c1c;
   --panel: #262626;
   --border: #3a3a3a;
+  --hover: #242424;
   --text: #eeeeee;
   --muted: #8a8a8a;
+  --text-secondary: #c3c2b7;
   --accent: #f4b728;
+  /* The accent as text on --bg or --panel. In the light set the accent is darkened for borders
+     and outlines, and darkened further for text, which needs 4.5:1. */
+  --accent-text: #f4b728;
   --ok: #4caf50;
   --warn: #ff9800;
   --error: #f05454;
   --debug: #b07fe0;
   --trace: #5c9cf5;
+  --stderr: #c47878;
   --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  /* Filled badges (the phase pill) keep bright fills with dark text in both sets. */
+  --badge-text: #111111;
+  --badge-muted: #8a8a8a;
+  --badge-accent: #f4b728;
+  --badge-ok: #4caf50;
+  --badge-warn: #ff9800;
+  --badge-error: #f05454;
+  /* Banner tints: a little of the tone over --bg. */
+  --banner-ok-bg: #1f2e20;
+  --banner-warn-bg: #2e2619;
+  --banner-error-bg: #2e1f1f;
+  --banner-accent-bg: #2c2717;
+  --embed-bg: #111111;
+  --backdrop: rgba(0, 0, 0, 0.65);
+  /* TOML highlighting in the read-only config view, on --panel. */
+  --toml-comment: #6a9955;
+  --toml-section: #97bee5;
+  --toml-key: #9cdcfe;
+  --toml-string: #e18f76;
+  --toml-literal: #b7f1ab;
   /* Chart tokens (dark steps of a colour-blind-safe palette, validated against --panel). Series
      colours mark data; text never wears them. Status colours mean good/warning/serious/critical
      and are never used for a series. */
@@ -27,8 +56,46 @@
   --status-critical: #d03b3b;
   --grid: #333333;
   --axis: #4a4a4a;
-  --text-secondary: #c3c2b7;
   color-scheme: dark;
+}
+
+/* The light set. Text, log level and TOML colours reach 4.5:1 on their backgrounds; the status
+   tokens are the same in both sets. */
+:root[data-theme="light"] {
+  --bg: #f6f6f4;
+  --panel: #ffffff;
+  --border: #d9d9d4;
+  --hover: #ebebe7;
+  --text: #1a1a1a;
+  --muted: #6b6b66;
+  --text-secondary: #52514e;
+  --accent: #b8860b;
+  --accent-text: #7d5a06;
+  --ok: #0a7d2c;
+  --warn: #b45309;
+  --error: #c0392b;
+  --debug: #7c3aed;
+  --trace: #1d4ed8;
+  --stderr: #a03030;
+  --banner-ok-bg: #e6f4ea;
+  --banner-warn-bg: #fdf1e2;
+  --banner-error-bg: #fbeae8;
+  --banner-accent-bg: #fbf3dc;
+  --embed-bg: #ffffff;
+  --backdrop: rgba(0, 0, 0, 0.4);
+  --toml-comment: #008000;
+  --toml-section: #0451a5;
+  --toml-key: #001080;
+  --toml-string: #a31515;
+  --toml-literal: #098658;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-muted: #9a9a94;
+  --series-track: #d6e4f7;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  color-scheme: light;
 }
 
 * {
@@ -79,6 +146,10 @@ pre {
   color: var(--error);
 }
 
+.warn {
+  color: var(--warn);
+}
+
 .ok {
   color: var(--ok);
 }
@@ -110,7 +181,7 @@ button:disabled {
 
 button.primary {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 button.link {
@@ -128,6 +199,33 @@ select {
 
 input.invalid {
   border-color: var(--error);
+}
+
+/* Focus: one ring for everything that takes the keyboard. */
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Motion: this stylesheet uses no transitions or animations. The guard below covers the other
+   stylesheets (charts, grafana, insights): under reduced motion any transition or animation they
+   add ends at once, so none of them has to repeat the query. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* App shell */
@@ -154,13 +252,46 @@ input.invalid {
   padding: 16px 20px;
 }
 
-.tabs {
+/* Header row: brand, tabs, network and version. The tabs scroll sideways when narrow. */
+
+.nav-bar {
   display: flex;
-  gap: 4px;
+  align-items: stretch;
+  gap: 12px;
   padding: 0 12px;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding-right: 4px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.brand-icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
+
+.tabs {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 4px;
+  padding: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
 .tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
   border: none;
   border-bottom: 2px solid transparent;
   border-radius: 0;
@@ -170,6 +301,7 @@ input.invalid {
   text-transform: uppercase;
   font-size: 12px;
   letter-spacing: 1px;
+  white-space: nowrap;
 }
 
 .tab:hover:not(:disabled) {
@@ -182,15 +314,91 @@ input.invalid {
   border-bottom-color: var(--text);
 }
 
+.tab:focus-visible {
+  outline-offset: -2px;
+}
+
+.tab-badge {
+  display: inline-block;
+  border-radius: 999px;
+  background: var(--badge-accent);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.tab-badge-dot {
+  width: 8px;
+  height: 8px;
+}
+
+.tab-badge-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color: var(--badge-text);
+}
+
+.nav-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  padding-left: 4px;
+}
+
+.network-pill {
+  padding: 1px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.network-pill.network-testnet {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.launcher-version {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* Status strip */
 
 .status-strip {
+  position: relative;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px 16px;
-  padding: 8px 20px;
+  padding: 8px 20px 11px;
   background: var(--panel);
+}
+
+.sync-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--series-track);
+}
+
+.sync-bar-fill {
+  height: 100%;
+  background: var(--series-1);
+}
+
+.sync-bar-fill.synced {
+  background: var(--ok);
 }
 
 .phase {
@@ -199,27 +407,27 @@ input.invalid {
   border-radius: 999px;
   font-weight: 600;
   font-size: 12px;
-  color: #111;
+  color: var(--badge-text);
 }
 
 .phase-stopped {
-  background: var(--muted);
+  background: var(--badge-muted);
 }
 
 .phase-transition {
-  background: var(--accent);
+  background: var(--badge-accent);
 }
 
 .phase-running {
-  background: var(--ok);
+  background: var(--badge-ok);
 }
 
 .phase-backoff {
-  background: var(--warn);
+  background: var(--badge-warn);
 }
 
 .phase-failed {
-  background: var(--error);
+  background: var(--badge-error);
 }
 
 .phase-detail {
@@ -255,8 +463,8 @@ input.invalid {
 
 .last-error {
   padding: 4px 20px;
-  background: #2e1f1f;
-  color: #f0a0a0;
+  background: var(--banner-error-bg);
+  color: var(--error);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -288,17 +496,17 @@ input.invalid {
 
 .banner-ok {
   border-color: var(--ok);
-  background: #1f2e20;
+  background: var(--banner-ok-bg);
 }
 
 .banner-warn {
   border-color: var(--warn);
-  background: #2e2619;
+  background: var(--banner-warn-bg);
 }
 
 .banner-error {
   border-color: var(--error);
-  background: #2e1f1f;
+  background: var(--banner-error-bg);
 }
 
 .error-panel pre {
@@ -353,7 +561,7 @@ input.invalid {
   height: 70vh;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #111;
+  background: var(--embed-bg);
 }
 
 /* Logs */
@@ -398,7 +606,7 @@ input.invalid {
 }
 
 .log-row:hover {
-  background: #242424;
+  background: var(--hover);
 }
 
 .log-row .ts {
@@ -438,12 +646,12 @@ input.invalid {
 }
 
 .log-stderr {
-  color: #b86b6b;
+  color: var(--stderr);
 }
 
 .log-launcher {
   font-style: italic;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .log-gap {
@@ -503,24 +711,24 @@ input.invalid {
 }
 
 .toml-comment {
-  color: #6a9955;
+  color: var(--toml-comment);
 }
 
 .toml-section {
-  color: #97bee5;
+  color: var(--toml-section);
   font-weight: 600;
 }
 
 .toml-key {
-  color: #9cdcfe;
+  color: var(--toml-key);
 }
 
 .toml-string {
-  color: #e18f76;
+  color: var(--toml-string);
 }
 
 .toml-literal {
-  color: #b7f1ab;
+  color: var(--toml-literal);
 }
 
 /* Settings */
@@ -568,6 +776,26 @@ input.invalid {
 
 .settings .buttons {
   flex-wrap: wrap;
+}
+
+/* The form's Revert / Save row, before the read-only sections. */
+form.settings > .buttons {
+  margin-bottom: 16px;
+}
+
+.data-dir-free {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.data-dir-free .icon {
+  flex: none;
+}
+
+.settings .about .rows {
+  margin: 4px 0 10px;
 }
 
 /* A fieldset is as wide as its widest line by default; let the diagnostics scroll instead. */
@@ -620,7 +848,7 @@ details.diagnostics pre {
   align-items: center;
   justify-content: center;
   padding: 16px;
-  background: rgba(0, 0, 0, 0.65);
+  background: var(--backdrop);
   z-index: 10;
 }
 
@@ -685,7 +913,7 @@ details.diagnostics pre {
 
 .banner-update {
   border-color: var(--accent);
-  background: #2c2717;
+  background: var(--banner-accent-bg);
 }
 
 .update-banner .update-body,
@@ -729,7 +957,7 @@ details.diagnostics pre {
 
 .countdown {
   font-variant-numeric: tabular-nums;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .update-status {
