@@ -256,7 +256,12 @@
   text-align: center;
 }
 
-/* The action bar sticks to the bottom of the page while the form is in view. */
+/* The action bar sticks to the bottom of the page while the form is in view. Its wrapper
+   generates no box, so the bar moves within the whole form, not within the wrapper. */
+
+.cfg-footer {
+  display: contents;
+}
 
 .cfg-footer .banner {
   margin: 0 0 8px;
@@ -264,7 +269,9 @@
 
 .cfg-bar {
   position: sticky;
-  bottom: 0;
+  /* The sticky area is inset by the scrolling page's padding (16px in styles.css); this puts
+     the bar on the page's bottom edge instead of 16px above it with content showing under. */
+  bottom: -16px;
   z-index: 2;
   display: flex;
   flex-wrap: wrap;

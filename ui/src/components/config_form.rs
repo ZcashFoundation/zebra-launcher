@@ -173,6 +173,11 @@ fn custom_path(raw: Option<&str>) -> String {
         .to_owned()
 }
 
+/// The "Default:" line under a control; a list's entries go on one line, comma-separated.
+fn default_text(field: &Field) -> String {
+    format!("Default: {}", display_default(field).replace('\n', ", "))
+}
+
 /// The rows of a list textarea: one per entry plus a spare one, between 3 and 6.
 fn textarea_rows(text: &str) -> usize {
     (text.lines().count() + 1).clamp(3, 6)
@@ -908,7 +913,7 @@ fn user_control(
     view! {
         {control}
         <div class="cfg-meta" id=hint_id>
-            <span class="muted">{format!("Default: {}", display_default(field))}</span>
+            <span class="muted">{default_text(field)}</span>
             {(field.kind == Kind::Duration)
                 .then(|| view! { <span class="muted">"for example 30s, 5m, 1h"</span> })}
             <button
@@ -947,7 +952,7 @@ fn locked_control(
             <span class="cfg-badge">{badge}</span>
         </div>
         <div class="cfg-meta" id=hint_id>
-            <span class="muted">{format!("Default: {}", display_default(field))}</span>
+            <span class="muted">{default_text(field)}</span>
             {(!note.is_empty()).then(|| view! { <span class="muted">{note}</span> })}
         </div>
     }
@@ -1068,6 +1073,17 @@ mod tests {
         assert_eq!(custom_path(Some("/tmp/x")), "/tmp/x");
         assert_eq!(custom_path(Some("true")), "");
         assert_eq!(custom_path(None), "");
+    }
+
+    #[test]
+    fn default_line_puts_a_list_on_one_line() {
+        assert_eq!(default_text(&PORT), "Default: 0");
+        assert_eq!(default_text(&ADDR), "Default: not set");
+        let list = Field {
+            default: Some("a:8233\nb:8233"),
+            ..PEERS
+        };
+        assert_eq!(default_text(&list), "Default: a:8233, b:8233");
     }
 
     #[test]

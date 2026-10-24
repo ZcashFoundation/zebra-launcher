@@ -154,6 +154,7 @@ pub fn Help(id: String, text: &'static str) -> impl IntoView {
         >
             <button
                 type="button"
+                id=id
                 class="help-icon"
                 class:help-pinned=move || pinned.get()
                 node_ref=icon
