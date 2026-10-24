@@ -179,7 +179,8 @@ pub struct AppState {
     /// `update.health_failure` too; see [`AppState::health_failure`].
     pub update_health: RwSignal<Option<UpdateHealthFailure>>,
     /// Bumped whenever `zebrad.toml` was replaced outside the Configure page's own save (a
-    /// `reset_config` from any page), so the Configure page (always mounted) re-reads it.
+    /// `reset_config` from any page, or a save from the Settings form), so the Configure page
+    /// (always mounted) re-reads it.
     pub config_changed: RwSignal<u64>,
     /// A text filter another page asks the Logs page to apply (a problem picked on the
     /// dashboard). The Logs page takes it and clears it.
