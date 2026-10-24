@@ -1,5 +1,8 @@
 dist
 .DS_Store
-/target
+# Cargo output at the root and under any crate (rust-analyzer writes src-tauri/target).
+target/
 /.claude/
 __pycache__/
+# The Grafana admin password for the observability stack (docs/GRAFANA.md).
+docs/observability/.env
