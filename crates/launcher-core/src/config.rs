@@ -99,7 +99,7 @@ impl ManagedKeys {
             (
                 "rpc",
                 "cookie_dir",
-                Value::from(path_str(&self.cookie_dir)?),
+                Value::from(path_str("rpc.cookie_dir", &self.cookie_dir)?),
             ),
             (
                 "metrics",
@@ -109,7 +109,7 @@ impl ManagedKeys {
             (
                 "state",
                 "cache_dir",
-                Value::from(path_str(&self.state_dir)?),
+                Value::from(path_str("state.cache_dir", &self.state_dir)?),
             ),
         ])
     }
@@ -128,8 +128,17 @@ pub enum ConfigError {
     #[error("`{0}` in zebrad.toml must be a table")]
     NotATable(String),
     /// A managed path cannot be written to TOML.
-    #[error("the path {0:?} is not valid UTF-8")]
-    NonUtf8Path(PathBuf),
+    #[error("`{key}` cannot be set: the path {path:?} is not valid UTF-8")]
+    NonUtf8Path {
+        /// The managed key, such as `state.cache_dir`.
+        key: String,
+        /// The path that could not be written.
+        path: PathBuf,
+    },
+    /// A change from the editor is still being applied ([`begin_apply`]);
+    /// its backup is the file a [`recover`] would restore.
+    #[error("a configuration change is still being applied")]
+    ApplyInProgress,
 }
 
 /// Saving an edited `zebrad.toml` was refused or failed.
@@ -248,10 +257,14 @@ fn same_value(a: &Value, b: &Value) -> bool {
     }
 }
 
-fn path_str(path: &Path) -> Result<String, ConfigError> {
+/// The TOML string for the managed `key`'s `path`.
+fn path_str(key: &str, path: &Path) -> Result<String, ConfigError> {
     path.to_str()
         .map(str::to_string)
-        .ok_or_else(|| ConfigError::NonUtf8Path(path.to_path_buf()))
+        .ok_or_else(|| ConfigError::NonUtf8Path {
+            key: key.to_string(),
+            path: path.to_path_buf(),
+        })
 }
 
 /// Reads `zebrad.toml` with its compare-and-swap token.
@@ -439,8 +452,13 @@ pub fn begin_apply_with_managed(
             key: section,
             reason: "must be a table: the launcher manages keys in it".to_string(),
         },
+        ConfigError::NonUtf8Path { key, path } => ConfigEditError::Forbidden {
+            key,
+            reason: format!("the launcher's path {path:?} is not valid UTF-8"),
+        },
+        ConfigError::Toml(err) => ConfigEditError::InvalidToml(err.to_string()),
+        ConfigError::ApplyInProgress => ConfigEditError::ApplyInProgress,
         ConfigError::Io(err) => ConfigEditError::Io(err),
-        other => ConfigEditError::Io(io::Error::other(other.to_string())),
     })?;
     begin_apply(paths, &doc.to_string(), expected_token)
 }
@@ -451,14 +469,13 @@ pub fn begin_apply_with_managed(
 /// The current file, if any, is kept as `zebrad.toml.bak`, the backup
 /// [`begin_apply`] keeps too, so a reset can be undone by hand. The bytes are
 /// copied unchanged, so an unparsable or non-UTF-8 file is backed up as well.
-/// Refused while an apply is pending (its marker exists), because the backup
-/// is the file a [`recover`] would restore. The caller makes sure no zebrad is
-/// running and no apply runs at the same time.
+/// Refused with [`ConfigError::ApplyInProgress`] while an apply is pending
+/// (its marker exists), because the backup is the file a [`recover`] would
+/// restore. The caller makes sure no zebrad is running and no apply runs at
+/// the same time.
 pub fn reset(paths: &Paths, keys: &ManagedKeys) -> Result<ConfigDocument, ConfigError> {
     if paths.pending_apply_marker().exists() {
-        return Err(ConfigError::Io(io::Error::other(
-            "a configuration change is still being applied",
-        )));
+        return Err(ConfigError::ApplyInProgress);
     }
     let text = render_minimal(keys)?;
     let config = paths.zebrad_config();
@@ -739,6 +756,35 @@ tx_cost_limit = 1000
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_non_utf8_managed_path_is_refused_by_key() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let (_dir, paths, mut keys) = setup();
+        ensure(&paths, &keys).expect("ensure");
+        let original = read(&paths).expect("read");
+        keys.state_dir = PathBuf::from(std::ffi::OsStr::from_bytes(b"/chain/\xff"));
+
+        let err = begin_apply_with_managed(&paths, &original.text, &original.token, &keys)
+            .expect_err("a non-UTF-8 path cannot be written to TOML");
+        assert!(
+            matches!(
+                &err,
+                ConfigEditError::Forbidden { key, reason }
+                    if key == "state.cache_dir" && reason.contains("UTF-8")
+            ),
+            "{err:?}"
+        );
+        assert!(matches!(
+            ensure(&paths, &keys),
+            Err(ConfigError::NonUtf8Path { key, .. }) if key == "state.cache_dir"
+        ));
+        // Nothing was written by either.
+        assert_eq!(read(&paths).expect("read"), original);
+        assert_eq!(files(paths.config_dir()), ["zebrad.toml"]);
+    }
+
+    #[test]
     fn apply_with_managed_overrides_edits_to_managed_keys() {
         let (_dir, paths, keys) = setup();
         ensure(&paths, &keys).expect("ensure");
@@ -872,7 +918,10 @@ tx_cost_limit = 1000
         let pending =
             begin_apply(&paths, "[mempool]\ntx_cost_limit = 1\n", &original.token).expect("begin");
         let applied = read(&paths).expect("read");
-        assert!(matches!(reset(&paths, &keys), Err(ConfigError::Io(_))));
+        assert!(matches!(
+            reset(&paths, &keys),
+            Err(ConfigError::ApplyInProgress)
+        ));
         // Neither the file nor the backup the rollback needs changed.
         assert_eq!(read(&paths).expect("read"), applied);
         pending.rollback().expect("rollback");
