@@ -343,7 +343,7 @@ pub fn SettingsPage() -> impl IntoView {
                             }
                         />
                         <span class="muted">
-                            "Shown on the dashboard. Only Grafana on this computer (http://127.0.0.1 or http://localhost, any port) can be embedded; leave empty to hide it."
+                            "Embedded in the Grafana tab. Only Grafana on this computer (http://127.0.0.1 or http://localhost, any port) can be embedded; leave empty and the tab explains how to set one up."
                         </span>
                         {move || grafana_error.get().map(|e| view! { <span class="error">{e}</span> })}
                     </label>

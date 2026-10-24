@@ -479,10 +479,21 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The log-analysis cards under the charts (styled by insights.css). */
+/* The log-analysis cards under the charts (styled by insights.css): the sync stage, the
+   recent problems and, wide enough, the activity chart beside them at double width. */
 .dash-insights {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 12px;
   margin-bottom: 12px;
+}
+
+@media (min-width: 1100px) {
+  .dash-insights {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .dash-insights .insight-activity {
+    grid-column: span 2;
+  }
 }

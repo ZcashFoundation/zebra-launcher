@@ -58,13 +58,19 @@
   grid-column: 1 / -1;
 }
 
+/* The activity chart is drawn in a fixed 640-unit viewBox and scales with its card; cap the
+   scale so a full-width card does not blow its text up. */
+.insight-activity svg {
+  display: block;
+  width: 100%;
+  max-width: 760px;
+  height: auto;
+}
+
+/* Wide: three cards in a row, the activity chart full width under them. */
 @media (min-width: 1100px) {
   .insight-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  .insight-activity {
-    grid-column: span 2;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

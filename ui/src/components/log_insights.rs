@@ -809,11 +809,11 @@ pub fn LogInsightsPanel(on_pick: Callback<String>) -> impl IntoView {
         <div class="insight-grid">
             <SyncStageCard />
             <RecentProblems limit=8 on_pick=on_pick />
+            <StartupTimeline />
             <div class="card insight-card insight-activity">
                 <h3>"Lines per minute"</h3>
                 <LogActivityChart />
             </div>
-            <StartupTimeline />
         </div>
     }
 }
