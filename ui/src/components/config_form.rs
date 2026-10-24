@@ -303,6 +303,16 @@ pub fn saved_text(restarted: bool) -> &'static str {
     }
 }
 
+/// The banner over a disabled form while the draft is not TOML, pointing at the control that
+/// is on screen: the text editor while it is open, else the switch that opens it or Discard.
+fn invalid_toml_text(text_mode: bool) -> &'static str {
+    if text_mode {
+        "The file is not valid TOML. Fix it in the text editor."
+    } else {
+        "The file is not valid TOML. Open it with \"Edit as text\" to fix it, or Discard."
+    }
+}
+
 /// The note on keys the schema does not know, if any.
 fn unknown_note(keys: &[String]) -> Option<String> {
     match keys {
@@ -813,12 +823,14 @@ pub fn ZebradConfigForm(editor: ConfigEditor) -> impl IntoView {
             })
         })
     };
+    // The remedy names the visible control: the text editor while it is open, else the switch
+    // that opens it (a file on disk that is not TOML opens in the lines view).
     let invalid_view = move || {
         editor.parsed.with(|parsed| {
             parsed.as_ref().err().map(|error| {
                 view! {
                     <div class="banner banner-error error-panel cfg-invalid" role="alert">
-                        <strong>"The file is not valid TOML. Fix it in the text editor."</strong>
+                        <strong>{move || invalid_toml_text(editor.text_mode.get())}</strong>
                         <pre>{error.clone()}</pre>
                     </div>
                 }
@@ -1583,6 +1595,8 @@ mod tests {
         assert_eq!(save_label(false), "Save");
         assert!(saved_text(true).contains("restarted"));
         assert_eq!(saved_text(false), "Saved.");
+        assert!(invalid_toml_text(true).ends_with("Fix it in the text editor."));
+        assert!(invalid_toml_text(false).contains("\"Edit as text\""));
     }
 
     #[test]

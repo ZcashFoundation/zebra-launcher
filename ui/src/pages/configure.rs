@@ -177,6 +177,20 @@ pub fn Configure() -> impl IntoView {
                         "Change a setting in the form and zebrad.toml follows, with the changed lines marked. The file can also be edited as text."
                     </p>
                 </div>
+                // The first control on the page, so the text editor is a Tab away and not
+                // behind every form control. One label with the pressed state, like the other
+                // toggles in the UI.
+                <div class="buttons" hidden=move || !has_document()>
+                    <button
+                        type="button"
+                        class="cfg-text-toggle"
+                        aria-pressed=move || editor.text_mode.get().to_string()
+                        disabled=move || editor.saving.get()
+                        on:click=move |_| editor.set_text_mode(!editor.text_mode.get_untracked())
+                    >
+                        "Edit as text"
+                    </button>
+                </div>
             </div>
             {load_view}
             <div
@@ -235,7 +249,7 @@ pub fn Configure() -> impl IntoView {
 }
 
 /// The file pane: the draft as numbered lines with the changed ones marked, or as a text
-/// editor, with the count of changed lines and the switch between the two.
+/// editor, with the count of changed lines. The switch between the two is in the page head.
 #[component]
 fn FilePane(editor: ConfigEditor) -> impl IntoView {
     let body = NodeRef::<html::Div>::new();
@@ -292,7 +306,6 @@ fn FilePane(editor: ConfigEditor) -> impl IntoView {
         request_animation_frame(move || reveal_line(body, number));
     });
 
-    let toggle = move |_| editor.set_text_mode(!editor.text_mode.get_untracked());
     let body_view = move || {
         if editor.text_mode.get() {
             view! {
@@ -301,6 +314,11 @@ fn FilePane(editor: ConfigEditor) -> impl IntoView {
                     spellcheck="false"
                     aria-label="zebrad.toml"
                     aria-invalid=move || editor.parsed.with(Result::is_err).then_some("true")
+                    // The parse error below is the field's description while it shows, so
+                    // the reason is read with the field and not only as an alert elsewhere.
+                    aria-describedby=move || {
+                        editor.parsed.with(Result::is_err).then_some("cfg-text-error")
+                    }
                     disabled=move || editor.saving.get()
                     prop:value=move || editor.draft.get()
                     on:input=move |event| editor.set_text(event_target_value(&event))
@@ -313,7 +331,13 @@ fn FilePane(editor: ConfigEditor) -> impl IntoView {
                             parsed
                                 .as_ref()
                                 .err()
-                                .map(|error| view! { <pre class="cfg-text-error">{error.clone()}</pre> })
+                                .map(|error| {
+                                    view! {
+                                        <pre class="cfg-text-error" id="cfg-text-error">
+                                            {error.clone()}
+                                        </pre>
+                                    }
+                                })
                         })
                 }}
             }
@@ -340,15 +364,6 @@ fn FilePane(editor: ConfigEditor) -> impl IntoView {
                     "zebrad.toml"
                 </span>
                 <span class="muted cfg-file-summary">{summary}</span>
-                <button
-                    type="button"
-                    class="cfg-text-toggle"
-                    aria-pressed=move || editor.text_mode.get().to_string()
-                    disabled=move || editor.saving.get()
-                    on:click=toggle
-                >
-                    {move || if editor.text_mode.get() { "Done editing" } else { "Edit as text" }}
-                </button>
             </div>
             <div class="cfg-file-body" node_ref=body>
                 {body_view}
