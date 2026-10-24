@@ -29,12 +29,15 @@ jobs:
           # The toolchain comes from rust-toolchain.toml.
           cache: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Install the WebKitGTK and tray libraries Tauri builds against
+      # The one Linux package list, shared with the bundle jobs and DEVELOPMENT.md.
+      - name: Install the Linux packages Tauri builds against (LINUX_PACKAGES)
         run: |
+          set -euo pipefail
+          packages="$(sed -n 's/^LINUX_PACKAGES=//p' .github/tool-versions.env)"
+          [ -n "${packages}" ] || { echo "::error::no LINUX_PACKAGES in .github/tool-versions.env"; exit 1; }
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-            libxdo-dev libssl-dev patchelf
+          # shellcheck disable=SC2086 # LINUX_PACKAGES is a word list
+          sudo apt-get install -y --no-install-recommends ${packages}
       - run: cargo fmt --all --check
       # tauri-build requires the sidecar file named in bundle.externalBin.
       - name: Install fake-zebrad as the sidecar

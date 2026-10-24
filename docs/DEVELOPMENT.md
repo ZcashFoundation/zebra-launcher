@@ -26,12 +26,17 @@ No Node, npm or pnpm is needed.
 
 ### Linux (Debian, Ubuntu)
 
+The packages CI installs, from `LINUX_PACKAGES` in
+[`.github/tool-versions.env`](../.github/tool-versions.env): the WebKitGTK and tray
+libraries Tauri builds against, `patchelf` for the AppImage bundler, `libfuse2` and `file`
+to run and inspect an AppImage, and the build basics (`build-essential`, `pkg-config`,
+`curl`, `git`, `jq`):
+
 ```sh
-sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+sudo apt-get install $(sed -n 's/^LINUX_PACKAGES=//p' .github/tool-versions.env)
 ```
 
-Plus a C toolchain (`build-essential`). CI builds in an `ubuntu:22.04` container, which is
-the oldest supported base.
+CI builds the bundles in an `ubuntu:22.04` container, which is the oldest supported base.
 
 ### macOS
 
