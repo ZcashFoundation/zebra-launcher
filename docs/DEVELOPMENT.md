@@ -53,8 +53,8 @@ Binaries are never committed.
   `fake-zebrad` and copies it into place. It takes no arguments. fake-zebrad starts
   fast, needs no chain state, and can be scripted into failure modes with the
   `FAKE_ZEBRAD_MODE` environment variable (`ok`, `crash`, `config-error`, `eos-warn`,
-  `eos-halt`, `port-in-use`, `db-locked`, `hang-on-signal`, `stderr-flood`, `non-utf8`,
-  `stdin-close`), which it inherits from the launcher.
+  `eos-halt`, `port-in-use`, `db-locked`, `hang-on-signal`, `stderr-flood`, `non-utf8`),
+  which it inherits from the launcher.
 - **Real zebrad:** the version in [`ZEBRAD_VERSION`](../ZEBRAD_VERSION), fetched
   (`scripts/fetch-zebrad-linux.sh`, Linux) or built from the Zebra tag
   (`scripts/build-zebrad.sh`, `scripts/build-zebrad.ps1`); see [SIDECARS.md](SIDECARS.md).
@@ -75,7 +75,7 @@ it, rebuilding on changes. Useful environment variables:
 | --- | --- |
 | `RUST_LOG` | Launcher log filter, default `info`. Debug builds also log to stderr. |
 | `FAKE_ZEBRAD_MODE` | fake-zebrad's behaviour, see above. |
-| `LAUNCHER_STDIN_CLOSE=1` | Spawn zebrad with `--shutdown-on-stdin-close` and stop it by closing its stdin (fake-zebrad, or a zebrad with the upstream change from M6). |
+| `LAUNCHER_STDIN_CLOSE=1` | Spawn zebrad with `--shutdown-on-stdin-close` and stop it by closing its stdin (fake-zebrad, or a zebrad with the proposed upstream flag; the pinned zebrad does not have it yet). |
 
 The launcher keeps its files in the per-user directories for the identifier
 `org.zfnd.zebra-launcher` (`zebrad.toml` and `launcher.json` in the config directory,
@@ -85,20 +85,23 @@ and `zebrad.log` in the log directory). The `open_path` command opens them.
 On Linux, if the window is blank, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 To see dashboards in the Grafana tab, start the stack in [GRAFANA.md](GRAFANA.md). Without
-Tauri, `trunk serve` in `ui/` shows the UI against a mock backend at http://localhost:1420
-(`?running` starts it with a running node; see the flags at the top of `ui/src/mock.rs`).
+Tauri, `trunk serve` in `ui/` shows the UI against a mock backend at http://localhost:1420.
+The mock starts zebrad on load; query flags such as `?firstrun`, `?stale`, `?eos=halt` or
+`?update=available` put it into other states (`?running` is a first-run flag: zebrad is
+already running and Start fails). The full list is in
+[ui/README.md](../ui/README.md#develop-in-a-browser-mock-mode).
 
 ### Release build
 
-`cargo tauri build` embeds `ui/dist`, which `trunk build --release` produces (the
-`beforeBuildCommand`). Until the `ui` crate is in the tree, build in two steps and
-expect the second to fail without it:
+`cargo tauri build` runs `trunk build --release` in `ui/` first (the `beforeBuildCommand`
+in `tauri.conf.json`) and embeds the resulting `ui/dist`, so one command builds the app
+and its bundles. Without the updater key, skip the updater artifacts:
 
 ```sh
-(cd ui && trunk build --release)          # 1. the frontend, into ui/dist
-# 2. the app and its bundles; without the updater key, skip the updater artifacts
 cargo tauri build --debug --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
+
+To build the frontend alone, run `trunk build --release` in `ui/`.
 
 `tauri.conf.json` sets `bundle.createUpdaterArtifacts`, which needs
 `TAURI_SIGNING_PRIVATE_KEY`; only the release workflow has it.
@@ -177,6 +180,41 @@ installed, checks each hash against the `digest` GitHub reports for the asset; i
 nothing unless every platform downloaded and matched. Then update the comments above the
 lines (the date the hashes were computed, notes such as trunk's default wasm-opt
 version) and run `scripts/check-versions.sh`.
+
+## Icons
+
+The application icons in `src-tauri/icons/` are generated, never edited by hand. The source
+is `src-tauri/icons/source/zebra-icon.png`; [`scripts/make-icons.py`](../scripts/make-icons.py)
+composes the 1024 px icon, runs `cargo tauri icon` for the PNG set and rewrites `icon.ico`
+and `icon.icns` with a simplified variant for the tiny sizes (the details are in
+[`src-tauri/icons/README.md`](../src-tauri/icons/README.md)). It needs the pinned tauri-cli
+and Pillow, pinned in [`scripts/requirements-icons.txt`](../scripts/requirements-icons.txt):
+
+```sh
+python3 -m pip install -r scripts/requirements-icons.txt   # in a virtualenv if you prefer
+python3 -P scripts/make-icons.py
+```
+
+Run it after changing the source image or the script, and commit the result. `64x64.png`
+is also the header icon of the UI (`ui/index.html` copies it into the bundle).
+
+## UI screenshots
+
+The repository has no screenshot tooling. For a reproducible capture, serve the mock and
+use any Chrome or Chromium in headless mode; `--virtual-time-budget` lets the wasm load
+before the capture:
+
+```sh
+(cd ui && trunk serve)                       # http://localhost:1420
+chromium --headless=new --window-size=1280,900 --virtual-time-budget=5000 \
+  --screenshot=dashboard.png 'http://localhost:1420/?running'
+```
+
+The query flags in [ui/README.md](../ui/README.md#develop-in-a-browser-mock-mode) select
+the state to capture (`?firstrun`, `?stale`, `?eos=halt`, `?update=ready`, ...). The mock's
+appearance follows the browser's `prefers-color-scheme`; choose Light or Dark in Settings
+first, or emulate the media feature through the DevTools protocol, to capture a specific
+theme.
 
 ## Log fixtures
 
