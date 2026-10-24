@@ -13,8 +13,6 @@ use launcher_core::{
     logfile::RotatingLogConfig,
     logs::Detector,
     pidfile,
-    policy::RestartPolicy,
-    process::ZebradCommand,
     supervisor::{self, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle},
 };
 use launcher_types::{ExitClass, LogEvent, LogStream, Phase};
@@ -22,31 +20,23 @@ use tokio::time::timeout;
 
 #[path = "support/helpers.rs"]
 mod support;
-use support::{contains, fake_zebrad, messages, within};
+use support::{
+    LIMIT, contains, fake_zebrad, fake_zebrad_command, fast_supervisor_config, messages,
+    wait_status, within,
+};
 
 struct Fixture {
     _dir: tempfile::TempDir,
     config: SupervisorConfig,
 }
 
+/// fake-zebrad in `mode` on a Regtest config in a temporary directory, with a
+/// pid file and a log file next to it.
 fn fixture(mode: &str) -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("zebrad.toml");
     std::fs::write(&config_path, "[network]\nnetwork = \"Regtest\"\n").expect("write config");
-    let mut command = ZebradCommand::new(fake_zebrad(), &config_path);
-    command.env = vec![
-        ("FAKE_ZEBRAD_MODE".into(), mode.into()),
-        ("FAKE_ZEBRAD_HEARTBEAT_MS".into(), "50".into()),
-    ];
-    let mut config = SupervisorConfig::new(command);
-    config.stop_grace = Duration::from_secs(3);
-    config.exit_drain = Duration::from_millis(500);
-    config.restart = RestartPolicy {
-        initial_backoff: Duration::from_millis(50),
-        max_backoff: Duration::from_millis(200),
-        window: Duration::from_secs(60),
-        max_crashes: 3,
-    };
+    let mut config = fast_supervisor_config(fake_zebrad_command(mode, &config_path));
     config.pidfile = Some(dir.path().join("zebrad.pid"));
     config.log_file = Some(RotatingLogConfig::new(dir.path().join("zebrad.log")));
     Fixture { _dir: dir, config }
@@ -57,9 +47,7 @@ async fn wait_phase(
     f: impl FnMut(&Phase) -> bool,
 ) -> launcher_types::Status {
     let mut f = f;
-    within(handle.wait_until(|s| f(&s.phase)))
-        .await
-        .expect("supervisor is alive")
+    wait_status(handle, LIMIT, "the phase", |s| f(&s.phase)).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
