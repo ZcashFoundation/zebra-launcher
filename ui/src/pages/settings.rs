@@ -9,9 +9,7 @@ use crate::{
     api,
     app::AppState,
     clipboard::copy_to_clipboard,
-    components::{
-        config_form::ZebradConfigForm, update_mode_choice::UpdateModeChoice, updates::UpdateStatus,
-    },
+    components::{update_mode_choice::UpdateModeChoice, updates::UpdateStatus},
     format::{bytes, data_change_allowed, is_low_space, state_dir, theme_text, theme_value},
 };
 
@@ -328,6 +326,9 @@ pub fn SettingsPage() -> impl IntoView {
                         </select>
                     </label>
                     <DataDirRow draft busy />
+                    <p class="muted cfg-settings-pointer">
+                        "zebrad's own settings are on the Configure tab."
+                    </p>
                 </fieldset>
 
                 <fieldset>
@@ -382,8 +383,6 @@ pub fn SettingsPage() -> impl IntoView {
                     }}
                 </div>
             </form>
-            // Outside `.settings`, whose width suits the launcher form: this one is wider.
-            <ZebradConfigForm />
             <section class="settings">
                 <Diagnostics />
                 <DeleteNodeData busy />
