@@ -3,7 +3,7 @@
 How to cut a Zebra Launcher release with
 [`release.yml`](../.github/workflows/release.yml). The goal: another maintainer can cut a
 release candidate from a clean clone by following this file alone. The pipeline design
-is in [ARCHITECTURE.md](ARCHITECTURE.md#release-pipeline-m9-m10), and signing and key
+is in [ARCHITECTURE.md](ARCHITECTURE.md#release-pipeline), and signing and key
 custody are in [SECURITY.md](SECURITY.md).
 
 ## Versions
@@ -121,7 +121,7 @@ Windows zebrad builds are cold.
       Running.
 - [ ] **Every OS**: with close-to-tray on, closing the window keeps the node running;
       tray Quit leaves no `zebra-launcher-zebrad` process.
-- [ ] **Updater (M11 and later)**: every `.sig` names this version (see below), and
+- [ ] **Updater** (releases that ship it): every `.sig` names this version (see below), and
       the [update rehearsal](#update-rehearsal) from the previous rc to this release
       works on every target; the `.deb` shows the release link instead of installing.
 <!-- smoke-checklist:end -->
@@ -130,13 +130,13 @@ Windows zebrad builds are cold.
 
 The repository variable `UPDATER_ENABLED` says whether releases ship the updater:
 
-- unset or anything but `false` (the default from M11 on): `bundle_sign` must produce
+- unset or anything but `false` (the default once the updater key exists): `bundle_sign` must produce
   updater artifacts and `.sig` files, `manifest` must assemble a `latest.json` with all
   five platform keys, and `scripts/check-versions.sh` (in the `verify` job) fails while
   `plugins.updater.pubkey` in `src-tauri/tauri.conf.json` is still the placeholder
   `REPLACE_WITH_MINISIGN_PUBLIC_KEY`.
-- `false`: only for releases cut before the updater key exists (the M10 signing
-  rehearsal). No `latest.json` is required and the placeholder key is accepted. Such a
+- `false`: only for releases cut before the updater key exists (a signing rehearsal). No
+  `latest.json` is required and the placeholder key is accepted. Such a
   release cannot update itself; its users install the next one by hand.
 
 The `verify` job decides this once, in its `updater` step (`require_updater`, from the
