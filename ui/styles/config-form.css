@@ -24,7 +24,7 @@
 
 /* Two panes: the form on the left, the file on the right. The file pane sticks to the top of
    the page while the form scrolls past it, and scrolls inside when the file is long. Below
-   1100px one column, the file after the form. */
+   900px one column, the file after the form. */
 
 .cfg-panes {
   display: grid;
@@ -47,8 +47,10 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
-  /* What the app header, the page's padding and the sticky action bar leave. */
-  --cfg-pane-max: calc(100vh - 190px);
+  /* What the app header, the page's padding and the sticky footer leave: measured in
+     configure.rs (--cfg-room), since both grow with their banners; the calc stands in until
+     the first measurement. */
+  --cfg-pane-max: var(--cfg-room, calc(100vh - 190px));
   max-height: var(--cfg-pane-max);
   background: var(--panel);
   border: 1px solid var(--border);
@@ -56,7 +58,7 @@
   overflow: hidden;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 900px) {
   .cfg-panes {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -148,7 +150,9 @@
 }
 
 /* The line last edited in the form: a stronger tint and an outline that fade into the mark.
-   The reduced-motion guard in styles.css ends the animation at once. */
+   Under reduced motion the fade is dropped, not the highlight: the tint stays while the class
+   does (FLASH_FOR in configure.rs), since the guard in styles.css would end the animation at
+   once and leave no cue. */
 @keyframes cfg-flash {
   from {
     background: var(--banner-warn-bg);
@@ -158,6 +162,14 @@
 
 .cfg-line-flash {
   animation: cfg-flash 1.2s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cfg-line-flash {
+    animation: none;
+    background: var(--banner-warn-bg);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
 }
 
 /* The file as text, filling the pane: as tall as the pane may be, shrunk to what is left. */
@@ -325,7 +337,8 @@
   border-top: 1px solid var(--border);
 }
 
-/* One column of fields while the form pane is narrow (the two-pane layout at 1280px wide). */
+/* One column of fields while the form pane is narrow (the two-pane layout at the default
+   1000px window). */
 @container (max-width: 720px) {
   .cfg-grid {
     grid-template-columns: minmax(0, 1fr);

@@ -27,12 +27,13 @@ Note: It currently requires a 64-bit processor, and on macOS, an ARM-based proce
   minute, the startup timeline of the current run).
 - **Grafana:** your own Grafana embedded, with a picker for the 14 Zebra dashboards the
   repository ships, a time range and a refresh interval ([GRAFANA.md](docs/GRAFANA.md)).
-- **Configure:** edit the managed `zebrad.toml` with validation and automatic rollback
-  when zebrad rejects a change.
+- **Configure:** zebrad's settings as a form beside the live `zebrad.toml`, with an
+  explanation of each one; a form edit rewrites only its line in the file, the file can
+  also be edited as text, and saving validates, restarts zebrad and rolls back
+  automatically when zebrad rejects the change.
 - **Settings:** opt-in launcher updates (off, notify, automatic), close to tray, light or
   dark appearance, the chain data folder with its free space, diagnostics for bug
-  reports, deleting the node data, and a form for every zebrad setting with an
-  explanation of each one, validated before it is written to `zebrad.toml`.
+  reports, and deleting the node data.
 
 ## Documentation
 

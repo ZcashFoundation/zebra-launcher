@@ -440,13 +440,14 @@ fn is_host_name(host: &str) -> bool {
 
 /// Writes the form values into `original`, keeping its comments, unknown keys and layout: a set
 /// value is written with the field's TOML type, an unset one is removed, and a section is
-/// created when its first value is set. Fails when `original` is not TOML or a value fails
-/// [`validate`].
+/// created when its first value is set. Fails when `original` is not TOML or a value that
+/// differs from the file's fails [`validate`].
 ///
 /// Only [`Control::User`] fields are written; managed and forced fields, unknown keys and
 /// values of an unexpected type are left as they are. A value equal to the one in the file is
-/// not rewritten, so rendering a [`parse_config`] result gives back the original text. A
-/// section emptied by a removal is dropped too, unless a comment is attached to its header.
+/// not rewritten (nor checked), so rendering a [`parse_config`] result gives back the original
+/// text. A section emptied by a removal is dropped too, unless a comment is attached to its
+/// header.
 pub fn render_config(original: &str, form: &FormState) -> Result<String, String> {
     let mut doc = parse_document(original)?;
     for field in FIELDS {
@@ -465,10 +466,7 @@ pub fn render_config(original: &str, form: &FormState) -> Result<String, String>
             .map(|text| normalize(field.kind, text))
             .filter(|text| !text.is_empty());
         match text {
-            Some(text) => {
-                validate(field, &text).map_err(|message| format!("{}: {message}", field.path()))?;
-                set_value(&mut doc, field, &text)?;
-            }
+            Some(text) => set_value(&mut doc, field, &text)?,
             None => remove_value(&mut doc, field),
         }
     }
@@ -493,6 +491,10 @@ fn set_value(doc: &mut DocumentMut, field: &Field, text: &str) -> Result<(), Str
     if unchanged {
         return Ok(());
     }
+    // A value the file already holds is left as it is, whatever `validate` says of it: a
+    // hand-edited file can carry one the form rejects, and that must not block the other
+    // fields. Only a new value is checked.
+    validate(field, text).map_err(|message| format!("{}: {message}", field.path()))?;
     // Keep the spacing and any comment after the old value.
     let decor = existing
         .and_then(Item::as_value)
@@ -1505,6 +1507,34 @@ enabled = false
             render_config("", &form),
             Err("sync.download_concurrency_limit: Enter a whole number of at least 1.".to_owned())
         );
+    }
+
+    #[test]
+    fn a_rejected_value_already_in_the_file_does_not_block_the_other_fields() {
+        // zebrad accepts 0 here (it raises it to 1); the form's `validate` does not. Carried
+        // over from the file it is left alone, so another field can still be written.
+        let original = "[sync]\ndownload_concurrency_limit = 0\n";
+        let mut form = parse_config(original).expect("parses").form;
+        assert_eq!(form.get(("sync", "download_concurrency_limit")), Some("0"));
+        assert_eq!(render_config(original, &form).expect("renders"), original);
+        form.set(("tracing", "filter"), Some("info".to_owned()));
+        assert_eq!(
+            render_config(original, &form).expect("renders"),
+            "[sync]\ndownload_concurrency_limit = 0\n\n[tracing]\nfilter = \"info\"\n"
+        );
+        // A new value for that field is checked as before.
+        form.set(
+            ("sync", "download_concurrency_limit"),
+            Some("-3".to_owned()),
+        );
+        assert_eq!(
+            render_config(original, &form),
+            Err("sync.download_concurrency_limit: Enter a whole number of at least 1.".to_owned())
+        );
+        // Spacing around the file's value does not make it a new one.
+        let padded = "[sync]\ndownload_concurrency_limit = 0 # none\n";
+        let form = parse_config(padded).expect("parses").form;
+        assert_eq!(render_config(padded, &form).expect("renders"), padded);
     }
 
     #[test]
