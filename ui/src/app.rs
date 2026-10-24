@@ -3,7 +3,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::{NodeStats, Settings, Status, UpdateHealthFailure, UpdateInfo};
+use launcher_types::{LogLine, NodeStats, Settings, Status, UpdateHealthFailure, UpdateInfo};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -14,29 +14,40 @@ use crate::{
         status_strip::StatusStrip,
         updates::{HealthFailureBanner, UpdateBanner},
     },
+    insights::Insights,
     log_view::LogBuffer,
     pages::{
-        configure::Configure, dashboard::Dashboard, first_run::FirstRun, logs::Logs,
-        settings::SettingsPage,
+        configure::Configure, dashboard::Dashboard, first_run::FirstRun, grafana::Grafana,
+        logs::Logs, settings::SettingsPage,
     },
+    stats_history::StatsHistory,
+    theme,
 };
 
-/// The four pages.
+/// The five pages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Dashboard,
     Logs,
+    Grafana,
     Configure,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Dashboard, Tab::Logs, Tab::Configure, Tab::Settings];
+    pub const ALL: [Tab; 5] = [
+        Tab::Dashboard,
+        Tab::Logs,
+        Tab::Grafana,
+        Tab::Configure,
+        Tab::Settings,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Dashboard => "Dashboard",
             Tab::Logs => "Logs",
+            Tab::Grafana => "Grafana",
             Tab::Configure => "Configure",
             Tab::Settings => "Settings",
         }
@@ -52,6 +63,13 @@ pub struct AppState {
     /// `None` until loaded.
     pub settings: RwSignal<Option<Settings>>,
     pub logs: RwSignal<LogBuffer>,
+    /// What the log stream says about the node, folded in as batches arrive.
+    pub insights: RwSignal<Insights>,
+    /// The node statistics published since the launcher opened, for charts and rates.
+    pub history: RwSignal<StatsHistory>,
+    /// Whether the resolved appearance is dark (the setting, or the system preference when
+    /// the setting follows it). Embedded pages pick their theme from it.
+    pub resolved_dark: RwSignal<bool>,
     /// Ticks every second, for countdowns and "5 s ago" texts.
     pub now: RwSignal<SystemTime>,
     /// The last error from loading or subscribing, shown under the header.
@@ -82,6 +100,22 @@ impl AppState {
         move |message| self.backend_error.set(Some(message))
     }
 
+    /// Publishes new node statistics and keeps them in the history.
+    fn record_stats(&self, stats: Option<NodeStats>) {
+        if let Some(stats) = &stats {
+            self.history.update(|history| history.push(stats));
+        }
+        self.stats.set(stats);
+    }
+
+    /// Folds a batch of log lines into the insights and the log buffer.
+    fn record_logs(&self, batch: Vec<LogLine>) {
+        let now = clock::now();
+        self.insights
+            .update(|insights| insights.ingest(&batch, now));
+        self.logs.update(|logs| logs.merge(batch));
+    }
+
     /// The post-update health failure, from the event or the update info.
     pub fn health_failure(&self) -> Option<UpdateHealthFailure> {
         self.update_health.get().or_else(|| {
@@ -99,6 +133,9 @@ pub fn App() -> impl IntoView {
         stats: RwSignal::new(None),
         settings: RwSignal::new(None),
         logs: RwSignal::new(LogBuffer::default()),
+        insights: RwSignal::new(Insights::default()),
+        history: RwSignal::new(StatsHistory::default()),
+        resolved_dark: RwSignal::new(true),
         now: RwSignal::new(clock::now()),
         backend_error: RwSignal::new(None),
         update: RwSignal::new(None),
@@ -106,6 +143,7 @@ pub fn App() -> impl IntoView {
         config_changed: RwSignal::new(0),
     };
     provide_context(state);
+    theme::init(&state);
 
     set_interval(move || state.now.set(clock::now()), Duration::from_secs(1));
 
@@ -142,14 +180,14 @@ pub fn App() -> impl IntoView {
         let result = api::on_node_stats(
             move |stats| {
                 event_seen.set_value(true);
-                state.stats.set(stats);
+                state.record_stats(stats);
             },
             state.payload_error(),
         )
         .await;
         state.report("Listening for node stats", result);
         match api::get_node_stats().await {
-            Ok(stats) if !event_seen.get_value() => state.stats.set(stats),
+            Ok(stats) if !event_seen.get_value() => state.record_stats(stats),
             Ok(_) => {}
             Err(error) => state.report("Reading node stats", Err(error)),
         }
@@ -201,14 +239,11 @@ pub fn App() -> impl IntoView {
         }
     });
     spawn_local(async move {
-        let result = api::subscribe_logs(
-            move |batch| state.logs.update(|logs| logs.merge(batch)),
-            state.payload_error(),
-        )
-        .await;
+        let result =
+            api::subscribe_logs(move |batch| state.record_logs(batch), state.payload_error()).await;
         state.report("Subscribing to logs", result);
         match api::log_history(0).await {
-            Ok(history) => state.logs.update(|logs| logs.merge(history)),
+            Ok(history) => state.record_logs(history),
             Err(error) => state.report("Reading log history", Err(error)),
         }
     });
@@ -252,6 +287,9 @@ pub fn App() -> impl IntoView {
                 </section>
                 <section class="page page-logs" hidden=hidden(Tab::Logs)>
                     <Logs />
+                </section>
+                <section class="page page-grafana" hidden=hidden(Tab::Grafana)>
+                    <Grafana />
                 </section>
                 <section class="page" hidden=hidden(Tab::Configure)>
                     <Configure />

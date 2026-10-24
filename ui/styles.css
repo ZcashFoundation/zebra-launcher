@@ -13,6 +13,21 @@
   --debug: #b07fe0;
   --trace: #5c9cf5;
   --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  /* Chart tokens (dark steps of a colour-blind-safe palette, validated against --panel). Series
+     colours mark data; text never wears them. Status colours mean good/warning/serious/critical
+     and are never used for a series. */
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-muted: #6f6f6f;
+  --series-track: #2f3f55;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --grid: #333333;
+  --axis: #4a4a4a;
+  --text-secondary: #c3c2b7;
   color-scheme: dark;
 }
 

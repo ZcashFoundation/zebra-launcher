@@ -1,18 +1,14 @@
-//! The dashboard: node details, the end-of-support banner, and the embedded Grafana dashboard.
+//! The dashboard: node details and the end-of-support banner.
 
 use launcher_types::{EOS_WARNING_WINDOW, ExitClass, Phase, eos_within};
 use leptos::prelude::*;
 
 use crate::{
-    app::AppState,
+    app::{AppState, Tab},
     clock,
     components::{status_strip::phase_detail, updates::CheckForUpdate},
-    format::{exit_class_text, kiosk_url, percent, phase_label, relative, thousands},
+    format::{exit_class_text, percent, phase_label, relative, thousands},
 };
-
-/// The command that starts the Prometheus and Grafana stack, shown when no Grafana URL is set.
-const OBSERVABILITY_HINT: &str = "docker compose -f docs/observability/docker-compose.yml up -d";
-const GRAFANA_EXAMPLE_URL: &str = "http://127.0.0.1:3000/d/zebra-overview";
 
 #[component]
 pub fn Dashboard() -> impl IntoView {
@@ -139,39 +135,12 @@ pub fn Dashboard() -> impl IntoView {
         })
     });
 
-    // A memo, so saving unrelated settings does not reload the iframe.
-    let grafana_url = Memo::new(move |_| {
-        state
-            .settings
-            .with(|settings| settings.as_ref().and_then(|s| s.grafana_url.clone()))
-    });
-    let grafana = move || {
-        match grafana_url.get() {
-            Some(url) => view! {
-                <iframe
-                    class="grafana"
-                    title="Grafana dashboard"
-                    src=kiosk_url(&url)
-                    sandbox="allow-scripts allow-same-origin"
-                    referrerpolicy="no-referrer"
-                ></iframe>
-            }
-            .into_any(),
-            None => view! {
-                <div class="card hint">
-                    <h3>"Metrics dashboard"</h3>
-                    <p>
-                        "zebrad exports Prometheus metrics. To chart them here, start the bundled Prometheus and Grafana stack from a checkout of this repository:"
-                    </p>
-                    <pre>{OBSERVABILITY_HINT}</pre>
-                    <p>
-                        "then set the Grafana URL in Settings, for example "
-                        <code>{GRAFANA_EXAMPLE_URL}</code> "."
-                    </p>
-                </div>
-            }
-            .into_any(),
-        }
+    let grafana = view! {
+        <div class="card hint">
+            <h3>"Grafana"</h3>
+            <p>"Detailed charts of zebrad's Prometheus metrics live in the Grafana tab."</p>
+            <button on:click=move |_| state.tab.set(Tab::Grafana)>"Open the Grafana tab"</button>
+        </div>
     };
 
     view! {

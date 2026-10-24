@@ -11,14 +11,20 @@
 
 mod api;
 mod app;
+mod charts;
 mod clipboard;
 mod clock;
 mod format;
+mod grafana_url;
+mod insights;
 mod log_view;
 mod mock;
+mod stats_history;
 mod tauri;
+mod theme;
 
 mod components {
+    pub mod log_insights;
     pub mod nav;
     pub mod reset_config;
     pub mod stale_banner;
@@ -31,6 +37,7 @@ mod pages {
     pub mod configure;
     pub mod dashboard;
     pub mod first_run;
+    pub mod grafana;
     pub mod logs;
     pub mod settings;
 }

@@ -109,23 +109,6 @@ pub fn relative(time: SystemTime, now: SystemTime) -> String {
     }
 }
 
-/// Adds Grafana's `kiosk` query parameter, keeping any existing query and fragment.
-pub fn kiosk_url(url: &str) -> String {
-    let (base, fragment) = match url.find('#') {
-        Some(index) => url.split_at(index),
-        None => (url, ""),
-    };
-    let separator = if base.contains('?') { "&" } else { "?" };
-    if base.split_once('?').is_some_and(|(_, query)| {
-        query
-            .split('&')
-            .any(|pair| pair == "kiosk" || pair.starts_with("kiosk="))
-    }) {
-        return url.to_owned();
-    }
-    format!("{base}{separator}kiosk{fragment}")
-}
-
 /// Below this much free space the data location gets a warning: Mainnet state is hundreds of GB.
 pub const LOW_SPACE_BYTES: u64 = 300_000_000_000;
 
@@ -393,22 +376,6 @@ mod tests {
         assert_eq!(relative(now - Duration::from_secs(1), now), "just now");
         assert_eq!(rough_duration(Duration::from_secs(59)), "59 s");
         assert_eq!(rough_duration(Duration::from_secs(120)), "2 min");
-    }
-
-    #[test]
-    fn kiosk_parameter() {
-        assert_eq!(
-            kiosk_url("http://127.0.0.1:3000/d/x"),
-            "http://127.0.0.1:3000/d/x?kiosk"
-        );
-        assert_eq!(
-            kiosk_url("http://127.0.0.1:3000/d/x?orgId=1#top"),
-            "http://127.0.0.1:3000/d/x?orgId=1&kiosk#top"
-        );
-        assert_eq!(
-            kiosk_url("http://localhost/d/x?kiosk"),
-            "http://localhost/d/x?kiosk"
-        );
     }
 
     #[test]
