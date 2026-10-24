@@ -18,7 +18,7 @@ use launcher_core::{
     settings::SettingsHandle,
     supervisor::SupervisorHandle,
 };
-use launcher_types::{NodeStats, Phase, Settings};
+use launcher_types::{NodeStats, Settings};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::exit::ExitGuard;
@@ -90,15 +90,16 @@ impl AppState {
         })
     }
 
-    /// Held while the node data changes. Fails unless zebrad is stopped (see
-    /// [`is_stopped`]) and no start or other data change is running.
+    /// Held while the node data changes. Fails unless zebrad is stopped or
+    /// failed ([`launcher_types::Phase::is_settled`]) and no start or other
+    /// data change is running.
     pub fn data_change_permit(&self) -> Result<OwnedSemaphorePermit, String> {
         let permit = self
             .data_gate
             .clone()
             .try_acquire_many_owned(DATA_GATE_PERMITS)
             .map_err(|_| "zebrad is starting, or another data change is running".to_string())?;
-        if !is_stopped(&self.supervisor.status().phase) {
+        if !self.supervisor.status().phase.is_settled() {
             return Err("stop zebrad first".to_string());
         }
         Ok(permit)
@@ -128,12 +129,6 @@ pub fn legacy_cache_dir() -> Result<PathBuf, String> {
     LegacyLocations::current()
         .zebra_cache_dir
         .ok_or_else(|| "this system has no default cache directory".to_string())
-}
-
-/// True when no zebrad runs and none is scheduled: [`Phase::Stopped`], or
-/// [`Phase::Failed`], which waits for the user.
-pub fn is_stopped(phase: &Phase) -> bool {
-    matches!(phase, Phase::Stopped | Phase::Failed { .. })
 }
 
 /// The chain state directory: `<settings.data_dir>/state` when the user

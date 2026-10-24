@@ -19,7 +19,7 @@ use launcher_core::{
 };
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, ExitClass,
-    FirstRunInfo, ImportOutcome, LogLine, NodeStats, Phase, Settings, Status,
+    FirstRunInfo, ImportOutcome, LogLine, NodeStats, Settings, Status,
 };
 use tauri::{AppHandle, Runtime, State, ipc::Channel};
 use tauri_plugin_dialog::DialogExt;
@@ -156,15 +156,6 @@ fn io_error(err: impl Display) -> ApplyError {
     apply_error(ApplyErrorKind::Io, err)
 }
 
-/// Whether `apply_config` restarts zebrad: it is running, starting, or about
-/// to be restarted after a crash. A stopping zebrad is left stopped.
-fn was_running(phase: &Phase) -> bool {
-    matches!(
-        phase,
-        Phase::Starting | Phase::Running | Phase::Backoff { .. }
-    )
-}
-
 fn edit_error(err: ConfigEditError) -> ApplyError {
     let kind = match &err {
         ConfigEditError::InvalidToml(_) => ApplyErrorKind::InvalidToml,
@@ -212,7 +203,8 @@ pub async fn apply_config(
         .map_err(io_error)?
         .map_err(edit_error)?;
 
-    if !was_running(&state.supervisor.status().phase) {
+    // A stopping zebrad is left stopped: the file waits for the next start.
+    if !state.supervisor.status().phase.is_active() {
         blocking(move || pending.commit())
             .await
             .map_err(io_error)?

@@ -202,6 +202,27 @@ pub enum Phase {
     },
 }
 
+impl Phase {
+    /// zebrad runs, or will without the user doing anything: it was spawned
+    /// ([`Phase::Starting`]), accepted its configuration ([`Phase::Running`])
+    /// or crashed and is scheduled to restart ([`Phase::Backoff`]). Such a
+    /// node is restarted by a configuration change and brought back after a
+    /// launcher update; a [`Phase::Stopping`] node is left stopped.
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Phase::Starting | Phase::Running | Phase::Backoff { .. }
+        )
+    }
+
+    /// No zebrad runs and none is scheduled: [`Phase::Stopped`], or
+    /// [`Phase::Failed`], which waits for the user. Only then may the node
+    /// data change. [`Phase::Stopping`] is neither active nor settled.
+    pub fn is_settled(&self) -> bool {
+        matches!(self, Phase::Stopped | Phase::Failed { .. })
+    }
+}
+
 /// How the last zebrad run ended.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExitInfo {
@@ -702,6 +723,27 @@ mod tests {
             .unwrap(),
             serde_json::json!({"kind": "apply_in_progress", "message": "busy"})
         );
+    }
+
+    #[test]
+    fn phase_predicates_cover_every_phase() {
+        let backoff = Phase::Backoff {
+            until: SystemTime::UNIX_EPOCH,
+            crashes: 1,
+        };
+        let failed = Phase::Failed {
+            class: ExitClass::Crash,
+        };
+        for phase in [Phase::Starting, Phase::Running, backoff] {
+            assert!(phase.is_active(), "{phase:?}");
+            assert!(!phase.is_settled(), "{phase:?}");
+        }
+        for phase in [Phase::Stopped, failed] {
+            assert!(!phase.is_active(), "{phase:?}");
+            assert!(phase.is_settled(), "{phase:?}");
+        }
+        assert!(!Phase::Stopping.is_active());
+        assert!(!Phase::Stopping.is_settled());
     }
 
     #[test]
