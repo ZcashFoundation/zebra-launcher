@@ -14,6 +14,7 @@ mod app;
 mod charts;
 mod clipboard;
 mod clock;
+mod config_editor;
 mod config_form;
 mod config_view;
 mod format;

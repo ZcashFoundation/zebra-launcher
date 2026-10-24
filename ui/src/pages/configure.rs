@@ -17,12 +17,10 @@ use leptos::{html, prelude::*};
 use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::{
-    components::{
-        config_form::{
-            ConfigEditor, Load, Notice, ZebradConfigForm, changed_list, changes_text, save_label,
-            saved_text, text_only_note,
-        },
-        reset_config::ResetConfigButton,
+    components::{config_form::ZebradConfigForm, reset_config::ResetConfigButton},
+    config_editor::{
+        ConfigEditor, Load, Notice, changed_list, changes_text, save_label, saved_text,
+        text_only_note,
     },
     config_view::{LineChange, change_summary, key_line, line_changes, scroll_to_reveal},
     format::highlight_toml,
