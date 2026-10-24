@@ -257,6 +257,9 @@ pub fn Configure() -> impl IntoView {
                     <p class="muted path">
                         {move || document.with(|doc| doc.as_ref().map(|doc| doc.path.clone()))}
                     </p>
+                    <p class="muted cfg-note">
+                        "Prefer the form in Settings for individual settings; this page edits the file as text."
+                    </p>
                 </div>
                 <div class="buttons">{buttons}</div>
             </div>

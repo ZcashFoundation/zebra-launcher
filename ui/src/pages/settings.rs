@@ -382,8 +382,9 @@ pub fn SettingsPage() -> impl IntoView {
                     }}
                 </div>
             </form>
+            // Outside `.settings`, whose width suits the launcher form: this one is wider.
+            <ZebradConfigForm />
             <section class="settings">
-                <ZebradConfigForm />
                 <Diagnostics />
                 <DeleteNodeData busy />
                 <About />
