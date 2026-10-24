@@ -8,7 +8,7 @@ use leptos::prelude::*;
 
 use crate::clock;
 
-use super::{Mock, mock, sleep, url_value};
+use super::{Mock, mock, sleep};
 
 /// The launcher version the mock runs.
 pub(super) const MOCK_VERSION: &str = "0.1.0";
@@ -46,8 +46,9 @@ pub(super) enum UpdateFlag {
 }
 
 impl UpdateFlag {
-    pub(super) fn from_url() -> Option<Self> {
-        Some(match url_value("update")?.as_str() {
+    /// The value of `?update=`; `None` for one that is not listed.
+    pub(super) fn parse(value: &str) -> Option<Self> {
+        Some(match value {
             "available" => UpdateFlag::Available,
             "downloading" => UpdateFlag::Downloading,
             "ready" => UpdateFlag::Ready,
@@ -257,7 +258,7 @@ pub async fn check_for_update() -> UpdateState {
         // Cancelled, or the mode changed meanwhile; whatever superseded it set the state.
         return mock.update_state();
     }
-    let found = match mock.update_flag {
+    let found = match mock.flags.update {
         Some(UpdateFlag::Error) => check_error(),
         None | Some(UpdateFlag::Health) => UpdateState::UpToDate {
             checked_at: clock::now(),

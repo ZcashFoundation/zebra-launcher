@@ -93,8 +93,9 @@ To see dashboards in the Grafana tab, start the stack in [GRAFANA.md](GRAFANA.md
 Tauri, `trunk serve` in `ui/` shows the UI against a mock backend at http://localhost:1420.
 The mock starts zebrad on load; query flags such as `?firstrun`, `?stale`, `?eos=halt` or
 `?update=available` put it into other states (`?running` is a first-run flag: zebrad is
-already running and Start fails). The full list is in
-[ui/README.md](../ui/README.md#develop-in-a-browser-mock-mode).
+already running and Start fails). The table at the top of [ui/src/mock.rs](../ui/src/mock.rs)
+lists every flag; [ui/README.md](../ui/README.md#develop-in-a-browser-mock-mode) describes the
+states.
 
 ### Release build
 

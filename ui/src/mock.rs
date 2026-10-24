@@ -2,8 +2,27 @@
 //! so every page can be developed and demonstrated without zebrad.
 //!
 //! The fake state lives in reference-counted signals; commands change it after short delays to
-//! mimic zebrad starting and stopping. Log lines are real zebrad 7.0.0 output from
-//! `crates/launcher-core/tests/fixtures`.
+//! mimic zebrad starting and stopping. The log corpus is in [`log_lines`], the updater in
+//! [`updates`] and the `zebrad.toml` simulation in [`config`].
+//!
+//! # URL flags
+//!
+//! The page URL's query picks the state the mock starts in. [`Flags`] reads every flag once,
+//! when the page loads, and flags combine (`?firstrun&stale`). ui/README.md describes what
+//! each state looks like.
+//!
+//! | Flag | Effect |
+//! | --- | --- |
+//! | `?firstrun` | The first run is not done: the wizard opens, zebrad stays stopped until Finish, and alpha.4 leftovers are offered. |
+//! | `?storeddir` | With `?firstrun`: a data folder was chosen in an earlier, unfinished first run. |
+//! | `?running` | zebrad runs from the start, even with `?firstrun`, and Start fails while it runs. |
+//! | `?stale` | A zebrad from an earlier launcher run is still running: Start fails until "Stop it and start". |
+//! | `?configfail` | The first `read_config` fails, as for an unreadable file. |
+//! | `?eos=soon` | The end of support is 10 days away, inside the warning window, instead of 41. |
+//! | `?eos=halt` | zebrad refuses to run past its end of support and fails. |
+//! | `?update=available`, `downloading`, `ready`, `countdown`, `error`, `health` | The updater starts in that state, with the mode that goes with it ([`updates::UpdateFlag`]). |
+//! | `?deb` | This installation cannot update itself: "Open releases page" instead of Install. |
+//! | `?stalecheck` | No successful update check for 20 days: the stale-check warning. |
 
 mod config;
 mod log_lines;
@@ -67,11 +86,8 @@ fn sample_legacy() -> LegacyInstall {
     }
 }
 
-/// The page URL's query parameters, as `(key, value)` pairs.
-fn url_params() -> Vec<(String, String)> {
-    let search = web_sys::window()
-        .and_then(|window| window.location().search().ok())
-        .unwrap_or_default();
+/// A query string such as `?firstrun&eos=halt` as `(key, value)` pairs.
+fn query_params(search: &str) -> Vec<(String, String)> {
     search
         .trim_start_matches('?')
         .split('&')
@@ -83,27 +99,83 @@ fn url_params() -> Vec<(String, String)> {
         .collect()
 }
 
-/// True when the page URL's query has the parameter `flag`, such as `?stale` or `?firstrun`.
-fn url_flag(flag: &str) -> bool {
-    url_params().iter().any(|(key, _)| key == flag)
+/// The `?flag`s of the page URL; the module doc says what each does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Flags {
+    /// `?firstrun`.
+    first_run: bool,
+    /// `?storeddir`.
+    stored_dir: bool,
+    /// `?running`.
+    running: bool,
+    /// `?stale`.
+    stale: bool,
+    /// `?configfail`.
+    config_fail: bool,
+    /// `?eos=…`.
+    eos: EosFlag,
+    /// `?update=…`.
+    update: Option<UpdateFlag>,
+    /// `?deb`.
+    deb: bool,
+    /// `?stalecheck`.
+    stale_check: bool,
 }
 
-/// The value of `key` in the page URL's query, such as `available` for `?update=available`.
-fn url_value(key: &str) -> Option<String> {
-    url_params()
-        .into_iter()
-        .find_map(|(k, value)| (k == key).then_some(value))
+impl Flags {
+    /// The flags in the page URL.
+    fn from_url() -> Self {
+        let search = web_sys::window()
+            .and_then(|window| window.location().search().ok())
+            .unwrap_or_default();
+        Self::parse(&search)
+    }
+
+    /// The flags in a query string such as `?firstrun&eos=halt`. Unknown flags and values
+    /// are ignored.
+    fn parse(search: &str) -> Self {
+        let params = query_params(search);
+        let flag = |name: &str| params.iter().any(|(key, _)| key == name);
+        let value = |name: &str| {
+            params
+                .iter()
+                .find_map(|(key, value)| (key == name).then_some(value.as_str()))
+        };
+        Flags {
+            first_run: flag("firstrun"),
+            stored_dir: flag("storeddir"),
+            running: flag("running"),
+            stale: flag("stale"),
+            config_fail: flag("configfail"),
+            eos: EosFlag::parse(value("eos")),
+            update: value("update").and_then(UpdateFlag::parse),
+            deb: flag("deb"),
+            stale_check: flag("stalecheck"),
+        }
+    }
 }
 
 /// What `?eos=…` simulates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum EosFlag {
     /// No flag: the end of support is 41 days away.
+    #[default]
     Later,
     /// `soon`: 10 days away, inside the 14-day warning.
     Soon,
     /// `halt`: zebrad refuses to run.
     Halt,
+}
+
+impl EosFlag {
+    /// The value of `?eos=`; anything else is the default.
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("soon") => EosFlag::Soon,
+            Some("halt") => EosFlag::Halt,
+            _ => EosFlag::Later,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -117,30 +189,27 @@ struct Mock {
     /// Bumped by every command, so a delayed transition from an older command is skipped.
     generation: Arc<AtomicU64>,
     next_pid: Arc<AtomicU32>,
-    /// Makes the next `read_config` fail, see [`READ_FAILURE_MARKER`].
+    /// Makes the next `read_config` fail, see `config::READ_FAILURE_MARKER`.
     fail_next_read: Arc<AtomicBool>,
     /// The alpha.4 leftovers, until they are moved.
     legacy: ArcRwSignal<Option<LegacyInstall>>,
     /// The size of the chain state, freed by `delete_node_data`.
     state_bytes: Arc<AtomicU64>,
-    /// `?running`: zebrad runs from the start, even with `?firstrun`, and `start_zebrad` fails
-    /// while it runs.
-    refuse_start_while_running: bool,
-    eos: EosFlag,
+    /// The URL flags the page was loaded with.
+    flags: Flags,
     /// The updater, as `get_update_info` returns it. `mode` follows the settings.
     update: ArcRwSignal<UpdateInfo>,
     /// Bumped by every updater command, so a delayed step of an older one is skipped.
     update_generation: Arc<AtomicU64>,
     /// The `update_health_failed` event, sent a moment after load with `?update=health`.
     health_event: ArcRwSignal<Option<UpdateHealthFailure>>,
-    update_flag: Option<UpdateFlag>,
     /// The user clicked Install, so the download ends in an install (Auto mode's background
     /// download waits instead).
     install_requested: Arc<AtomicBool>,
 }
 
 thread_local! {
-    static MOCK: Mock = Mock::new();
+    static MOCK: Mock = Mock::new(Flags::from_url());
 }
 
 fn mock() -> Mock {
@@ -148,18 +217,17 @@ fn mock() -> Mock {
 }
 
 impl Mock {
-    fn new() -> Self {
-        // `?firstrun` in the page URL shows the first-run flow, with alpha.4 leftovers to move.
-        // Like the real backend, zebrad is then not started until the flow is finished.
-        let first_run = url_flag("firstrun");
-        let update_flag = UpdateFlag::from_url();
-        let update_mode = update_flag.map_or(UpdateMode::Off, UpdateFlag::mode);
+    fn new(flags: Flags) -> Self {
+        // `?firstrun` shows the first-run flow, with alpha.4 leftovers to move. Like the real
+        // backend, zebrad is then not started until the flow is finished.
+        let first_run = flags.first_run;
+        let update_mode = flags.update.map_or(UpdateMode::Off, UpdateFlag::mode);
         let mock = Self {
             status: ArcRwSignal::new(Status::default()),
             stats: ArcRwSignal::new(None),
             settings: ArcRwSignal::new(Settings {
                 first_run_done: !first_run,
-                data_dir: url_flag("storeddir").then(|| STORED_DATA_DIR.into()),
+                data_dir: flags.stored_dir.then(|| STORED_DATA_DIR.into()),
                 update_mode,
                 ..Settings::default()
             }),
@@ -172,52 +240,50 @@ impl Mock {
             generation: Arc::new(AtomicU64::new(0)),
             next_pid: Arc::new(AtomicU32::new(4242)),
             // `?configfail`: the first `read_config` fails, as for an unreadable file.
-            fail_next_read: Arc::new(AtomicBool::new(url_flag("configfail"))),
+            fail_next_read: Arc::new(AtomicBool::new(flags.config_fail)),
             legacy: ArcRwSignal::new(first_run.then(sample_legacy)),
             state_bytes: Arc::new(AtomicU64::new(if first_run {
                 0
             } else {
                 SYNCED_STATE_BYTES
             })),
-            refuse_start_while_running: url_flag("running"),
-            eos: match url_value("eos").as_deref() {
-                Some("soon") => EosFlag::Soon,
-                Some("halt") => EosFlag::Halt,
-                _ => EosFlag::Later,
-            },
+            flags,
             update: ArcRwSignal::new(UpdateInfo {
-                state: update_flag.map_or(UpdateState::Idle, UpdateFlag::initial_state),
+                state: flags
+                    .update
+                    .map_or(UpdateState::Idle, UpdateFlag::initial_state),
                 mode: update_mode,
                 current_version: MOCK_VERSION.into(),
-                last_successful_check: if url_flag("stalecheck") {
+                last_successful_check: if flags.stale_check {
                     Some(clock::now() - Duration::from_secs(20 * 86_400))
                 } else {
-                    update_flag.map(|_| clock::now() - Duration::from_secs(5 * 3600))
+                    flags
+                        .update
+                        .map(|_| clock::now() - Duration::from_secs(5 * 3600))
                 },
-                stale_check_warning: url_flag("stalecheck"),
-                can_install: !url_flag("deb"),
+                stale_check_warning: flags.stale_check,
+                can_install: !flags.deb,
                 releases_url: MOCK_RELEASES_URL.into(),
-                health_failure: (update_flag == Some(UpdateFlag::Health)).then(health_failure),
+                health_failure: (flags.update == Some(UpdateFlag::Health)).then(health_failure),
             }),
             update_generation: Arc::new(AtomicU64::new(0)),
             health_event: ArcRwSignal::new(None),
-            update_flag,
             install_requested: Arc::new(AtomicBool::new(false)),
         };
-        // `?stale` in the page URL simulates a zebrad left behind by an earlier launcher run.
-        if url_flag("stale") {
+        // `?stale` simulates a zebrad left behind by an earlier launcher run.
+        if flags.stale {
             mock.status.update(|status| {
                 status.stale = Some(StaleProcessInfo {
                     pid: 1234,
                     binary: "/opt/zebra-launcher/zebrad".into(),
                 })
             });
-        } else if !first_run || mock.refuse_start_while_running {
+        } else if !first_run || flags.running {
             mock.start();
         }
         let ticker = mock.clone();
         set_interval(move || ticker.tick_stats(), Duration::from_secs(1));
-        match update_flag {
+        match flags.update {
             Some(UpdateFlag::Downloading) => mock.download(),
             Some(UpdateFlag::Countdown) => mock.count_down(),
             Some(UpdateFlag::Health) => {
@@ -287,7 +353,7 @@ impl Mock {
             status.rpc_addr = None;
             status.metrics_addr = None;
         });
-        if self.eos == EosFlag::Halt {
+        if self.flags.eos == EosFlag::Halt {
             // zebrad 7.0.0 refuses to run past its end of support and exits with code 1.
             self.after(Duration::from_millis(1500), |mock| {
                 mock.status.update(|status| {
@@ -350,6 +416,11 @@ impl Mock {
             return;
         }
         let jitter = (js_sys::Math::random() * 3.0) as u64;
+        let eos_days = if self.flags.eos == EosFlag::Soon {
+            10
+        } else {
+            41
+        };
         let mut stats = self.stats.get_untracked().unwrap_or_else(|| NodeStats {
             height: 2_950_000,
             estimated_height: 3_120_000,
@@ -361,10 +432,7 @@ impl Mock {
             last_error: Some("(mock) no initial peers in the network config".into()),
             eos: Some(EosInfo {
                 block_height: 3_160_000,
-                estimated_time: clock::now()
-                    + Duration::from_secs(
-                        if self.eos == EosFlag::Soon { 10 } else { 41 } * 24 * 3600,
-                    ),
+                estimated_time: clock::now() + Duration::from_secs(eos_days * 24 * 3600),
             }),
             updated_at: clock::now(),
         });
@@ -429,7 +497,7 @@ pub async fn start_zebrad() -> Result<(), String> {
             stale.pid
         ));
     }
-    if mock.refuse_start_while_running && matches!(mock.phase(), Phase::Starting | Phase::Running) {
+    if mock.flags.running && matches!(mock.phase(), Phase::Starting | Phase::Running) {
         return Err("(mock) another start is in progress".into());
     }
     if mock.start_allowed() {
@@ -655,4 +723,55 @@ pub async fn complete_first_run() {
 pub async fn open_path(target: &str) {
     sleep(50).await;
     leptos::logging::log!("(mock) open_path({target})");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_are_read_from_the_query() {
+        assert_eq!(Flags::parse(""), Flags::default());
+        assert_eq!(Flags::parse("?"), Flags::default());
+        assert_eq!(
+            Flags::parse("?running"),
+            Flags {
+                running: true,
+                ..Flags::default()
+            }
+        );
+        // Every flag in the module doc's table, combined.
+        assert_eq!(
+            Flags::parse(
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck"
+            ),
+            Flags {
+                first_run: true,
+                stored_dir: true,
+                running: true,
+                stale: true,
+                config_fail: true,
+                eos: EosFlag::Halt,
+                update: Some(UpdateFlag::Countdown),
+                deb: true,
+                stale_check: true,
+            }
+        );
+        assert_eq!(Flags::parse("?eos=soon").eos, EosFlag::Soon);
+        // Unknown values and flags are ignored.
+        assert_eq!(
+            Flags::parse("?eos=never&update=bogus&other"),
+            Flags::default()
+        );
+        for (value, flag) in [
+            ("available", UpdateFlag::Available),
+            ("downloading", UpdateFlag::Downloading),
+            ("ready", UpdateFlag::Ready),
+            ("countdown", UpdateFlag::Countdown),
+            ("error", UpdateFlag::Error),
+            ("health", UpdateFlag::Health),
+        ] {
+            assert_eq!(Flags::parse(&format!("?update={value}")).update, Some(flag));
+        }
+    }
 }
