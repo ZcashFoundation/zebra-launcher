@@ -329,14 +329,12 @@ pub fn App() -> impl IntoView {
             Err(error) => state.report("Reading settings", Err(error)),
         }
     });
+    // The subscription streams the retained history before the live lines, so no separate
+    // history request is needed.
     spawn_local(async move {
         let result =
             api::subscribe_logs(move |batch| state.record_logs(batch), state.payload_error()).await;
         state.report("Subscribing to logs", result);
-        match api::log_history(0).await {
-            Ok(history) => state.record_logs(history),
-            Err(error) => state.report("Reading log history", Err(error)),
-        }
     });
 
     // Ctrl (or Cmd) + 1..5 switch tabs. The modifier keeps the shortcut out of the way of typing,

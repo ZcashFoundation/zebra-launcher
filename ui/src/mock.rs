@@ -517,7 +517,7 @@ fn mock_hash(seq: u64) -> String {
 
 /// The mock's log line at `seq`: a startup sequence, then a steady state where every 20th line
 /// reports progress, every 37th warns, every 101st comes from stderr and the rest is INFO
-/// gossip. Deterministic, so `log_history` can regenerate any range.
+/// gossip. Deterministic in `seq`, so any range can be regenerated.
 fn sample_line(seq: u64) -> GeneratedLine {
     if let Some(&(stream, level, spans, target, message)) =
         STARTUP_LINES.get(usize::try_from(seq).unwrap_or(usize::MAX))
@@ -1138,15 +1138,6 @@ pub fn subscribe_logs(on_batch: impl Fn(Vec<LogLine>) + 'static) {
         },
         Duration::from_millis(400),
     );
-}
-
-pub async fn log_history(since: u64) -> Vec<LogLine> {
-    sleep(50).await;
-    let mock = mock();
-    let end = mock.next_seq.load(Ordering::Relaxed);
-    (since.max(end.saturating_sub(200))..end)
-        .map(|seq| mock.line(seq))
-        .collect()
 }
 
 pub async fn read_config() -> Result<ConfigDocument, String> {
