@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "What the launcher UI in the main window may call. The Grafana iframe gets nothing.",
+  "description": "What the launcher UI in the main window may call. The Grafana iframe gets nothing. build.rs fails the build unless the allow-* list below matches its COMMANDS.",
   "windows": ["main"],
   "permissions": [
     "core:default",

@@ -11,24 +11,21 @@
 //!   request is made. Release builds honour no runtime endpoint override; the
 //!   QA override is build-time (`TAURI_CONFIG` / `--config`, see
 //!   docs/RELEASING.md). Debug builds also read `LAUNCHER_UPDATE_ENDPOINT`.
-//! - emits `update_info` (an [`UpdateInfo`]) on every change and
-//!   `update_state` (its [`UpdateState`]) when the state changes;
+//! - emits [`events::UPDATE_INFO`] (an [`UpdateInfo`]) on every change and
+//!   [`events::UPDATE_STATE`] (its [`UpdateState`]) when the state changes;
 //! - runs the health gate when the previous launch installed an update, and
-//!   emits `update_health_failed` if the update did not come back healthy.
+//!   emits [`events::UPDATE_HEALTH_FAILED`] if the update did not come back
+//!   healthy.
 
 use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use launcher_core::{
-    firstrun,
-    supervisor::SupervisorError,
-    updates::{
-        self, FoundUpdate, NodeControl, OnChunk, UpdateBackend, UpdaterConfig, UpdaterHandle,
-    },
+use launcher_core::updates::{
+    self, FoundUpdate, NodeControl, OnChunk, UpdateBackend, UpdaterConfig, UpdaterHandle,
 };
-use launcher_types::{Status, UpdateInfo, UpdateState};
+use launcher_types::{Status, UpdateInfo, UpdateState, events};
 use tauri::{
     AppHandle, Emitter, Runtime,
     utils::{config::BundleType, platform::bundle_type},
@@ -37,14 +34,6 @@ use tauri_plugin_updater::{Update, Updater, UpdaterExt};
 use tokio::sync::watch;
 
 use crate::{app_state::AppState, commands::RELEASES_URL};
-
-/// The event carrying every [`UpdateState`] change.
-pub const UPDATE_STATE_EVENT: &str = "update_state";
-/// The event carrying every [`UpdateInfo`] change.
-pub const UPDATE_INFO_EVENT: &str = "update_info";
-/// The event emitted when an update did not come back healthy, with an
-/// [`launcher_types::UpdateHealthFailure`].
-pub const UPDATE_HEALTH_FAILED_EVENT: &str = "update_health_failed";
 
 /// How long a check may take.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -180,10 +169,11 @@ impl<R: Runtime> UpdateBackend for PluginBackend<R> {
 
 /// The zebrad supervisor as the updater sees it: stops go straight to the
 /// supervisor, but starts (the health gate's, and the restart after a failed
-/// install) follow the same rules as every other start:
-/// [`firstrun::start_allowed`], and not while the node data is being changed.
-/// A zebrad left by an earlier run is reported to the UI like at launch
-/// (`stale_process`); the health gate waits for the user to resolve it.
+/// install) go through [`crate::start_node`], the same path as a start at
+/// launch or from the tray: not before the first run is done, not while the
+/// node data is being changed, and a zebrad left by an earlier run is
+/// reported to the UI (`stale_process`); the health gate waits for the user
+/// to resolve it.
 struct GatedNode<R: Runtime> {
     app: AppHandle<R>,
     state: AppState,
@@ -209,16 +199,7 @@ impl<R: Runtime> NodeControl for GatedNode<R> {
     }
 
     async fn start(&self) -> Result<(), String> {
-        firstrun::start_allowed(&self.state.settings.current())?;
-        let _permit = self.state.start_permit()?;
-        match self.state.supervisor.start().await {
-            Ok(()) => Ok(()),
-            Err(SupervisorError::StaleProcess(stale)) => {
-                crate::report_stale_process(&self.app, &stale);
-                Err(SupervisorError::StaleProcess(stale).to_string())
-            }
-            Err(err) => Err(err.to_string()),
-        }
+        crate::start_node(&self.app, &self.state).await
     }
 }
 
@@ -233,8 +214,13 @@ fn seed() -> u64 {
 
 /// Starts the updater actor, its event bridge and, if the previous launch
 /// installed an update, the health gate. Call once from setup; manage the
-/// returned handle.
-pub fn start<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> UpdaterHandle {
+/// returned handle. `gate_may_start` is [`crate::LaunchPlan::gate_may_start`]:
+/// whether the gate starts zebrad when the update stopped a running one.
+pub fn start<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    gate_may_start: bool,
+) -> UpdaterHandle {
     let current_version = app.package_info().version.to_string();
     let record_file = updates::record_path(&state.paths);
     let marker_file = updates::marker_path(&state.paths);
@@ -264,9 +250,6 @@ pub fn start<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> UpdaterHandle 
     });
     tauri::async_runtime::spawn(forward(app.clone(), handle.watch()));
 
-    // When zebrad is not started at launch, the gate starts it if the update
-    // stopped it.
-    let start_node = !state.settings.current().start_node_on_launch;
     let updater = handle.clone();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -274,14 +257,14 @@ pub fn start<R: Runtime>(app: &AppHandle<R>, state: &AppState) -> UpdaterHandle 
             &marker_file,
             &current_version,
             &node,
-            start_node,
+            gate_may_start,
             updates::HEALTH_GATE_TIMEOUT,
             RELEASES_URL,
         )
         .await;
         if let Some(Err(failure)) = gate {
             let _ = updater.report_health_failure(failure.clone()).await;
-            if let Err(err) = app.emit(UPDATE_HEALTH_FAILED_EVENT, failure) {
+            if let Err(err) = app.emit(events::UPDATE_HEALTH_FAILED, failure) {
                 tracing::warn!(%err, "could not emit update_health_failed");
             }
         }
@@ -296,12 +279,12 @@ async fn forward<R: Runtime>(app: AppHandle<R>, mut rx: watch::Receiver<UpdateIn
     loop {
         let info = rx.borrow_and_update().clone();
         if last_state.as_ref() != Some(&info.state) {
-            if let Err(err) = app.emit(UPDATE_STATE_EVENT, info.state.clone()) {
+            if let Err(err) = app.emit(events::UPDATE_STATE, info.state.clone()) {
                 tracing::warn!(%err, "could not emit update_state");
             }
             last_state = Some(info.state.clone());
         }
-        if let Err(err) = app.emit(UPDATE_INFO_EVENT, info) {
+        if let Err(err) = app.emit(events::UPDATE_INFO, info) {
             tracing::warn!(%err, "could not emit update_info");
         }
         if rx.changed().await.is_err() {

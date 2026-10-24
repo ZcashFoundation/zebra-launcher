@@ -12,14 +12,15 @@ use std::{
 };
 
 use launcher_core::{
+    apply,
     config::{self, ConfigEditError},
     diagnostics,
     firstrun::{self, LegacyLocations},
-    supervisor::{StartOptions, SupervisorError},
+    supervisor::StartOptions,
 };
 use launcher_types::{
-    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, ExitClass,
-    FirstRunInfo, ImportOutcome, LogLine, NodeStats, Phase, Settings, Status,
+    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
+    ImportOutcome, LogLine, NodeStats, OpenTarget, Settings, Status,
 };
 use tauri::{AppHandle, Runtime, State, ipc::Channel};
 use tauri_plugin_dialog::DialogExt;
@@ -36,7 +37,7 @@ use crate::{
 /// this has accepted it.
 const APPLY_START_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The page `open_path("releases_page")` opens.
+/// The page `open_path` opens for [`OpenTarget::ReleasesPage`].
 pub const RELEASES_URL: &str = "https://github.com/ZcashFoundation/zebra-launcher/releases";
 
 fn message(err: impl Display) -> String {
@@ -152,49 +153,25 @@ fn apply_error(kind: ApplyErrorKind, message: impl Display) -> ApplyError {
     }
 }
 
-fn io_error(err: impl Display) -> ApplyError {
-    apply_error(ApplyErrorKind::Io, err)
-}
-
-/// Whether `apply_config` restarts zebrad: it is running, starting, or about
-/// to be restarted after a crash. A stopping zebrad is left stopped.
-fn was_running(phase: &Phase) -> bool {
-    matches!(
-        phase,
-        Phase::Starting | Phase::Running | Phase::Backoff { .. }
-    )
-}
-
-fn edit_error(err: ConfigEditError) -> ApplyError {
-    let kind = match &err {
-        ConfigEditError::InvalidToml(_) => ApplyErrorKind::InvalidToml,
-        ConfigEditError::Forbidden { .. } => ApplyErrorKind::Forbidden,
-        ConfigEditError::Conflict => ApplyErrorKind::Conflict,
-        ConfigEditError::ApplyInProgress => ApplyErrorKind::ApplyInProgress,
-        ConfigEditError::Io(_) => ApplyErrorKind::Io,
-    };
-    apply_error(kind, err)
-}
-
 /// Saves `text` as `zebrad.toml` and, if zebrad was running, restarts it
-/// with the new file.
+/// with the new file: [`apply::apply_and_restart`], behind this app's
+/// permits.
 ///
-/// `token` is the one `read_config` returned. The launcher-managed keys are
-/// set to the launcher's values before the file is checked and written.
-/// When zebrad is not running (stopped, or failed and waiting for the user)
-/// the file is saved and the outcome is `applied`; zebrad reads it on its
-/// next start. Otherwise zebrad is restarted: if it refuses the file as a
-/// configuration error, the previous file is restored, zebrad is started
-/// with it, and the outcome is `rolled_back` with zebrad's message. Any
-/// other start failure keeps the new file (zebrad got past loading it) and
-/// shows up in the status. Rejections leave the file unchanged.
+/// `token` is the one `read_config` returned. When zebrad is not running
+/// (stopped, or failed and waiting for the user) the file is saved and the
+/// outcome is `applied`; zebrad reads it on its next start. Otherwise zebrad
+/// is restarted: if it refuses the file as a configuration error, the
+/// previous file is restored, zebrad is started with it, and the outcome is
+/// `rolled_back` with zebrad's message. Any other start failure keeps the
+/// new file (zebrad got past loading it) and shows up in the status.
+/// Rejections leave the file unchanged.
 #[tauri::command]
 pub async fn apply_config(
     state: State<'_, AppState>,
     text: String,
     token: String,
 ) -> Result<ApplyOutcome, ApplyError> {
-    let _permit = state
+    let _config = state
         .config_writer
         .clone()
         .try_acquire_owned()
@@ -204,81 +181,26 @@ pub async fn apply_config(
                 ConfigEditError::ApplyInProgress,
             )
         })?;
-
-    let paths = state.paths.clone();
-    let keys = managed_keys(&state.settings.current(), &paths);
-    let pending = blocking(move || config::begin_apply_with_managed(&paths, &text, &token, &keys))
-        .await
-        .map_err(io_error)?
-        .map_err(edit_error)?;
-
-    if !was_running(&state.supervisor.status().phase) {
-        blocking(move || pending.commit())
-            .await
-            .map_err(io_error)?
-            .map_err(io_error)?;
-        tracing::info!("saved the new configuration; zebrad uses it on its next start");
-        return Ok(ApplyOutcome::Applied);
-    }
-
     // Held across the stop and the start, so the node data cannot change
-    // while zebrad is briefly stopped.
-    let _start = match state.start_permit() {
-        Ok(permit) => permit,
-        Err(err) => {
-            let _ = blocking(move || pending.rollback()).await;
-            return Err(io_error(err));
-        }
-    };
-    if let Err(err) = state.supervisor.stop().await {
-        // The launcher is exiting. Restore the file now; if that fails, the
-        // pending marker makes the next launch do it.
-        let _ = blocking(move || pending.rollback()).await;
-        return Err(io_error(err.to_string()));
-    }
+    // while zebrad is briefly stopped. Taken before anything is written, so
+    // a refusal leaves the file unchanged.
+    let _start = state.start_permit().map_err(|_| {
+        apply_error(
+            ApplyErrorKind::Busy,
+            "the node data is being changed; apply the configuration when that has finished",
+        )
+    })?;
 
-    match tokio::time::timeout(APPLY_START_TIMEOUT, state.supervisor.start()).await {
-        Ok(Err(SupervisorError::ExitedDuringStart(exit)))
-            if exit.class == ExitClass::ConfigError =>
-        {
-            let error = exit
-                .detail
-                .unwrap_or_else(|| "zebrad could not load the configuration".to_string());
-            tracing::warn!(%error, "zebrad refused the new configuration; rolling back");
-            blocking(move || pending.rollback())
-                .await
-                .map_err(io_error)?
-                .map_err(|err| {
-                    io_error(format!(
-                        "zebrad refused the new configuration ({error}), and the previous one could not be restored: {err}"
-                    ))
-                })?;
-            match tokio::time::timeout(APPLY_START_TIMEOUT, state.supervisor.start()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    tracing::warn!(%err, "zebrad did not start with the restored configuration")
-                }
-                Err(_) => {
-                    tracing::warn!("zebrad is still starting with the restored configuration")
-                }
-            }
-            Ok(ApplyOutcome::RolledBack { error })
-        }
-        started => {
-            match started {
-                Ok(Ok(())) => tracing::info!("zebrad started with the new configuration"),
-                Ok(Err(err)) => {
-                    tracing::warn!(%err, "zebrad accepted the new configuration but did not start")
-                }
-                Err(_) => tracing::info!("zebrad is still starting with the new configuration"),
-            }
-            blocking(move || pending.commit())
-                .await
-                .map_err(io_error)?
-                .map_err(io_error)?;
-            Ok(ApplyOutcome::Applied)
-        }
-    }
+    let keys = managed_keys(&state.settings.current(), &state.paths);
+    apply::apply_and_restart(
+        &state.paths,
+        &state.supervisor,
+        text,
+        token,
+        &keys,
+        APPLY_START_TIMEOUT,
+    )
+    .await
 }
 
 /// The launcher settings.
@@ -289,36 +211,45 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 
 /// Validates and saves `settings`, returning what was saved.
 ///
-/// Managed `zebrad.toml` keys that depend on the settings (network, data
-/// directory) are updated right away and take effect on the next zebrad
-/// start; the stop grace period takes effect on the next launch.
-/// `first_run_done` is kept as it is: only `complete_first_run` sets it.
-/// `data_dir` is kept as it is too: only `choose_data_dir` changes it, after
-/// checking that zebrad is stopped and the directory is writable, so a stale
-/// copy of the settings in the UI cannot undo a choice.
+/// Managed `zebrad.toml` keys that depend on the settings (the network) are
+/// updated right away and take effect on the next zebrad start; the stop
+/// grace period takes effect on the next launch. A save that changes such a
+/// key is refused, without saving anything, while a configuration change is
+/// being applied (see [`AppState::config_writer`]); every other save goes
+/// through regardless. `first_run_done` is kept as it is: only
+/// `complete_first_run` sets it. `data_dir` is kept as it is too: only
+/// `choose_data_dir` changes it, after checking that zebrad is stopped and
+/// the directory is writable, so a stale copy of the settings in the UI
+/// cannot undo a choice.
 #[tauri::command]
 pub async fn set_settings(
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<Settings, String> {
+    let paths = state.paths.clone();
+    let current = state.settings.current();
+    let mut merged = current.clone();
+    launcher_core::settings::apply_from_ui(&mut merged, settings.clone());
+    let config_permit = if managed_keys(&merged, &paths) == managed_keys(&current, &paths) {
+        None
+    } else {
+        Some(state.try_config_permit()?)
+    };
+
     let saved = state
         .settings
         .update(move |current| launcher_core::settings::apply_from_ui(current, settings))
         .await
         .map_err(message)?;
 
-    // `ensure` only writes when a managed value changed.
-    let _permit = state
-        .config_writer
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(message)?;
-    let paths = state.paths.clone();
-    let keys = managed_keys(&saved, &paths);
-    blocking(move || config::ensure(&paths, &keys))
-        .await?
-        .map_err(|err| format!("settings saved, but zebrad.toml could not be updated: {err}"))?;
+    if config_permit.is_some() {
+        let keys = managed_keys(&saved, &paths);
+        blocking(move || config::ensure(&paths, &keys))
+            .await?
+            .map_err(|err| {
+                format!("settings saved, but zebrad.toml could not be updated: {err}")
+            })?;
+    }
     Ok(saved)
 }
 
@@ -337,37 +268,34 @@ fn path_arg(path: &Path) -> String {
 /// Grafana tab's setup card describes lives (`docs/observability/`).
 const REPO_URL: &str = "https://github.com/ZcashFoundation/zebra-launcher";
 
-/// Opens one of a fixed set of locations with the system's default handler:
-/// `config_dir`, `data_dir` (the chosen chain data directory, or the
-/// launcher's data directory), `log_dir`, `releases_page`, `repo` (the
-/// source repository, in the browser), or `grafana` (the Grafana URL from
-/// the settings, in the browser; fails when none is set).
+/// Opens one of a fixed set of locations ([`OpenTarget`]) with the system's
+/// default handler. A `target` outside the set is refused by Tauri before
+/// this runs.
 #[tauri::command]
 pub fn open_path<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, AppState>,
-    target: String,
+    target: OpenTarget,
 ) -> Result<(), String> {
     let opener = app.opener();
     let paths = &state.paths;
-    let result = match target.as_str() {
-        "config_dir" => opener.open_path(path_arg(paths.config_dir()), None::<&str>),
-        "data_dir" => {
+    let result = match target {
+        OpenTarget::ConfigDir => opener.open_path(path_arg(paths.config_dir()), None::<&str>),
+        OpenTarget::DataDir => {
             let dir = match state.settings.current().data_dir {
                 Some(dir) => dir,
                 None => path_arg(paths.data_dir()),
             };
             opener.open_path(dir, None::<&str>)
         }
-        "log_dir" => opener.open_path(path_arg(paths.log_dir()), None::<&str>),
-        "releases_page" => opener.open_url(RELEASES_URL, None::<&str>),
-        "repo" => opener.open_url(REPO_URL, None::<&str>),
+        OpenTarget::LogDir => opener.open_path(path_arg(paths.log_dir()), None::<&str>),
+        OpenTarget::ReleasesPage => opener.open_url(RELEASES_URL, None::<&str>),
+        OpenTarget::Repo => opener.open_url(REPO_URL, None::<&str>),
         // Validated as a loopback http URL when it was saved (`is_loopback_http_url`).
-        "grafana" => match state.settings.current().grafana_url {
+        OpenTarget::Grafana => match state.settings.current().grafana_url {
             Some(url) => opener.open_url(url, None::<&str>),
             None => return Err("no Grafana URL is set".into()),
         },
-        other => return Err(format!("cannot open {other:?}")),
     };
     result.map_err(message)
 }

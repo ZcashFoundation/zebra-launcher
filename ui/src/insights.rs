@@ -15,7 +15,6 @@ use std::{
 
 use launcher_types::{LogLevel, LogLine, LogStream};
 
-use crate::log_view::is_gap_marker;
 use fields::{
     epoch_minute, field, height_of, message_text, minute_start, parse_timestamp, pattern_of,
     percent_of, u64_of,
@@ -359,8 +358,8 @@ impl Insights {
                 continue;
             }
             self.last_seq = Some(line.seq);
-            if is_gap_marker(line) {
-                self.dropped_lines += dropped_count(&line.message);
+            if let Some(dropped) = line.dropped {
+                self.dropped_lines += dropped;
                 continue;
             }
             let at = match line.timestamp.as_deref().and_then(parse_timestamp) {
@@ -730,14 +729,6 @@ impl Insights {
     }
 }
 
-/// The count in a gap marker's `N lines dropped`.
-fn dropped_count(message: &str) -> u64 {
-    message
-        .strip_suffix(" lines dropped")
-        .and_then(|count| count.parse().ok())
-        .unwrap_or(0)
-}
-
 /// `+0.08 s`, `+1.2 s`, `+45 s`, `+3 min`: a step's time since the run started.
 pub fn elapsed_text(elapsed: Duration) -> String {
     let secs = elapsed.as_secs_f64();
@@ -787,6 +778,7 @@ mod tests {
             spans: None,
             target: Some(target.into()),
             message: message.into(),
+            dropped: None,
         }
     }
 
@@ -799,6 +791,7 @@ mod tests {
             spans: None,
             target: None,
             message: message.into(),
+            dropped: None,
         }
     }
 
@@ -956,15 +949,15 @@ mod tests {
     #[test]
     fn gap_markers_count_dropped_lines_and_are_not_analysed() {
         let mut insights = Insights::default();
-        let marker = LogLine {
-            level: Some(LogLevel::Warn),
-            ..launcher(9, "7 lines dropped")
-        };
-        insights.ingest(&[marker], at(T0));
+        insights.ingest(&[LogLine::gap_marker(7, 9)], at(T0));
         assert_eq!(insights.dropped_lines(), 7);
         assert_eq!(insights.lines_total(), 0);
         assert!(insights.problems(10).is_empty());
         assert_eq!(insights.unseen_problems(), 0);
+        // A launcher note that reads like a marker is an ordinary line.
+        insights.ingest(&[launcher(10, "7 lines dropped")], at(T0));
+        assert_eq!(insights.dropped_lines(), 7);
+        assert_eq!(insights.lines_total(), 1);
     }
 
     #[test]

@@ -27,16 +27,11 @@ use launcher_core::{
     settings::SettingsStore,
     supervisor::{self, SupervisorConfig, SupervisorError},
 };
-use launcher_types::StaleProcessInfo;
+use launcher_types::{StaleProcessInfo, events};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::app_state::{AppState, managed_keys};
-
-/// The event emitted when zebrad was to start at launch but a zebrad from
-/// an earlier launcher run is still alive. The UI offers
-/// `start_zebrad_killing_stale`.
-pub const STALE_PROCESS_EVENT: &str = "stale_process";
 
 /// Set to `1` to run zebrad with `--shutdown-on-stdin-close`, for testing
 /// with a zebrad that has the upstream change.
@@ -65,7 +60,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         // Rust-side only: the UI gets no updater permissions; see updater.rs.
         .plugin(tauri_plugin_updater::Builder::new().build())
-        // Keep in sync with build.rs and capabilities/main.json.
+        // build.rs fails the build unless this list, its COMMANDS and the
+        // allow-* permissions in capabilities/main.json agree.
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::subscribe_logs,
@@ -133,14 +129,13 @@ fn setup(app: &AppHandle) {
     match tauri::async_runtime::block_on(start(app)) {
         Ok(state) => {
             app.manage(state.clone());
-            app.manage(updater::start(app, &state));
+            // One settings snapshot decides who starts zebrad at launch.
+            let plan = launch_plan(&state.settings.current());
+            app.manage(updater::start(app, &state, plan.gate_may_start));
             bridge::forward_status(app.clone(), state.supervisor.watch_status());
             bridge::forward_node_stats(app.clone(), state.node_stats.clone());
             tray::install(app, &state);
-            // Until the first-run flow is done the user has not chosen where
-            // the chain state goes, so zebrad waits for them.
-            let settings = state.settings.current();
-            if settings.start_node_on_launch && firstrun::start_allowed(&settings).is_ok() {
+            if plan.start_now {
                 tauri::async_runtime::spawn(start_in_background(app.clone(), state));
             }
         }
@@ -260,30 +255,59 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     Ok(AppState::new(paths, supervisor, settings, node_stats))
 }
 
-/// Starts zebrad without a UI request waiting for the result: at launch
-/// when `start_node_on_launch` is set, and from the tray. A zebrad left by an
-/// earlier run is reported to the UI with [`STALE_PROCESS_EVENT`]. Nothing
-/// starts before the first run is done ([`firstrun::start_allowed`]).
-pub(crate) async fn start_in_background(app: AppHandle, state: AppState) {
-    if let Err(err) = firstrun::start_allowed(&state.settings.current()) {
-        tracing::warn!(%err, "zebrad was not started");
-        return;
-    }
-    let _permit = match state.start_permit() {
-        Ok(permit) => permit,
-        Err(err) => {
-            tracing::warn!(%err, "zebrad was not started");
-            return;
-        }
-    };
-    match state.supervisor.start().await {
-        Ok(()) => {}
-        Err(SupervisorError::StaleProcess(stale)) => report_stale_process(&app, &stale),
-        Err(err) => tracing::warn!(%err, "zebrad did not start at launch"),
+/// Who starts zebrad at launch. Decided once, from one settings snapshot, so
+/// the two paths that can start it cannot read different settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LaunchPlan {
+    /// `setup` starts zebrad right away: `start_node_on_launch` is set and
+    /// the first run is done. Until then the user has not chosen where the
+    /// chain state goes, so zebrad waits for them.
+    pub start_now: bool,
+    /// The post-update health gate may start zebrad when the update stopped
+    /// a running one: only when the launcher does not start it anyway, so a
+    /// node is never started twice.
+    pub gate_may_start: bool,
+}
+
+/// The [`LaunchPlan`] for `settings`.
+pub(crate) fn launch_plan(settings: &launcher_types::Settings) -> LaunchPlan {
+    LaunchPlan {
+        start_now: settings.start_node_on_launch && firstrun::start_allowed(settings).is_ok(),
+        gate_may_start: !settings.start_node_on_launch,
     }
 }
 
-/// Tells the UI with [`STALE_PROCESS_EVENT`] that a zebrad from an earlier
+/// Starts zebrad the way every start without a UI request waiting for the
+/// result does: not before the first run is done
+/// ([`firstrun::start_allowed`]), not while the node data is being changed
+/// ([`AppState::start_permit`]), and with a zebrad left by an earlier run
+/// reported to the UI with [`events::STALE_PROCESS`]. The error is the message
+/// for the log or the caller.
+pub(crate) async fn start_node<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+) -> Result<(), String> {
+    firstrun::start_allowed(&state.settings.current())?;
+    let _permit = state.start_permit()?;
+    match state.supervisor.start().await {
+        Ok(()) => Ok(()),
+        Err(SupervisorError::StaleProcess(stale)) => {
+            report_stale_process(app, &stale);
+            Err(SupervisorError::StaleProcess(stale).to_string())
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// [`start_node`] for the places that only log a failure: at launch when
+/// [`LaunchPlan::start_now`] is set, and from the tray.
+pub(crate) async fn start_in_background(app: AppHandle, state: AppState) {
+    if let Err(err) = start_node(&app, &state).await {
+        tracing::warn!(%err, "zebrad was not started");
+    }
+}
+
+/// Tells the UI with [`events::STALE_PROCESS`] that a zebrad from an earlier
 /// launcher run is still alive.
 pub(crate) fn report_stale_process<R: tauri::Runtime>(app: &AppHandle<R>, stale: &StaleProcess) {
     tracing::warn!(
@@ -294,7 +318,52 @@ pub(crate) fn report_stale_process<R: tauri::Runtime>(app: &AppHandle<R>, stale:
         pid: stale.pid,
         binary: stale.binary.display().to_string(),
     };
-    if let Err(err) = app.emit(STALE_PROCESS_EVENT, info) {
+    if let Err(err) = app.emit(events::STALE_PROCESS, info) {
         tracing::warn!(%err, "could not emit stale_process");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use launcher_types::Settings;
+
+    use super::{LaunchPlan, launch_plan};
+
+    #[test]
+    fn launch_plan_starts_once_at_most() {
+        // A fresh install: zebrad waits for the first run, and nobody starts it.
+        let fresh = Settings::default();
+        assert!(fresh.start_node_on_launch);
+        assert_eq!(
+            launch_plan(&fresh),
+            LaunchPlan {
+                start_now: false,
+                gate_may_start: false
+            }
+        );
+        // The first run is done: setup starts zebrad, the gate never does.
+        let done = Settings {
+            first_run_done: true,
+            ..Settings::default()
+        };
+        assert_eq!(
+            launch_plan(&done),
+            LaunchPlan {
+                start_now: true,
+                gate_may_start: false
+            }
+        );
+        // The user turned the launch start off: only the gate may start it.
+        let manual = Settings {
+            start_node_on_launch: false,
+            ..done
+        };
+        assert_eq!(
+            launch_plan(&manual),
+            LaunchPlan {
+                start_now: false,
+                gate_may_start: true
+            }
+        );
     }
 }

@@ -14,6 +14,48 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+/// The names of the events the backend emits and the UI listens to. Logs do
+/// not go through an event: they take a `tauri::ipc::Channel` of
+/// `Vec<LogLine>` batches, set up by the `subscribe_logs` command.
+pub mod events {
+    /// Every [`Status`](crate::Status) change.
+    pub const STATUS: &str = "status";
+    /// Every `Option<NodeStats>` change ([`NodeStats`](crate::NodeStats)).
+    pub const NODE_STATS: &str = "node_stats";
+    /// zebrad was to start at launch, but a zebrad from an earlier launcher
+    /// run is still alive: a [`StaleProcessInfo`](crate::StaleProcessInfo).
+    /// The UI offers `start_zebrad_killing_stale`.
+    pub const STALE_PROCESS: &str = "stale_process";
+    /// Every [`UpdateState`](crate::UpdateState) change.
+    pub const UPDATE_STATE: &str = "update_state";
+    /// Every [`UpdateInfo`](crate::UpdateInfo) change.
+    pub const UPDATE_INFO: &str = "update_info";
+    /// The launcher did not come back healthy after an update: an
+    /// [`UpdateHealthFailure`](crate::UpdateHealthFailure).
+    pub const UPDATE_HEALTH_FAILED: &str = "update_health_failed";
+}
+
+/// A location the `open_path` command opens with the system's default
+/// handler. On the wire it is the snake_case name (`config_dir`, ...).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenTarget {
+    /// The launcher's configuration directory, with `zebrad.toml`.
+    ConfigDir,
+    /// The chosen chain data directory, or the launcher's data directory
+    /// when none was chosen.
+    DataDir,
+    /// The directory with the launcher and zebrad logs.
+    LogDir,
+    /// The launcher's releases page, in the browser.
+    ReleasesPage,
+    /// The launcher's source repository, in the browser.
+    Repo,
+    /// The Grafana URL from the settings, in the browser. Fails when none is
+    /// set.
+    Grafana,
+}
+
 /// Where a log line came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,6 +143,38 @@ pub struct LogLine {
     /// The message and its fields. For lines without a timestamp and level,
     /// such as continuation lines of a multi-line message, this is the whole line.
     pub message: String,
+    /// Set on a gap marker only (see [`LogLine::gap_marker`]): how many lines
+    /// the receiver fell behind on. Absent from the wire for every other line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped: Option<u64>,
+}
+
+impl LogLine {
+    /// The launcher's stand-in for `dropped` lines a slow receiver missed.
+    ///
+    /// It takes `seq`, the sequence number of the last dropped line, so the
+    /// sequence the receiver sees stays contiguous; the dropped lines can be
+    /// fetched with `log_history` while they are still retained. The message
+    /// says the same for display, but [`LogLine::dropped`] is what marks the
+    /// line as a gap: a launcher note that happens to use the same words is
+    /// not one.
+    pub fn gap_marker(dropped: u64, seq: u64) -> Self {
+        LogLine {
+            seq,
+            stream: LogStream::Launcher,
+            timestamp: None,
+            level: Some(LogLevel::Warn),
+            spans: None,
+            target: None,
+            message: format!("{dropped} lines dropped"),
+            dropped: Some(dropped),
+        }
+    }
+
+    /// Whether this line stands in for dropped lines (see [`LogLine::gap_marker`]).
+    pub fn is_gap_marker(&self) -> bool {
+        self.dropped.is_some()
+    }
 }
 
 /// A notable event detected in zebrad output.
@@ -200,6 +274,27 @@ pub enum Phase {
         /// Why.
         class: ExitClass,
     },
+}
+
+impl Phase {
+    /// zebrad runs, or will without the user doing anything: it was spawned
+    /// ([`Phase::Starting`]), accepted its configuration ([`Phase::Running`])
+    /// or crashed and is scheduled to restart ([`Phase::Backoff`]). Such a
+    /// node is restarted by a configuration change and brought back after a
+    /// launcher update; a [`Phase::Stopping`] node is left stopped.
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Phase::Starting | Phase::Running | Phase::Backoff { .. }
+        )
+    }
+
+    /// No zebrad runs and none is scheduled: [`Phase::Stopped`], or
+    /// [`Phase::Failed`], which waits for the user. Only then may the node
+    /// data change. [`Phase::Stopping`] is neither active nor settled.
+    pub fn is_settled(&self) -> bool {
+        matches!(self, Phase::Stopped | Phase::Failed { .. })
+    }
 }
 
 /// How the last zebrad run ended.
@@ -478,6 +573,15 @@ pub enum ApplyErrorKind {
     ApplyInProgress,
     /// Reading or writing the file failed.
     Io,
+    /// The node data is being changed (the data directory, an import or a
+    /// deletion of the state); try again when that has finished.
+    Busy,
+    /// The launcher is shutting down, so zebrad could not be restarted.
+    Closed,
+    /// The launcher could not finish the change for a reason that is neither
+    /// the file's nor zebrad's (a task of its own failed); the launcher log
+    /// has the detail.
+    Internal,
 }
 
 /// The rejection returned by `apply_config` when the new file was not saved.
@@ -611,7 +715,7 @@ pub enum UpdateState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryAction {
-    /// Open the log directory (`open_path("log_dir")`).
+    /// Open the log directory (`open_path` with [`OpenTarget::LogDir`]).
     OpenLogs,
     /// Restore the default `zebrad.toml`.
     ResetConfig,
@@ -702,6 +806,88 @@ mod tests {
             .unwrap(),
             serde_json::json!({"kind": "apply_in_progress", "message": "busy"})
         );
+        for (kind, name) in [
+            (ApplyErrorKind::InvalidToml, "invalid_toml"),
+            (ApplyErrorKind::Forbidden, "forbidden"),
+            (ApplyErrorKind::Conflict, "conflict"),
+            (ApplyErrorKind::ApplyInProgress, "apply_in_progress"),
+            (ApplyErrorKind::Io, "io"),
+            (ApplyErrorKind::Busy, "busy"),
+            (ApplyErrorKind::Closed, "closed"),
+            (ApplyErrorKind::Internal, "internal"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn open_targets_are_snake_case_on_the_wire() {
+        for (target, name) in [
+            (OpenTarget::ConfigDir, "config_dir"),
+            (OpenTarget::DataDir, "data_dir"),
+            (OpenTarget::LogDir, "log_dir"),
+            (OpenTarget::ReleasesPage, "releases_page"),
+            (OpenTarget::Repo, "repo"),
+            (OpenTarget::Grafana, "grafana"),
+        ] {
+            assert_eq!(serde_json::to_value(target).unwrap(), name);
+            let parsed: OpenTarget = serde_json::from_value(serde_json::json!(name)).unwrap();
+            assert_eq!(parsed, target);
+        }
+        assert!(serde_json::from_value::<OpenTarget>(serde_json::json!("home")).is_err());
+    }
+
+    #[test]
+    fn phase_predicates_cover_every_phase() {
+        let backoff = Phase::Backoff {
+            until: SystemTime::UNIX_EPOCH,
+            crashes: 1,
+        };
+        let failed = Phase::Failed {
+            class: ExitClass::Crash,
+        };
+        for phase in [Phase::Starting, Phase::Running, backoff] {
+            assert!(phase.is_active(), "{phase:?}");
+            assert!(!phase.is_settled(), "{phase:?}");
+        }
+        for phase in [Phase::Stopped, failed] {
+            assert!(!phase.is_active(), "{phase:?}");
+            assert!(phase.is_settled(), "{phase:?}");
+        }
+        assert!(!Phase::Stopping.is_active());
+        assert!(!Phase::Stopping.is_settled());
+    }
+
+    #[test]
+    fn gap_markers_carry_a_typed_count() {
+        let marker = LogLine::gap_marker(3, 9);
+        assert!(marker.is_gap_marker());
+        assert_eq!(marker.seq, 9);
+        assert_eq!(marker.stream, LogStream::Launcher);
+        assert_eq!(marker.message, "3 lines dropped");
+        let json = serde_json::to_value(&marker).unwrap();
+        assert_eq!(json["dropped"], 3);
+        assert_eq!(json["stream"], "launcher");
+
+        // The field marks a gap, not the words: a launcher note that uses them is not one,
+        // and no other line carries the field on the wire.
+        let note = LogLine {
+            dropped: None,
+            ..LogLine::gap_marker(3, 9)
+        };
+        assert!(!note.is_gap_marker());
+        let json = serde_json::to_value(&note).unwrap();
+        assert!(json.get("dropped").is_none(), "{json}");
+
+        // A payload from a backend without the field still deserializes.
+        let old: LogLine = serde_json::from_str(
+            r#"{"seq":1,"stream":"stdout","timestamp":null,"level":null,"spans":null,"target":null,"message":"x"}"#,
+        )
+        .expect("old payload");
+        assert_eq!(old.dropped, None);
+        let round_trip: LogLine =
+            serde_json::from_value(serde_json::to_value(&marker).unwrap()).unwrap();
+        assert_eq!(round_trip, marker);
     }
 
     #[test]

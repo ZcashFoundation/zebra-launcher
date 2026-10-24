@@ -6,7 +6,7 @@ use std::{cell::Cell, fmt};
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
     ImportOutcome, LogLine, NodeStats, Settings, StaleProcessInfo, Status, UpdateHealthFailure,
-    UpdateInfo, UpdateState,
+    UpdateInfo, UpdateState, events,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
@@ -123,7 +123,7 @@ pub async fn on_status(
         mock::on_status(mock_handler("`status` event", on_status, on_error));
         return Ok(());
     }
-    Ok(tauri::listen("status", on_status, on_error).await?)
+    Ok(tauri::listen(events::STATUS, on_status, on_error).await?)
 }
 
 /// Calls `on_stale` when the backend reports, at launch, that a zebrad from an earlier launcher
@@ -136,7 +136,7 @@ pub async fn on_stale_process(
         // The mock reports a stale process through `status.stale` only.
         return Ok(());
     }
-    Ok(tauri::listen("stale_process", on_stale, on_error).await?)
+    Ok(tauri::listen(events::STALE_PROCESS, on_stale, on_error).await?)
 }
 
 /// Calls `on_stats` with every `node_stats` event for the rest of the page's life.
@@ -148,11 +148,12 @@ pub async fn on_node_stats(
         mock::on_node_stats(mock_handler("`node_stats` event", on_stats, on_error));
         return Ok(());
     }
-    Ok(tauri::listen("node_stats", on_stats, on_error).await?)
+    Ok(tauri::listen(events::NODE_STATS, on_stats, on_error).await?)
 }
 
 /// Streams log batches to `on_batch` for the rest of the page's life. When the backend fell
-/// behind, a `Launcher`-stream line saying "N lines dropped" takes the place of the lost lines.
+/// behind, a gap marker (`LogLine::gap_marker`, with `dropped` set) takes the place of the lost
+/// lines.
 pub async fn subscribe_logs(
     on_batch: impl Fn(Vec<LogLine>) + 'static,
     on_error: impl Fn(String) + 'static,
@@ -200,10 +201,10 @@ pub async fn apply_config(text: String, token: String) -> Result<ApplyOutcome, A
 }
 
 /// Reads an `ApplyError` rejection. Anything else (the IPC call itself failed, or the payload
-/// did not deserialize) is reported as kind `io`, which the page shows as a plain failure.
+/// did not deserialize) is reported as kind `internal`, which the page shows as a plain failure.
 fn apply_error(error: JsValue) -> ApplyError {
     tauri::from_js::<ApplyError>(error.clone()).unwrap_or_else(|_| ApplyError {
-        kind: ApplyErrorKind::Io,
+        kind: ApplyErrorKind::Internal,
         message: ApiError::from(error).0,
     })
 }
@@ -380,7 +381,7 @@ pub async fn on_update_state(
         mock::on_update_state(mock_handler("`update_state` event", on_state, on_error));
         return Ok(());
     }
-    Ok(tauri::listen("update_state", on_state, on_error).await?)
+    Ok(tauri::listen(events::UPDATE_STATE, on_state, on_error).await?)
 }
 
 /// Calls `on_info` with every `update_info` event (any change of what the UI shows about
@@ -393,7 +394,7 @@ pub async fn on_update_info(
         mock::on_update_info(mock_handler("`update_info` event", on_info, on_error));
         return Ok(());
     }
-    Ok(tauri::listen("update_info", on_info, on_error).await?)
+    Ok(tauri::listen(events::UPDATE_INFO, on_info, on_error).await?)
 }
 
 /// Calls `on_failure` when the launcher did not come back healthy after an update. It may fire
@@ -410,7 +411,7 @@ pub async fn on_update_health_failed(
         ));
         return Ok(());
     }
-    Ok(tauri::listen("update_health_failed", on_failure, on_error).await?)
+    Ok(tauri::listen(events::UPDATE_HEALTH_FAILED, on_failure, on_error).await?)
 }
 
 #[derive(Serialize)]
@@ -418,8 +419,10 @@ struct OpenPathArgs {
     target: &'static str,
 }
 
-/// Opens one of the backend's fixed locations (`config_dir`, `data_dir`, `log_dir`,
-/// `releases_page`) with the system's default handler.
+/// Opens one of the backend's fixed locations with the system's default handler. `target` is
+/// the wire name of a `launcher_types::OpenTarget` (`config_dir`, `data_dir`, `log_dir`,
+/// `releases_page`, `repo`, `grafana`); the backend refuses anything else. The string form stays
+/// until the call sites take the enum.
 pub async fn open_path(target: &'static str) -> ApiResult<()> {
     if !is_tauri() {
         mock::open_path(target).await;

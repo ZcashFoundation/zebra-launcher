@@ -34,6 +34,7 @@ pub fn parse_line(seq: u64, stream: LogStream, raw: &str) -> LogLine {
         spans: None,
         target: None,
         message: raw.to_string(),
+        dropped: None,
     };
 
     let Some((timestamp, rest)) = raw.split_once(' ') else {
@@ -59,6 +60,7 @@ pub fn parse_line(seq: u64, stream: LogStream, raw: &str) -> LogLine {
         spans,
         target,
         message: message.to_string(),
+        dropped: None,
     }
 }
 

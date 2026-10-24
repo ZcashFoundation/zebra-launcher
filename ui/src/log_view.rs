@@ -39,7 +39,7 @@ impl LogBuffer {
                     return false;
                 }
                 // A real line from `log_history` replaces the gap marker that took its seq.
-                if is_gap_marker(kept) && !is_gap_marker(later) {
+                if kept.is_gap_marker() && !later.is_gap_marker() {
                     std::mem::swap(later, kept);
                 }
                 true
@@ -74,7 +74,7 @@ impl LogBuffer {
     }
 
     /// The lines that pass `filter`, with a [`LogEntry::Gap`] wherever `seq` jumps between two
-    /// buffered lines or the backend sent a gap marker (see [`is_gap_marker`]).
+    /// buffered lines or the backend sent a gap marker ([`LogLine::is_gap_marker`]).
     pub fn entries(&self, filter: &LogFilter) -> Vec<LogEntry> {
         let needle = filter.text.trim().to_lowercase();
         let mut entries = Vec::new();
@@ -82,9 +82,11 @@ impl LogBuffer {
         // Continuation lines (no level) follow the visibility of the line they continue.
         let mut parent_visible = true;
         for line in &self.lines {
-            if is_gap_marker(line) {
+            if line.is_gap_marker() {
                 // The marker takes the seq of the last dropped line, so it and any jump in
-                // `seq` before it are one gap. A marker with nothing before it says nothing.
+                // `seq` before it are one gap, counted from the seqs rather than from
+                // `dropped`: `log_history` may have filled some of the lines in since. A
+                // marker with nothing before it says nothing.
                 if let Some(previous) = previous_seq {
                     entries.push(LogEntry::Gap {
                         before_seq: line.seq,
@@ -213,18 +215,6 @@ impl LogEntry {
     }
 }
 
-/// Whether `line` is the backend's stand-in for lines it dropped (`bridge::gap_marker` in
-/// `src-tauri`): a `Launcher` line reading "N lines dropped" that takes the seq of the last
-/// dropped line.
-pub fn is_gap_marker(line: &LogLine) -> bool {
-    line.stream == LogStream::Launcher
-        && line.timestamp.is_none()
-        && line
-            .message
-            .strip_suffix(" lines dropped")
-            .is_some_and(|count| !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()))
-}
-
 fn matches_text(line: &LogLine, needle_lowercase: &str) -> bool {
     [
         Some(line.message.as_str()),
@@ -302,6 +292,7 @@ mod tests {
             spans: None,
             target: level.map(|_| "zebrad::commands::start".into()),
             message: message.into(),
+            dropped: None,
         }
     }
 
@@ -394,15 +385,7 @@ mod tests {
     }
 
     fn gap_marker(seq: u64, dropped: u64) -> LogLine {
-        LogLine {
-            seq,
-            stream: LogStream::Launcher,
-            timestamp: None,
-            level: Some(LogLevel::Warn),
-            spans: None,
-            target: None,
-            message: format!("{dropped} lines dropped"),
-        }
+        LogLine::gap_marker(dropped, seq)
     }
 
     #[test]
@@ -440,16 +423,23 @@ mod tests {
     }
 
     #[test]
-    fn only_dropped_line_notes_are_gap_markers() {
-        assert!(is_gap_marker(&gap_marker(9, 7)));
-        let mut note = gap_marker(9, 7);
-        note.message = "zebrad exited with code 0".into();
-        assert!(!is_gap_marker(&note));
-        let mut stdout = gap_marker(9, 7);
-        stdout.stream = LogStream::Stdout;
-        assert!(!is_gap_marker(&stdout));
-        note.message = " lines dropped".into();
-        assert!(!is_gap_marker(&note));
+    fn a_launcher_note_with_the_marker_text_is_not_a_gap() {
+        // Only the typed field marks a gap: the note below reads like a marker but is a real
+        // line, so it shows as one and the jump before it is a separate gap.
+        let mut buffer = LogBuffer::default();
+        let mut note = line(4, None, "7 lines dropped");
+        note.stream = LogStream::Launcher;
+        buffer.merge(vec![line(0, None, "a"), line(1, None, "b"), note]);
+        let entries = buffer.entries(&LogFilter::default());
+        assert_eq!(entries.len(), 4);
+        assert_eq!(
+            entries[2],
+            LogEntry::Gap {
+                before_seq: 4,
+                dropped: 2
+            }
+        );
+        assert!(matches!(&entries[3], LogEntry::Line(line) if line.seq == 4));
     }
 
     #[test]
