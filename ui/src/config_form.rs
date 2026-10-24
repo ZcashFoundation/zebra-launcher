@@ -10,10 +10,6 @@
 //! The schema itself lives in [`schema`]; it says which keys of the pinned zebrad are left out
 //! and why.
 
-// The schema and its functions are filled in and wired to the form together; until then some
-// of them are unused.
-#![allow(dead_code)]
-
 mod schema;
 
 use std::{collections::BTreeMap, net::SocketAddr};
@@ -102,6 +98,7 @@ impl Field {
 }
 
 /// The field for a `(section, key)`, if the schema has it.
+#[cfg(test)]
 pub fn field(id: FieldId) -> Option<&'static Field> {
     field_named(id.0, id.1)
 }
@@ -119,6 +116,7 @@ pub fn fields_of(section: &str) -> impl Iterator<Item = &'static Field> {
 }
 
 /// The section a field belongs to.
+#[cfg(test)]
 pub fn section_of(field: &Field) -> Option<&'static Section> {
     SECTIONS.iter().find(|section| section.key == field.section)
 }

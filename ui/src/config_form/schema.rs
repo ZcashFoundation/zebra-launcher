@@ -23,11 +23,6 @@
 
 use super::{Control, Field, Kind, Section};
 
-/// A port number.
-const PORT: Kind = Kind::Integer {
-    min: Some(0),
-    max: Some(65_535),
-};
 /// A `u32`.
 const U32: Kind = Kind::Integer {
     min: Some(0),
