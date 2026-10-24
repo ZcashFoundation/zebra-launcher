@@ -394,6 +394,18 @@ pub enum Theme {
     Dark,
 }
 
+impl Theme {
+    /// The name on the wire and in `launcher.json`, as serde writes it:
+    /// `system`, `light` or `dark`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Theme::System => "system",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        }
+    }
+}
+
 /// The launcher's own settings, stored in `launcher.json`.
 ///
 /// Missing fields take their default, so older files keep loading.
@@ -998,5 +1010,14 @@ mod tests {
         let settings: Settings =
             serde_json::from_str(r#"{"theme":"dark"}"#).expect("settings with a theme parse");
         assert_eq!(settings.theme, Theme::Dark);
+    }
+
+    #[test]
+    fn theme_as_str_is_the_serde_name() {
+        for theme in [Theme::System, Theme::Light, Theme::Dark] {
+            assert_eq!(serde_json::to_value(theme).unwrap(), theme.as_str());
+            let parsed: Theme = serde_json::from_value(serde_json::json!(theme.as_str())).unwrap();
+            assert_eq!(parsed, theme);
+        }
     }
 }
