@@ -305,13 +305,11 @@
   display: none;
 }
 
+/* Never hidden while empty: a live region is announced only when text changes inside a region
+   that is already in the accessibility tree. Empty, it has no height in the row. */
 .cfg-status {
   margin: 0;
   flex: 1 1 auto;
-}
-
-.cfg-status:empty {
-  display: none;
 }
 
 .cfg-bar .buttons {
