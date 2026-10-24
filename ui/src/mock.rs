@@ -1030,6 +1030,7 @@ impl Mock {
             spans: spans.map(Into::into),
             target: target.map(Into::into),
             message,
+            dropped: None,
         }
     }
 }
@@ -1117,19 +1118,11 @@ pub fn subscribe_logs(on_batch: impl Fn(Vec<LogLine>) + 'static) {
             let batch_number = batches.fetch_add(1, Ordering::Relaxed);
             let mut batch = Vec::new();
             if batch_number % 60 == 59 {
-                // Like the bridge after lagging: the lost lines are replaced by one launcher
-                // line that takes the seq of the last of them.
+                // Like the bridge after lagging: the lost lines are replaced by one gap marker
+                // that takes the seq of the last of them.
                 const DROPPED: u64 = 7;
                 let first_dropped = mock.next_seq.fetch_add(DROPPED, Ordering::Relaxed);
-                batch.push(LogLine {
-                    seq: first_dropped + DROPPED - 1,
-                    stream: LogStream::Launcher,
-                    timestamp: None,
-                    level: Some(LogLevel::Warn),
-                    spans: None,
-                    target: None,
-                    message: format!("{DROPPED} lines dropped"),
-                });
+                batch.push(LogLine::gap_marker(DROPPED, first_dropped + DROPPED - 1));
             }
             let count = 1 + (js_sys::Math::random() * 3.0) as u64;
             let first = mock.next_seq.fetch_add(count, Ordering::Relaxed);

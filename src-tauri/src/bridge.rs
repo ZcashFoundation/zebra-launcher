@@ -13,7 +13,7 @@ use std::{
 };
 
 use launcher_core::supervisor::LogSubscription;
-use launcher_types::{LogLevel, LogLine, LogStream, NodeStats, Status};
+use launcher_types::{LogLine, NodeStats, Status};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, ipc::Channel};
 use tokio::{
@@ -132,25 +132,16 @@ pub async fn pump_logs(
     }
 }
 
-/// A launcher line standing in for `dropped` lines the UI fell behind on.
-///
-/// It takes the sequence number of the last dropped line (`next_seq - 1`), so
-/// the sequence the UI sees stays contiguous; the lines themselves can be
-/// fetched with `log_history` while they are still retained.
+/// A launcher line standing in for `dropped` lines the UI fell behind on
+/// ([`LogLine::gap_marker`]), placed before the live line with `next_seq`: it
+/// takes the sequence number of the last dropped line, `next_seq - 1`.
 pub fn gap_marker(dropped: u64, next_seq: u64) -> LogLine {
-    LogLine {
-        seq: next_seq.saturating_sub(1),
-        stream: LogStream::Launcher,
-        timestamp: None,
-        level: Some(LogLevel::Warn),
-        spans: None,
-        target: None,
-        message: format!("{dropped} lines dropped"),
-    }
+    LogLine::gap_marker(dropped, next_seq.saturating_sub(1))
 }
 
 #[cfg(test)]
 mod tests {
+    use launcher_types::LogStream;
     use tokio::sync::broadcast;
 
     use super::*;
@@ -164,6 +155,7 @@ mod tests {
             spans: None,
             target: None,
             message: format!("line {seq}"),
+            dropped: None,
         })
     }
 
@@ -199,16 +191,21 @@ mod tests {
         let seqs: Vec<u64> = lines.iter().map(|l| l.seq).collect();
         assert_eq!(seqs, vec![0, 1, 4, 5, 6]);
         assert_eq!(lines[2].stream, LogStream::Launcher);
+        assert_eq!(lines[2].dropped, Some(3));
         assert_eq!(lines[2].message, "3 lines dropped");
+        assert!(lines.iter().filter(|line| line.is_gap_marker()).count() == 1);
     }
 
     #[test]
     fn gap_marker_shape() {
         let marker = gap_marker(7, 10);
         assert_eq!(marker.seq, 9);
-        assert_eq!(
-            serde_json::to_value(&marker).expect("serialize")["stream"],
-            "launcher"
-        );
+        assert_eq!(marker.dropped, Some(7));
+        let json = serde_json::to_value(&marker).expect("serialize");
+        assert_eq!(json["stream"], "launcher");
+        assert_eq!(json["dropped"], 7);
+        // Ordinary lines carry no `dropped` key, so the field is invisible to them.
+        let json = serde_json::to_value(&*line(3)).expect("serialize");
+        assert!(json.get("dropped").is_none(), "{json}");
     }
 }

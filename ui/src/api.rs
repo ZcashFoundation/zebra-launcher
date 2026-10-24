@@ -152,7 +152,8 @@ pub async fn on_node_stats(
 }
 
 /// Streams log batches to `on_batch` for the rest of the page's life. When the backend fell
-/// behind, a `Launcher`-stream line saying "N lines dropped" takes the place of the lost lines.
+/// behind, a gap marker (`LogLine::gap_marker`, with `dropped` set) takes the place of the lost
+/// lines.
 pub async fn subscribe_logs(
     on_batch: impl Fn(Vec<LogLine>) + 'static,
     on_error: impl Fn(String) + 'static,

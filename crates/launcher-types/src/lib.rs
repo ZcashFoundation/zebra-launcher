@@ -101,6 +101,38 @@ pub struct LogLine {
     /// The message and its fields. For lines without a timestamp and level,
     /// such as continuation lines of a multi-line message, this is the whole line.
     pub message: String,
+    /// Set on a gap marker only (see [`LogLine::gap_marker`]): how many lines
+    /// the receiver fell behind on. Absent from the wire for every other line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped: Option<u64>,
+}
+
+impl LogLine {
+    /// The launcher's stand-in for `dropped` lines a slow receiver missed.
+    ///
+    /// It takes `seq`, the sequence number of the last dropped line, so the
+    /// sequence the receiver sees stays contiguous; the dropped lines can be
+    /// fetched with `log_history` while they are still retained. The message
+    /// says the same for display, but [`LogLine::dropped`] is what marks the
+    /// line as a gap: a launcher note that happens to use the same words is
+    /// not one.
+    pub fn gap_marker(dropped: u64, seq: u64) -> Self {
+        LogLine {
+            seq,
+            stream: LogStream::Launcher,
+            timestamp: None,
+            level: Some(LogLevel::Warn),
+            spans: None,
+            target: None,
+            message: format!("{dropped} lines dropped"),
+            dropped: Some(dropped),
+        }
+    }
+
+    /// Whether this line stands in for dropped lines (see [`LogLine::gap_marker`]).
+    pub fn is_gap_marker(&self) -> bool {
+        self.dropped.is_some()
+    }
 }
 
 /// A notable event detected in zebrad output.
@@ -744,6 +776,38 @@ mod tests {
         }
         assert!(!Phase::Stopping.is_active());
         assert!(!Phase::Stopping.is_settled());
+    }
+
+    #[test]
+    fn gap_markers_carry_a_typed_count() {
+        let marker = LogLine::gap_marker(3, 9);
+        assert!(marker.is_gap_marker());
+        assert_eq!(marker.seq, 9);
+        assert_eq!(marker.stream, LogStream::Launcher);
+        assert_eq!(marker.message, "3 lines dropped");
+        let json = serde_json::to_value(&marker).unwrap();
+        assert_eq!(json["dropped"], 3);
+        assert_eq!(json["stream"], "launcher");
+
+        // The field marks a gap, not the words: a launcher note that uses them is not one,
+        // and no other line carries the field on the wire.
+        let note = LogLine {
+            dropped: None,
+            ..LogLine::gap_marker(3, 9)
+        };
+        assert!(!note.is_gap_marker());
+        let json = serde_json::to_value(&note).unwrap();
+        assert!(json.get("dropped").is_none(), "{json}");
+
+        // A payload from a backend without the field still deserializes.
+        let old: LogLine = serde_json::from_str(
+            r#"{"seq":1,"stream":"stdout","timestamp":null,"level":null,"spans":null,"target":null,"message":"x"}"#,
+        )
+        .expect("old payload");
+        assert_eq!(old.dropped, None);
+        let round_trip: LogLine =
+            serde_json::from_value(serde_json::to_value(&marker).unwrap()).unwrap();
+        assert_eq!(round_trip, marker);
     }
 
     #[test]
