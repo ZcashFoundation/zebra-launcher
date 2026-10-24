@@ -4,11 +4,8 @@
 //! stalling the test run.
 
 use std::{
-    future::Future,
     io::{BufRead, BufReader},
-    path::PathBuf,
     process::{Command, Stdio},
-    sync::Arc,
     time::Duration,
 };
 
@@ -20,20 +17,12 @@ use launcher_core::{
     process::ZebradCommand,
     supervisor::{self, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle},
 };
-use launcher_types::{ExitClass, LogEvent, LogLine, LogStream, Phase};
+use launcher_types::{ExitClass, LogEvent, LogStream, Phase};
 use tokio::time::timeout;
 
-const LIMIT: Duration = Duration::from_secs(20);
-
-async fn within<F: Future>(future: F) -> F::Output {
-    timeout(LIMIT, future)
-        .await
-        .expect("operation finished within the test limit")
-}
-
-fn fake_zebrad() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_fake-zebrad"))
-}
+#[path = "support/helpers.rs"]
+mod support;
+use support::{contains, fake_zebrad, messages, within};
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -61,14 +50,6 @@ fn fixture(mode: &str) -> Fixture {
     config.pidfile = Some(dir.path().join("zebrad.pid"));
     config.log_file = Some(RotatingLogConfig::new(dir.path().join("zebrad.log")));
     Fixture { _dir: dir, config }
-}
-
-fn messages(lines: &[Arc<LogLine>]) -> Vec<String> {
-    lines.iter().map(|l| l.message.clone()).collect()
-}
-
-fn contains(lines: &[Arc<LogLine>], needle: &str) -> bool {
-    lines.iter().any(|l| l.message.contains(needle))
 }
 
 async fn wait_phase(
