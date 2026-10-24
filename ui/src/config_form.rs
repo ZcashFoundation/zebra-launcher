@@ -171,8 +171,9 @@ pub struct ParsedConfig {
     /// [`render_config`]). Keys of [`SKIPPED_SECTIONS`] are not listed: they are left out of
     /// the schema on purpose and kept untouched too.
     pub unknown: Vec<String>,
-    /// Keys the schema knows whose value could not be shown in the form (an unexpected TOML
-    /// type); they are left untouched.
+    /// Keys the schema knows whose value could not be shown in the form: an unexpected TOML
+    /// type, or an empty value such as `[]` or `""`, which the form would read as "use the
+    /// default". They are left untouched.
     pub unreadable: Vec<String>,
 }
 
@@ -211,9 +212,11 @@ fn parse_document(text: &str) -> Result<DocumentMut, String> {
         .map_err(|error| error.to_string())
 }
 
-/// The form text of a TOML item read as `kind`, or `None` when the item has another type.
+/// The form text of a TOML item read as `kind`, or `None` when the item has another type or an
+/// empty value (`[]`, `""`): empty text means "use the default" in the form, so such a value
+/// cannot be shown and is left in the file untouched.
 fn item_text(kind: Kind, item: &Item) -> Option<String> {
-    match kind {
+    let text = match kind {
         Kind::Bool => item.as_bool().map(|flag| flag.to_string()),
         Kind::Integer { .. } => item.as_integer().map(|number| number.to_string()),
         Kind::Text | Kind::Path | Kind::Choice(_) | Kind::SocketAddr { .. } | Kind::Duration => {
@@ -232,7 +235,8 @@ fn item_text(kind: Kind, item: &Item) -> Option<String> {
             .as_bool()
             .map(|flag| flag.to_string())
             .or_else(|| item.as_str().map(str::to_owned)),
-    }
+    };
+    text.filter(|text| !normalize(kind, text).is_empty())
 }
 
 /// The text as it is written to the file: trimmed, and for a list one trimmed entry per line
@@ -885,6 +889,34 @@ enabled = false
         assert_eq!(
             parsed.form.get(("sync", "download_concurrency_limit")),
             None
+        );
+    }
+
+    #[test]
+    fn empty_values_in_the_file_are_kept() {
+        let text = "[network]\ninitial_mainnet_peers = []\n\n[mining]\nminer_memo = \" \"\n\n\
+                    [tracing]\nfilter = \"\"\n";
+        let parsed = parse_config(text).expect("parses");
+        // Not read as "" (which the form takes for "use the default"), so no phantom change.
+        assert_eq!(parsed.form, FormState::default());
+        assert_eq!(
+            parsed.unreadable,
+            [
+                "mining.miner_memo",
+                "network.initial_mainnet_peers",
+                "tracing.filter"
+            ]
+        );
+        // Untouched on save, not removed.
+        assert_eq!(render_config(text, &parsed.form).expect("renders"), text);
+        // A value typed into the form still replaces it.
+        let form = form_with(("network", "initial_mainnet_peers"), "my-node.example:8233");
+        let rendered = render_config(text, &form).expect("renders");
+        assert!(
+            rendered.starts_with(
+                "[network]\ninitial_mainnet_peers = [\n    \"my-node.example:8233\",\n]\n"
+            ),
+            "{rendered}"
         );
     }
 
