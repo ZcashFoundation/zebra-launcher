@@ -1,4 +1,8 @@
-//! Display helpers. Pure Rust, tested natively.
+//! Display helpers for the node and its numbers: phase labels and controls, thousands, sizes,
+//! durations and relative times, the data directory and the sync bar. Pure Rust, tested
+//! natively. The words for launcher updates are in [`crate::update_text`], the appearance's
+//! in [`crate::theme`], the TOML highlighter in [`crate::config_view`] and the chart texts in
+//! [`crate::charts`].
 
 use std::time::{Duration, SystemTime};
 

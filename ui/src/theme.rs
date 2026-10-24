@@ -1,5 +1,5 @@
-//! Light and dark appearance: resolves the setting against the system preference and applies it
-//! to the document.
+//! Light and dark appearance: resolves the setting against the system preference, applies it
+//! to the document, and gives the Settings radios their words.
 //!
 //! The stylesheet defines every colour as a token on `:root` (the dark set) and redefines them
 //! under `:root[data-theme="light"]`, so applying a theme is one attribute on `<html>`.

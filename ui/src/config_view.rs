@@ -1,6 +1,6 @@
 //! Pure helpers for the Configure page's file pane: which lines of the draft differ from the
-//! saved file, where a key is written, how far to scroll to show a line, and the words for the
-//! summary. Tested natively.
+//! saved file, where a key is written, how far to scroll to show a line, the words for the
+//! summary, and the TOML highlighting. Tested natively.
 
 /// One line of the draft as the file pane shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,7 +160,7 @@ impl TomlClass {
     }
 }
 
-/// Splits TOML text into classified spans, line by line, for the read-only config view.
+/// Splits TOML text into classified spans, line by line, for the file pane's line view.
 /// Deliberately simple: it only has to look right for config files, not parse them.
 pub fn highlight_toml(text: &str) -> Vec<(TomlClass, String)> {
     let mut spans = Vec::new();

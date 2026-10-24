@@ -268,8 +268,9 @@ summary:focus-visible,
 }
 
 /* Motion: this stylesheet uses no transitions or animations. The guard below covers the other
-   stylesheets (charts, grafana, insights): under reduced motion any transition or animation they
-   add ends at once, so none of them has to repeat the query. */
+   stylesheets: under reduced motion any transition or animation they add ends at once. The one
+   exception repeats the query itself: config-form.css keeps the edited line's highlight without
+   its fade, since ending the animation at once would leave no cue. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

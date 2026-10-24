@@ -2,8 +2,8 @@
 //! WebAssembly and Tauri serves from `ui/dist`.
 //!
 //! The crate also compiles natively so the workspace-wide `cargo clippy` and `cargo test` cover
-//! it, including the unit tests of the pure modules ([`log_view`], [`format`]); the native
-//! binary does nothing.
+//! it, including the unit tests of the pure modules (those without views: [`format`],
+//! [`insights`], [`charts`], [`log_view`] and the rest); the native binary does nothing.
 
 #![forbid(unsafe_code)]
 // Natively nothing mounts the app, so most of it is unused there.
