@@ -184,9 +184,12 @@ pub async fn apply_config(
     // Held across the stop and the start, so the node data cannot change
     // while zebrad is briefly stopped. Taken before anything is written, so
     // a refusal leaves the file unchanged.
-    let _start = state
-        .start_permit()
-        .map_err(|err| apply_error(ApplyErrorKind::Io, err))?;
+    let _start = state.start_permit().map_err(|_| {
+        apply_error(
+            ApplyErrorKind::Busy,
+            "the node data is being changed; apply the configuration when that has finished",
+        )
+    })?;
 
     let keys = managed_keys(&state.settings.current(), &state.paths);
     apply::apply_and_restart(

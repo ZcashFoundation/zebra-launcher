@@ -573,6 +573,15 @@ pub enum ApplyErrorKind {
     ApplyInProgress,
     /// Reading or writing the file failed.
     Io,
+    /// The node data is being changed (the data directory, an import or a
+    /// deletion of the state); try again when that has finished.
+    Busy,
+    /// The launcher is shutting down, so zebrad could not be restarted.
+    Closed,
+    /// The launcher could not finish the change for a reason that is neither
+    /// the file's nor zebrad's (a task of its own failed); the launcher log
+    /// has the detail.
+    Internal,
 }
 
 /// The rejection returned by `apply_config` when the new file was not saved.
@@ -797,6 +806,18 @@ mod tests {
             .unwrap(),
             serde_json::json!({"kind": "apply_in_progress", "message": "busy"})
         );
+        for (kind, name) in [
+            (ApplyErrorKind::InvalidToml, "invalid_toml"),
+            (ApplyErrorKind::Forbidden, "forbidden"),
+            (ApplyErrorKind::Conflict, "conflict"),
+            (ApplyErrorKind::ApplyInProgress, "apply_in_progress"),
+            (ApplyErrorKind::Io, "io"),
+            (ApplyErrorKind::Busy, "busy"),
+            (ApplyErrorKind::Closed, "closed"),
+            (ApplyErrorKind::Internal, "internal"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
+        }
     }
 
     #[test]

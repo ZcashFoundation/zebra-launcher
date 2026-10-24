@@ -201,10 +201,10 @@ pub async fn apply_config(text: String, token: String) -> Result<ApplyOutcome, A
 }
 
 /// Reads an `ApplyError` rejection. Anything else (the IPC call itself failed, or the payload
-/// did not deserialize) is reported as kind `io`, which the page shows as a plain failure.
+/// did not deserialize) is reported as kind `internal`, which the page shows as a plain failure.
 fn apply_error(error: JsValue) -> ApplyError {
     tauri::from_js::<ApplyError>(error.clone()).unwrap_or_else(|_| ApplyError {
-        kind: ApplyErrorKind::Io,
+        kind: ApplyErrorKind::Internal,
         message: ApiError::from(error).0,
     })
 }
