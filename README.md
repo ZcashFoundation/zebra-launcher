@@ -31,7 +31,8 @@ Note: It currently requires a 64-bit processor, and on macOS, an ARM-based proce
   when zebrad rejects a change.
 - **Settings:** opt-in launcher updates (off, notify, automatic), close to tray, light or
   dark appearance, the chain data folder with its free space, diagnostics for bug
-  reports, and deleting the node data.
+  reports, deleting the node data, and a form for every zebrad setting with an
+  explanation of each one, validated before it is written to `zebrad.toml`.
 
 ## Documentation
 

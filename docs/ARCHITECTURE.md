@@ -188,6 +188,19 @@ edits, never full `zebrad generate` output. Every zebrad section is
 | `state.cache_dir` | `<chosen data dir>/state` |
 | `zcashd_compat` | forced off (unsupported) |
 
+**Configuration form.** Settings shows every key of the bundled zebrad's `zebrad.toml` as
+a form (`ui/src/config_form.rs`, schema in `ui/src/config_form/schema.rs`: section, kind,
+default, control and a plain-words explanation for the tooltip, derived from zebrad's doc
+comments at the pinned commit). The form reads the file with `toml_edit`, shows a field's
+value or its default, validates per kind (bounds, loopback addresses, humantime durations,
+peer lists) and renders only the changed keys back into the same document, so comments and
+unknown keys survive and a field reset to its default is removed from the file. Managed
+keys and the keys the launcher forces through environment variables are read-only. Saving
+goes through `apply_config` like the raw editor on the Configure page, with the same
+conflict detection and rollback. A unit test pins the schema to the `zebrad generate`
+fixture, so a zebrad bump that adds, removes or re-defaults a key fails `cargo test -p ui`
+until the schema is updated.
+
 The managed keys are launcher-owned: the supervisor and the RPC monitor rely on them.
 `config::ensure` rewrites them at every start, and `config::begin_apply_with_managed`
 overrides any edit to them before saving, so the editor cannot change them; they change
