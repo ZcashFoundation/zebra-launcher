@@ -14,7 +14,7 @@ mod schema;
 
 use std::{collections::BTreeMap, net::SocketAddr};
 
-use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
+use toml_edit::{Array, DocumentMut, Item, RawString, Table, Value, value};
 
 pub use schema::{FIELDS, SECTIONS, SKIPPED_SECTIONS};
 
@@ -476,8 +476,9 @@ fn remove_value(doc: &mut DocumentMut, field: &Field) {
     }
 }
 
-/// Removes a top-level table. The blank lines before it move to the table that follows, so
-/// removing the first section does not leave the file starting with blank lines.
+/// Removes a top-level table. The blank lines before it replace those before the table that
+/// follows, so removing the first section does not leave the file starting with blank lines;
+/// a comment on the following header stays.
 fn remove_section(root: &mut Table, section: &str) {
     let tables: Vec<String> = root
         .iter()
@@ -488,13 +489,21 @@ fn remove_section(root: &mut Table, section: &str) {
         .iter()
         .position(|key| key == section)
         .and_then(|index| tables.get(index + 1));
-    let prefix = root.remove(section).and_then(|item| {
-        item.as_table()
-            .and_then(|table| table.decor().prefix().cloned())
+    // Blank lines only: a table with a comment on its header is never removed.
+    let blank = root.remove(section).and_then(|item| {
+        item.as_table().and_then(|table| {
+            table
+                .decor()
+                .prefix()
+                .and_then(RawString::as_str)
+                .map(str::to_owned)
+        })
     });
-    if let (Some(next), Some(prefix)) = (next, prefix)
+    if let (Some(next), Some(blank)) = (next, blank)
         && let Some(table) = root.get_mut(next).and_then(Item::as_table_mut)
+        && let Some(kept) = table.decor().prefix().map_or(Some(""), RawString::as_str)
     {
+        let prefix = format!("{blank}{}", kept.trim_start());
         table.decor_mut().set_prefix(prefix);
     }
 }
@@ -1177,6 +1186,28 @@ enabled = false
         assert_eq!(
             render_config(original, &form).expect("renders"),
             "[mempool]\ntx_cost_limit = 1\n"
+        );
+    }
+
+    #[test]
+    fn removing_a_section_keeps_the_next_headers_comment() {
+        let original =
+            "[sync]\nparallel_cpu_threads = 4\n\n# mempool tuning\n[mempool]\ntx_cost_limit = 1\n";
+        let mut form = parse_config(original).expect("parses").form;
+        form.set(("sync", "parallel_cpu_threads"), None);
+        assert_eq!(
+            render_config(original, &form).expect("renders"),
+            "# mempool tuning\n[mempool]\ntx_cost_limit = 1\n"
+        );
+
+        let original = "[network]\npeerset_initial_target_size = 30\n\n[sync]\n\
+                        parallel_cpu_threads = 4\n\n# mempool tuning\n[mempool]\ntx_cost_limit = 1\n";
+        let mut form = parse_config(original).expect("parses").form;
+        form.set(("sync", "parallel_cpu_threads"), None);
+        assert_eq!(
+            render_config(original, &form).expect("renders"),
+            "[network]\npeerset_initial_target_size = 30\n\n# mempool tuning\n[mempool]\n\
+             tx_cost_limit = 1\n"
         );
     }
 
