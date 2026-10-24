@@ -104,10 +104,12 @@ pub fn compact(value: u64) -> String {
     if value < 1000 {
         return value.to_string();
     }
-    let value = value as f64;
-    // 999,999 reads `1.00M`, not `1000K`: pick the unit after rounding to three figures.
-    let (unit, suffix) = unit_for(value * (1.0 + 5e-4));
-    let scaled = value / unit;
+    // 999,500 reads `1.00M`, not `1000K`: round to three figures before picking the unit, so
+    // the unit and the printed rounding cannot disagree.
+    let step = 10f64.powi(value.ilog10() as i32 - 2);
+    let rounded = (value as f64 / step).round() * step;
+    let (unit, suffix) = unit_for(rounded);
+    let scaled = rounded / unit;
     let text = if scaled < 9.995 {
         format!("{scaled:.2}")
     } else if scaled < 99.95 {
@@ -127,8 +129,14 @@ pub fn nice_ticks(min: f64, max: f64, count: usize) -> Vec<f64> {
     }
     if hi - lo <= f64::EPSILON * hi.abs().max(1.0) {
         let pad = (hi.abs() * 0.001).max(1.0);
-        lo -= pad;
-        hi += pad;
+        if lo >= 0.0 && lo < pad {
+            // Non-negative data at or near zero: a band above it, never below zero, so the
+            // axis keeps a true zero and no two ticks read "0".
+            hi += 2.0 * pad;
+        } else {
+            lo -= pad;
+            hi += pad;
+        }
     }
     let max_ticks = count.max(2) + 1;
     let raw = (hi - lo) / (max_ticks - 1) as f64;
@@ -691,7 +699,11 @@ mod tests {
         assert_eq!(compact(1000), "1.00K");
         assert_eq!(compact(12_345), "12.3K");
         assert_eq!(compact(999_499), "999K");
+        // The rounding boundary: `{:.0}` of 999.5 is "1000", so the unit must move up with it.
+        assert_eq!(compact(999_500), "1.00M");
         assert_eq!(compact(999_999), "1.00M");
+        assert_eq!(compact(999_500_000), "1.00B");
+        assert_eq!(compact(999_500_000_000), "1.00T");
         assert_eq!(compact(2_950_120), "2.95M");
         assert_eq!(compact(9_995_000), "10.0M");
         assert_eq!(compact(1_200_000_000), "1.20B");
@@ -713,6 +725,12 @@ mod tests {
         // A flat series still gets a band around it.
         let flat = nice_ticks(8.0, 8.0, 3);
         assert!(flat.len() >= 2 && flat[0] <= 8.0 && flat[flat.len() - 1] >= 8.0);
+        // A flat series at zero (an inactive mempool, no peers) gets its band above zero, so
+        // the baseline is a true zero and the labels are distinct.
+        assert_eq!(nice_ticks(0.0, 0.0, 3), vec![0.0, 1.0, 2.0]);
+        let near_zero = nice_ticks(0.5, 0.5, 3);
+        assert!(near_zero[0] >= 0.0 && near_zero[near_zero.len() - 1] >= 0.5);
+        assert_eq!(tick_labels(&nice_ticks(0.0, 0.0, 3)), vec!["0", "1", "2"]);
         // Reversed bounds and non-finite values do not panic.
         assert_eq!(nice_ticks(10.0, 0.0, 3), vec![0.0, 5.0, 10.0]);
         assert_eq!(nice_ticks(f64::NAN, 1.0, 3), vec![0.0, 1.0]);
@@ -950,6 +968,20 @@ mod tests {
         assert_eq!(g.y_ticks[0].1, "0");
         assert_eq!(g.y_ticks[0].0, VIEW_H - PAD_B);
         assert_eq!((g.width, g.xs[3]), (1000.0, 1000.0 - PAD_R));
+        // A count that is zero for the whole range: the line sits on the baseline, the area
+        // wash is empty and no two gridlines read the same.
+        let idle: Vec<Sample> = (0..4).map(|i| sample(i * 5, 2_950_000, 0)).collect();
+        let idle = ChartData::from_samples(&idle, &[("Peers", "chart-series-1", Field::Peers)]);
+        let g = geometry(&idle, true, 0, VIEW_W).unwrap();
+        let labels: Vec<_> = g.y_ticks.iter().map(|(_, label)| label.as_str()).collect();
+        assert_eq!(labels, vec!["0", "1", "2"]);
+        assert_eq!(g.y_ticks[0].0, VIEW_H - PAD_B);
+        assert!(
+            g.ys[0].iter().all(|y| *y == VIEW_H - PAD_B),
+            "{:?}",
+            g.ys[0]
+        );
+        assert_eq!(g.end_label, "0");
         // A useless width falls back to the default.
         assert_eq!(geometry(&peers, true, 0, 0.0).unwrap().width, VIEW_W);
         assert_eq!(geometry(&peers, true, 0, f64::NAN).unwrap().width, VIEW_W);
