@@ -59,6 +59,13 @@
   --status-critical: #d03b3b;
   --grid: #333333;
   --axis: #4a4a4a;
+  /* Sizes that Rust reads back (ui/src/pages/configure.rs, ui/src/components/tooltip.rs), so
+     a change here reaches them: the scrolling page's padding, which the Configure page's sticky
+     panes are inset by; the gap above the Configure footer; the gap between a help icon and
+     its tip. */
+  --page-pad: 16px;
+  --cfg-footer-gap: 8px;
+  --help-gap: 6px;
   color-scheme: dark;
 }
 
@@ -335,7 +342,7 @@ summary:focus-visible,
 .page {
   height: 100%;
   overflow: auto;
-  padding: 16px 20px;
+  padding: var(--page-pad) 20px;
 }
 
 /* Header row: brand, tabs, network and version. The tabs scroll sideways when narrow. */
