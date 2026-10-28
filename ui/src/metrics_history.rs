@@ -36,6 +36,7 @@ pub mod names {
     pub const NET_OUT_BYTES: &str = "zcash_net_out_bytes_total";
     pub const HANDSHAKE_FAILURES: &str = "zcash_net_peer_handshake_failures_total";
     pub const OBSOLETE_PEERS: &str = "zcash_net_peers_version_obsolete";
+    pub const OBSOLETE_REFUSED: &str = "zcash_net_peers_obsolete";
 }
 
 /// The families a kept snapshot holds: everything the dashboard plots or derives over time.
@@ -59,6 +60,7 @@ pub const KEPT_FAMILIES: &[&str] = &[
     names::NET_OUT_BYTES,
     names::HANDSHAKE_FAILURES,
     names::OBSOLETE_PEERS,
+    names::OBSOLETE_REFUSED,
 ];
 
 /// The snapshots, oldest first.
@@ -130,6 +132,16 @@ impl MetricsHistory {
         };
         let start = self.snapshots.partition_point(|s| s.at < cutoff);
         &self.snapshots[start..]
+    }
+
+    /// The reading of `name` in the newest snapshot taken at or before `at`; `None` before
+    /// the first one, or when no snapshot up to then had the family.
+    pub fn value_at(&self, name: &str, at: SystemTime) -> Option<f64> {
+        let end = self.snapshots.partition_point(|s| s.at <= at);
+        self.snapshots[..end]
+            .iter()
+            .rev()
+            .find_map(|s| value_of(s, name))
     }
 
     /// The series `name` over the window: `(time, value)` for every snapshot that has it.
@@ -262,6 +274,11 @@ impl MetricsHistory {
     pub fn obsolete_peers(&self) -> Option<u64> {
         self.newest_count(names::OBSOLETE_PEERS)
     }
+
+    /// Peers refused for an obsolete protocol version since zebrad started.
+    pub fn obsolete_refused(&self) -> Option<u64> {
+        self.newest_count(names::OBSOLETE_REFUSED)
+    }
 }
 
 #[cfg(test)]
@@ -308,6 +325,7 @@ mod tests {
                 family(names::MEMPOOL_BYTES, MetricKind::Gauge, 44_400.0),
                 family(names::HANDSHAKE_FAILURES, MetricKind::Counter, 3.0),
                 family(names::OBSOLETE_PEERS, MetricKind::Gauge, 1.0),
+                family(names::OBSOLETE_REFUSED, MetricKind::Counter, 2.0),
                 // Not kept in the history, but on the newest snapshot.
                 family("rpc_active_requests", MetricKind::Gauge, 2.0),
                 MetricFamily {
@@ -385,6 +403,16 @@ mod tests {
         let series = history.series(names::DISK_BYTES, Some(Duration::from_secs(90)), now);
         assert_eq!(series, vec![(at(120), 3.0), (at(180), 4.0)]);
         assert!(history.series("missing", None, now).is_empty());
+        // A reading at a time: the newest snapshot at or before it.
+        assert_eq!(
+            MetricsHistory::default().value_at(names::DISK_BYTES, at(59)),
+            None
+        );
+        assert_eq!(history.value_at(names::DISK_BYTES, at(59)), Some(1.0));
+        assert_eq!(history.value_at(names::DISK_BYTES, at(60)), Some(2.0));
+        assert_eq!(history.value_at(names::DISK_BYTES, at(119)), Some(2.0));
+        assert_eq!(history.value_at(names::DISK_BYTES, at(500)), Some(4.0));
+        assert_eq!(history.value_at("missing", at(500)), None);
     }
 
     #[test]
@@ -499,6 +527,7 @@ mod tests {
         assert_eq!(history.mempool_bytes(), Some(44_400));
         assert_eq!(history.handshake_failures(), Some(3));
         assert_eq!(history.obsolete_peers(), Some(1));
+        assert_eq!(history.obsolete_refused(), Some(2));
         // A gauge with a non-finite value, or missing, is unknown; a negative one is zero.
         let mut odd = MetricsHistory::default();
         odd.push(&MetricsSnapshot {

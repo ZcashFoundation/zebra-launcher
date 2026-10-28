@@ -724,6 +724,75 @@
   height: 18px;
 }
 
+/* The peer table: text columns left, the ping right, the address in the mono face, the agent
+   clipped with its full text in the title. It has to fit a 450 px card in the three-column
+   row, so the cells are tight and the Version column shows only where the card is wider
+   (full width under 1100 px, or a window from 1500 px). Under 1100 px the card is collapsed
+   to its caption until "Show peers". */
+
+.dash-peers-table {
+  margin-top: 8px;
+}
+
+.dash-peer-list {
+  font-size: 11px;
+}
+
+.dash-peer-list th,
+.dash-peer-list td {
+  padding: 3px 5px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.dash-peer-list th:first-child,
+.dash-peer-list td:first-child {
+  padding-left: 0;
+}
+
+.dash-peer-list th.num,
+.dash-peer-list td.num {
+  text-align: right;
+}
+
+.dash-peer-addr {
+  font-family: var(--mono);
+}
+
+.dash-peer-agent {
+  max-width: 11ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (min-width: 1100px) and (max-width: 1499.98px) {
+  .dash-peer-list .dash-peer-version {
+    display: none;
+  }
+}
+
+.dash-peers-all {
+  margin-top: 6px;
+}
+
+.dash-peers-toggle {
+  display: none;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+@media (max-width: 1099.98px) {
+  .dash-peers-toggle {
+    display: inline;
+  }
+
+  .dash-peers:not(.dash-peers-open) .dash-peers-table,
+  .dash-peers:not(.dash-peers-open) .dash-peers-all {
+    display: none;
+  }
+}
+
 /* Details: Node and Chain; the Node card's rows in two columns from 1100 px. */
 
 @media (min-width: 1100px) {

@@ -17,9 +17,14 @@ fn px(value: f64) -> String {
     format!("{value:.1}")
 }
 
-/// A sample value in the tooltip and the table.
+/// A sample value in the tooltip and the table; a non-finite value is a cell without a
+/// reading (a metric before its first snapshot).
 fn whole(value: f64) -> String {
-    thousands(value.round().max(0.0) as u64)
+    if value.is_finite() {
+        thousands(value.round().max(0.0) as u64)
+    } else {
+        "—".to_owned()
+    }
 }
 
 /// A chart card. `data` is the range's samples; `empty` is what the frame says while there are
@@ -322,7 +327,12 @@ fn Plot(
                 .collect();
             // Two lines of one quantity (peers by direction): their sum too.
             if d.series.len() >= 2 {
-                let total: f64 = d.series.iter().filter_map(|s| s.values.get(index)).sum();
+                let total: f64 = d
+                    .series
+                    .iter()
+                    .filter_map(|s| s.values.get(index))
+                    .filter(|value| value.is_finite())
+                    .sum();
                 rows.push(("chart-series-muted", "Total", whole(total)));
             }
             (d.times.get(index).copied(), rows)

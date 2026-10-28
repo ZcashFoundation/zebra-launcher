@@ -26,7 +26,7 @@ use crate::{
     },
     format::{relative, thousands},
     health::{HealthInput, Level, Verdict, health_verdict},
-    metrics_history::MetricsHistory,
+    metrics_history::{MetricsHistory, names},
     stats_history::{Field, Sample},
 };
 
@@ -80,6 +80,7 @@ pub(crate) struct MetricsFacts {
     pub ready_peers: Option<u64>,
     pub unready_peers: Option<u64>,
     pub obsolete_peers: Option<u64>,
+    pub obsolete_refused: Option<u64>,
     pub handshake_failures: Option<u64>,
     pub checkpoint_height: Option<u64>,
     pub chain_count: Option<u64>,
@@ -96,6 +97,7 @@ impl MetricsFacts {
             ready_peers: history.ready_peers(),
             unready_peers: history.unready_peers(),
             obsolete_peers: history.obsolete_peers(),
+            obsolete_refused: history.obsolete_refused(),
             handshake_failures: history.handshake_failures(),
             checkpoint_height: history.checkpoint_height(),
             chain_count: history.chain_count(),
@@ -261,6 +263,37 @@ pub(crate) fn peers_chart(window: &[Sample], split: bool) -> ChartData {
     }
 }
 
+/// The Peers chart's table: the plotted series, their total when they are two, then the peer
+/// set's ready and unready counts from the metrics page (the newest reading at or before
+/// each sample, a dash before the first) while the history has any.
+pub(crate) fn peers_table(window: &[Sample], split: bool, metrics: &MetricsHistory) -> ChartData {
+    let mut data = peers_chart(window, split);
+    if split {
+        data.series.push(Series {
+            name: "Total",
+            class: "chart-series-muted",
+            values: window.iter().map(|s| f64::from(s.peers)).collect(),
+        });
+    }
+    for (name, metric) in [
+        ("Ready", names::READY_PEERS),
+        ("Unready", names::UNREADY_PEERS),
+    ] {
+        let values: Vec<f64> = window
+            .iter()
+            .map(|s| metrics.value_at(metric, s.at).unwrap_or(f64::NAN))
+            .collect();
+        if values.iter().any(|v| v.is_finite()) {
+            data.series.push(Series {
+                name,
+                class: "chart-series-muted",
+                values,
+            });
+        }
+    }
+    data
+}
+
 /// Every sample of a drawable window is at the tip: the Behind chart says so in words instead
 /// of drawing a flat zero.
 pub(crate) fn all_at_tip(window: &[Sample]) -> bool {
@@ -389,12 +422,17 @@ pub fn Dashboard() -> impl IntoView {
 
     let behind = Memo::new(move |_| window.with(|window| behind_chart(window)));
     let behind_rows = Memo::new(move |_| window.with(|window| behind_table(window)));
-    let peers = Memo::new(move |_| {
+    let peer_split = Memo::new(move |_| {
         let now = state.now.get();
-        let split = state
+        state
             .history
-            .with(|history| history.has_peer_split(range.get().span(), now));
-        window.with(|window| peers_chart(window, split))
+            .with(|history| history.has_peer_split(range.get().span(), now))
+    });
+    let peers = Memo::new(move |_| window.with(|window| peers_chart(window, peer_split.get())));
+    let peers_rows = Memo::new(move |_| {
+        state
+            .metrics_history
+            .with(|metrics| window.with(|window| peers_table(window, peer_split.get(), metrics)))
     });
     let empty = Signal::derive(move || {
         let has_history = state.history.with(|history| !history.is_empty());
@@ -435,6 +473,7 @@ pub fn Dashboard() -> impl IntoView {
                     title="Peers"
                     subtitle="Connected peers, by who opened the connection"
                     data=peers
+                    table_data=peers_rows
                     empty=empty
                     from_zero=true
                     area=true
@@ -455,8 +494,6 @@ pub fn Dashboard() -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use launcher_types::{MetricFamily, MetricKind, MetricSample, MetricsSnapshot};
-
-    use crate::metrics_history::names;
 
     use super::*;
 
@@ -516,6 +553,7 @@ mod tests {
         assert_eq!(facts.ready_peers, Some(11));
         assert_eq!(facts.unready_peers, Some(1));
         assert_eq!(facts.obsolete_peers, Some(1));
+        assert_eq!(facts.obsolete_refused, None, "no counter in the page");
         assert_eq!(facts.handshake_failures, Some(3));
         assert_eq!(facts.checkpoint_height, Some(2_500_000));
         assert_eq!(facts.chain_count, None, "NaN reads as absent");
@@ -577,6 +615,29 @@ mod tests {
         // A sample without a list reads 0 for both, as `Sample::get` does.
         assert_eq!(split.series[0].values, vec![0.0, 6.0]);
         assert_eq!(split.series[1].values, vec![0.0, 3.0]);
+        // The table adds the total and, with metrics, the peer set's readiness per sample:
+        // the newest reading at or before the sample, none before the first.
+        let plain = peers_table(&window, false, &MetricsHistory::default());
+        let names: Vec<_> = plain.series.iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["Peers"]);
+        let mut metrics = MetricsHistory::default();
+        metrics.push(&MetricsSnapshot {
+            at: at(3),
+            families: vec![
+                family(names::READY_PEERS, MetricKind::Gauge, 7.0),
+                family(names::UNREADY_PEERS, MetricKind::Gauge, 1.0),
+            ],
+        });
+        let table = peers_table(&window, true, &metrics);
+        let names: Vec<_> = table.series.iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            vec!["Outbound", "Inbound", "Total", "Ready", "Unready"]
+        );
+        assert_eq!(table.series[2].values, vec![8.0, 9.0]);
+        assert!(table.series[3].values[0].is_nan());
+        assert_eq!(table.series[3].values[1], 7.0);
+        assert_eq!(table.series[4].values[1], 1.0);
     }
 
     #[test]

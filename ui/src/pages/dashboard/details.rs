@@ -395,6 +395,7 @@ mod tests {
             ready_peers: None,
             unready_peers: None,
             obsolete_peers: None,
+            obsolete_refused: None,
             handshake_failures: None,
             checkpoint_height: checkpoint,
             chain_count: chains,

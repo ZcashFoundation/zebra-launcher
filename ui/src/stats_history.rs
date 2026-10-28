@@ -3,7 +3,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::{NodeDetails, NodeStats};
+use launcher_types::{NodeDetails, NodeStats, PeerInfo};
 
 /// How many samples are kept: four hours of the monitor's 5-second polls.
 pub const MAX_SAMPLES: usize = 4 * 60 * 60 / 5;
@@ -100,26 +100,27 @@ struct PeerSplit {
     at: SystemTime,
 }
 
+/// Whether zebrad is connected to a listed peer: one without a state, or in a connected one.
+/// A peer the node merely knows (`failed`, pending) is not a connection.
+pub fn is_connected(peer: &PeerInfo) -> bool {
+    peer.state.as_deref().is_none_or(|state| {
+        state.eq_ignore_ascii_case("connected") || state.eq_ignore_ascii_case("responded")
+    })
+}
+
 impl PeerSplit {
-    /// Counts the peers zebrad is connected to: a listed peer without a state, or in a
-    /// connected one. A peer the node merely knows (`failed`, pending) is not a connection.
+    /// Counts the connected peers ([`is_connected`]) by direction.
     fn of(details: &NodeDetails) -> Self {
-        let connected = |state: &Option<String>| {
-            state.as_deref().is_none_or(|state| {
-                state.eq_ignore_ascii_case("connected") || state.eq_ignore_ascii_case("responded")
-            })
-        };
-        let (inbound, outbound) = details
-            .peers
-            .iter()
-            .filter(|peer| connected(&peer.state))
-            .fold((0, 0), |(inbound, outbound), peer| {
+        let (inbound, outbound) = details.peers.iter().filter(|peer| is_connected(peer)).fold(
+            (0, 0),
+            |(inbound, outbound), peer| {
                 if peer.inbound {
                     (inbound + 1, outbound)
                 } else {
                     (inbound, outbound + 1)
                 }
-            });
+            },
+        );
         PeerSplit {
             inbound,
             outbound,
@@ -345,8 +346,6 @@ impl StatsHistory {
 #[cfg(test)]
 mod tests {
     use std::time::UNIX_EPOCH;
-
-    use launcher_types::PeerInfo;
 
     use super::*;
 
