@@ -384,13 +384,20 @@ impl<'a> Facts<'a> {
         }
     }
 
-    /// A metric from the newest snapshot (the published one, or the history's).
+    /// A metric from the newest snapshot: the published one, or the history's when it is this
+    /// run's. A snapshot withdrawn from an earlier process says nothing about this one.
     fn metric(&self, name: &str) -> Option<f64> {
         self.input
             .metrics
             .and_then(|snapshot| snapshot.family(name)?.single())
             .filter(|value| value.is_finite())
-            .or_else(|| self.input.metrics_history.newest_value(name))
+            .or_else(|| {
+                let history = self.input.metrics_history;
+                history
+                    .latest()
+                    .filter(|newest| self.this_run(newest.at))
+                    .and_then(|_| history.newest_value(name))
+            })
     }
 
     fn metric_count(&self, name: &str) -> Option<u64> {
@@ -1870,9 +1877,19 @@ mod tests {
             verdict.actions,
             vec![Action::ShowInLogs("peer".into()), Action::OpenConfigure]
         );
-        // Without the gauge the ready count is left out.
+        // Without the gauge the ready count is left out, even while an earlier run's snapshot
+        // is still in the history.
         scene.metrics = None;
+        scene.metrics_history.push(&MetricsSnapshot {
+            at: t(0) - Duration::from_secs(30),
+            ..metrics(0, &[(names::READY_PEERS, 11.0)])
+        });
         assert!(scene.verdict().reason.ends_with("5 initial peers failed"));
+        // This run's newest snapshot in the history stands in for a missing publication.
+        scene
+            .metrics_history
+            .push(&metrics(590, &[(names::READY_PEERS, 3.0)]));
+        assert!(scene.verdict().reason.ends_with("ready peers 3"));
         // No peers before a stalled sync: the cause first.
         scene.frozen_from(0);
         assert_eq!(scene.verdict().rule, 8);
