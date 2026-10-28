@@ -713,6 +713,8 @@ mod tests {
             peers,
             mempool_transactions: 10,
             verification_progress: height as f64 / 3_120_000.0,
+            peers_inbound: None,
+            peers_outbound: None,
         }
     }
 

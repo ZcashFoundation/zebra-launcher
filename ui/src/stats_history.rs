@@ -3,13 +3,20 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::NodeStats;
+use launcher_types::{NodeDetails, NodeStats};
 
 /// How many samples are kept: four hours of the monitor's 5-second polls.
 pub const MAX_SAMPLES: usize = 4 * 60 * 60 / 5;
 
 /// A block rate needs at least this much time between the first and last sample of a window.
 pub const MIN_RATE_SPAN: Duration = Duration::from_secs(30);
+
+/// The window of the sync hero's rate and ETA, fixed so the figures do not move with the
+/// range control (the whole history while it is shorter).
+pub const HERO_RATE_WINDOW: Duration = Duration::from_secs(15 * 60);
+
+/// A peer list is attached to the sample of the same poll: one within this much of its time.
+pub const PEER_SPLIT_FRESH: Duration = Duration::from_secs(15);
 
 /// One published statistics value, reduced to the fields the dashboard plots.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -21,6 +28,11 @@ pub struct Sample {
     pub peers: u32,
     pub mempool_transactions: u64,
     pub verification_progress: f64,
+    /// Peers that connected to us, from the peer list of the same poll
+    /// ([`StatsHistory::record_peers`]); `None` until a list landed.
+    pub peers_inbound: Option<u32>,
+    /// Peers we connected to, likewise.
+    pub peers_outbound: Option<u32>,
 }
 
 impl Sample {
@@ -32,6 +44,8 @@ impl Sample {
             peers: stats.peers,
             mempool_transactions: stats.mempool_transactions,
             verification_progress: stats.verification_progress,
+            peers_inbound: None,
+            peers_outbound: None,
         }
     }
 
@@ -45,13 +59,22 @@ impl Sample {
         self.remaining() <= 1 || self.verification_progress >= 0.9999
     }
 
-    /// A counted field's value, for deltas and charts.
+    /// The peers by direction, `(inbound, outbound)`, when a peer list landed with the poll.
+    pub fn peer_split(&self) -> Option<(u32, u32)> {
+        Some((self.peers_inbound?, self.peers_outbound?))
+    }
+
+    /// A counted field's value, for deltas and charts. The directions read 0 while no peer
+    /// list landed; [`Sample::peer_split`] tells the two apart.
     pub fn get(&self, field: Field) -> u64 {
         match field {
             Field::Height => self.height,
             Field::EstimatedHeight => self.estimated_height,
             Field::Peers => u64::from(self.peers),
             Field::Mempool => self.mempool_transactions,
+            Field::Behind => self.remaining(),
+            Field::PeersInbound => u64::from(self.peers_inbound.unwrap_or(0)),
+            Field::PeersOutbound => u64::from(self.peers_outbound.unwrap_or(0)),
         }
     }
 }
@@ -63,25 +86,88 @@ pub enum Field {
     EstimatedHeight,
     Peers,
     Mempool,
+    /// The estimated tip minus the verified height ([`Sample::remaining`]).
+    #[allow(dead_code, reason = "wired by the dashboard's view workstream")]
+    Behind,
+    #[allow(dead_code, reason = "wired by the dashboard's view workstream")]
+    PeersInbound,
+    #[allow(dead_code, reason = "wired by the dashboard's view workstream")]
+    PeersOutbound,
+}
+
+/// The newest peer list's counts, stamped with the list's time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PeerSplit {
+    inbound: u32,
+    outbound: u32,
+    at: SystemTime,
+}
+
+impl PeerSplit {
+    /// Counts the peers zebrad is connected to: a listed peer without a state, or in a
+    /// connected one. A peer the node merely knows (`failed`, pending) is not a connection.
+    fn of(details: &NodeDetails) -> Self {
+        let connected = |state: &Option<String>| {
+            state.as_deref().is_none_or(|state| {
+                state.eq_ignore_ascii_case("connected") || state.eq_ignore_ascii_case("responded")
+            })
+        };
+        let (inbound, outbound) = details
+            .peers
+            .iter()
+            .filter(|peer| connected(&peer.state))
+            .fold((0, 0), |(inbound, outbound), peer| {
+                if peer.inbound {
+                    (inbound + 1, outbound)
+                } else {
+                    (inbound, outbound + 1)
+                }
+            });
+        PeerSplit {
+            inbound,
+            outbound,
+            at: details.updated_at,
+        }
+    }
+
+    /// Whether the list belongs to the poll of a sample taken at `at`.
+    fn fits(&self, at: SystemTime) -> bool {
+        let gap = match at.duration_since(self.at) {
+            Ok(gap) => gap,
+            Err(earlier) => earlier.duration(),
+        };
+        gap <= PEER_SPLIT_FRESH
+    }
+
+    fn apply(&self, sample: &mut Sample) {
+        sample.peers_inbound = Some(self.inbound);
+        sample.peers_outbound = Some(self.outbound);
+    }
 }
 
 /// The samples kept since the launcher opened, oldest first.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StatsHistory {
     samples: Vec<Sample>,
+    peer_split: Option<PeerSplit>,
 }
 
 impl StatsHistory {
     /// Records a published statistics value. A value with the newest sample's time is a repeat
     /// and is ignored; an older time is filed in order; past [`MAX_SAMPLES`] the oldest go.
+    /// The newest peer list ([`StatsHistory::record_peers`]) is attached when it is from the
+    /// same poll.
     pub fn push(&mut self, stats: &NodeStats) {
-        let sample = Sample::from_stats(stats);
+        let mut sample = Sample::from_stats(stats);
         if self
             .samples
             .last()
             .is_some_and(|newest| newest.at == sample.at)
         {
             return;
+        }
+        if let Some(split) = self.peer_split.filter(|split| split.fits(sample.at)) {
+            split.apply(&mut sample);
         }
         let index = self.samples.partition_point(|s| s.at < sample.at);
         match self.samples.get_mut(index) {
@@ -94,6 +180,34 @@ impl StatsHistory {
         }
     }
 
+    /// Records the peer list of a poll: its inbound and outbound counts go onto the sample of
+    /// the same poll (the closest within [`PEER_SPLIT_FRESH`], already filed or still to come).
+    #[allow(
+        dead_code,
+        reason = "called by the app shell once the peer list is wired"
+    )]
+    pub fn record_peers(&mut self, details: &NodeDetails) {
+        let split = PeerSplit::of(details);
+        self.peer_split = Some(split);
+        let after = self.samples.partition_point(|s| s.at < split.at);
+        let candidates = [after.checked_sub(1), Some(after)];
+        let closest = candidates
+            .into_iter()
+            .flatten()
+            .filter_map(|index| {
+                let sample = self.samples.get(index)?;
+                let gap = match sample.at.duration_since(split.at) {
+                    Ok(gap) => gap,
+                    Err(earlier) => earlier.duration(),
+                };
+                (gap <= PEER_SPLIT_FRESH).then_some((gap, index))
+            })
+            .min_by_key(|(gap, _)| *gap);
+        if let Some((_, index)) = closest {
+            split.apply(&mut self.samples[index]);
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
     }
@@ -101,6 +215,12 @@ impl StatsHistory {
     /// The newest sample.
     pub fn latest(&self) -> Option<&Sample> {
         self.samples.last()
+    }
+
+    /// The oldest sample at or after `from` (the oldest of all for `None`).
+    pub fn oldest_from(&self, from: Option<SystemTime>) -> Option<&Sample> {
+        let start = from.map_or(0, |from| self.samples.partition_point(|s| s.at < from));
+        self.samples.get(start)
     }
 
     /// The samples from `now - span` on, oldest first; all of them for `None`.
@@ -154,11 +274,72 @@ impl StatsHistory {
         let last = i64::try_from(last.get(field)).unwrap_or(i64::MAX);
         Some(last.saturating_sub(first))
     }
+
+    /// When the height last went up: the `at` of the newest sample whose height exceeds its
+    /// predecessor's (5 s resolution). `None` while no rise was seen.
+    pub fn last_height_change_at(&self) -> Option<SystemTime> {
+        self.samples
+            .windows(2)
+            .rev()
+            .find(|pair| pair[1].height > pair[0].height)
+            .map(|pair| pair[1].at)
+    }
+
+    /// When `field` last changed: the `at` of the newest sample whose value differs from its
+    /// predecessor's. `None` while it never did.
+    pub fn last_change_at(&self, field: Field) -> Option<SystemTime> {
+        self.samples
+            .windows(2)
+            .rev()
+            .find(|pair| pair[1].get(field) != pair[0].get(field))
+            .map(|pair| pair[1].at)
+    }
+
+    /// Since when the peer count has been under `limit`: the `at` of the first sample of the
+    /// trailing run with `peers < limit`, looking back no further than `from`. `None` when
+    /// the newest sample has `limit` peers or more, or no sample is at or after `from`.
+    pub fn low_peers_since(&self, limit: u32, from: Option<SystemTime>) -> Option<SystemTime> {
+        let start = from.map_or(0, |from| self.samples.partition_point(|s| s.at < from));
+        let run = &self.samples[start..];
+        if run.last()?.peers >= limit {
+            return None;
+        }
+        let first_low = run
+            .iter()
+            .rposition(|s| s.peers >= limit)
+            .map_or(0, |index| index + 1);
+        Some(run[first_low].at)
+    }
+
+    /// Whether any sample of the window carries a peer list's split, so the direction series
+    /// mean something.
+    #[allow(dead_code, reason = "wired by the dashboard's view workstream")]
+    pub fn has_peer_split(&self, span: Option<Duration>, now: SystemTime) -> bool {
+        self.window(span, now)
+            .iter()
+            .any(|s| s.peer_split().is_some())
+    }
+
+    /// Whether every peer list of the window counted no inbound peer (and there was one).
+    #[allow(dead_code, reason = "wired by the dashboard's view workstream")]
+    pub fn no_inbound_over(&self, span: Option<Duration>, now: SystemTime) -> bool {
+        let mut known = false;
+        for sample in self.window(span, now) {
+            match sample.peers_inbound {
+                Some(0) => known = true,
+                Some(_) => return false,
+                None => {}
+            }
+        }
+        known
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::UNIX_EPOCH;
+
+    use launcher_types::PeerInfo;
 
     use super::*;
 
@@ -183,12 +364,49 @@ mod tests {
         }
     }
 
+    fn with_peers(secs: u64, height: u64, peers: u32) -> NodeStats {
+        NodeStats {
+            peers,
+            ..stats(secs, height)
+        }
+    }
+
     fn history(points: &[(u64, u64)]) -> StatsHistory {
         let mut history = StatsHistory::default();
         for &(secs, height) in points {
             history.push(&stats(secs, height));
         }
         history
+    }
+
+    fn peer(inbound: bool, state: Option<&str>) -> PeerInfo {
+        PeerInfo {
+            addr: "192.0.2.1:8233".into(),
+            inbound,
+            user_agent: None,
+            protocol_version: None,
+            state: state.map(str::to_owned),
+            last_seen: None,
+            ping_secs: None,
+        }
+    }
+
+    fn details(secs: u64, peers: Vec<PeerInfo>) -> NodeDetails {
+        NodeDetails {
+            peers,
+            best_block_hash: None,
+            headers: None,
+            difficulty: None,
+            size_on_disk: None,
+            chain_supply_zec: None,
+            value_pools: Vec::new(),
+            active_upgrade: None,
+            subversion: None,
+            protocol_version: None,
+            mempool_bytes: None,
+            mempool_usage: None,
+            updated_at: at(secs),
+        }
     }
 
     #[test]
@@ -213,6 +431,12 @@ mod tests {
         );
         assert!(!history.is_empty());
         assert!(StatsHistory::default().is_empty());
+        assert_eq!(history.oldest_from(None).map(|s| s.height), Some(100));
+        assert_eq!(
+            history.oldest_from(Some(at(6))).map(|s| s.height),
+            Some(115)
+        );
+        assert_eq!(history.oldest_from(Some(at(11))), None);
     }
 
     #[test]
@@ -264,6 +488,13 @@ mod tests {
         // Only the window counts.
         let rate = history(&[(0, 0), (30, 1000), (60, 1030), (90, 1090)])
             .block_rate(Some(Duration::from_secs(60)), at(90))
+            .unwrap();
+        assert!((rate - 90.0).abs() < 1e-9, "{rate}");
+        // The hero's window is shorter than the range control's longest and covers a short
+        // history whole.
+        assert_eq!(HERO_RATE_WINDOW, Duration::from_secs(900));
+        let rate = history(&[(0, 100), (30, 130), (60, 190)])
+            .block_rate(Some(HERO_RATE_WINDOW), now)
             .unwrap();
         assert!((rate - 90.0).abs() < 1e-9, "{rate}");
     }
@@ -325,6 +556,152 @@ mod tests {
         assert_eq!(
             StatsHistory::default().delta(Field::Height, None, now),
             None
+        );
+    }
+
+    #[test]
+    fn behind_is_the_estimate_minus_the_height() {
+        let sample = Sample::from_stats(&stats(0, 2_952_680));
+        assert_eq!(sample.get(Field::Behind), 167_320);
+        assert_eq!(sample.get(Field::Behind), sample.remaining());
+        assert_eq!(
+            Sample::from_stats(&stats(0, 3_130_000)).get(Field::Behind),
+            0
+        );
+        // Converging while syncing: the delta of the field is negative.
+        let history = history(&[(0, 100), (60, 1100)]);
+        assert_eq!(history.delta(Field::Behind, None, at(60)), Some(-1000));
+    }
+
+    #[test]
+    fn last_height_change_is_the_newest_rise() {
+        let now = at(100);
+        assert_eq!(StatsHistory::default().last_height_change_at(), None);
+        assert_eq!(history(&[(0, 100)]).last_height_change_at(), None);
+        // Flat for the whole history: no rise.
+        assert_eq!(
+            history(&[(0, 100), (5, 100), (10, 100)]).last_height_change_at(),
+            None
+        );
+        let rose = history(&[(0, 100), (5, 110), (10, 110), (15, 110)]);
+        assert_eq!(rose.last_height_change_at(), Some(at(5)));
+        // A fall is not a rise, a rise after it is.
+        let fell = history(&[(0, 100), (5, 90), (10, 95), (15, 95)]);
+        assert_eq!(fell.last_height_change_at(), Some(at(10)));
+        // Any change counts for the general accessor, the estimate included.
+        assert_eq!(fell.last_change_at(Field::Height), Some(at(10)));
+        assert_eq!(fell.last_change_at(Field::EstimatedHeight), None);
+        let mut estimate_moved = fell.clone();
+        estimate_moved.push(&NodeStats {
+            estimated_height: 3_120_010,
+            ..stats(20, 95)
+        });
+        assert_eq!(
+            estimate_moved.last_change_at(Field::EstimatedHeight),
+            Some(at(20))
+        );
+        assert_eq!(estimate_moved.last_height_change_at(), Some(at(10)));
+        let _ = now;
+    }
+
+    #[test]
+    fn low_peers_since_the_trailing_run() {
+        let mut history = StatsHistory::default();
+        for (secs, peers) in [(0, 5), (5, 0), (10, 0), (15, 2), (20, 0), (25, 0), (30, 0)] {
+            history.push(&with_peers(secs, 100, peers));
+        }
+        // No peers since the sample after the last one with peers.
+        assert_eq!(history.low_peers_since(1, None), Some(at(20)));
+        // Few peers (under 3) since the first sample after the one with 5.
+        assert_eq!(history.low_peers_since(3, None), Some(at(5)));
+        // Looking back no further than a run start.
+        assert_eq!(history.low_peers_since(3, Some(at(12))), Some(at(15)));
+        assert_eq!(history.low_peers_since(3, Some(at(22))), Some(at(25)));
+        assert_eq!(history.low_peers_since(3, Some(at(31))), None, "no sample");
+        // Peers are back: nothing low.
+        history.push(&with_peers(35, 100, 4));
+        assert_eq!(history.low_peers_since(1, None), None);
+        assert_eq!(history.low_peers_since(3, None), None);
+        assert_eq!(StatsHistory::default().low_peers_since(1, None), None);
+        // Zero peers from the first sample on: since that sample.
+        let never = {
+            let mut h = StatsHistory::default();
+            h.push(&with_peers(0, 1, 0));
+            h.push(&with_peers(5, 1, 0));
+            h
+        };
+        assert_eq!(never.low_peers_since(1, None), Some(at(0)));
+    }
+
+    #[test]
+    fn peer_lists_split_the_sample_of_their_poll() {
+        let mut history = history(&[(0, 100), (5, 110)]);
+        assert_eq!(history.latest().unwrap().peer_split(), None);
+        assert!(!history.has_peer_split(None, at(5)));
+        assert!(!history.no_inbound_over(None, at(5)));
+        // The list of the same poll, landing after the stats: the newest sample takes it.
+        let list = vec![
+            peer(true, None),
+            peer(false, None),
+            peer(false, Some("connected")),
+            peer(false, Some("failed")),
+            peer(true, Some("Responded")),
+        ];
+        history.record_peers(&details(6, list.clone()));
+        let newest = *history.latest().unwrap();
+        assert_eq!(
+            newest.peer_split(),
+            Some((2, 2)),
+            "failed peers not counted"
+        );
+        assert_eq!(newest.get(Field::PeersInbound), 2);
+        assert_eq!(newest.get(Field::PeersOutbound), 2);
+        assert_eq!(history.window(None, at(6))[0].peer_split(), None);
+        assert!(history.has_peer_split(None, at(6)));
+        // A list landing before its stats is attached when they come.
+        history.record_peers(&details(10, vec![peer(false, None)]));
+        history.push(&stats(10, 120));
+        assert_eq!(history.latest().unwrap().peer_split(), Some((0, 1)));
+        // A stale list is not attached to a much later sample.
+        history.push(&stats(40, 130));
+        assert_eq!(history.latest().unwrap().peer_split(), None);
+        // The list goes to the closest sample within the freshness, not just the newest.
+        history.push(&stats(45, 131));
+        history.record_peers(&details(41, vec![peer(true, None)]));
+        let samples = history.window(None, at(45));
+        assert_eq!(samples[samples.len() - 2].peer_split(), Some((1, 0)));
+        assert_eq!(samples[samples.len() - 1].peer_split(), None);
+        assert!(
+            !history.no_inbound_over(None, at(45)),
+            "one split has inbound"
+        );
+        // "No inbound peers" over a range needs every known split at zero inbound.
+        let mut quiet = StatsHistory::default();
+        quiet.push(&stats(0, 1));
+        quiet.push(&stats(5, 2));
+        assert!(!quiet.no_inbound_over(None, at(5)), "nothing known");
+        quiet.record_peers(&details(5, vec![peer(false, None)]));
+        assert!(quiet.no_inbound_over(None, at(5)));
+        quiet.push(&stats(30, 3));
+        assert!(
+            quiet.no_inbound_over(None, at(30)),
+            "unknown samples do not count"
+        );
+        quiet.record_peers(&details(30, vec![peer(true, None)]));
+        assert!(!quiet.no_inbound_over(None, at(30)));
+        assert!(!quiet.no_inbound_over(Some(Duration::from_secs(1)), at(30)));
+        // A list far from every sample is kept for the next push only.
+        let mut late = StatsHistory::default();
+        late.record_peers(&details(0, vec![peer(true, None)]));
+        late.push(&stats(100, 1));
+        assert_eq!(late.latest().unwrap().peer_split(), None);
+        assert_eq!(
+            PeerSplit::of(&details(0, Vec::new())),
+            PeerSplit {
+                inbound: 0,
+                outbound: 0,
+                at: at(0)
+            }
         );
     }
 }
