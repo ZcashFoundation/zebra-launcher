@@ -198,6 +198,33 @@ pub enum SyncStage {
     Stalled,
 }
 
+/// One line of the dashboard's "This run" timeline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "built by the dashboard's events workstream")]
+pub struct RunEvent {
+    pub at: SystemTime,
+    pub kind: EventKind,
+    /// The sentence shown, such as `zebrad started (pid 4242)`.
+    pub text: String,
+    pub tone: Tone,
+}
+
+/// What kind of thing happened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "built by the dashboard's events workstream")]
+pub enum EventKind {
+    Started,
+    Milestone,
+    StopRequested,
+    Exited,
+    Restarting,
+    ConfigApplied,
+    ConfigRolledBack,
+    Update,
+    Problem,
+    EarlierRun,
+}
+
 /// How a stage reads: paired with an icon and text, never colour alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -725,6 +752,20 @@ impl Insights {
     }
 
     /// The most recent run.
+    /// The newest `limit` events of the session, newest first: milestones, exits, restarts, the
+    /// launcher's decisions and problems. Filled in by the dashboard's events workstream.
+    #[allow(dead_code)]
+    pub fn events(&self, limit: usize) -> Vec<RunEvent> {
+        let _ = limit;
+        Vec::new()
+    }
+
+    /// When the newest timestamped line was logged.
+    #[allow(dead_code)]
+    pub fn last_at(&self) -> Option<SystemTime> {
+        None
+    }
+
     pub fn current_run(&self) -> Option<&Run> {
         self.runs.last()
     }

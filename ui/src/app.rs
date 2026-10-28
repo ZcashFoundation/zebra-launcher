@@ -4,7 +4,7 @@
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
-    LogLine, NodeStats, Settings, Status, Theme, UpdateHealthFailure, UpdateInfo,
+    LogLine, MetricsSnapshot, NodeStats, Settings, Status, Theme, UpdateHealthFailure, UpdateInfo,
 };
 use leptos::{ev, prelude::*, task::spawn_local};
 
@@ -16,8 +16,9 @@ use crate::{
         status_strip::StatusStrip,
         updates::{HealthFailureBanner, UpdateBanner},
     },
-    insights::Insights,
+    insights::{Insights, RunEvent},
     log_view::LogBuffer,
+    metrics_history::MetricsHistory,
     pages::{
         configure::Configure, dashboard::Dashboard, first_run::FirstRun, grafana::Grafana,
         logs::Logs, settings::SettingsPage,
@@ -163,6 +164,17 @@ pub struct AppState {
     pub insights: RwSignal<Insights>,
     /// The node statistics published since the launcher opened, for charts and rates.
     pub history: RwSignal<StatsHistory>,
+    /// The newest reading of zebrad's metrics page, `None` while it does not run.
+    #[allow(dead_code, reason = "read by the dashboard once its model lands")]
+    pub metrics: RwSignal<Option<MetricsSnapshot>>,
+    /// The metrics snapshots since the launcher opened.
+    pub metrics_history: RwSignal<MetricsHistory>,
+    /// When the current phase began, for the dashboard's "for N min".
+    #[allow(dead_code, reason = "read by the dashboard once its model lands")]
+    pub phase_since: RwSignal<SystemTime>,
+    /// Status transitions the UI observed this session, newest first.
+    #[allow(dead_code, reason = "read by the dashboard once its model lands")]
+    pub session_events: RwSignal<Vec<RunEvent>>,
     /// Whether the resolved appearance is dark (the setting, or the system preference when
     /// the setting follows it). Embedded pages pick their theme from it.
     pub resolved_dark: RwSignal<bool>,
@@ -208,6 +220,15 @@ impl AppState {
             self.history.update(|history| history.push(stats));
         }
         self.stats.set(stats);
+    }
+
+    /// Publishes a metrics reading and keeps it in the history.
+    fn record_metrics(&self, snapshot: Option<MetricsSnapshot>) {
+        if let Some(snapshot) = &snapshot {
+            self.metrics_history
+                .update(|history| history.push(snapshot));
+        }
+        self.metrics.set(snapshot);
     }
 
     /// Folds a batch of log lines into the insights and the log buffer.
@@ -289,6 +310,10 @@ pub fn App() -> impl IntoView {
         logs: RwSignal::new(LogBuffer::default()),
         insights: RwSignal::new(Insights::default()),
         history: RwSignal::new(StatsHistory::default()),
+        metrics: RwSignal::new(None),
+        metrics_history: RwSignal::new(MetricsHistory::default()),
+        phase_since: RwSignal::new(clock::now()),
+        session_events: RwSignal::new(Vec::new()),
         resolved_dark: RwSignal::new(true),
         preview_theme: RwSignal::new(None),
         now: RwSignal::new(clock::now()),
@@ -346,6 +371,23 @@ pub fn App() -> impl IntoView {
         api::get_node_stats,
         "Reading node stats",
         move |stats| state.record_stats(stats),
+    ));
+    spawn_local(subscribe_then_fetch(
+        state,
+        async move |seen| {
+            let result = api::on_metrics(
+                move |snapshot| {
+                    seen.mark();
+                    state.record_metrics(snapshot);
+                },
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for metrics", result);
+        },
+        api::get_metrics,
+        "Reading metrics",
+        move |snapshot| state.record_metrics(snapshot),
     ));
     // `update_info` carries the state too, and the backend sends it right after each
     // `update_state`, so the info event and the snapshot are enough. An `update_state` only

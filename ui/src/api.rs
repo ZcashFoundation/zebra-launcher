@@ -5,8 +5,8 @@ use std::{cell::Cell, fmt};
 
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
-    ImportOutcome, LogLine, NodeStats, OpenTarget, Settings, StaleProcessInfo, Status,
-    UpdateHealthFailure, UpdateInfo, UpdateState, events,
+    ImportOutcome, LogLine, MetricsSnapshot, NodeStats, OpenTarget, Settings, StaleProcessInfo,
+    Status, UpdateHealthFailure, UpdateInfo, UpdateState, events,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
@@ -151,6 +151,19 @@ pub async fn on_node_stats(
     Ok(tauri::listen(events::NODE_STATS, on_stats, on_error).await?)
 }
 
+/// Calls `on_metrics` with every `metrics` event: zebrad's metrics page, read every 10 s while
+/// it runs, `None` while it does not.
+pub async fn on_metrics(
+    on_metrics: impl Fn(Option<MetricsSnapshot>) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::on_metrics(mock_handler("`metrics` event", on_metrics, on_error));
+        return Ok(());
+    }
+    Ok(tauri::listen(events::METRICS, on_metrics, on_error).await?)
+}
+
 /// Streams log batches to `on_batch` for the rest of the page's life. When the backend fell
 /// behind, a gap marker (`LogLine::gap_marker`, with `dropped` set) takes the place of the lost
 /// lines.
@@ -249,6 +262,14 @@ pub async fn get_node_stats() -> ApiResult<Option<NodeStats>> {
         return Ok(wire(mock::get_node_stats().await)?);
     }
     Ok(tauri::invoke0("get_node_stats").await?)
+}
+
+/// The newest reading of zebrad's metrics page, if zebrad runs and answered.
+pub async fn get_metrics() -> ApiResult<Option<MetricsSnapshot>> {
+    if !is_tauri() {
+        return Ok(wire(mock::get_metrics().await)?);
+    }
+    Ok(tauri::invoke0("get_metrics").await?)
 }
 
 /// What the first-run flow shows: the default data directory, its free space and any alpha.4

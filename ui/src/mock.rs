@@ -26,6 +26,7 @@
 
 mod config;
 mod log_lines;
+mod metrics;
 mod updates;
 
 use std::{
@@ -38,8 +39,8 @@ use std::{
 
 use launcher_types::{
     ConfigDocument, DataDirChoice, EosInfo, ExitClass, ExitInfo, FirstRunInfo, ImportOutcome,
-    LegacyInstall, LogLine, NodeStats, OpenTarget, Phase, Settings, StaleProcessInfo, Status,
-    UpdateHealthFailure, UpdateInfo, UpdateMode, UpdateState,
+    LegacyInstall, LogLine, MetricsSnapshot, NodeStats, OpenTarget, Phase, Settings,
+    StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo, UpdateMode, UpdateState,
 };
 use leptos::prelude::*;
 
@@ -48,6 +49,7 @@ use crate::{clock, format};
 use config::SAMPLE_CONFIG;
 pub use config::{apply_config, read_config, reset_config};
 use log_lines::sample_line;
+pub use metrics::{get_metrics, on_metrics};
 use updates::{MOCK_RELEASES_URL, MOCK_VERSION, UpdateFlag, health_failure};
 pub use updates::{
     cancel_update, check_for_update, get_update_info, install_update, on_update_health_failed,
@@ -182,6 +184,10 @@ impl EosFlag {
 struct Mock {
     status: ArcRwSignal<Status>,
     stats: ArcRwSignal<Option<NodeStats>>,
+    /// zebrad's metrics page, refreshed every tenth stats tick while running.
+    metrics: ArcRwSignal<Option<MetricsSnapshot>>,
+    /// Stats ticks so far, for the metrics cadence and its moving values.
+    ticks: Arc<AtomicU64>,
     settings: ArcRwSignal<Settings>,
     config: ArcRwSignal<ConfigDocument>,
     /// The next log sequence number.
@@ -225,6 +231,8 @@ impl Mock {
         let mock = Self {
             status: ArcRwSignal::new(Status::default()),
             stats: ArcRwSignal::new(None),
+            metrics: ArcRwSignal::new(None),
+            ticks: Arc::new(AtomicU64::new(0)),
             settings: ArcRwSignal::new(Settings {
                 first_run_done: !first_run,
                 data_dir: flags.stored_dir.then(|| STORED_DATA_DIR.into()),
@@ -405,6 +413,7 @@ impl Mock {
                 });
             });
             mock.stats.set(None);
+            mock.metrics.set(None);
             if then_start {
                 mock.start();
             }
@@ -442,6 +451,11 @@ impl Mock {
         stats.peers = 6 + jitter as u32 * 3;
         stats.mempool_transactions = 10 + jitter * 7;
         stats.updated_at = clock::now();
+        let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
+        if tick.is_multiple_of(10) {
+            self.metrics
+                .set(Some(metrics::snapshot(&stats, tick / 10, clock::now())));
+        }
         self.stats.set(Some(stats));
     }
 
