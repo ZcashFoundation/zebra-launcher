@@ -12,7 +12,7 @@ use std::{
 
 use launcher_types::{ApplyOutcome, ExitClass, ExitInfo, Phase, Status, UpdateInfo, UpdateState};
 
-use crate::format::{exit_class_text, rough_duration};
+use crate::format::{exit_class_text, exit_code_words, rough_duration};
 
 use super::{EventKind, Problem, ProblemLevel, RunEvent, Tone, fields::message_text};
 
@@ -101,18 +101,12 @@ pub fn exit_words(class: ExitClass) -> &'static str {
     }
 }
 
-fn code_words(code: Option<i32>) -> String {
-    match code {
-        Some(code) => format!("code {code}"),
-        None => "no exit code".to_owned(),
-    }
-}
-
-/// `clean exit (code 0)`, `crash (code 101)`, `exit (no exit code)`.
+/// `clean exit (code 0)`, `crash (code 101)`, `crash (killed by a signal)`, `exit (code 1)`.
 pub fn ending_words(class: Option<ExitClass>, code: Option<i32>) -> String {
+    let code = exit_code_words(code, class);
     match class {
-        Some(class) => format!("{} ({})", exit_words(class), code_words(code)),
-        None => format!("exit ({})", code_words(code)),
+        Some(class) => format!("{} ({code})", exit_words(class)),
+        None => format!("exit ({code})"),
     }
 }
 
@@ -702,7 +696,7 @@ mod tests {
             (
                 "zebrad exited (no exit code, Crash, stop requested)",
                 EventKind::Exited,
-                "zebrad exited: crash (no exit code)",
+                "zebrad exited: crash (killed by a signal)",
                 Tone::Warning,
             ),
             (

@@ -9,15 +9,15 @@
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
-    EOS_WARNING_WINDOW, EosInfo, ExitClass, ExitInfo, MetricsSnapshot, NodeStats, Phase,
-    RecoveryAction, StaleProcessInfo, Status, UpdateInfo, UpdateState, eos_within,
+    EOS_WARNING_WINDOW, EosInfo, ExitClass, MetricsSnapshot, NodeStats, Phase, RecoveryAction,
+    StaleProcessInfo, Status, UpdateInfo, UpdateState, eos_within,
 };
 
 use crate::{
     charts::{eta_text, percent_1},
     format::{
-        bytes, exit_class_text, local_date_short, local_datetime_short, relative, rough_duration,
-        thousands,
+        bytes, exit_class_text, exit_code_text, local_date_short, local_datetime_short, relative,
+        rough_duration, thousands,
     },
     insights::{Insights, ProblemLevel, Run, SyncSnapshot, SyncStage, pick_filter},
     metrics_history::{MetricsHistory, names},
@@ -926,14 +926,6 @@ fn crashes_text(crashes: u32) -> String {
     }
 }
 
-/// `code 101`, or `killed by a signal`.
-fn exit_code_text(exit: &ExitInfo) -> String {
-    exit.code.map_or_else(
-        || "killed by a signal".to_owned(),
-        |code| format!("code {code}"),
-    )
-}
-
 /// `pid 4242, /opt/zebrad, from an earlier launcher run`.
 fn stale_text(stale: &StaleProcessInfo) -> String {
     format!(
@@ -1203,7 +1195,7 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     use launcher_types::{
-        EosInfo, LogLevel, LogLine, LogStream, MetricFamily, MetricKind, MetricSample,
+        EosInfo, ExitInfo, LogLevel, LogLine, LogStream, MetricFamily, MetricKind, MetricSample,
         UpdateHealthFailure, UpdateMode,
     };
 
@@ -1590,7 +1582,7 @@ mod tests {
         });
         let verdict = scene.verdict();
         assert_eq!(verdict.headline, "zebrad could not be started");
-        assert_eq!(verdict.reason, "exited 10 s ago (killed by a signal)");
+        assert_eq!(verdict.reason, "exited 10 s ago (no exit code)");
         assert_eq!(
             verdict.actions,
             vec![Action::Start, Action::ShowInLogs("zebrad".into())]
