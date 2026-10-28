@@ -3,7 +3,7 @@
 use launcher_types::UpdateMode;
 use leptos::prelude::*;
 
-use crate::format::update_mode_text;
+use crate::update_text::update_mode_text;
 
 /// One radio button per [`UpdateMode`], each with its explanation. `selected` is the checked
 /// mode (`None`: none checked); `on_select` gets the mode the user picked. `name` groups the

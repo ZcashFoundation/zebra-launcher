@@ -85,7 +85,19 @@ async fn starts_streams_logs_and_stops_cleanly() {
     assert_eq!(status.phase, Phase::Stopped);
     assert_eq!(status.pid, None);
     let exit = status.last_exit.expect("exit recorded");
-    assert_eq!(exit.code, Some(0), "{exit:?}");
+    if cfg!(unix) {
+        assert_eq!(exit.code, Some(0), "{exit:?}");
+        assert_eq!(exit.detail, None, "{exit:?}");
+    } else {
+        // Without the stdin-close mode a stop on Windows terminates the job, so
+        // zebrad never exits on its own: the launcher records the kill.
+        assert_ne!(exit.code, Some(0), "{exit:?}");
+        assert_eq!(
+            exit.detail.as_deref(),
+            Some("killed by the launcher"),
+            "{exit:?}"
+        );
+    }
     assert_eq!(exit.class, ExitClass::Clean);
     assert!(exit.requested);
     assert!(!fx.config.pidfile.as_ref().unwrap().exists());
@@ -163,11 +175,14 @@ async fn hanging_child_is_killed_after_the_grace_period() {
     assert_eq!(exit.class, ExitClass::Clean, "{exit:?}");
     assert_eq!(exit.detail.as_deref(), Some("killed by the launcher"));
     let history = within(handle.history_since(0)).await.expect("history");
-    assert!(
-        contains(&history, "did not stop within"),
-        "{:#?}",
-        messages(&history)
-    );
+    // On Windows (without the stdin-close mode) the stop itself terminates the job, so
+    // there is no grace period to run out.
+    let expected = if cfg!(unix) {
+        "did not stop within"
+    } else {
+        "stop requested (terminated"
+    };
+    assert!(contains(&history, expected), "{:#?}", messages(&history));
     // The SIGTERM reached the fake's handler instead of killing it outright.
     #[cfg(unix)]
     assert!(
@@ -629,18 +644,32 @@ async fn the_actor_answers_commands_while_a_stale_zebrad_is_terminated() {
         tokio::spawn(async move { handle.start_with(StartOptions { kill_stale: true }).await })
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
-    // The actor is not blocked on the stale zebrad.
-    let history = timeout(Duration::from_secs(1), handle.history_since(0))
+    // The actor is not blocked on the stale zebrad: on Unix it is still waiting for the
+    // orphan (which ignores SIGTERM) and must answer well within STALE_KILL_WAIT; on Windows
+    // the termination is immediate and the actor may be busy starting zebrad, which a cold
+    // process spawn can make slow.
+    let answer_within = if cfg!(unix) {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(10)
+    };
+    let history = timeout(answer_within, handle.history_since(0))
         .await
         .expect("the actor answers while the stale zebrad is waited for")
         .expect("supervisor is alive");
-    assert!(
-        !contains(&history, "zebrad started"),
-        "{:#?}",
-        messages(&history)
-    );
+    // On Unix the orphan ignores SIGTERM, so the actor is still waiting for it here; on
+    // Windows termination is immediate and the start has usually gone ahead by now.
     #[cfg(unix)]
-    assert!(!starter.is_finished(), "the stale zebrad is still alive");
+    {
+        assert!(
+            !contains(&history, "zebrad started"),
+            "{:#?}",
+            messages(&history)
+        );
+        assert!(!starter.is_finished(), "the stale zebrad is still alive");
+    }
+    #[cfg(windows)]
+    let _ = &history;
 
     let result = within(starter).await.expect("task");
     if cfg!(unix) {

@@ -15,10 +15,8 @@ use crate::{
         rows::{Rows, text_rows},
         transient::Transient,
     },
-    format::{
-        NOTES_EXCERPT_CHARS, data_change_allowed, download_progress, notes_excerpt, relative,
-        update_state_text,
-    },
+    format::{data_change_allowed, relative},
+    update_text::{NOTES_EXCERPT_CHARS, download_progress, notes_excerpt, update_state_text},
 };
 
 /// How the header banner treats an updater state.
