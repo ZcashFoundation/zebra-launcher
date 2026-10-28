@@ -14,6 +14,15 @@
 # Grafana: http://127.0.0.1:3000 (anonymous Viewer; admin/admin to edit)
 # In the launcher, set http://127.0.0.1:3000 as the Grafana URL (Grafana tab or
 # Settings); the launcher builds the dashboard URLs itself.
+#
+# Both services carry a health check, and Grafana waits for Prometheus to pass its
+# check before it starts, so the datasource is reachable when the dashboards are
+# provisioned. `docker compose ps` shows the state as (healthy); `docker compose up`
+# fails with "dependency failed to start" when Prometheus never becomes healthy.
+# The checks probe 127.0.0.1, which answers in both layouts: on the bridge the
+# services listen on all of the container's interfaces, on the Linux host network they
+# are bound to 127.0.0.1 only (and busybox wget takes only the first address a name
+# such as localhost resolves to).
 
 name: zebra-launcher-observability
 
@@ -31,12 +40,21 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:9090:9090"
+    # /-/ready answers 200 once the configuration is loaded and the TSDB is open. The
+    # image is built on busybox, which has wget but no curl.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   grafana:
     image: grafana/grafana:13.2.4
     restart: unless-stopped
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
     environment:
       # Read by grafana/provisioning/datasources/datasources.yml.
       PROMETHEUS_URL: http://prometheus:9090
@@ -57,6 +75,15 @@ services:
       - grafana-data:/var/lib/grafana
     ports:
       - "127.0.0.1:3000:3000"
+    # /api/health answers 200 once the database migrations have run and Grafana serves
+    # requests. The image is built on Alpine and ships curl. Grafana's first start
+    # (migrations, provisioning) takes longer than Prometheus's, hence the start period.
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   prometheus-data:
