@@ -112,7 +112,9 @@ drops the newest launcher lines instead of stalling. Targets that log per batch
 forwarded to the UI (`zebra_launcher::bridge`) are left out, or each line would log
 another. The launcher log file on disk is unchanged (it keeps everything its `RUST_LOG`
 filter admits); the zebrad log file gets the launcher lines in zebrad's line format
-behind its `[launcher] ` marker.
+behind its `[launcher] ` marker. A message of several lines (a TOML parse error, a panic)
+is one stamped line followed by continuation lines, each behind the marker on disk and
+without timestamp, level or target in the stream, as zebrad's own multi-line messages are.
 
 The updater UI: a header banner while an update is available, downloading, ready,
 counting down (not dismissible) or installing (not dismissible), or failed; Settings →
