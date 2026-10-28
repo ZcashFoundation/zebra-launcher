@@ -36,8 +36,18 @@ pub fn LineChart(
     /// Wash the area under the first line.
     #[prop(optional)]
     area: bool,
+    /// What the Table button shows, when the table has columns the plot does not (a chart of
+    /// one quantity beside the numbers it comes from). The plotted `data` otherwise.
+    #[prop(into, optional)]
+    table_data: Option<Signal<ChartData>>,
+    /// A sentence that takes the plot's place while it applies (`At the tip for the whole
+    /// range`); the table stays available.
+    #[prop(into, optional)]
+    note: Option<Signal<Option<String>>>,
 ) -> impl IntoView {
     let table = RwSignal::new(false);
+    let table_data = table_data.unwrap_or(data);
+    let note_text = move || note.and_then(|note| note.get());
     let hover = RwSignal::new(None::<usize>);
     // The plot's width in CSS pixels, measured by `Plot`, so one viewBox unit is one pixel and
     // text and strokes keep their size whatever the card's width.
@@ -93,9 +103,22 @@ pub fn LineChart(
             >
                 <Show
                     when=move || table.get()
-                    fallback=move || view! { <Plot layout data label hover width area /> }
+                    fallback=move || {
+                        view! {
+                            <Show
+                                when=move || note_text().is_none()
+                                fallback=move || {
+                                    view! {
+                                        <div class="chart-empty muted" role="status">{note_text}</div>
+                                    }
+                                }
+                            >
+                                <Plot layout data label hover width area />
+                            </Show>
+                        }
+                    }
                 >
-                    <DataTable title data />
+                    <DataTable title data=table_data />
                 </Show>
             </Show>
         </div>

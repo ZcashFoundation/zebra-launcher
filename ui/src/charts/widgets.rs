@@ -14,7 +14,7 @@ use crate::{
 pub fn RangeControl(value: RwSignal<Range>) -> impl IntoView {
     view! {
         <div class="dash-range">
-            <span class="dash-range-label" id="dash-range-label">"Range"</span>
+            <span class="dash-range-label" id="dash-range-label">"Show the last"</span>
             <div class="dash-segmented" role="radiogroup" aria-labelledby="dash-range-label">
                 {Range::ALL
                     .into_iter()
