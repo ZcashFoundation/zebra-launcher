@@ -593,7 +593,11 @@ impl Mock {
             });
         });
         self.clear_run();
-        self.after(delay, Mock::start);
+        self.after(delay, |mock| {
+            // The supervisor counts an automatic restart when the backoff expires.
+            mock.status.update(|status| status.restarts += 1);
+            mock.start();
+        });
     }
 
     fn tick_stats(&self) {
