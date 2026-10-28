@@ -178,15 +178,11 @@ pub fn is_synced(fraction: f64) -> bool {
     fraction >= SYNCED_PROGRESS
 }
 
-// Re-exported for pages/configure.rs until it imports from `config_view`.
-pub use crate::config_view::highlight_toml;
 // Re-exported for components/updates.rs, components/update_mode_choice.rs and
 // pages/first_run.rs until they import from `update_text`.
 pub use crate::update_text::{
     NOTES_EXCERPT_CHARS, download_progress, notes_excerpt, update_mode_text, update_state_text,
 };
-// Re-exported for pages/settings.rs until it imports from `theme`.
-pub use crate::theme::{theme_text, theme_value};
 
 /// `0.1.0` as `v0.1.0`; a version that already starts with `v` is left alone.
 pub fn version_tag(version: &str) -> String {
