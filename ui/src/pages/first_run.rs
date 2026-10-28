@@ -15,7 +15,8 @@ use crate::{
     api,
     app::AppState,
     components::update_mode_choice::UpdateModeChoice,
-    format::{bytes, is_low_space, state_dir, update_mode_text},
+    format::{bytes, is_low_space, state_dir},
+    update_text::update_mode_text,
 };
 
 /// The word to type before the alpha.4 chain state is deleted.

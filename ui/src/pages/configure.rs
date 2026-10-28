@@ -22,8 +22,9 @@ use crate::{
         ConfigEditor, Load, Notice, changed_list, changes_text, save_label, saved_message,
         text_only_note,
     },
-    config_view::{LineChange, change_summary, key_line, line_changes, scroll_to_reveal},
-    format::highlight_toml,
+    config_view::{
+        LineChange, change_summary, highlight_toml, key_line, line_changes, scroll_to_reveal,
+    },
 };
 
 /// How long the line last edited in the form stays highlighted.

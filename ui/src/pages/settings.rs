@@ -2,7 +2,7 @@
 //! Save sends the whole settings object to `set_settings`; the data directory is changed only
 //! through `choose_data_dir`, so Save always sends the stored one.
 
-use launcher_types::{Network, OpenTarget, Settings, Theme, is_loopback_http_url};
+use launcher_types::{Network, OpenTarget, STOP_GRACE_SECS, Settings, Theme, is_loopback_http_url};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -10,7 +10,8 @@ use crate::{
     app::AppState,
     clipboard::copy_to_clipboard,
     components::{update_mode_choice::UpdateModeChoice, updates::UpdateStatus},
-    format::{bytes, data_change_allowed, is_low_space, state_dir, theme_text, theme_value},
+    format::{bytes, data_change_allowed, is_low_space, state_dir},
+    theme::theme_text,
 };
 
 /// The appearance radios, in order.
@@ -18,8 +19,6 @@ const THEMES: [Theme; 3] = [Theme::System, Theme::Light, Theme::Dark];
 
 /// The word to type before node data is deleted.
 const DELETE_WORD: &str = "delete";
-
-const STOP_GRACE_RANGE: std::ops::RangeInclusive<u64> = 5..=3600;
 
 /// Form fields that are typed as text and validated on Save.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -37,13 +36,14 @@ impl TextFields {
     }
 }
 
+/// Checks the stop grace field against the range the backend accepts, [`STOP_GRACE_SECS`].
 fn parse_stop_grace(text: &str) -> Result<u64, String> {
     match text.trim().parse::<u64>() {
-        Ok(secs) if STOP_GRACE_RANGE.contains(&secs) => Ok(secs),
+        Ok(secs) if STOP_GRACE_SECS.contains(&secs) => Ok(secs),
         _ => Err(format!(
             "Enter a whole number of seconds from {} to {}.",
-            STOP_GRACE_RANGE.start(),
-            STOP_GRACE_RANGE.end()
+            STOP_GRACE_SECS.start(),
+            STOP_GRACE_SECS.end()
         )),
     }
 }
@@ -250,8 +250,8 @@ pub fn SettingsPage() -> impl IntoView {
                         <span>"Stop grace period (seconds)"</span>
                         <input
                             type="number"
-                            min=*STOP_GRACE_RANGE.start()
-                            max=*STOP_GRACE_RANGE.end()
+                            min=*STOP_GRACE_SECS.start()
+                            max=*STOP_GRACE_SECS.end()
                             class:invalid=move || grace_error.get().is_some()
                             prop:value=move || fields.with(|f| f.stop_grace_secs.clone())
                             on:input=move |event| {
@@ -275,7 +275,7 @@ pub fn SettingsPage() -> impl IntoView {
                                     <input
                                         type="radio"
                                         name="theme"
-                                        value=theme_value(theme)
+                                        value=theme.as_str()
                                         prop:checked=move || {
                                             draft.with(|d| d.as_ref().is_some_and(|d| d.theme == theme))
                                         }
