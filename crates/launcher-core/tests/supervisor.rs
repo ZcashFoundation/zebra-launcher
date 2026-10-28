@@ -104,7 +104,8 @@ async fn starts_streams_logs_and_stops_cleanly() {
     assert!(!fx.config.pidfile.as_ref().unwrap().exists());
     assert_eq!(status.restarts, 0, "nothing restarted by itself");
     let report = status.last_stop.expect("the stop is reported");
-    assert!(!report.forced, "{report:?}");
+    // Graceful on Unix (SIGTERM); a job termination, so forced, on Windows without stdin-close.
+    assert_eq!(report.forced, !status.stop_is_graceful, "{report:?}");
     assert!(report.exited_at >= report.requested_at, "{report:?}");
     assert_eq!(report.exited_at, exit.at);
 
@@ -186,7 +187,11 @@ async fn hanging_child_is_killed_after_the_grace_period() {
         .exited_at
         .duration_since(report.requested_at)
         .expect("the exit follows the request");
-    assert!(took >= Duration::from_millis(500), "{took:?}");
+    // The grace period only runs where the stop is graceful; a Windows job termination is
+    // immediate.
+    if cfg!(unix) {
+        assert!(took >= Duration::from_millis(500), "{took:?}");
+    }
     let history = within(handle.history_since(0)).await.expect("history");
     // On Windows (without the stdin-close mode) the stop itself terminates the job, so
     // there is no grace period to run out.
