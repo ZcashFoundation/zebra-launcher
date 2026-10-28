@@ -408,14 +408,16 @@ impl<'a> Facts<'a> {
     }
 
     /// The sync hero's figures: `94.6 % · 3,747 blocks/min · about 44 min left`, on the fixed
-    /// [`HERO_RATE_WINDOW`].
+    /// [`HERO_RATE_WINDOW`] over this run's samples, so the downtime before a restart does not
+    /// dilute the pace.
     fn sync_line(&self) -> String {
         let Some(latest) = self.latest else {
             return "Waiting for zebrad's RPC".to_owned();
         };
         let history = self.input.history;
+        let (started, now) = (self.started_at(), self.now());
         let mut parts = vec![percent_1(latest.verification_progress)];
-        match history.block_rate(Some(HERO_RATE_WINDOW), self.now()) {
+        match history.block_rate_from(Some(HERO_RATE_WINDOW), started, now) {
             None => parts.push("estimating…".to_owned()),
             Some(rate) => {
                 parts.push(format!(
@@ -424,7 +426,7 @@ impl<'a> Facts<'a> {
                 ));
                 parts.push(
                     history
-                        .eta_to_tip(Some(HERO_RATE_WINDOW), self.now())
+                        .eta_to_tip_from(Some(HERO_RATE_WINDOW), started, now)
                         .map_or_else(|| "not catching up".to_owned(), eta_text),
                 );
             }
@@ -2215,6 +2217,29 @@ mod tests {
         let mut scene = Scene::syncing(20);
         scene.status.started_at = Some(t(0));
         assert_eq!(scene.verdict().reason, "94.5 % · estimating…");
+        // After five minutes down, a run syncing at 3,000 blocks/min for a minute reads its
+        // own pace, not one diluted by the downtime still inside the hero's window.
+        let mut scene = Scene::syncing(60);
+        for secs in (360..=420).step_by(5) {
+            scene
+                .history
+                .push(&stats(secs, 2_950_088 + (secs - 360) / 5 * 250, 12));
+        }
+        scene.stats = scene
+            .history
+            .latest()
+            .map(|s| stats(420, s.height, s.peers));
+        scene.status.started_at = Some(t(355));
+        scene.now = t(420);
+        let verdict = scene.verdict();
+        assert_eq!(verdict.rule, 17);
+        assert_eq!(
+            verdict.reason,
+            "94.6 % · 3,000 blocks/min · about 55 min left"
+        );
+        // Too little of the run for a rate: estimating, not the earlier run's pace.
+        scene.status.started_at = Some(t(400));
+        assert_eq!(scene.verdict().reason, "94.6 % · estimating…");
     }
 
     #[test]

@@ -227,10 +227,34 @@ impl StatsHistory {
         &self.samples[start..]
     }
 
+    /// The window's samples at or after `from`: this run's, for the run start; the whole
+    /// window for `None`.
+    pub fn window_from(
+        &self,
+        span: Option<Duration>,
+        from: Option<SystemTime>,
+        now: SystemTime,
+    ) -> &[Sample] {
+        let window = self.window(span, now);
+        let start = from.map_or(0, |from| window.partition_point(|s| s.at < from));
+        &window[start..]
+    }
+
     /// Blocks verified per minute between the first and last sample of the window. `None`
     /// until the window spans [`MIN_RATE_SPAN`].
     pub fn block_rate(&self, span: Option<Duration>, now: SystemTime) -> Option<f64> {
-        let window = self.window(span, now);
+        self.block_rate_from(span, None, now)
+    }
+
+    /// [`StatsHistory::block_rate`] over the window's samples at or after `from`: a run's
+    /// pace, not diluted by the downtime before it, when `from` is the run start.
+    pub fn block_rate_from(
+        &self,
+        span: Option<Duration>,
+        from: Option<SystemTime>,
+        now: SystemTime,
+    ) -> Option<f64> {
+        let window = self.window_from(span, from, now);
         let (first, last) = (window.first()?, window.last()?);
         let elapsed = last.at.duration_since(first.at).ok()?;
         if elapsed < MIN_RATE_SPAN {
@@ -243,11 +267,21 @@ impl StatsHistory {
     /// How long the newest sample's remaining blocks take at the window's rate. `Some(ZERO)`
     /// at the tip; `None` while the rate is unknown or not positive.
     pub fn eta_to_tip(&self, span: Option<Duration>, now: SystemTime) -> Option<Duration> {
+        self.eta_to_tip_from(span, None, now)
+    }
+
+    /// [`StatsHistory::eta_to_tip`] at the rate of [`StatsHistory::block_rate_from`].
+    pub fn eta_to_tip_from(
+        &self,
+        span: Option<Duration>,
+        from: Option<SystemTime>,
+        now: SystemTime,
+    ) -> Option<Duration> {
         let newest = self.latest()?;
         if newest.at_tip() {
             return Some(Duration::ZERO);
         }
-        let rate = self.block_rate(span, now)?;
+        let rate = self.block_rate_from(span, from, now)?;
         if rate <= 0.0 {
             return None;
         }
@@ -485,6 +519,37 @@ mod tests {
             .block_rate(Some(HERO_RATE_WINDOW), now)
             .unwrap();
         assert!((rate - 90.0).abs() < 1e-9, "{rate}");
+    }
+
+    #[test]
+    fn rate_from_a_run_start_skips_the_downtime() {
+        // A minute at 100 blocks/min, five minutes down, then a minute at 3,000 blocks/min.
+        let mut history = history(&[(0, 0), (30, 50), (60, 100)]);
+        for (secs, height) in [(360, 100), (390, 1600), (420, 3100)] {
+            history.push(&stats(secs, height));
+        }
+        let now = at(420);
+        let span = Some(Duration::from_secs(900));
+        let diluted = history.block_rate(span, now).unwrap();
+        assert!((diluted - 3100.0 / 7.0).abs() < 1e-9, "{diluted}");
+        let run = history.block_rate_from(span, Some(at(360)), now).unwrap();
+        assert!((run - 3000.0).abs() < 1e-9, "{run}");
+        assert_eq!(history.window_from(span, Some(at(360)), now).len(), 3);
+        assert_eq!(history.window_from(span, None, now).len(), 6);
+        // The span still bounds the window.
+        assert_eq!(
+            history
+                .window_from(Some(Duration::from_secs(30)), Some(at(360)), now)
+                .len(),
+            2
+        );
+        // Too little of the run yet: no rate, rather than the earlier run's.
+        assert_eq!(history.block_rate_from(span, Some(at(400)), now), None);
+        // The ETA follows the run's rate.
+        let eta = history.eta_to_tip_from(span, Some(at(360)), now).unwrap();
+        let expected = (3_120_000.0 - 3100.0) / 3000.0 * 60.0;
+        assert!((eta.as_secs_f64() - expected).abs() < 1.0, "{eta:?}");
+        assert!(history.eta_to_tip(span, now).unwrap() > eta);
     }
 
     #[test]
