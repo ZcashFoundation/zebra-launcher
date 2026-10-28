@@ -60,8 +60,8 @@ impl<T: Send + Sync + 'static> Transient<T> {
         self.replace(Some(value));
     }
 
-    /// Clears the value now: the Settings form drops its "Saved" on the next edit.
-    #[expect(dead_code, reason = "adopted by the Settings page in the second phase")]
+    /// Clears the value now: the Settings form drops its "Saved" on the next edit, the config
+    /// editor its notice on Discard.
     pub fn clear(self) {
         self.replace(None);
     }
