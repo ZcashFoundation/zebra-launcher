@@ -52,8 +52,8 @@ One actor task owns the zebrad child. Nothing else touches it.
 
 | Channel | Direction | Carries |
 | --- | --- | --- |
-| `mpsc<Cmd>` | in | `Start{options}`, `Stop`, `Shutdown`, `Subscribe`, `History{since}` (`crates/launcher-core/src/supervisor.rs`). `SupervisorHandle::restart` is a `Stop` followed by a `Start`; applying a config is the `apply_config` Tauri command, built on the same handle. |
-| `watch<Status>` | out | `phase` (`Stopped`, `Starting`, `Running`, `Stopping`, `Backoff{until, crashes}`, `Failed{class}`), `pid`, `started_at`, the `rpc_addr` and `metrics_addr` zebrad logged as opened, `last_exit` (`ExitInfo{code, class, detail, requested}`) and `stale` (`crates/launcher-types/src/lib.rs`) |
+| `mpsc<Cmd>` | in | `Start{options}`, `Stop`, `Shutdown`, `Subscribe`, `History{since}`, `Note` (a launcher line for the ring, sent with `try_send`) (`crates/launcher-core/src/supervisor.rs`). `SupervisorHandle::restart` is a `Stop` followed by a `Start`; applying a config is the `apply_config` Tauri command, built on the same handle. |
+| `watch<Status>` | out | `phase` (`Stopped`, `Starting`, `Running`, `Stopping`, `Backoff{until, crashes}`, `Failed{class}`), `pid`, `started_at`, the `rpc_addr` and `metrics_addr` zebrad logged as opened, `last_exit` (`ExitInfo{code, class, detail, requested}`), `stale`, `restarts` (automatic restarts this launcher session) and `last_stop` (`StopReport{requested_at, exited_at, forced}` for the last requested stop) (`crates/launcher-types/src/lib.rs`) |
 | `broadcast<LogLine>` | out | live log lines, each with a monotonic `seq` |
 | `oneshot` | reply | each command's answer; `History{since}` returns lines from the 10 000-line `VecDeque` ring, for late subscribers |
 
@@ -71,11 +71,15 @@ any `seq` jump before it, as one "… N lines dropped" row; a real line with the
 Commands (`src-tauri/src/commands.rs`) return `launcher-types` structs; errors are strings,
 except `apply_config`, which rejects with an `ApplyError {kind, message}`. Events carry
 changes the UI did not ask for: `status` (every `Status` change), `node_stats` (every
-`Option<NodeStats>` change), `stale_process` (a zebrad from an earlier launcher run
-blocked the start at launch), and for the updater `update_info` (every `UpdateInfo`
-change), `update_state` (its `UpdateState`, when that changed) and
-`update_health_failed` (an `UpdateHealthFailure` after an update that did not come back
-healthy).
+`Option<NodeStats>` change), `node_details` (every `Option<NodeDetails>` change: the
+details behind the stats, from the same RPC poll), `metrics` (every
+`Option<MetricsSnapshot>` change: zebrad's Prometheus page, read every 10 s while it
+runs), `stale_process` (a zebrad from an earlier launcher run blocked the start at
+launch), and for the updater `update_info` (every `UpdateInfo` change), `update_state`
+(its `UpdateState`, when that changed) and `update_health_failed` (an
+`UpdateHealthFailure` after an update that did not come back healthy). The snapshot
+commands are `get_status`, `get_node_stats`, `get_node_details`, `get_metrics` and
+`get_update_info`.
 
 At startup the UI subscribes first and then fetches a snapshot (`get_status`,
 `get_node_stats`, `get_update_info`), so no change falls between the two; the log
@@ -90,6 +94,24 @@ Log batches are merged by `seq`, so their order does not matter.
 driven by `status.stale`, which the snapshot carries; likewise `update_health_failed`
 is also in `UpdateInfo.health_failure`. A payload that does not deserialize is shown in
 the UI's error banner (the first one per event or channel), not only logged.
+
+**Launcher lines in the log stream.** The launcher's own decisions appear in the same
+stream as zebrad's output, as `LogLine`s with `stream: launcher`: the supervisor's notes
+(`zebrad started (pid N)`, `stop requested (stdin closed)`, `restarting zebrad in 4s`,
+`not restarting zebrad (ConfigError)`) and every `tracing` event at INFO or louder from
+the rest of the launcher (a configuration applied or rolled back, an update check, a
+stale process handled, startup), which the layer in `src-tauri/src/logging.rs` forwards
+through `SupervisorHandle::note`. Such a line has a `timestamp` from the launcher's clock
+in zebrad's RFC 3339 UTC format, a `level`, the `tracing` `target`
+(`launcher_core::supervisor` for the supervisor's notes, `zebra_launcher::updater` and so
+on for the rest) and the `message` with the event's fields appended as `key=value`;
+`spans` is empty. Forwarding never blocks a logging call: the layer puts the event on a
+bounded queue with `try_send` and the queue feeds the actor the same way, so a flood
+drops the newest launcher lines instead of stalling. Targets that log per batch
+forwarded to the UI (`zebra_launcher::bridge`) are left out, or each line would log
+another. The launcher log file on disk is unchanged (it keeps everything its `RUST_LOG`
+filter admits); the zebrad log file gets the launcher lines in zebrad's line format
+behind its `[launcher] ` marker.
 
 The updater UI: a header banner while an update is available, downloading, ready,
 counting down (not dismissible) or installing (not dismissible), or failed; Settings →
@@ -306,10 +328,20 @@ Show / second launch (single-instance) / macOS dock -> show + focus the window
 ## Status and metrics
 
 `rpc.rs` and `monitor.rs` poll zebrad's cookie-authenticated RPC every 5 s
-(`getblockchaininfo`, `getinfo`, `getmempoolinfo`, `getpeerinfo` count; hourly
-`getdeprecationinfo` on Mainnet only) and publish `watch<NodeStats>`. That feeds the
-status strip and the dashboard, the primary metrics view. Grafana is optional and run by
-the user, embedded in its own tab; see [GRAFANA.md](GRAFANA.md).
+(`getblockchaininfo`, `getinfo`, `getmempoolinfo`, `getpeerinfo`; hourly
+`getdeprecationinfo` on Mainnet only) and publish `watch<Option<NodeStats>>` and, from
+the same calls, `watch<Option<NodeDetails>>`: the peer list (address, direction, user
+agent, protocol version, state, last seen, ping), the best block hash, headers,
+difficulty, size on disk, the chain supply and value pools in ZEC, the active network
+upgrade, zebrad's user agent and protocol version, and the mempool's bytes and memory.
+`metrics.rs` parses the Prometheus text exposition format and `metrics/poller.rs` reads
+zebrad's `/metrics` page every 10 s while it runs, publishing
+`watch<Option<MetricsSnapshot>>` with the families and samples as exported
+(`zcash_net_peers`; zebrad registers dotted names and its exporter writes underscores);
+the snapshot is `None` while zebrad is not running and after three failed reads in a
+row. That feeds the status strip and the dashboard, the primary metrics view;
+`OpenTarget::MetricsEndpoint` opens the raw page in the browser. Grafana is optional and
+run by the user, embedded in its own tab; see [GRAFANA.md](GRAFANA.md).
 
 **Dashboard.** The UI keeps every published `NodeStats` in `ui/src/stats_history.rs`
 (up to 4 h of 5 s samples, since the launcher opened; nothing is persisted). From it the

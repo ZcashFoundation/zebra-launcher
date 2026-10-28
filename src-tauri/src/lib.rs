@@ -215,9 +215,13 @@ fn show_startup_error(app: &AppHandle, err: &StartupError) {
 /// runtime, which the supervisor, monitor and settings actors need.
 async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     let paths = paths::resolve(app)?;
-    if let Err(err) = logging::init(&paths.launcher_log()) {
-        eprintln!("Zebra Launcher is running without a log file: {err}");
-    }
+    let notes = match logging::init(&paths.launcher_log()) {
+        Ok(notes) => Some(notes),
+        Err(err) => {
+            eprintln!("Zebra Launcher is running without a log file: {err}");
+            None
+        }
+    };
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         config_dir = %paths.config_dir().display(),
@@ -251,6 +255,10 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     supervisor_config.pidfile = Some(paths.pidfile());
     supervisor_config.log_file = Some(RotatingLogConfig::new(paths.zebrad_log()));
     let supervisor = supervisor::spawn(supervisor_config)?;
+    // From here on the launcher's own events show in the Logs tab too.
+    if let Some(notes) = notes {
+        logging::forward_notes(notes, supervisor.clone());
+    }
 
     let MonitorOutput { stats, details } = Monitor::spawn(
         supervisor.watch_status(),
