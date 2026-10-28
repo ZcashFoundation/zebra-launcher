@@ -3,8 +3,9 @@
 //! Startup (in [`run`]'s setup hook): resolve the per-user directories,
 //! start the launcher log, roll back an interrupted config change, load the
 //! settings, bring the managed `zebrad.toml` keys up to date, start the
-//! supervisor and the RPC monitor, forward their state to the UI, and start
-//! zebrad if the settings say so. Quitting stops zebrad first; see [`exit`].
+//! supervisor, the RPC monitor and the metrics poller, forward their state to
+//! the UI, and start zebrad if the settings say so. Quitting stops zebrad
+//! first; see [`exit`].
 
 pub mod app_state;
 pub mod bridge;
@@ -21,6 +22,7 @@ use std::time::Duration;
 use launcher_core::{
     config, firstrun,
     logfile::RotatingLogConfig,
+    metrics::poller::MetricsPoller,
     monitor::{self, Monitor},
     pidfile::StaleProcess,
     process::ZebradCommand,
@@ -76,6 +78,7 @@ pub fn run() {
             commands::get_settings,
             commands::set_settings,
             commands::get_node_stats,
+            commands::get_metrics,
             commands::open_path,
             commands::get_first_run_info,
             commands::pick_data_dir,
@@ -134,6 +137,7 @@ fn setup(app: &AppHandle) {
             app.manage(updater::start(app, &state, plan.gate_may_start));
             bridge::forward_status(app.clone(), state.supervisor.watch_status());
             bridge::forward_node_stats(app.clone(), state.node_stats.clone());
+            bridge::forward_metrics(app.clone(), state.metrics.clone());
             tray::install(app, &state);
             if plan.start_now {
                 tauri::async_runtime::spawn(start_in_background(app.clone(), state));
@@ -251,7 +255,10 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
         paths.rpc_cookie_file(),
         monitor::DEFAULT_INTERVAL,
     );
-    Ok(AppState::new(paths, supervisor, settings, node_stats))
+    let metrics = MetricsPoller::spawn(supervisor.watch_status());
+    Ok(AppState::new(
+        paths, supervisor, settings, node_stats, metrics,
+    ))
 }
 
 /// Who starts zebrad at launch. Decided once, from one settings snapshot, so

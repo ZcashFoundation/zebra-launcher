@@ -20,7 +20,7 @@ use launcher_core::{
 };
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
-    ImportOutcome, LogLine, NodeStats, OpenTarget, Settings, Status,
+    ImportOutcome, LogLine, MetricsSnapshot, NodeStats, OpenTarget, Settings, Status,
 };
 use tauri::{AppHandle, Runtime, State, ipc::Channel};
 use tauri_plugin_dialog::DialogExt;
@@ -260,6 +260,14 @@ pub fn get_node_stats(state: State<'_, AppState>) -> Option<NodeStats> {
     state.node_stats.borrow().clone()
 }
 
+/// The latest read of zebrad's Prometheus metrics page, `None` while zebrad
+/// is not running, has not answered yet, or stopped answering. Every change
+/// is also sent as the `metrics` event.
+#[tauri::command]
+pub fn get_metrics(state: State<'_, AppState>) -> Option<MetricsSnapshot> {
+    state.metrics.borrow().clone()
+}
+
 fn path_arg(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -295,6 +303,11 @@ pub fn open_path<R: Runtime>(
         OpenTarget::Grafana => match state.settings.current().grafana_url {
             Some(url) => opener.open_url(url, None::<&str>),
             None => return Err("no Grafana URL is set".into()),
+        },
+        // The address zebrad logged as opened in this run; cleared when it exits.
+        OpenTarget::MetricsEndpoint => match state.supervisor.status().metrics_addr {
+            Some(addr) => opener.open_url(format!("http://{addr}/metrics"), None::<&str>),
+            None => return Err("zebrad is not running, so its metrics page is closed".into()),
         },
     };
     result.map_err(message)

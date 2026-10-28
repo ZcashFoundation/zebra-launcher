@@ -34,6 +34,10 @@ pub mod events {
     /// The launcher did not come back healthy after an update: an
     /// [`UpdateHealthFailure`](crate::UpdateHealthFailure).
     pub const UPDATE_HEALTH_FAILED: &str = "update_health_failed";
+    /// Every `Option<MetricsSnapshot>` change
+    /// ([`MetricsSnapshot`](crate::MetricsSnapshot)): zebrad's Prometheus
+    /// metrics, read every 10 s while it runs.
+    pub const METRICS: &str = "metrics";
 }
 
 /// A location the `open_path` command opens with the system's default
@@ -55,6 +59,9 @@ pub enum OpenTarget {
     /// The Grafana URL from the settings, in the browser. Fails when none is
     /// set.
     Grafana,
+    /// zebrad's Prometheus metrics page, `http://<metrics_addr>/metrics`, in
+    /// the browser. Fails while zebrad is not running.
+    MetricsEndpoint,
 }
 
 /// Where a log line came from.
@@ -1042,6 +1049,7 @@ mod tests {
             (OpenTarget::ReleasesPage, "releases_page"),
             (OpenTarget::Repo, "repo"),
             (OpenTarget::Grafana, "grafana"),
+            (OpenTarget::MetricsEndpoint, "metrics_endpoint"),
         ] {
             assert_eq!(serde_json::to_value(target).unwrap(), name);
             let parsed: OpenTarget = serde_json::from_value(serde_json::json!(name)).unwrap();
