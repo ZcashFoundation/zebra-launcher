@@ -14,6 +14,7 @@ mod app;
 mod charts;
 mod clipboard;
 mod clock;
+mod config_editor;
 mod config_form;
 mod config_view;
 mod format;
@@ -28,7 +29,7 @@ mod theme;
 mod update_text;
 
 mod components {
-    pub mod config_form;
+    pub mod config_form_view;
     pub mod icons;
     pub mod log_insights;
     pub mod nav;
