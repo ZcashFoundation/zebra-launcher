@@ -2,7 +2,7 @@
 //!
 //! Status, node statistics and metrics change rarely, so every change is
 //! emitted as a Tauri event ([`events::STATUS`], [`events::NODE_STATS`],
-//! [`events::METRICS`]). Logs can arrive by the thousand per second, so they
+//! [`events::NODE_DETAILS`], [`events::METRICS`]). Logs can arrive by the thousand per second, so they
 //! go through a `tauri::ipc::Channel` in batches.
 
 use std::{
@@ -14,7 +14,7 @@ use std::{
 };
 
 use launcher_core::supervisor::LogSubscription;
-use launcher_types::{LogLine, MetricsSnapshot, NodeStats, Status, events};
+use launcher_types::{LogLine, MetricsSnapshot, NodeDetails, NodeStats, Status, events};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, ipc::Channel};
 use tokio::{
@@ -35,6 +35,14 @@ pub fn forward_status<R: Runtime>(app: AppHandle<R>, rx: watch::Receiver<Status>
 /// Emits [`events::NODE_STATS`] now and on every change, until the monitor ends.
 pub fn forward_node_stats<R: Runtime>(app: AppHandle<R>, rx: watch::Receiver<Option<NodeStats>>) {
     tauri::async_runtime::spawn(forward_watch(app, events::NODE_STATS, rx));
+}
+
+/// Emits [`events::NODE_DETAILS`] now and on every change, until the monitor ends.
+pub fn forward_node_details<R: Runtime>(
+    app: AppHandle<R>,
+    rx: watch::Receiver<Option<NodeDetails>>,
+) {
+    tauri::async_runtime::spawn(forward_watch(app, events::NODE_DETAILS, rx));
 }
 
 /// Emits [`events::METRICS`] now and on every change, until the poller ends.

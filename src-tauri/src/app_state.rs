@@ -18,7 +18,7 @@ use launcher_core::{
     settings::SettingsHandle,
     supervisor::SupervisorHandle,
 };
-use launcher_types::{MetricsSnapshot, NodeStats, Settings};
+use launcher_types::{MetricsSnapshot, NodeDetails, NodeStats, Settings};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::exit::ExitGuard;
@@ -37,6 +37,8 @@ pub struct AppState {
     pub settings: SettingsHandle,
     /// The latest RPC poll, `None` while zebrad is not running.
     pub node_stats: watch::Receiver<Option<NodeStats>>,
+    /// The details behind [`AppState::node_stats`], from the same poll.
+    pub node_details: watch::Receiver<Option<NodeDetails>>,
     /// The latest read of zebrad's Prometheus metrics page, `None` while
     /// zebrad is not running or the page stopped answering.
     pub metrics: watch::Receiver<Option<MetricsSnapshot>>,
@@ -75,6 +77,7 @@ impl AppState {
         supervisor: SupervisorHandle,
         settings: SettingsHandle,
         node_stats: watch::Receiver<Option<NodeStats>>,
+        node_details: watch::Receiver<Option<NodeDetails>>,
         metrics: watch::Receiver<Option<MetricsSnapshot>>,
     ) -> Self {
         Self {
@@ -82,6 +85,7 @@ impl AppState {
             supervisor,
             settings,
             node_stats,
+            node_details,
             metrics,
             config_writer: Arc::new(Semaphore::new(1)),
             log_generation: Arc::new(AtomicU64::new(0)),

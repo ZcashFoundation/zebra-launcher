@@ -39,8 +39,10 @@
 //! `<cookie_dir>/.cookie` in zebrad's format and answers `401` to requests
 //! without the matching Basic credentials. It answers `getblockchaininfo`,
 //! `getinfo`, `getmempoolinfo`, `getpeerinfo` and `getdeprecationinfo` with
-//! canned values (see [`canned`]), `fakegetcallcounts` with the number of calls
-//! per method so far, and `-32601` to anything else.
+//! canned values in zebrad's shapes (see [`canned`]: supply and value pools,
+//! network upgrades, eight peers with user agents and ping times),
+//! `fakegetcallcounts` with the number of calls per method so far, and
+//! `-32601` to anything else.
 //! `FAKE_ZEBRAD_DEPRECATION_FAILURES=N` makes the first `N` `getdeprecationinfo`
 //! calls fail with the JSON-RPC error code in
 //! `FAKE_ZEBRAD_DEPRECATION_ERROR_CODE` (default `-32000`).
@@ -679,15 +681,36 @@ fn canned(method: &str) -> Value {
         "getblockchaininfo" => json!({
             "chain": "main",
             "blocks": 2_500_000,
-            "headers": 2_500_000,
-            "difficulty": 1.0,
+            "headers": 2_500_001,
+            "difficulty": 123_456_789.5,
             "verificationprogress": 0.8333,
             "chainwork": 0,
             "pruned": false,
-            "size_on_disk": 0,
+            "size_on_disk": 321_000_000_000_u64,
             "commitments": 0,
-            "bestblockhash": "0000000000000000000000000000000000000000000000000000000000000000",
+            "bestblockhash": "0000000001c2a8f4b4a2a1e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3",
             "estimatedheight": 3_000_000,
+            "chainSupply": {
+                "chainValue": 15_937_500.0,
+                "chainValueZat": 1_593_750_000_000_000_u64,
+                "monitored": true,
+            },
+            "valuePools": [
+                { "id": "transparent", "chainValue": 10_000_000.0, "chainValueZat": 1_000_000_000_000_000_u64, "monitored": true },
+                { "id": "sprout", "chainValue": 0.0, "chainValueZat": 0, "monitored": false },
+                { "id": "sapling", "chainValue": 3_000_000.0, "chainValueZat": 300_000_000_000_000_u64, "monitored": true },
+                { "id": "orchard", "chainValue": 2_500_000.0, "chainValueZat": 250_000_000_000_000_u64, "monitored": true },
+                { "id": "lockbox", "chainValue": 437_500.0, "chainValueZat": 43_750_000_000_000_u64, "monitored": true },
+                { "id": "ironwood", "chainValue": 0.0, "chainValueZat": 0, "monitored": false },
+            ],
+            "upgrades": {
+                "5ba81b19": { "name": "Overwinter", "activationheight": 347_500, "status": "active" },
+                "76b809bb": { "name": "Sapling", "activationheight": 419_200, "status": "active" },
+                "c2d6d0b4": { "name": "NU5", "activationheight": 1_687_104, "status": "active" },
+                "c8e71055": { "name": "NU6", "activationheight": 2_726_400, "status": "active" },
+                "4dec4df0": { "name": "NU6.1", "activationheight": 3_146_400, "status": "pending" },
+            },
+            "consensus": { "chaintip": "c8e71055", "nextblock": "c8e71055" },
         }),
         "getinfo" => json!({
             "version": 7_000_050,
@@ -707,11 +730,22 @@ fn canned(method: &str) -> Value {
         "getpeerinfo" => Value::Array(
             (0..8)
                 .map(|i| {
-                    json!({
+                    let mut peer = json!({
                         "addr": format!("192.0.2.{i}:8233"),
-                        "inbound": false,
+                        "services": "0000000000000001",
+                        "lastrecv": 1_800_000_000 - i * 10,
+                        "inbound": i % 3 == 0,
+                        "banscore": 0,
+                        "subver": if i % 2 == 0 { "/Zebra:7.0.0/" } else { "/MagicBean:6.2.0/" },
+                        "version": 170_140,
                         "connection_state": "connected",
-                    })
+                    });
+                    // zebrad omits the ping fields for a peer it has not pinged.
+                    if i < 6 {
+                        peer["pingtime"] = json!(0.012 * f64::from(i + 1));
+                        peer["pingwait"] = json!(0.0);
+                    }
+                    peer
                 })
                 .collect(),
         ),

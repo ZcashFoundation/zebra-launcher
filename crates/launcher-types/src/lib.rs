@@ -23,6 +23,10 @@ pub mod events {
     pub const STATUS: &str = "status";
     /// Every `Option<NodeStats>` change ([`NodeStats`](crate::NodeStats)).
     pub const NODE_STATS: &str = "node_stats";
+    /// Every `Option<NodeDetails>` change
+    /// ([`NodeDetails`](crate::NodeDetails)): the details behind the node
+    /// statistics, from the same RPC poll.
+    pub const NODE_DETAILS: &str = "node_details";
     /// zebrad was to start at launch, but a zebrad from an earlier launcher
     /// run is still alive: a [`StaleProcessInfo`](crate::StaleProcessInfo).
     /// The UI offers `start_zebrad_killing_stale`.
@@ -578,6 +582,87 @@ pub struct EosInfo {
     pub block_height: u64,
     /// zebrad's estimate of when that block is reached.
     pub estimated_time: SystemTime,
+}
+
+/// The details behind [`NodeStats`], polled from zebrad's JSON-RPC interface
+/// by the same poll: the `node_details` event and `get_node_details`. `None`
+/// on the wire while zebrad is not running. Every field but `updated_at` is
+/// optional, so a field a zebrad release does not report cannot fail the poll.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeDetails {
+    /// The peers zebrad is connected to or knows, from `getpeerinfo`.
+    #[serde(default)]
+    pub peers: Vec<PeerInfo>,
+    /// The hash of the best block, hex.
+    #[serde(default)]
+    pub best_block_hash: Option<String>,
+    /// The height of the best chain's headers.
+    #[serde(default)]
+    pub headers: Option<u64>,
+    /// The network difficulty at the tip.
+    #[serde(default)]
+    pub difficulty: Option<f64>,
+    /// zebrad's estimate of the chain state's size on disk, in bytes.
+    #[serde(default)]
+    pub size_on_disk: Option<u64>,
+    /// The issued supply in ZEC: the sum of the value pools.
+    #[serde(default)]
+    pub chain_supply_zec: Option<f64>,
+    /// The value pools and their balances, in zebrad's order.
+    #[serde(default)]
+    pub value_pools: Vec<ValuePool>,
+    /// The active network upgrade, such as `NU6`: the `active` entry of
+    /// `getblockchaininfo.upgrades` with the highest activation height.
+    #[serde(default)]
+    pub active_upgrade: Option<String>,
+    /// zebrad's P2P user agent, such as `/Zebra:7.0.0/`.
+    #[serde(default)]
+    pub subversion: Option<String>,
+    /// The P2P protocol version zebrad speaks.
+    #[serde(default)]
+    pub protocol_version: Option<u32>,
+    /// The size of the mempool's transactions, in bytes.
+    #[serde(default)]
+    pub mempool_bytes: Option<u64>,
+    /// The memory the mempool uses, in bytes.
+    #[serde(default)]
+    pub mempool_usage: Option<u64>,
+    /// When these details were last refreshed.
+    pub updated_at: SystemTime,
+}
+
+/// One peer, from `getpeerinfo`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PeerInfo {
+    /// The peer's address, `ip:port`.
+    pub addr: String,
+    /// The peer connected to us (true) or we to it (false).
+    pub inbound: bool,
+    /// The peer's user agent, such as `/Zebra:7.0.0/` or `/MagicBean:6.2.0/`.
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    /// The negotiated protocol version.
+    #[serde(default)]
+    pub protocol_version: Option<u32>,
+    /// The connection state zebrad reports, such as `connected` or `failed`.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// When a message was last exchanged with the peer.
+    #[serde(default)]
+    pub last_seen: Option<SystemTime>,
+    /// The round-trip ping time, in seconds.
+    #[serde(default)]
+    pub ping_secs: Option<f64>,
+}
+
+/// A value pool's balance.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ValuePool {
+    /// The pool: `transparent`, `sprout`, `sapling`, `orchard`, `lockbox` or
+    /// `ironwood`.
+    pub id: String,
+    /// The balance in ZEC.
+    pub zec: f64,
 }
 
 /// zebrad's end-of-support warning: this close to the estimated halt, Auto mode installs a
@@ -1254,6 +1339,42 @@ mod tests {
             let parsed: Theme = serde_json::from_value(serde_json::json!(theme.as_str())).unwrap();
             assert_eq!(parsed, theme);
         }
+    }
+
+    #[test]
+    fn node_details_tolerate_a_sparse_payload() {
+        let details: NodeDetails =
+            serde_json::from_str(r#"{"updated_at":{"secs_since_epoch":1,"nanos_since_epoch":0}}"#)
+                .expect("details with the time only");
+        assert!(details.peers.is_empty());
+        assert_eq!(details.best_block_hash, None);
+        assert_eq!(details.chain_supply_zec, None);
+        assert!(details.value_pools.is_empty());
+        assert_eq!(details.active_upgrade, None);
+        assert_eq!(details.mempool_usage, None);
+        assert_eq!(
+            details.updated_at,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1)
+        );
+        let peer: PeerInfo = serde_json::from_str(r#"{"addr":"192.0.2.1:8233","inbound":true}"#)
+            .expect("a peer with the address only");
+        assert_eq!(peer.addr, "192.0.2.1:8233");
+        assert!(peer.inbound);
+        assert_eq!(peer.user_agent, None);
+        assert_eq!(peer.last_seen, None);
+        assert_eq!(peer.ping_secs, None);
+        let full = NodeDetails {
+            peers: vec![peer],
+            value_pools: vec![ValuePool {
+                id: "sapling".into(),
+                zec: 0.5,
+            }],
+            active_upgrade: Some("NU6".into()),
+            ..details
+        };
+        let round_trip: NodeDetails =
+            serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
+        assert_eq!(round_trip, full);
     }
 
     fn sample(name: &str, labels: &[(&str, &str)], value: f64) -> MetricSample {

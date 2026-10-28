@@ -20,7 +20,7 @@ use launcher_core::{
 };
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
-    ImportOutcome, LogLine, MetricsSnapshot, NodeStats, OpenTarget, Settings, Status,
+    ImportOutcome, LogLine, MetricsSnapshot, NodeDetails, NodeStats, OpenTarget, Settings, Status,
 };
 use tauri::{AppHandle, Runtime, State, ipc::Channel};
 use tauri_plugin_dialog::DialogExt;
@@ -258,6 +258,14 @@ pub async fn set_settings(
 #[tauri::command]
 pub fn get_node_stats(state: State<'_, AppState>) -> Option<NodeStats> {
     state.node_stats.borrow().clone()
+}
+
+/// The details behind the node statistics (peers, chain supply, the active
+/// network upgrade, ...), from the same poll; `None` whenever `get_node_stats`
+/// is. Every change is also sent as the `node_details` event.
+#[tauri::command]
+pub fn get_node_details(state: State<'_, AppState>) -> Option<NodeDetails> {
+    state.node_details.borrow().clone()
 }
 
 /// The latest read of zebrad's Prometheus metrics page, `None` while zebrad

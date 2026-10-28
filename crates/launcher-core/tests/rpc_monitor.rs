@@ -1,9 +1,14 @@
 //! The RPC client and the monitor against fake-zebrad's JSON-RPC server.
 
-use std::{net::SocketAddr, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    process::Stdio,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use launcher_core::{
-    monitor::{Monitor, MonitorConfig},
+    monitor::{Monitor, MonitorConfig, MonitorOutput},
     rpc::{RpcClient, RpcError},
 };
 use launcher_types::{NodeStats, Phase, Status};
@@ -95,6 +100,16 @@ async fn rpc_client_calls_every_method() {
     assert_eq!(chain.estimated_height, 3_000_000);
     assert_eq!(chain.verification_progress, 0.8333);
     assert_eq!(chain.chain, "main");
+    assert_eq!(chain.headers, Some(2_500_001));
+    assert_eq!(chain.difficulty, Some(123_456_789.5));
+    assert_eq!(chain.size_on_disk, Some(321_000_000_000));
+    assert_eq!(chain.best_block_hash.as_deref().map(str::len), Some(64));
+    assert_eq!(
+        chain.chain_supply.and_then(|pool| pool.chain_value_zat),
+        Some(1_593_750_000_000_000)
+    );
+    assert_eq!(chain.value_pools.len(), 6);
+    assert_eq!(chain.upgrades.len(), 5);
 
     let info = timeout(T, client.get_info())
         .await
@@ -102,6 +117,7 @@ async fn rpc_client_calls_every_method() {
         .expect("getinfo");
     assert_eq!(info.version, 7_000_050);
     assert_eq!(info.subversion, "/Zebra:7.0.0/");
+    assert_eq!(info.protocol_version, Some(170_140));
     assert_eq!(info.connections, 8);
     assert_eq!(info.release(), "7.0.0");
     assert_eq!(info.last_error(), None);
@@ -111,12 +127,24 @@ async fn rpc_client_calls_every_method() {
         .expect("in time")
         .expect("getmempoolinfo");
     assert_eq!(mempool.size, 42);
+    assert_eq!(mempool.bytes, Some(32_500));
+    assert_eq!(mempool.usage, Some(41_000));
 
     let peers = timeout(T, client.get_peer_info())
         .await
         .expect("in time")
         .expect("getpeerinfo");
-    assert_eq!(peers, 8);
+    assert_eq!(peers.len(), 8);
+    assert_eq!(peers[0].addr, "192.0.2.0:8233");
+    assert!(peers[0].inbound);
+    assert!(!peers[1].inbound);
+    assert_eq!(peers[0].subver, "/Zebra:7.0.0/");
+    assert_eq!(peers[1].subver, "/MagicBean:6.2.0/");
+    assert_eq!(peers[0].version, 170_140);
+    assert_eq!(peers[0].connection_state, "connected");
+    assert_eq!(peers[0].lastrecv, 1_800_000_000);
+    assert_eq!(peers[0].pingtime, Some(0.012));
+    assert_eq!(peers[7].pingtime, None);
 
     let eos = timeout(T, client.get_deprecation_info())
         .await
@@ -186,7 +214,7 @@ async fn a_session_reads_the_cookie_once() {
     assert_eq!(chain.expect("getblockchaininfo").blocks, 2_500_000);
     assert_eq!(info.expect("getinfo").release(), "7.0.0");
     assert_eq!(mempool.expect("getmempoolinfo").size, 42);
-    assert_eq!(peers.expect("getpeerinfo"), 8);
+    assert_eq!(peers.expect("getpeerinfo").len(), 8);
 
     // The client itself reads the file per call.
     let err = timeout(T, client.get_info())
@@ -196,12 +224,12 @@ async fn a_session_reads_the_cookie_once() {
     assert!(matches!(err, RpcError::Cookie { .. }), "{err:?}");
 }
 
-async fn wait_for(
-    stats: &mut watch::Receiver<Option<NodeStats>>,
+async fn wait_for<T: Clone>(
+    output: &mut watch::Receiver<Option<T>>,
     what: &str,
-    predicate: impl FnMut(&Option<NodeStats>) -> bool,
-) -> Option<NodeStats> {
-    timeout(T, stats.wait_for(predicate))
+    predicate: impl FnMut(&Option<T>) -> bool,
+) -> Option<T> {
+    timeout(T, output.wait_for(predicate))
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
         .expect("the monitor is running")
@@ -212,7 +240,10 @@ async fn wait_for(
 async fn monitor_follows_the_supervisor_status() {
     let mut fake = spawn_fake().await;
     let (status_tx, status_rx) = watch::channel(Status::default());
-    let mut stats = Monitor::spawn_with(
+    let MonitorOutput {
+        mut stats,
+        mut details,
+    } = Monitor::spawn_with(
         status_rx,
         MonitorConfig {
             cookie_file: fake.cookie_file.clone(),
@@ -221,6 +252,7 @@ async fn monitor_follows_the_supervisor_status() {
         },
     );
     assert_eq!(*stats.borrow(), None);
+    assert_eq!(*details.borrow(), None);
 
     // Starting is not Running: nothing is polled yet.
     status_tx.send_modify(|s| {
@@ -243,8 +275,57 @@ async fn monitor_follows_the_supervisor_status() {
     assert_eq!(eos.block_height, 3_706_000);
     assert_eq!(
         eos.estimated_time,
-        std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
+        UNIX_EPOCH + Duration::from_secs(1_800_000_000)
     );
+
+    // The details come from the same poll, in the wire's shapes.
+    let detail = wait_for(&mut details, "details", Option::is_some)
+        .await
+        .expect("some");
+    assert!(detail.updated_at >= first.updated_at);
+    assert_eq!(detail.peers.len(), 8);
+    let peer = &detail.peers[0];
+    assert_eq!(peer.addr, "192.0.2.0:8233");
+    assert!(peer.inbound);
+    assert_eq!(peer.user_agent.as_deref(), Some("/Zebra:7.0.0/"));
+    assert_eq!(peer.protocol_version, Some(170_140));
+    assert_eq!(peer.state.as_deref(), Some("connected"));
+    assert_eq!(
+        peer.last_seen,
+        Some(UNIX_EPOCH + Duration::from_secs(1_800_000_000))
+    );
+    assert_eq!(peer.ping_secs, Some(0.012));
+    assert!(!detail.peers[1].inbound);
+    assert_eq!(
+        detail.peers[1].user_agent.as_deref(),
+        Some("/MagicBean:6.2.0/")
+    );
+    assert_eq!(detail.peers[7].ping_secs, None);
+    assert_eq!(
+        detail.peers[7].last_seen,
+        Some(UNIX_EPOCH + Duration::from_secs(1_799_999_930))
+    );
+    assert_eq!(detail.best_block_hash.as_deref().map(str::len), Some(64));
+    assert_eq!(detail.headers, Some(2_500_001));
+    assert_eq!(detail.difficulty, Some(123_456_789.5));
+    assert_eq!(detail.size_on_disk, Some(321_000_000_000));
+    assert_eq!(detail.chain_supply_zec, Some(15_937_500.0));
+    assert_eq!(detail.value_pools.len(), 6);
+    assert_eq!(detail.value_pools[0].id, "transparent");
+    assert_eq!(detail.value_pools[0].zec, 10_000_000.0);
+    assert_eq!(detail.value_pools[4].id, "lockbox");
+    assert_eq!(detail.value_pools[4].zec, 437_500.0);
+    let pools: f64 = detail.value_pools.iter().map(|pool| pool.zec).sum();
+    assert_eq!(
+        Some(pools),
+        detail.chain_supply_zec,
+        "the pools add up to the supply"
+    );
+    assert_eq!(detail.active_upgrade.as_deref(), Some("NU6"));
+    assert_eq!(detail.subversion.as_deref(), Some("/Zebra:7.0.0/"));
+    assert_eq!(detail.protocol_version, Some(170_140));
+    assert_eq!(detail.mempool_bytes, Some(32_500));
+    assert_eq!(detail.mempool_usage, Some(41_000));
 
     // Several more polls, but only one end-of-support check per hour.
     let mut seen = first.updated_at;
@@ -273,12 +354,13 @@ async fn monitor_follows_the_supervisor_status() {
     .expect("stats are kept");
     assert_eq!(failed.height, 2_500_000);
 
-    // Not running: the stats are cleared.
+    // Not running: both outputs are cleared.
     status_tx.send_modify(|s| {
         s.phase = Phase::Stopped;
         s.rpc_addr = None;
     });
     wait_for(&mut stats, "cleared stats", Option::is_none).await;
+    wait_for(&mut details, "cleared details", Option::is_none).await;
 
     // Dropping the status sender stops the monitor, which drops its sender.
     drop(status_tx);
@@ -299,7 +381,7 @@ async fn deprecation_calls(fake: &Fake) -> u64 {
 /// Starts a monitor that polls `fake` every 100 ms with hourly EOS checks.
 fn monitor_for(fake: &Fake) -> (watch::Sender<Status>, watch::Receiver<Option<NodeStats>>) {
     let (status_tx, status_rx) = watch::channel(Status::default());
-    let stats = Monitor::spawn_with(
+    let MonitorOutput { stats, .. } = Monitor::spawn_with(
         status_rx,
         MonitorConfig {
             cookie_file: fake.cookie_file.clone(),
