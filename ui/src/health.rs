@@ -784,12 +784,14 @@ impl<'a> Facts<'a> {
             countdown_secs: Some(secs),
         }) = self.input.update.map(|update| &update.state)
         {
+            // The seconds go in the reason: the headline is in the live region, which would
+            // otherwise re-announce the countdown every second.
             return Some(Verdict::new(
                 Level::Urgent,
                 11,
-                format!("Update installs in {secs} s"),
+                "Update installs automatically",
                 format!(
-                    "Launcher {version} is ready · the launcher restarts and brings zebrad back"
+                    "Launcher {version} installs in {secs} s · the launcher restarts and brings zebrad back"
                 ),
                 vec![Action::Install, Action::CancelUpdate],
             ));
@@ -2086,10 +2088,10 @@ mod tests {
         }));
         let verdict = scene.verdict();
         assert_eq!((verdict.rule, verdict.level), (11, Level::Urgent));
-        assert_eq!(verdict.headline, "Update installs in 42 s");
+        assert_eq!(verdict.headline, "Update installs automatically");
         assert_eq!(
             verdict.reason,
-            "Launcher 0.3.0 is ready · the launcher restarts and brings zebrad back"
+            "Launcher 0.3.0 installs in 42 s · the launcher restarts and brings zebrad back"
         );
         assert_eq!(verdict.actions, vec![Action::Install, Action::CancelUpdate]);
         // Ready without a countdown waits for the user: the shell's banner, not the verdict.
