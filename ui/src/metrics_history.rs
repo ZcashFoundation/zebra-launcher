@@ -6,9 +6,6 @@
 //! reduced to the families in [`KEPT_FAMILIES`]; the newest snapshot stays whole for the
 //! one-off gauges the page reads ([`MetricsHistory::latest`]).
 
-// Read by the dashboard's view workstream; the accessors it does not use yet stay for it.
-#![allow(dead_code, reason = "read by the dashboard once its view lands")]
-
 use std::time::{Duration, SystemTime};
 
 use launcher_types::MetricsSnapshot;
@@ -115,10 +112,6 @@ impl MetricsHistory {
         self.newest = Some(snapshot.clone());
         let excess = self.snapshots.len().saturating_sub(MAX_SNAPSHOTS);
         self.snapshots.drain(..excess);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.snapshots.is_empty()
     }
 
     /// The newest snapshot, whole.
@@ -233,11 +226,6 @@ impl MetricsHistory {
         self.newest_count(names::UNREADY_PEERS)
     }
 
-    /// Block downloads in flight, from the newest snapshot.
-    pub fn downloads_in_flight(&self) -> Option<u64> {
-        self.newest_count(names::DOWNLOADS_IN_FLIGHT)
-    }
-
     /// The checkpoint verifier's height, from the newest snapshot.
     pub fn checkpoint_height(&self) -> Option<u64> {
         self.newest_count(names::CHECKPOINT_HEIGHT)
@@ -347,8 +335,6 @@ mod tests {
     #[test]
     fn push_keeps_order_reduces_and_caps() {
         let mut history = history(&[(0, 1.0, 0.0, 0.0, 0.0), (10, 2.0, 0.0, 0.0, 0.0)]);
-        assert!(!history.is_empty());
-        assert!(MetricsHistory::default().is_empty());
         // A repeat and a late snapshot are ignored.
         history.push(&snapshot(10, 99.0, 0.0, 0.0, 0.0));
         history.push(&snapshot(5, 99.0, 0.0, 0.0, 0.0));
@@ -505,7 +491,7 @@ mod tests {
         let history = history(&[(0, 312_400_000_000.0, 0.0, 0.0, 0.0)]);
         assert_eq!(history.ready_peers(), Some(11));
         assert_eq!(history.unready_peers(), Some(1));
-        assert_eq!(history.downloads_in_flight(), Some(42));
+        assert_eq!(history.newest_value(names::DOWNLOADS_IN_FLIGHT), Some(42.0));
         assert_eq!(history.checkpoint_height(), Some(2_500_000));
         assert_eq!(history.chain_count(), Some(2));
         assert_eq!(history.disk_bytes(), Some(312_400_000_000));
@@ -524,7 +510,7 @@ mod tests {
             ],
         });
         assert_eq!(odd.ready_peers(), None);
-        assert_eq!(odd.downloads_in_flight(), None);
+        assert_eq!(odd.newest_value(names::DOWNLOADS_IN_FLIGHT), None);
         assert_eq!(odd.chain_count(), Some(0));
         assert_eq!(
             odd.memory_bytes(),

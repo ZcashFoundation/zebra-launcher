@@ -252,13 +252,11 @@ fn tz_offset_min_at(time: SystemTime) -> i32 {
 
 /// [`datetime_short`] in the user's zone: `23 Oct, 21:13`. Beside [`crate::clock::local_string`]
 /// (`10/23/2026, 9:13:58 PM`) for the dashboard's shorter texts.
-#[allow(dead_code, reason = "read by the dashboard once its view lands")]
 pub fn local_datetime_short(time: SystemTime) -> String {
     datetime_short(time, tz_offset_min_at(time))
 }
 
 /// [`date_short`] in the user's zone: `3 Dec 2026`.
-#[allow(dead_code, reason = "read by the dashboard once its view lands")]
 pub fn local_date_short(time: SystemTime) -> String {
     date_short(time, tz_offset_min_at(time))
 }

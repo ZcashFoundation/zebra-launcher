@@ -1,10 +1,7 @@
 //! The app shell: shared state, backend subscriptions, the header, the five pages and the
 //! first-run wizard.
 
-use std::{
-    mem::discriminant,
-    time::{Duration, SystemTime},
-};
+use std::time::{Duration, SystemTime};
 
 use launcher_types::{
     ApplyOutcome, LogLine, MetricsSnapshot, NodeDetails, NodeStats, Phase, Settings,
@@ -158,9 +155,6 @@ impl Tab {
     }
 }
 
-/// How many status transitions [`AppState::session_events`] keeps.
-const SESSION_EVENTS_KEPT: usize = 40;
-
 /// State shared by every page, provided as context.
 #[derive(Clone, Copy)]
 pub struct AppState {
@@ -171,8 +165,8 @@ pub struct AppState {
     pub status_loaded: RwSignal<bool>,
     pub stats: RwSignal<Option<NodeStats>>,
     /// The details behind `stats` (the peer list, the best block, the chain's supply and
-    /// pools), from the same poll; `None` whenever `stats` is.
-    #[allow(dead_code, reason = "read by the dashboard once its model lands")]
+    /// pools), from the same poll; `None` whenever `stats` is. The peer list's counts by
+    /// direction also go onto the sample of the same poll in `history`.
     pub details: RwSignal<Option<NodeDetails>>,
     /// `None` until loaded.
     pub settings: RwSignal<Option<Settings>>,
@@ -182,20 +176,16 @@ pub struct AppState {
     /// The node statistics published since the launcher opened, for charts and rates.
     pub history: RwSignal<StatsHistory>,
     /// The newest reading of zebrad's metrics page, `None` while it does not run.
-    #[allow(dead_code, reason = "read by the dashboard once its model lands")]
     pub metrics: RwSignal<Option<MetricsSnapshot>>,
     /// The metrics snapshots since the launcher opened.
     pub metrics_history: RwSignal<MetricsHistory>,
-    /// When the current phase began (the phase variant, not its fields), for the dashboard's
-    /// "for N min": set by [`AppState::record_status`].
-    #[allow(dead_code, reason = "read by the dashboard once its model lands")]
+    /// Since when the dashboard's verdict has read as it does, for its "for N min" and "stop
+    /// requested N s ago". One rule, the dashboard's: the page resets it to now whenever the
+    /// verdict's rule or level changes; the first status seeds it here, from `started_at`
+    /// while zebrad is starting or running (the launcher may have been opened long after
+    /// zebrad started) and from now otherwise. A phase change on its own does not touch it:
+    /// the verdict that follows it does.
     pub phase_since: RwSignal<SystemTime>,
-    /// The events the UI observed this session, newest first, at most
-    /// [`SESSION_EVENTS_KEPT`]: status transitions, updater steps, configuration changes.
-    /// The same events go into `insights`, whose [`Insights::events`] merges them with the
-    /// log's; this is the raw list.
-    #[allow(dead_code, reason = "read by the dashboard once its model lands")]
-    pub session_events: RwSignal<Vec<RunEvent>>,
     /// Whether the resolved appearance is dark (the setting, or the system preference when
     /// the setting follows it). Embedded pages pick their theme from it.
     pub resolved_dark: RwSignal<bool>,
@@ -236,17 +226,14 @@ impl AppState {
     }
 
     /// Publishes a status, turning what changed since the last one into session events
-    /// ([`status_events`]) and dating the phase. The first status is the baseline: it says
-    /// where the node is, not that anything happened.
+    /// ([`status_events`]). The first status is the baseline: it says where the node is, not
+    /// that anything happened, and it seeds `phase_since`.
     fn record_status(&self, status: Status) {
         let now = clock::now();
         let previous = self.status.get_untracked();
         if self.status_loaded.get_untracked() {
             for event in status_events(&previous, &status, now) {
                 self.record_event(event);
-            }
-            if discriminant(&previous.phase) != discriminant(&status.phase) {
-                self.phase_since.set(now);
             }
         } else {
             self.status_loaded.set(true);
@@ -268,12 +255,9 @@ impl AppState {
         self.record_status(status);
     }
 
-    /// Keeps an event the UI observed, for the dashboard's timeline.
+    /// Keeps an event the UI observed, for the dashboard's timeline ([`Insights::events`]
+    /// merges it with what the log says).
     fn record_event(&self, event: RunEvent) {
-        self.session_events.update(|events| {
-            events.insert(0, event.clone());
-            events.truncate(SESSION_EVENTS_KEPT);
-        });
         self.insights
             .update(|insights| insights.record_session_event(event));
     }
@@ -306,7 +290,6 @@ impl AppState {
 
     /// The Configure page saved `zebrad.toml`: the outcome joins the dashboard's timeline
     /// ("Configuration applied", or rolled back when zebrad rejected it).
-    #[allow(dead_code, reason = "called by the Configure page after a save")]
     pub fn record_config_outcome(&self, outcome: &ApplyOutcome) {
         self.record_event(config_outcome_event(outcome, clock::now()));
     }
@@ -317,6 +300,15 @@ impl AppState {
             self.history.update(|history| history.push(stats));
         }
         self.stats.set(stats);
+    }
+
+    /// Publishes the details behind the statistics; the peer list's counts by direction go
+    /// onto the sample of the same poll.
+    fn record_details(&self, details: Option<NodeDetails>) {
+        if let Some(details) = &details {
+            self.history.update(|history| history.record_peers(details));
+        }
+        self.details.set(details);
     }
 
     /// Publishes a metrics reading and keeps it in the history.
@@ -412,7 +404,6 @@ pub fn App() -> impl IntoView {
         metrics: RwSignal::new(None),
         metrics_history: RwSignal::new(MetricsHistory::default()),
         phase_since: RwSignal::new(clock::now()),
-        session_events: RwSignal::new(Vec::new()),
         resolved_dark: RwSignal::new(true),
         preview_theme: RwSignal::new(None),
         now: RwSignal::new(clock::now()),
@@ -477,7 +468,7 @@ pub fn App() -> impl IntoView {
             let result = api::on_node_details(
                 move |details| {
                     seen.mark();
-                    state.details.set(details);
+                    state.record_details(details);
                 },
                 state.payload_error(),
             )
@@ -486,7 +477,7 @@ pub fn App() -> impl IntoView {
         },
         api::get_node_details,
         "Reading node details",
-        move |details| state.details.set(details),
+        move |details| state.record_details(details),
     ));
     spawn_local(subscribe_then_fetch(
         state,

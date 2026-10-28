@@ -696,6 +696,9 @@ impl ConfigEditor {
         self.notice.clear();
         spawn_local(async move {
             let result = api::apply_config(text, token).await;
+            if let Ok(outcome) = &result {
+                self.state.record_config_outcome(outcome);
+            }
             let (reload, notice) = after_apply(result, restarted, || self.keeps_draft());
             if let Some(reload) = reload {
                 self.reload(reload).await;

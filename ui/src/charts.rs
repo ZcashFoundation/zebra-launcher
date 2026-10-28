@@ -376,7 +376,6 @@ pub fn signed(delta: i64) -> String {
 
 /// A transfer rate in decimal units with one decimal: `1.2 MB/s`, `512 bytes/s`. A negative
 /// or non-finite rate reads as nothing moving.
-#[allow(dead_code, reason = "read by the dashboard once its view lands")]
 pub fn byte_rate(bytes_per_sec: f64) -> String {
     let rounded = if bytes_per_sec.is_finite() && bytes_per_sec > 0.0 {
         bytes_per_sec.round() as u64
@@ -387,7 +386,6 @@ pub fn byte_rate(bytes_per_sec: f64) -> String {
 }
 
 /// A size delta with its sign: `+1.1 GB`, `-3.0 MB`, `0 bytes`.
-#[allow(dead_code, reason = "read by the dashboard once its view lands")]
 pub fn signed_bytes(delta: i64) -> String {
     let magnitude = bytes(delta.unsigned_abs());
     match delta {
@@ -583,7 +581,10 @@ pub struct Geometry {
     pub y_ticks: Vec<(f64, String)>,
     /// `(x, label)` per x-axis label.
     pub x_ticks: Vec<(f64, String)>,
-    /// The label at the end of the first series.
+    /// The series the direct end label belongs to: the one that ends highest (the first of
+    /// equals), so two lines get one label and it sits on the upper one.
+    pub end_label_series: usize,
+    /// The direct label at that series' end.
     pub end_label: String,
 }
 
@@ -661,7 +662,20 @@ pub fn geometry(
     };
     let lines = ys.iter().map(|series| line_path(&points(series))).collect();
     let area = area_path(&points(&ys[0]), baseline);
-    let end_label = compact(data.series[0].values[n - 1].round().max(0.0) as u64);
+    let end_label_series = data
+        .series
+        .iter()
+        .enumerate()
+        .filter_map(|(index, s)| Some((index, *s.values.get(n - 1)?)))
+        .fold(
+            None,
+            |best: Option<(usize, f64)>, (index, value)| match best {
+                Some((_, top)) if top >= value => best,
+                _ => Some((index, value)),
+            },
+        )
+        .map_or(0, |(index, _)| index);
+    let end_label = compact(data.series[end_label_series].values[n - 1].round().max(0.0) as u64);
     Some(Geometry {
         width,
         xs,
@@ -670,6 +684,7 @@ pub fn geometry(
         area,
         y_ticks,
         x_ticks,
+        end_label_series,
         end_label,
     })
 }
@@ -1002,7 +1017,9 @@ mod tests {
         assert!((2..=5).contains(&g.y_ticks.len()), "{:?}", g.y_ticks);
         // The estimated height is the top of the domain, so it sits at or above the plot top.
         assert!(g.ys[1][0] >= PAD_T && g.ys[1][0] < g.ys[0][0]);
-        assert_eq!(g.end_label, "2.95M");
+        // The direct label goes on the line that ends higher: the estimate.
+        assert_eq!(g.end_label_series, 1);
+        assert_eq!(g.end_label, "3.12M");
         // 15 s of data from a clean time: 15 s ticks at both ends, with seconds.
         let labels: Vec<_> = g.x_ticks.iter().map(|(_, label)| label.as_str()).collect();
         assert_eq!(labels, vec!["00:00:00", "00:00:15"]);
@@ -1014,6 +1031,21 @@ mod tests {
         assert_eq!(g.y_ticks[0].1, "0");
         assert_eq!(g.y_ticks[0].0, VIEW_H - PAD_B);
         assert_eq!((g.width, g.xs[3]), (1000.0, 1000.0 - PAD_R));
+        assert_eq!((g.end_label_series, g.end_label.as_str()), (0, "8"));
+        // Two series ending equal: the first keeps the label.
+        let twin = ChartData::from_samples(
+            &samples,
+            &[
+                ("Peers", "chart-series-1", Field::Peers),
+                ("Also", "chart-series-2", Field::Peers),
+            ],
+        );
+        assert_eq!(
+            geometry(&twin, true, |_| 0, VIEW_W)
+                .unwrap()
+                .end_label_series,
+            0
+        );
         // A count that is zero for the whole range: the line sits on the baseline, the area
         // wash is empty and no two gridlines read the same.
         let idle: Vec<Sample> = (0..4).map(|i| sample(i * 5, 2_950_000, 0)).collect();

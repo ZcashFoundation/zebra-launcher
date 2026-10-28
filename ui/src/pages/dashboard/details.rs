@@ -10,7 +10,7 @@ use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
     api,
-    charts::{hhmm, tz_offset_min_at, uptime_text},
+    charts::{byte_rate, hhmm, tz_offset_min_at, uptime_text},
     components::{
         rows::{Row, Rows},
         transient::Transient,
@@ -84,12 +84,7 @@ pub fn data_folder_text(data_dir: Option<&str>) -> String {
 
 /// The Network row: `1.2 MB/s in · 300.0 kB/s out`, from bytes per second.
 pub fn network_text(in_bps: f64, out_bps: f64) -> String {
-    let per_second = |rate: f64| bytes(rate.max(0.0).round() as u64);
-    format!(
-        "{}/s in · {}/s out",
-        per_second(in_bps),
-        per_second(out_bps)
-    )
+    format!("{} in · {} out", byte_rate(in_bps), byte_rate(out_bps))
 }
 
 /// The newest minute of snapshots gives the Network row its rate.

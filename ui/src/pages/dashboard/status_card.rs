@@ -33,15 +33,10 @@ pub const CHECKPOINT_NEAR_BLOCKS: u64 = 5_000;
 /// How long "Copied" stays beside the Copy summary button.
 const COPIED_FOR: Duration = Duration::from_secs(2);
 
-/// The class that colours the card's edge and the chip's icon.
-pub fn level_class(level: Level) -> &'static str {
-    match level {
-        Level::Healthy => "dash-level-good",
-        Level::Neutral => "dash-level-neutral",
-        Level::Attention => "dash-level-warning",
-        Level::Urgent => "dash-level-serious",
-        Level::Problem => "dash-level-critical",
-    }
+/// The class that colours the card's edge and the chip's icon: `dash-level-` plus the
+/// level's tone (`good`, `neutral`, `warning`, `serious`, `critical`).
+pub fn level_class(level: Level) -> String {
+    format!("dash-level-{}", level.tone())
 }
 
 pub fn level_icon(level: Level) -> Icon {
@@ -53,25 +48,17 @@ pub fn level_icon(level: Level) -> Icon {
     }
 }
 
-/// The chip's word: `Healthy`, `Attention`, `Problem`; a neutral verdict's chip is its own
-/// headline (`Syncing`, `Stopped`), so it has no word of its own.
-pub fn level_word(level: Level) -> Option<&'static str> {
-    match level {
-        Level::Healthy => Some("Healthy"),
-        Level::Neutral => None,
-        Level::Attention | Level::Urgent => Some("Attention"),
-        Level::Problem => Some("Problem"),
-    }
-}
-
-/// What the chip says.
+/// What the chip says: the level's word (`Healthy`, `Attention`, `Problem`), or the headline
+/// itself for a neutral verdict (`Syncing`, `Stopped`), which has no word of its own.
 pub fn chip_word(level: Level, headline: &str) -> String {
-    level_word(level).map_or_else(|| headline.to_owned(), str::to_owned)
+    level
+        .word()
+        .map_or_else(|| headline.to_owned(), str::to_owned)
 }
 
 /// What follows the chip: the headline, unless the chip already is the headline.
 pub fn chip_rest(level: Level, headline: &str) -> Option<String> {
-    level_word(level).map(|_| headline.to_owned())
+    level.word().map(|_| headline.to_owned())
 }
 
 /// The verb in "Could not …" when an action fails.
@@ -80,7 +67,6 @@ pub fn action_verb(action: &Action) -> &'static str {
         Action::Start | Action::StartNow => "start zebrad",
         Action::StartKillingStale => "stop the earlier zebrad and start",
         Action::Restart => "restart zebrad",
-        Action::Stop => "stop zebrad",
         Action::Install => "install the update",
         Action::CancelUpdate => "cancel the update",
         Action::OpenLogsFolder => "open the logs folder",
@@ -196,7 +182,6 @@ fn run_action(dash: Dash, action: Action, busy: RwSignal<bool>, failure: Transie
             Action::Start | Action::StartNow => api::start_zebrad().await,
             Action::StartKillingStale => api::start_zebrad_killing_stale().await,
             Action::Restart => api::restart_zebrad().await,
-            Action::Stop => api::stop_zebrad().await,
             Action::Install => api::install_update().await,
             Action::CancelUpdate => api::cancel_update().await,
             Action::OpenLogsFolder => api::open_path(OpenTarget::LogDir).await,

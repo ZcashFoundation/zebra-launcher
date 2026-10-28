@@ -6,9 +6,6 @@
 //! sync, so the operator reads the reason, not the consequence. The same facts feed the hero
 //! line and the tiles, so they never disagree with the verdict.
 
-// Read by the dashboard's view workstream.
-#![allow(dead_code, reason = "read by the dashboard once its view lands")]
-
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
@@ -111,7 +108,6 @@ pub enum Action {
     StartKillingStale,
     StartNow,
     Restart,
-    Stop,
     /// Switch to the Logs page with this text filter (empty: no filter).
     ShowInLogs(String),
     OpenConfigure,
@@ -131,7 +127,6 @@ impl Action {
             Action::StartKillingStale => "Stop it and start",
             Action::StartNow => "Start now",
             Action::Restart => "Restart",
-            Action::Stop => "Stop",
             Action::ShowInLogs(_) => "Show in logs",
             Action::OpenConfigure => "Open Configure",
             Action::ResetConfig => "Reset the configuration",
@@ -278,9 +273,8 @@ impl<'a> Facts<'a> {
             latest: None,
         };
         let latest = input
-            .stats
-            .map(Sample::from_stats)
-            .or_else(|| input.history.latest().copied())
+            .history
+            .sample_for(input.stats)
             .filter(|sample| facts.this_run(sample.at));
         facts.latest = latest;
         facts
@@ -1081,7 +1075,7 @@ pub fn summary_text(input: &HealthInput<'_>, verdict: &Verdict) -> String {
         lines.push(format!("Last exit: {text}"));
     }
 
-    match facts.latest.or_else(|| input.history.latest().copied()) {
+    match facts.latest.or_else(|| input.history.sample_for(None)) {
         None => lines.push("Sync: no answer from zebrad's RPC yet".to_owned()),
         Some(sample) => {
             let mut parts = if sample.at_tip() {

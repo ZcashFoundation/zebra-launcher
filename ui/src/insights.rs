@@ -816,7 +816,6 @@ impl Insights {
     /// the previous run stopped, the first appearance of each ERROR and stderr problem of the
     /// run, the status transitions the UI observed, and one line per earlier run. A session
     /// event that repeats a logged one is shown once ([`events::merge_events`]).
-    #[allow(dead_code, reason = "read by the dashboard once its view lands")]
     pub fn events(&self, limit: usize) -> Vec<RunEvent> {
         let mut log = Vec::new();
         let current = self.runs.last();
@@ -923,7 +922,6 @@ impl Insights {
     }
 
     /// When the newest timestamped line was logged.
-    #[allow(dead_code, reason = "read by the dashboard once its view lands")]
     pub fn last_at(&self) -> Option<SystemTime> {
         self.last_at
     }
