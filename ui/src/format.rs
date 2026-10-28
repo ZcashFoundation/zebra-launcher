@@ -4,7 +4,7 @@
 //! in [`crate::theme`], the TOML highlighter in [`crate::config_view`] and the chart texts in
 //! [`crate::charts`].
 
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use launcher_types::{ExitClass, Phase};
 
@@ -187,6 +187,82 @@ pub fn version_tag(version: &str) -> String {
     }
 }
 
+/// Three-letter month names, for the short dates.
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// The civil date of a day count since 1970-01-01 (negative before it): `(year, month, day)`.
+/// Howard Hinnant's `civil_from_days`.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+/// The date and time of day at `time` in the zone `tz_offset_min` minutes behind UTC (the
+/// `Date.getTimezoneOffset()` convention; 0 is UTC): `(year, month, day, hour, minute)`.
+fn local_parts(time: SystemTime, tz_offset_min: i32) -> (i64, u32, u32, u32, u32) {
+    let utc_secs = time
+        .duration_since(UNIX_EPOCH)
+        .map(|since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    let secs = utc_secs.saturating_sub(i64::from(tz_offset_min) * 60);
+    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+    let day_secs = secs.rem_euclid(86_400) as u32;
+    (year, month, day, day_secs / 3600, day_secs % 3600 / 60)
+}
+
+/// `23 Oct, 21:13`: a short date and time for "since 23 Oct, 21:13", in the zone
+/// `tz_offset_min` minutes behind UTC. [`local_datetime_short`] picks the user's zone.
+pub fn datetime_short(time: SystemTime, tz_offset_min: i32) -> String {
+    let (_, month, day, hour, minute) = local_parts(time, tz_offset_min);
+    format!(
+        "{day} {}, {hour:02}:{minute:02}",
+        MONTHS[(month - 1) as usize]
+    )
+}
+
+/// `3 Dec 2026`: a short date for an estimate ("about 3 Dec 2026"), in the zone
+/// `tz_offset_min` minutes behind UTC. [`local_date_short`] picks the user's zone.
+pub fn date_short(time: SystemTime, tz_offset_min: i32) -> String {
+    let (year, month, day, _, _) = local_parts(time, tz_offset_min);
+    format!("{day} {} {year}", MONTHS[(month - 1) as usize])
+}
+
+/// The browser's zone at `time`, as minutes behind UTC; UTC natively, where no browser runs.
+fn tz_offset_min_at(time: SystemTime) -> i32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::charts::tz_offset_min_at(time)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = time;
+        0
+    }
+}
+
+/// [`datetime_short`] in the user's zone: `23 Oct, 21:13`. Beside [`crate::clock::local_string`]
+/// (`10/23/2026, 9:13:58 PM`) for the dashboard's shorter texts.
+#[allow(dead_code, reason = "read by the dashboard once its view lands")]
+pub fn local_datetime_short(time: SystemTime) -> String {
+    datetime_short(time, tz_offset_min_at(time))
+}
+
+/// [`date_short`] in the user's zone: `3 Dec 2026`.
+#[allow(dead_code, reason = "read by the dashboard once its view lands")]
+pub fn local_date_short(time: SystemTime) -> String {
+    date_short(time, tz_offset_min_at(time))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +382,36 @@ mod tests {
     fn version_tags() {
         assert_eq!(version_tag("0.1.0"), "v0.1.0");
         assert_eq!(version_tag("v0.2.0"), "v0.2.0");
+    }
+    #[test]
+    fn short_dates() {
+        // 2001-09-09 01:46:40 UTC.
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        assert_eq!(datetime_short(time, 0), "9 Sep, 01:46");
+        assert_eq!(date_short(time, 0), "9 Sep 2001");
+        assert_eq!(
+            datetime_short(time, 300),
+            "8 Sep, 20:46",
+            "UTC-5 is the evening before"
+        );
+        assert_eq!(datetime_short(time, -330), "9 Sep, 07:16", "UTC+5:30");
+        // 2026-10-23 19:13 UTC is 21:13 in UTC+2.
+        let evening = SystemTime::UNIX_EPOCH + Duration::from_secs(1_792_782_780);
+        assert_eq!(datetime_short(evening, -120), "23 Oct, 21:13");
+        assert_eq!(datetime_short(evening, 0), "23 Oct, 19:13");
+        // A leap day, a day boundary and a year boundary, and the epoch itself.
+        let leap = SystemTime::UNIX_EPOCH + Duration::from_secs(1_709_208_000);
+        assert_eq!(date_short(leap, 0), "29 Feb 2024");
+        // 2026-12-03 23:30 UTC.
+        let late = SystemTime::UNIX_EPOCH + Duration::from_secs(1_796_340_600);
+        assert_eq!(date_short(late, -60), "4 Dec 2026");
+        assert_eq!(datetime_short(late, 0), "3 Dec, 23:30");
+        let y2k = SystemTime::UNIX_EPOCH + Duration::from_secs(946_684_800);
+        assert_eq!(date_short(y2k, 0), "1 Jan 2000");
+        assert_eq!(date_short(y2k, 1), "31 Dec 1999");
+        assert_eq!(datetime_short(SystemTime::UNIX_EPOCH, 0), "1 Jan, 00:00");
+        // Natively the user's zone is UTC.
+        assert_eq!(local_datetime_short(evening), "23 Oct, 19:13");
+        assert_eq!(local_date_short(leap), "29 Feb 2024");
     }
 }
