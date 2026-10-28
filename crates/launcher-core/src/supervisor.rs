@@ -156,7 +156,10 @@ pub struct SupervisorHandle {
 /// zebrad is not started until [`SupervisorHandle::start`] is called.
 pub fn spawn(config: SupervisorConfig) -> io::Result<SupervisorHandle> {
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
-    let (status_tx, status_rx) = watch::channel(Status::default());
+    let (status_tx, status_rx) = watch::channel(Status {
+        stop_is_graceful: config.command.stop_is_graceful(),
+        ..Status::default()
+    });
     let stop_grace = config.stop_grace;
     let actor = actor::Actor::new(config, cmd_rx, status_tx)?;
     tokio::spawn(actor.run());

@@ -29,7 +29,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     app_state::{AppState, legacy_cache_dir, managed_keys, state_dir},
-    bridge,
+    bridge, sidecar,
 };
 
 /// How long `apply_config` waits for zebrad to accept a configuration.
@@ -467,30 +467,29 @@ pub async fn delete_node_data(state: State<'_, AppState>) -> Result<u64, String>
     .map_err(message)
 }
 
-/// The diagnostics text for a bug report: versions, OS, status, settings,
-/// `zebrad.toml` and the last lines of both logs. The UI copies it to the
-/// clipboard.
+/// The diagnostics text for a bug report ([`diagnostics::bundle`]): versions,
+/// OS, the zebrad binary, the stop grace in effect and in the settings,
+/// status, settings, node statistics, the updater's records, `zebrad.toml`
+/// and the last lines of both logs. The UI copies it to the clipboard.
 #[tauri::command]
 pub async fn copy_diagnostics(state: State<'_, AppState>) -> Result<String, String> {
     let paths = state.paths.clone();
     let status = state.supervisor.status();
     let settings = state.settings.current();
+    let stats = state.node_stats.borrow().clone();
+    let stop_grace = state.supervisor.stop_grace();
     blocking(move || {
-        let launcher = log_tail(diagnostics::latest_launcher_log(&paths.launcher_log()));
-        let zebrad = log_tail(Some(paths.zebrad_log()));
-        diagnostics::diagnostics_bundle(&paths, &status, &settings, &launcher, &zebrad)
+        let sidecar = sidecar::resolve(&paths);
+        diagnostics::bundle(
+            &paths,
+            &status,
+            &settings,
+            stats.as_ref(),
+            Some(&sidecar),
+            stop_grace,
+        )
     })
     .await
-}
-
-fn log_tail(path: Option<PathBuf>) -> String {
-    let Some(path) = path else {
-        return "(no log file yet)\n".to_string();
-    };
-    match diagnostics::tail_lines(&path, diagnostics::TAIL_LINES) {
-        Ok(tail) => tail,
-        Err(err) => format!("(could not read {}: {err})\n", path.display()),
-    }
 }
 
 /// Records that the first-run flow is done, so it is not shown again and

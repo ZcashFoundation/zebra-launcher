@@ -65,7 +65,8 @@ jobs:
 
   # The bash in scripts/ and docs/observability/, and the workflows (actionlint
   # also hands every `run:` block to shellcheck). actionlint does not read
-  # composite actions, so .github/actions/setup-tauri/action.yml is not covered.
+  # composite actions, so the small steps of .github/actions/setup-tauri/action.yml
+  # are not covered; its tool install is scripts/install-pinned-tools.sh, which is.
   lint-scripts:
     name: shellcheck and actionlint
     runs-on: ubuntu-24.04
@@ -73,8 +74,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Release binaries at the versions pinned in .github/tool-versions.env,
-      # each checked against its sha256 pin before it runs, as setup-tauri does
-      # for the build tools. scripts/refresh-tool-pins.sh refreshes the pins.
+      # each checked against its sha256 pin before it runs, as
+      # scripts/install-pinned-tools.sh does for the build tools.
+      # scripts/refresh-tool-pins.sh refreshes the pins.
       - name: Install shellcheck and actionlint (pinned)
         run: |
           set -euo pipefail

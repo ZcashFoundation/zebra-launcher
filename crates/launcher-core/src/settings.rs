@@ -6,16 +6,11 @@
 
 use std::{fs, io, path::PathBuf};
 
+pub use launcher_types::{MAX_STOP_GRACE_SECS, MIN_STOP_GRACE_SECS, STOP_GRACE_SECS};
 use launcher_types::{Settings, is_loopback_http_url};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{fsutil, paths::Paths};
-
-/// The shortest stop grace period that can be saved, in seconds. The settings
-/// form (`ui/src/pages/settings.rs`) applies the same bounds.
-pub const MIN_STOP_GRACE_SECS: u64 = 5;
-/// The longest stop grace period that can be saved, in seconds.
-pub const MAX_STOP_GRACE_SECS: u64 = 3600;
 
 /// Loading, validating or saving settings failed.
 #[derive(Debug, thiserror::Error)]
@@ -48,7 +43,7 @@ pub fn validate(settings: &Settings) -> Result<(), SettingsError> {
     {
         return Err(SettingsError::InvalidGrafanaUrl(url.clone()));
     }
-    if !(MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS).contains(&settings.stop_grace_secs) {
+    if !STOP_GRACE_SECS.contains(&settings.stop_grace_secs) {
         return Err(SettingsError::InvalidStopGrace(settings.stop_grace_secs));
     }
     Ok(())
@@ -263,7 +258,7 @@ fn sanitize(settings: &mut Settings) {
         tracing::warn!(%url, "launcher.json has an invalid Grafana URL; ignoring it");
         settings.grafana_url = None;
     }
-    if !(MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS).contains(&settings.stop_grace_secs) {
+    if !STOP_GRACE_SECS.contains(&settings.stop_grace_secs) {
         let default = Settings::default().stop_grace_secs;
         tracing::warn!(
             secs = settings.stop_grace_secs,

@@ -8,6 +8,7 @@
 use std::{
     fmt,
     net::SocketAddr,
+    ops::RangeInclusive,
     str::FromStr,
     time::{Duration, SystemTime},
 };
@@ -323,7 +324,7 @@ pub struct StaleProcessInfo {
 }
 
 /// The supervisor's view of zebrad, published on a `watch` channel.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     /// The current phase.
     pub phase: Phase,
@@ -339,6 +340,35 @@ pub struct Status {
     pub last_exit: Option<ExitInfo>,
     /// A zebrad from an earlier launcher run that is still alive, if detected.
     pub stale: Option<StaleProcessInfo>,
+    /// Whether a requested stop lets zebrad run its shutdown: the supervisor
+    /// closes its stdin (zebrad started with `--shutdown-on-stdin-close`) or
+    /// sends `SIGTERM`. False when a stop terminates the process instead,
+    /// which is the case on Windows while the bundled zebrad lacks the
+    /// stdin-close flag: a hard stop, with no `stopping zebrad` lines. Fixed
+    /// for the supervisor's lifetime, set from its configuration. A status
+    /// from a backend without the field reads as graceful.
+    #[serde(default = "stop_is_graceful_default")]
+    pub stop_is_graceful: bool,
+}
+
+fn stop_is_graceful_default() -> bool {
+    true
+}
+
+impl Default for Status {
+    /// Stopped, with nothing recorded and a graceful stop.
+    fn default() -> Self {
+        Self {
+            phase: Phase::Stopped,
+            pid: None,
+            started_at: None,
+            rpc_addr: None,
+            metrics_addr: None,
+            last_exit: None,
+            stale: None,
+            stop_is_graceful: true,
+        }
+    }
 }
 
 /// The Zcash network zebrad runs on.
@@ -394,6 +424,18 @@ pub enum Theme {
     Dark,
 }
 
+impl Theme {
+    /// The name on the wire and in `launcher.json`, as serde writes it:
+    /// `system`, `light` or `dark`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Theme::System => "system",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        }
+    }
+}
+
 /// The launcher's own settings, stored in `launcher.json`.
 ///
 /// Missing fields take their default, so older files keep loading.
@@ -435,6 +477,16 @@ impl Settings {
     /// The current [`Settings::schema_version`].
     pub const SCHEMA_VERSION: u32 = 2;
 }
+
+/// The shortest stop grace period that can be saved, in seconds
+/// ([`Settings::stop_grace_secs`]). The backend validates against these
+/// bounds and the settings form applies them to its field.
+pub const MIN_STOP_GRACE_SECS: u64 = 5;
+/// The longest stop grace period that can be saved, in seconds.
+pub const MAX_STOP_GRACE_SECS: u64 = 3600;
+/// The stop grace periods that can be saved, in seconds:
+/// [`MIN_STOP_GRACE_SECS`]`..=`[`MAX_STOP_GRACE_SECS`].
+pub const STOP_GRACE_SECS: RangeInclusive<u64> = MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -898,6 +950,25 @@ mod tests {
         assert_eq!(status.pid, None);
         assert_eq!(status.last_exit, None);
         assert_eq!(status.stale, None);
+        assert!(status.stop_is_graceful);
+    }
+
+    #[test]
+    fn stop_is_graceful_defaults_to_true_on_the_wire() {
+        // A payload from a backend without the field.
+        let old: Status = serde_json::from_str(
+            r#"{"phase":{"phase":"running"},"pid":7,"started_at":null,"rpc_addr":null,"metrics_addr":null,"last_exit":null,"stale":null}"#,
+        )
+        .expect("old payload");
+        assert!(old.stop_is_graceful);
+        let hard = Status {
+            stop_is_graceful: false,
+            ..Status::default()
+        };
+        let json = serde_json::to_value(&hard).unwrap();
+        assert_eq!(json["stop_is_graceful"], false);
+        let round_trip: Status = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, hard);
     }
 
     #[test]
@@ -992,11 +1063,28 @@ mod tests {
     }
 
     #[test]
+    fn stop_grace_bounds_hold_the_default() {
+        assert_eq!(STOP_GRACE_SECS, MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS);
+        assert!(STOP_GRACE_SECS.contains(&Settings::default().stop_grace_secs));
+        assert!(!STOP_GRACE_SECS.contains(&(MIN_STOP_GRACE_SECS - 1)));
+        assert!(!STOP_GRACE_SECS.contains(&(MAX_STOP_GRACE_SECS + 1)));
+    }
+
+    #[test]
     fn theme_is_snake_case_on_the_wire() {
         assert_eq!(serde_json::to_value(Theme::System).unwrap(), "system");
         assert_eq!(serde_json::to_value(Theme::Light).unwrap(), "light");
         let settings: Settings =
             serde_json::from_str(r#"{"theme":"dark"}"#).expect("settings with a theme parse");
         assert_eq!(settings.theme, Theme::Dark);
+    }
+
+    #[test]
+    fn theme_as_str_is_the_serde_name() {
+        for theme in [Theme::System, Theme::Light, Theme::Dark] {
+            assert_eq!(serde_json::to_value(theme).unwrap(), theme.as_str());
+            let parsed: Theme = serde_json::from_value(serde_json::json!(theme.as_str())).unwrap();
+            assert_eq!(parsed, theme);
+        }
     }
 }

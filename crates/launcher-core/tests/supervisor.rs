@@ -4,11 +4,8 @@
 //! stalling the test run.
 
 use std::{
-    future::Future,
     io::{BufRead, BufReader},
-    path::PathBuf,
     process::{Command, Stdio},
-    sync::Arc,
     time::Duration,
 };
 
@@ -16,59 +13,33 @@ use launcher_core::{
     logfile::RotatingLogConfig,
     logs::Detector,
     pidfile,
-    policy::RestartPolicy,
-    process::ZebradCommand,
     supervisor::{self, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle},
 };
-use launcher_types::{ExitClass, LogEvent, LogLine, LogStream, Phase};
+use launcher_types::{ExitClass, LogEvent, LogStream, Phase};
 use tokio::time::timeout;
 
-const LIMIT: Duration = Duration::from_secs(20);
-
-async fn within<F: Future>(future: F) -> F::Output {
-    timeout(LIMIT, future)
-        .await
-        .expect("operation finished within the test limit")
-}
-
-fn fake_zebrad() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_fake-zebrad"))
-}
+#[path = "support/helpers.rs"]
+mod support;
+use support::{
+    LIMIT, contains, fake_zebrad, fake_zebrad_command, fast_supervisor_config, messages,
+    wait_status, within,
+};
 
 struct Fixture {
     _dir: tempfile::TempDir,
     config: SupervisorConfig,
 }
 
+/// fake-zebrad in `mode` on a Regtest config in a temporary directory, with a
+/// pid file and a log file next to it.
 fn fixture(mode: &str) -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("zebrad.toml");
     std::fs::write(&config_path, "[network]\nnetwork = \"Regtest\"\n").expect("write config");
-    let mut command = ZebradCommand::new(fake_zebrad(), &config_path);
-    command.env = vec![
-        ("FAKE_ZEBRAD_MODE".into(), mode.into()),
-        ("FAKE_ZEBRAD_HEARTBEAT_MS".into(), "50".into()),
-    ];
-    let mut config = SupervisorConfig::new(command);
-    config.stop_grace = Duration::from_secs(3);
-    config.exit_drain = Duration::from_millis(500);
-    config.restart = RestartPolicy {
-        initial_backoff: Duration::from_millis(50),
-        max_backoff: Duration::from_millis(200),
-        window: Duration::from_secs(60),
-        max_crashes: 3,
-    };
+    let mut config = fast_supervisor_config(fake_zebrad_command(mode, &config_path));
     config.pidfile = Some(dir.path().join("zebrad.pid"));
     config.log_file = Some(RotatingLogConfig::new(dir.path().join("zebrad.log")));
     Fixture { _dir: dir, config }
-}
-
-fn messages(lines: &[Arc<LogLine>]) -> Vec<String> {
-    lines.iter().map(|l| l.message.clone()).collect()
-}
-
-fn contains(lines: &[Arc<LogLine>], needle: &str) -> bool {
-    lines.iter().any(|l| l.message.contains(needle))
 }
 
 async fn wait_phase(
@@ -76,9 +47,7 @@ async fn wait_phase(
     f: impl FnMut(&Phase) -> bool,
 ) -> launcher_types::Status {
     let mut f = f;
-    within(handle.wait_until(|s| f(&s.phase)))
-        .await
-        .expect("supervisor is alive")
+    wait_status(handle, LIMIT, "the phase", |s| f(&s.phase)).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -87,6 +56,8 @@ async fn starts_streams_logs_and_stops_cleanly() {
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
     let mut sub = within(handle.subscribe()).await.expect("subscribe");
     assert!(sub.history.is_empty());
+    // SIGTERM is graceful; without the stdin mode Windows terminates.
+    assert_eq!(handle.status().stop_is_graceful, cfg!(unix));
 
     within(handle.start()).await.expect("start");
     assert_eq!(handle.status().phase, Phase::Running);
@@ -150,9 +121,15 @@ async fn stdin_close_mode_stops_gracefully_on_every_platform() {
     let mut fx = fixture("ok");
     fx.config.command.shutdown_on_stdin_close = true;
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    assert!(handle.status().stop_is_graceful);
     within(handle.start()).await.expect("start");
     within(handle.stop()).await.expect("stop");
-    let exit = handle.status().last_exit.expect("exit recorded");
+    let status = handle.status();
+    assert!(
+        status.stop_is_graceful,
+        "fixed for the supervisor's lifetime"
+    );
+    let exit = status.last_exit.expect("exit recorded");
     assert_eq!(exit.code, Some(0), "{exit:?}");
     let history = within(handle.history_since(0)).await.expect("history");
     assert!(

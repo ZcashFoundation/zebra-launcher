@@ -1,5 +1,7 @@
-//! The "Copy diagnostics" text: versions, OS, status, settings, the managed
-//! `zebrad.toml` and the tails of both logs, ready to paste into an issue.
+//! The "Copy diagnostics" text: versions, OS, the zebrad binary, the stop
+//! grace, status, settings, node statistics, the updater's records, the
+//! managed `zebrad.toml` and the tails of both logs, ready to paste into an
+//! issue.
 //!
 //! The RPC cookie is a credential and is never read here. URLs in the
 //! settings lose any user info before they are printed.
@@ -9,11 +11,12 @@ use std::{
     fs,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
-use launcher_types::{Settings, Status};
+use launcher_types::{NodeStats, Settings, Status};
 
-use crate::paths::Paths;
+use crate::{paths::Paths, updates};
 
 /// The launcher version.
 pub const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -82,6 +85,18 @@ pub fn latest_launcher_log(log_file: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The tail of the log at `path` for the bundle: its last [`TAIL_LINES`]
+/// lines, or a note when there is no log file yet or it cannot be read.
+pub fn log_tail(path: Option<PathBuf>) -> String {
+    let Some(path) = path else {
+        return "(no log file yet)\n".to_string();
+    };
+    match tail_lines(&path, TAIL_LINES) {
+        Ok(tail) => tail,
+        Err(err) => format!("(could not read {}: {err})\n", path.display()),
+    }
+}
+
 /// `url` with any `user:password@` removed from its authority.
 pub fn redact_url(url: &str) -> String {
     let (scheme, rest) = match url.find("://") {
@@ -95,15 +110,22 @@ pub fn redact_url(url: &str) -> String {
     }
 }
 
-/// Builds the diagnostics text. `launcher_log_tail` and `zebrad_log_tail`
-/// are the last lines of each log (see [`tail_lines`]); the managed
-/// `zebrad.toml` is read from `paths`.
-pub fn diagnostics_bundle(
+/// Builds the diagnostics text, reading everything it includes from `paths`:
+/// the managed `zebrad.toml`, the updater record and the pending-update
+/// marker (see [`updates`]), and the tails of the newest launcher log and of
+/// the zebrad log (see [`log_tail`]).
+///
+/// `stats` are the last node statistics, if zebrad has answered; `sidecar`
+/// is the zebrad binary the launcher resolved, if known; `stop_grace` is the
+/// grace period the running supervisor applies, which the settings may have
+/// changed since launch.
+pub fn bundle(
     paths: &Paths,
     status: &Status,
     settings: &Settings,
-    launcher_log_tail: &str,
-    zebrad_log_tail: &str,
+    stats: Option<&NodeStats>,
+    sidecar: Option<&Path>,
+    stop_grace: Duration,
 ) -> String {
     let mut out = String::new();
     let section = |out: &mut String, title: &str| {
@@ -126,9 +148,40 @@ pub fn diagnostics_bundle(
     let _ = writeln!(out, "Config dir: {}", paths.config_dir().display());
     let _ = writeln!(out, "Data dir: {}", paths.data_dir().display());
     let _ = writeln!(out, "Log dir: {}", paths.log_dir().display());
+    let _ = writeln!(
+        out,
+        "zebrad binary: {}",
+        match sidecar {
+            Some(path) if path.is_file() => path.display().to_string(),
+            Some(path) => format!("{} (missing)", path.display()),
+            None => "(unknown)".to_string(),
+        }
+    );
+    // The supervisor's grace is fixed at launch; a changed setting applies
+    // to the next one.
+    let _ = writeln!(
+        out,
+        "Stop grace: {} s in effect, {} s in the settings",
+        stop_grace.as_secs(),
+        settings.stop_grace_secs
+    );
 
     section(&mut out, "Status");
     out.push_str(&to_json(status));
+
+    section(&mut out, "Stale zebrad from an earlier launcher run");
+    match &status.stale {
+        Some(stale) => {
+            let _ = writeln!(out, "pid {} ({})", stale.pid, stale.binary);
+        }
+        None => out.push_str("(none)\n"),
+    }
+
+    section(&mut out, "Node stats");
+    match stats {
+        Some(stats) => out.push_str(&to_json(stats)),
+        None => out.push_str("(none: zebrad is not running or has not answered yet)\n"),
+    }
 
     section(&mut out, "Settings");
     let redacted = Settings {
@@ -136,6 +189,22 @@ pub fn diagnostics_bundle(
         ..settings.clone()
     };
     out.push_str(&to_json(&redacted));
+
+    section(&mut out, "Updater record");
+    let record = updates::record_path(paths);
+    let _ = writeln!(out, "# {}", record.display());
+    out.push_str(&to_json(&updates::load_record(&record)));
+
+    section(&mut out, "Pending update marker");
+    let marker = updates::marker_path(paths);
+    let _ = writeln!(out, "# {}", marker.display());
+    match updates::read_marker(&marker) {
+        Ok(Some(pending)) => out.push_str(&to_json(&pending)),
+        Ok(None) => out.push_str("(none)\n"),
+        Err(err) => {
+            let _ = writeln!(out, "(could not read it: {err})");
+        }
+    }
 
     section(&mut out, "zebrad.toml");
     let config = paths.zebrad_config();
@@ -148,9 +217,12 @@ pub fn diagnostics_bundle(
     }
 
     section(&mut out, &format!("launcher log, last {TAIL_LINES} lines"));
-    push_block(&mut out, launcher_log_tail);
+    push_block(
+        &mut out,
+        &log_tail(latest_launcher_log(&paths.launcher_log())),
+    );
     section(&mut out, &format!("zebrad log, last {TAIL_LINES} lines"));
-    push_block(&mut out, zebrad_log_tail);
+    push_block(&mut out, &log_tail(Some(paths.zebrad_log())));
     out
 }
 
@@ -177,6 +249,10 @@ fn push_block(out: &mut String, text: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
+    use launcher_types::{EosInfo, StaleProcessInfo};
+
     use super::*;
 
     #[test]
@@ -259,6 +335,21 @@ mod tests {
     }
 
     #[test]
+    fn log_tail_notes_a_missing_or_unreadable_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(log_tail(None), "(no log file yet)\n");
+        let missing = dir.path().join("missing.log");
+        let note = log_tail(Some(missing.clone()));
+        assert!(
+            note.starts_with(&format!("(could not read {}: ", missing.display())),
+            "{note:?}"
+        );
+        let log = dir.path().join("zebrad.log");
+        fs::write(&log, "a\nb\n").expect("write");
+        assert_eq!(log_tail(Some(log)), "a\nb\n");
+    }
+
+    #[test]
     fn urls_lose_their_credentials() {
         assert_eq!(
             redact_url("http://admin:secret@127.0.0.1:3000/d/x?kiosk"),
@@ -271,6 +362,24 @@ mod tests {
         assert_eq!(redact_url("localhost:3000"), "localhost:3000");
     }
 
+    fn stats() -> NodeStats {
+        NodeStats {
+            height: 2_500_000,
+            estimated_height: 3_000_000,
+            verification_progress: 0.8333,
+            peers: 8,
+            mempool_transactions: 42,
+            chain: "main".into(),
+            zebrad_version: "7.0.0".into(),
+            last_error: None,
+            eos: Some(EosInfo {
+                block_height: 3_706_000,
+                estimated_time: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+            }),
+            updated_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000),
+        }
+    }
+
     #[test]
     fn bundle_has_every_section_and_no_cookie() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -278,16 +387,55 @@ mod tests {
         paths.ensure_dirs().expect("dirs");
         fs::write(paths.zebrad_config(), "[network]\nnetwork = \"Mainnet\"\n").expect("config");
         fs::write(paths.rpc_cookie_file(), "__cookie__:supersecretcookie").expect("cookie");
+        // The newest dated launcher log is the one included, not the plain file.
+        fs::write(paths.launcher_log(), "plain launcher line\n").expect("launcher log");
+        fs::write(
+            paths.log_dir().join("launcher.2026-10-23.log"),
+            "dated launcher line\n",
+        )
+        .expect("dated launcher log");
+        fs::write(paths.zebrad_log(), "zebrad line").expect("zebrad log");
+        updates::save_record(
+            &updates::record_path(&paths),
+            &updates::UpdaterRecord {
+                last_successful_check: Some(
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                ),
+            },
+        )
+        .expect("record");
+        updates::write_marker(
+            &updates::marker_path(&paths),
+            &updates::PendingUpdate {
+                from_version: "0.1.0".into(),
+                to_version: "0.2.0".into(),
+                zebrad_was_running: true,
+                written_at: SystemTime::UNIX_EPOCH,
+            },
+        )
+        .expect("marker");
+        let sidecar = dir.path().join("zebra-launcher-zebrad");
+        fs::write(&sidecar, b"zebrad").expect("sidecar");
+
         let settings = Settings {
             grafana_url: Some("http://user:pw@127.0.0.1:3000/d/zebra".into()),
+            stop_grace_secs: 90,
             ..Settings::default()
         };
-        let text = diagnostics_bundle(
+        let status = Status {
+            stale: Some(StaleProcessInfo {
+                pid: 4242,
+                binary: "/old/zebrad".into(),
+            }),
+            ..Status::default()
+        };
+        let text = bundle(
             &paths,
-            &Status::default(),
+            &status,
             &settings,
-            "launcher line\n",
-            "zebrad line",
+            Some(&stats()),
+            Some(&sidecar),
+            Duration::from_secs(60),
         );
         for needle in [
             &format!(
@@ -295,15 +443,74 @@ mod tests {
                 bundled_zebrad_version()
             ),
             std::env::consts::OS,
+            &format!("zebrad binary: {}", sidecar.display()),
+            "Stop grace: 60 s in effect, 90 s in the settings",
             "\"phase\": \"stopped\"",
-            "network = \"Mainnet\"",
-            "launcher line",
-            "zebrad line",
+            "pid 4242 (/old/zebrad)",
+            "\"height\": 2500000",
             "http://[redacted]@127.0.0.1:3000/d/zebra",
+            "\"last_successful_check\": {",
+            "\"to_version\": \"0.2.0\"",
+            "network = \"Mainnet\"",
+            "dated launcher line",
+            "zebrad line",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }
+        assert!(!text.contains("plain launcher line"), "{text}");
         assert!(!text.contains("supersecretcookie"));
         assert!(!text.contains("user:pw"));
+        assert!(!text.contains(".cookie"), "{text}");
+    }
+
+    #[test]
+    fn bundle_says_what_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::under(dir.path());
+        let missing_sidecar = dir.path().join("zebra-launcher-zebrad");
+        let text = bundle(
+            &paths,
+            &Status::default(),
+            &Settings::default(),
+            None,
+            Some(&missing_sidecar),
+            Duration::from_secs(60),
+        );
+        for needle in [
+            &format!("zebrad binary: {} (missing)", missing_sidecar.display()),
+            "== Stale zebrad from an earlier launcher run ==\n(none)",
+            "== Node stats ==\n(none: zebrad is not running or has not answered yet)",
+            "\"last_successful_check\": null",
+            "== Pending update marker ==",
+            "(no log file yet)",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
+        // No launcher log was ever written; the zebrad log has a fixed path.
+        assert_eq!(text.matches("(no log file yet)").count(), 1, "{text}");
+        assert!(
+            text.contains(&format!(
+                "(could not read {}: ",
+                paths.zebrad_log().display()
+            )),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("(none)\n").count(),
+            2,
+            "stale and marker: {text}"
+        );
+        assert!(text.contains("== zebrad.toml ==\n#"), "{text}");
+        assert!(text.contains("(could not read it: "), "{text}");
+
+        let text = bundle(
+            &paths,
+            &Status::default(),
+            &Settings::default(),
+            None,
+            None,
+            Duration::from_secs(60),
+        );
+        assert!(text.contains("zebrad binary: (unknown)"), "{text}");
     }
 }

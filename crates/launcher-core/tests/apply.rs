@@ -6,30 +6,19 @@
 //!
 //! Every await is bounded by [`within`], so a hang fails fast.
 
-use std::{fs, future::Future, path::PathBuf, time::Duration};
+use std::fs;
 
 use launcher_core::{
     apply,
     config::{self, ManagedKeys},
     paths::Paths,
-    policy::RestartPolicy,
-    process::ZebradCommand,
-    supervisor::{self, SupervisorConfig, SupervisorError, SupervisorHandle},
+    supervisor::{self, SupervisorError, SupervisorHandle},
 };
 use launcher_types::{ApplyOutcome, ConfigDocument, ExitClass, Network, Phase};
-use tokio::time::timeout;
 
-const LIMIT: Duration = Duration::from_secs(20);
-
-async fn within<F: Future>(future: F) -> F::Output {
-    timeout(LIMIT, future)
-        .await
-        .expect("operation finished within the test limit")
-}
-
-fn fake_zebrad() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_fake-zebrad"))
-}
+#[path = "support/helpers.rs"]
+mod support;
+use support::{LIMIT, fake_zebrad_command, fast_supervisor_config, within};
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -51,20 +40,7 @@ fn fixture(mode: &str) -> Fixture {
     config::ensure(&paths, &keys).expect("ensure");
     let original = config::read(&paths).expect("read");
 
-    let mut command = ZebradCommand::new(fake_zebrad(), paths.zebrad_config());
-    command.env = vec![
-        ("FAKE_ZEBRAD_MODE".into(), mode.into()),
-        ("FAKE_ZEBRAD_HEARTBEAT_MS".into(), "50".into()),
-    ];
-    let mut config = SupervisorConfig::new(command);
-    config.stop_grace = Duration::from_secs(3);
-    config.exit_drain = Duration::from_millis(500);
-    config.restart = RestartPolicy {
-        initial_backoff: Duration::from_millis(50),
-        max_backoff: Duration::from_millis(200),
-        window: Duration::from_secs(60),
-        max_crashes: 3,
-    };
+    let mut config = fast_supervisor_config(fake_zebrad_command(mode, &paths.zebrad_config()));
     config.pidfile = Some(paths.pidfile());
     let handle = supervisor::spawn(config).expect("spawn supervisor");
     Fixture {
