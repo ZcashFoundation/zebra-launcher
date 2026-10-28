@@ -6,16 +6,17 @@
 use std::{
     io::{BufRead, BufReader},
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use launcher_core::{
+    clock,
     logfile::RotatingLogConfig,
     logs::Detector,
     pidfile,
-    supervisor::{self, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle},
+    supervisor::{self, Note, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle},
 };
-use launcher_types::{ExitClass, LogEvent, LogStream, Phase};
+use launcher_types::{ExitClass, LogEvent, LogLevel, LogStream, Phase};
 use tokio::time::timeout;
 
 #[path = "support/helpers.rs"]
@@ -101,6 +102,11 @@ async fn starts_streams_logs_and_stops_cleanly() {
     assert_eq!(exit.class, ExitClass::Clean);
     assert!(exit.requested);
     assert!(!fx.config.pidfile.as_ref().unwrap().exists());
+    assert_eq!(status.restarts, 0, "nothing restarted by itself");
+    let report = status.last_stop.expect("the stop is reported");
+    assert!(!report.forced, "{report:?}");
+    assert!(report.exited_at >= report.requested_at, "{report:?}");
+    assert_eq!(report.exited_at, exit.at);
 
     let history = within(handle.history_since(0)).await.expect("history");
     if cfg!(unix) {
@@ -174,6 +180,13 @@ async fn hanging_child_is_killed_after_the_grace_period() {
     // The kill finished the stop the user asked for: not a crash.
     assert_eq!(exit.class, ExitClass::Clean, "{exit:?}");
     assert_eq!(exit.detail.as_deref(), Some("killed by the launcher"));
+    let report = handle.status().last_stop.expect("the stop is reported");
+    assert!(report.forced, "{report:?}");
+    let took = report
+        .exited_at
+        .duration_since(report.requested_at)
+        .expect("the exit follows the request");
+    assert!(took >= Duration::from_millis(500), "{took:?}");
     let history = within(handle.history_since(0)).await.expect("history");
     // On Windows (without the stdin-close mode) the stop itself terminates the job, so
     // there is no grace period to run out.
@@ -213,6 +226,11 @@ async fn a_crash_during_a_graceful_stop_is_not_clean() {
     assert_eq!(exit.class, ExitClass::Crash, "{exit:?}");
     assert!(exit.requested, "{exit:?}");
     assert_eq!(exit.detail, None, "not killed by the launcher: {exit:?}");
+    let report = status.last_stop.expect("the stop is reported");
+    assert!(
+        !report.forced,
+        "a crash while stopping is not a kill: {report:?}"
+    );
     let history = within(handle.history_since(0)).await.expect("history");
     assert!(
         contains(
@@ -242,7 +260,7 @@ fn draining_crash_fixture(linger: Duration) -> Fixture {
 /// has had time to record the exit, while its pipes are still open.
 async fn start_and_wait_for_the_crash(handle: &SupervisorHandle) {
     let mut sub = within(handle.subscribe()).await.expect("subscribe");
-    within(handle.start()).await.expect("start");
+    start_a_crashing_fake(handle).await;
     loop {
         let line = within(sub.live.recv()).await.expect("live line");
         if line.message.contains("simulated crash") {
@@ -348,12 +366,22 @@ async fn config_error_fails_without_restarting() {
     within(handle.shutdown()).await.expect("shutdown");
 }
 
+/// Starts a fake in `crash` mode. It exits right after it reports `Starting
+/// zebrad`, and that line and the exit reach the actor from different tasks,
+/// so `start` either succeeds or learns of the exit; the crash is handled the
+/// same way afterwards, which is what these tests check.
+async fn start_a_crashing_fake(handle: &SupervisorHandle) {
+    match within(handle.start()).await {
+        Ok(()) | Err(SupervisorError::ExitedDuringStart(_)) => {}
+        Err(err) => panic!("start: {err}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crashes_restart_with_backoff_then_give_up() {
     let fx = fixture("crash");
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
-    // The fake crashes right after it reports `Starting zebrad`, so start succeeds.
-    within(handle.start()).await.expect("start");
+    start_a_crashing_fake(&handle).await;
     let status = wait_phase(&handle, |p| matches!(p, Phase::Failed { .. })).await;
     assert_eq!(
         status.phase,
@@ -367,6 +395,8 @@ async fn crashes_restart_with_backoff_then_give_up() {
         .filter(|l| l.message.starts_with("restarting zebrad in"))
         .count();
     assert_eq!(restarts, 2, "{:#?}", messages(&history));
+    assert_eq!(status.restarts, 2, "both automatic restarts are counted");
+    assert_eq!(status.last_stop, None, "no stop was requested");
     let exits = history
         .iter()
         .filter(|l| l.message.starts_with("zebrad exited"))
@@ -735,4 +765,83 @@ async fn stop_during_startup_and_restart() {
     within(handle.restart()).await.expect("restart");
     assert_eq!(handle.status().phase, Phase::Running);
     within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launcher_notes_join_the_log_stream_with_their_fields() {
+    let fx = fixture("ok");
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    let mut sub = within(handle.subscribe()).await.expect("subscribe");
+
+    // A note from a caller, such as the launcher's tracing layer. It never waits.
+    let before = SystemTime::now();
+    assert!(handle.note(
+        LogLevel::Warn,
+        "zebra_launcher::updater",
+        "update check failed err=offline"
+    ));
+    let after = SystemTime::now();
+    let line = within(sub.live.recv()).await.expect("live line");
+    assert_eq!(line.seq, 0);
+    assert_eq!(line.stream, LogStream::Launcher);
+    assert_eq!(line.level, Some(LogLevel::Warn));
+    assert_eq!(line.target.as_deref(), Some("zebra_launcher::updater"));
+    assert_eq!(line.message, "update check failed err=offline");
+    assert_eq!(line.spans, None);
+    assert!(!line.is_gap_marker());
+    // Timestamped by the launcher's clock in zebrad's format, so the lines sort together.
+    let timestamp = line.timestamp.clone().expect("a timestamp");
+    assert!(
+        clock::rfc3339(before) <= timestamp && timestamp <= clock::rfc3339(after),
+        "{timestamp}"
+    );
+
+    // A note with its own time keeps it.
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_210_144);
+    assert!(handle.note_at(Note {
+        at,
+        level: LogLevel::Error,
+        target: "zebra_launcher::apply".into(),
+        message: "zebrad refused the new configuration".into(),
+    }));
+    let line = within(sub.live.recv()).await.expect("live line");
+    assert_eq!(line.seq, 1);
+    assert_eq!(
+        line.timestamp.as_deref(),
+        Some("2026-10-28T17:55:44.000000Z")
+    );
+    assert_eq!(line.level, Some(LogLevel::Error));
+    assert_eq!(line.target.as_deref(), Some("zebra_launcher::apply"));
+
+    // The actor's own notes carry the same fields.
+    within(handle.start()).await.expect("start");
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert_eq!(
+        history[0].message, "update check failed err=offline",
+        "notes are retained like any line"
+    );
+    let started = history
+        .iter()
+        .find(|l| l.message.starts_with("zebrad started"))
+        .expect("start note");
+    assert_eq!(started.stream, LogStream::Launcher);
+    assert_eq!(started.level, Some(LogLevel::Info));
+    assert_eq!(started.target.as_deref(), Some("launcher_core::supervisor"));
+    assert!(
+        started
+            .timestamp
+            .as_deref()
+            .is_some_and(|t| t.ends_with('Z'))
+    );
+
+    within(handle.shutdown()).await.expect("shutdown");
+    // On disk the line is in zebrad's format, behind the launcher marker.
+    let log = std::fs::read_to_string(fx.config.log_file.as_ref().unwrap().path.clone())
+        .unwrap_or_default();
+    assert!(
+        log.contains(
+            "[launcher] 2026-10-28T17:55:44.000000Z ERROR zebra_launcher::apply: zebrad refused the new configuration"
+        ),
+        "log file: {log:?}"
+    );
 }

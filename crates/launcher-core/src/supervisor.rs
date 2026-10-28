@@ -12,10 +12,22 @@
 //!        └── status/logs ──────┘ │
 //!                 stdout/stderr readers, exit waiter ──ChildEvent──┘
 //! ```
+//!
+//! The log stream also carries the launcher's own lines (`LogStream::Launcher`):
+//! the actor's notes about what it did (`zebrad started`, `restarting zebrad
+//! in 4s`) and whatever callers add with [`SupervisorHandle::note`], which
+//! never waits, so a `tracing` layer can forward the launcher's log events
+//! into the same ring. Every such line has the launcher's timestamp in
+//! zebrad's format, a level and a target.
 
-use std::{io, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    io,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
-use launcher_types::{ExitInfo, LogLine, Status};
+use launcher_types::{ExitInfo, LogLevel, LogLine, Status};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::{
@@ -123,6 +135,20 @@ pub struct LogSubscription {
     pub live: broadcast::Receiver<Arc<LogLine>>,
 }
 
+/// A launcher line for the log stream: what the launcher did or decided,
+/// shown next to zebrad's lines. See [`SupervisorHandle::note`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Note {
+    /// When it happened, by the launcher's clock.
+    pub at: SystemTime,
+    /// How loud it is.
+    pub level: LogLevel,
+    /// Where it came from: a `tracing` target such as `zebra_launcher::updater`.
+    pub target: String,
+    /// The message, with any fields appended as `key=value`.
+    pub message: String,
+}
+
 enum Cmd {
     Start {
         options: StartOptions,
@@ -141,6 +167,8 @@ enum Cmd {
         since: u64,
         reply: oneshot::Sender<Vec<Arc<LogLine>>>,
     },
+    /// A launcher line for the log stream. No reply: see [`SupervisorHandle::note`].
+    Note(Note),
 }
 
 /// A cloneable handle to the supervisor actor.
@@ -261,6 +289,26 @@ impl SupervisorHandle {
         let (reply, response) = oneshot::channel();
         self.send(Cmd::History { since, reply }).await?;
         response.await.map_err(|_| SupervisorError::Closed)
+    }
+
+    /// Adds a launcher line to the log stream, timestamped now: what the
+    /// launcher did or decided, next to zebrad's lines. It never waits: the
+    /// line goes to the actor with `try_send`, so a `tracing` layer may call
+    /// this from a logging callback. Returns false when the line was dropped
+    /// because the actor is behind (its command queue is full) or gone.
+    pub fn note(&self, level: LogLevel, target: &str, message: impl Into<String>) -> bool {
+        self.note_at(Note {
+            at: SystemTime::now(),
+            level,
+            target: target.to_string(),
+            message: message.into(),
+        })
+    }
+
+    /// [`Self::note`] with every field given, for an event that happened
+    /// earlier.
+    pub fn note_at(&self, note: Note) -> bool {
+        self.cmd.try_send(Cmd::Note(note)).is_ok()
     }
 
     async fn send(&self, cmd: Cmd) -> Result<(), SupervisorError> {

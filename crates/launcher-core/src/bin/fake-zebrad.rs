@@ -66,6 +66,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use launcher_core::clock::rfc3339;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -827,7 +828,10 @@ fn wait_for_signal() -> impl std::future::Future<Output = Shutdown> + 'static {
 /// Prints a line in zebrad's `tracing` Full format.
 fn log(level: &str, spans: Option<&str>, target: &str, message: &str) {
     let spans = spans.map(|s| format!("{s}: ")).unwrap_or_default();
-    println!("{} {level:>5} {spans}{target}: {message}", timestamp());
+    println!(
+        "{} {level:>5} {spans}{target}: {message}",
+        rfc3339(SystemTime::now())
+    );
 }
 
 /// Mimics a release-build panic: Rust's panic header on stderr, the message on
@@ -851,36 +855,4 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
-}
-
-/// RFC 3339 UTC with microseconds, like `tracing-subscriber`'s default timer.
-fn timestamp() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    let micros = now.subsec_micros();
-    let days = secs / 86_400;
-    let rem = secs % 86_400;
-    let (year, month, day) = civil_from_days(days as i64);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{micros:06}Z",
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60
-    )
-}
-
-/// Howard Hinnant's days-to-civil algorithm.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }

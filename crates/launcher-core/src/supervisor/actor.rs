@@ -8,7 +8,8 @@ use std::{
 };
 
 use launcher_types::{
-    ExitClass, ExitInfo, LogEvent, LogLine, LogStream, Phase, StaleProcessInfo, Status,
+    ExitClass, ExitInfo, LogEvent, LogLevel, LogLine, LogStream, Phase, StaleProcessInfo, Status,
+    StopReport,
 };
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, BufReader},
@@ -18,8 +19,9 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::{Cmd, LogSubscription, StartOptions, SupervisorConfig, SupervisorError};
+use super::{Cmd, LogSubscription, Note, StartOptions, SupervisorConfig, SupervisorError};
 use crate::{
+    clock,
     logfile::LogFileWriter,
     logs::{Detector, classify_event, classify_exit, parse_line},
     pidfile::{self, StaleProcess},
@@ -31,6 +33,8 @@ use crate::{
 const MAX_LINE_BYTES: usize = 64 * 1024;
 /// How long to wait for a stale zebrad to exit after terminating it.
 const STALE_KILL_WAIT: Duration = Duration::from_secs(5);
+/// The `target` of the actor's own notes.
+const LAUNCHER_TARGET: &str = "launcher_core::supervisor";
 
 enum ChildEvent {
     Line {
@@ -67,6 +71,8 @@ struct ExitOutcome {
 }
 
 struct StopState {
+    /// When the stop was requested, for [`Status::last_stop`].
+    requested_at: SystemTime,
     deadline: Instant,
     escalated: bool,
     forced: bool,
@@ -286,6 +292,7 @@ impl Actor {
                         .collect(),
                 );
             }
+            Cmd::Note(note) => self.push_note(note),
         }
     }
 
@@ -507,6 +514,7 @@ impl Actor {
                         }
                     };
                     run.state = RunState::Stopping(StopState {
+                        requested_at: SystemTime::now(),
                         deadline: Instant::now() + self.config.stop_grace,
                         escalated: false,
                         forced,
@@ -587,6 +595,8 @@ impl Actor {
         }
         if self.backoff_until.is_some_and(|until| now >= until) {
             self.backoff_until = None;
+            self.status
+                .send_modify(|s| s.restarts = s.restarts.saturating_add(1));
             self.spawn_run(StartOptions::default(), Vec::new()).await;
         }
     }
@@ -689,6 +699,13 @@ impl Actor {
             at: SystemTime::now(),
             requested,
         };
+        // A stop issued before the exit is reported; one issued after it did
+        // not end the run, so there is nothing to time.
+        let last_stop = stop.as_ref().map(|stop| StopReport {
+            requested_at: stop.requested_at,
+            exited_at: info.at,
+            forced: stop.forced,
+        });
 
         if let Some(path) = &self.config.pidfile
             && let Err(err) = pidfile::remove(path)
@@ -720,6 +737,9 @@ impl Actor {
             s.rpc_addr = None;
             s.metrics_addr = None;
             s.last_exit = Some(info);
+            if let Some(report) = last_stop {
+                s.last_stop = Some(report);
+            }
         });
 
         if stopped {
@@ -757,15 +777,55 @@ impl Actor {
         replies.send();
     }
 
-    /// Records a line: on disk, in the history, to live subscribers, and
-    /// through the event detector of the current run.
+    /// Records a line of zebrad output: on disk, in the history, to live
+    /// subscribers, and through the event detector of the current run.
     fn push_line(&mut self, stream: LogStream, text: String) {
         if let Some(log_file) = &self.log_file {
             log_file.write_line(stream, text.trim_end_matches(['\r', '\n']));
         }
+        let seq = self.take_seq();
+        self.record(Arc::new(parse_line(seq, stream, &text)));
+    }
+
+    /// Records a launcher line: on disk in zebrad's line format, behind the
+    /// launcher marker, and in the history and the live feed with its
+    /// timestamp, level and target set.
+    fn push_note(&mut self, note: Note) {
+        let timestamp = clock::rfc3339(note.at);
+        if let Some(log_file) = &self.log_file {
+            log_file.write_line(
+                LogStream::Launcher,
+                &format!(
+                    "{timestamp} {:>5} {}: {}",
+                    note.level.as_str(),
+                    note.target,
+                    note.message
+                ),
+            );
+        }
+        let seq = self.take_seq();
+        self.record(Arc::new(LogLine {
+            seq,
+            stream: LogStream::Launcher,
+            timestamp: Some(timestamp),
+            level: Some(note.level),
+            spans: None,
+            target: Some(note.target),
+            message: note.message,
+            dropped: None,
+        }));
+    }
+
+    /// The next sequence number.
+    fn take_seq(&mut self) -> u64 {
         let seq = self.next_seq;
         self.next_seq += 1;
-        let line = Arc::new(parse_line(seq, stream, &text));
+        seq
+    }
+
+    /// Keeps `line` in the history, sends it to live subscribers and feeds
+    /// it to the event detector of the current run.
+    fn record(&mut self, line: Arc<LogLine>) {
         if self.history.len() >= self.config.history_capacity.max(1) {
             self.history.pop_front();
         }
@@ -821,9 +881,14 @@ impl Actor {
         }
     }
 
-    /// Adds a launcher note to the log stream.
+    /// Adds the actor's own note to the log stream: what it did, at INFO.
     fn note(&mut self, text: String) {
-        self.push_line(LogStream::Launcher, text);
+        self.push_note(Note {
+            at: SystemTime::now(),
+            level: LogLevel::Info,
+            target: LAUNCHER_TARGET.to_string(),
+            message: text,
+        });
     }
 }
 
