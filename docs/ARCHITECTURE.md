@@ -82,13 +82,14 @@ commands are `get_status`, `get_node_stats`, `get_node_details`, `get_metrics` a
 `get_update_info`.
 
 At startup the UI subscribes first and then fetches a snapshot (`get_status`,
-`get_node_stats`, `get_update_info`), so no change falls between the two; the log
-subscription itself streams the retained history before live lines, so logs need no
-snapshot request.
+`get_node_stats`, `get_node_details`, `get_metrics`, `get_update_info`), so no change
+falls between the two; the log subscription itself streams the retained history before
+live lines, so logs need no snapshot request.
 An event that arrives while a snapshot request is in flight is newer than the snapshot,
-so the UI drops the `get_status`, `get_node_stats` and `get_update_info` snapshots once
-an event of the same kind has arrived (for the updater: `update_info`; an
-`update_state` that arrives before any `update_info` replaces the snapshot's state).
+so the UI drops the `get_status`, `get_node_stats`, `get_node_details`, `get_metrics` and
+`get_update_info` snapshots once an event of the same kind has arrived (for the updater:
+`update_info`; an `update_state` that arrives before any `update_info` replaces the
+snapshot's state).
 Log batches are merged by `seq`, so their order does not matter.
 `stale_process` may be emitted before the UI listens, so the stale-process banner is
 driven by `status.stale`, which the snapshot carries; likewise `update_health_failed`
@@ -343,12 +344,57 @@ row. That feeds the status strip and the dashboard, the primary metrics view;
 `OpenTarget::MetricsEndpoint` opens the raw page in the browser. Grafana is optional and
 run by the user, embedded in its own tab; see [GRAFANA.md](GRAFANA.md).
 
-**Dashboard.** The UI keeps every published `NodeStats` in `ui/src/stats_history.rs`
-(up to 4 h of 5 s samples, since the launcher opened; nothing is persisted). From it the
-dashboard draws a sync meter with the block rate and the time to the tip, stat tiles
-with sparklines, and inline SVG line charts of height, peers and mempool size
-(`ui/src/charts.rs`, no chart library) over a range the user picks (15 min to all).
-Every chart has a hover crosshair, keyboard navigation and a table view.
+**Dashboard.** The UI keeps two histories since the launcher opened; nothing is persisted.
+`ui/src/stats_history.rs` holds every published `NodeStats` as a `Sample` (up to 4 h of the
+monitor's 5 s polls; the peer list of the same poll adds the inbound and outbound counts)
+and answers, over a window, the block rate, the ETA to the tip, the last height change and
+how long the peer count has been low. `ui/src/metrics_history.rs` holds every
+`MetricsSnapshot` reduced to the families the page derives series from (`KEPT_FAMILIES`:
+disk and memory bytes, the network byte counters, ready and unready peers, downloads in
+flight, the checkpoint height and so on; 4 h of 10 s snapshots), the newest kept whole for
+the one-off gauges. Tiles and charts read both over the range the user picks (15 min, 1 h,
+4 h, all); the sync hero's rate and ETA use a fixed 15 min window (`HERO_RATE_WINDOW`), so
+they do not move with the range control.
+
+**Health verdict.** `ui/src/health.rs` folds the status, the latest statistics, both
+histories, the log analysis and the updater state (`HealthInput`) into one `Verdict`: a
+level (healthy, neutral, attention, urgent, problem), the rule that fired, a headline, a
+reason sentence and the actions that fix it (Start, Stop it and start, Start now, Restart,
+Show in logs with a filter, Open Configure, Reset the configuration, Check for updates,
+Install, Cancel, and the recovery actions of a failed launcher update). The 18 rules are
+tried in order and the first match wins, cause before symptom: a failed launcher update
+(1); every phase but running (2 to 6: failed, backoff or crash loop, stopping, stopped or
+an earlier zebrad still running, starting or a slow start); what can be wrong while running
+(7 to 16: a silent RPC, no peers, a stalled sync, no new block at the tip, an urgent end of
+support or an install countdown, few peers, a slow sync, recent errors in the log, a
+restart after a crash, the end-of-support warning); then syncing (17) and healthy at the
+tip (18). Rule 0, `Verdict::connecting`, stands in before the first status. The thresholds
+are the named constants at the top of the file (`STALE_AFTER` 30 s, `RPC_FIRST_ANSWER`
+60 s, `RPC_SILENT_PROBLEM` and `SLOW_START` 5 min, `NO_PEERS_FOR` 2 min, `FEW_PEERS` 3 for
+`FEW_PEERS_FOR` 5 min, `STALL_ATTENTION` 2 min and `STALL_PROBLEM` 10 min behind the tip,
+`STALL_AT_TIP` 10 min, `RECENT_ERRORS` 10 min, `RECENT_CRASH` 1 h, `CRASH_LOOP` 3,
+`EOS_URGENT` 3 days). `AppState.phase_since` records when the phase or the rule last
+changed, for the "for N min" in the reason. `summary_text` builds the plain-text report
+that "Copy summary" puts on the clipboard (verdict, versions, phase, sync, peers, mempool,
+disk, ports, end of support, the newest problems and the run's events, with absolute local
+times) from the same input, so it cannot disagree with the page.
+
+**Dashboard page.** `ui/src/pages/dashboard.rs` holds the signals the cards share, the
+chart data and the page order; the cards are in `ui/src/pages/dashboard/`. `status_card.rs`
+shows the verdict with its actions and the Copy summary button beside the sync hero
+(figure, meter, rate, ETA, last block, and the checkpoint or full-validation line from the
+metrics and the log). `tiles.rs` holds the range row with its freshness sentence and the
+six stat tiles with sparklines (Height, Blocks per minute, Peers, Mempool, Disk, Uptime)
+from the statistics history, the metrics (Disk) and the status (Uptime). The page itself
+mounts the two inline SVG line charts (`ui/src/charts.rs`, no chart library; hover
+crosshair, keyboard navigation and a table view): "Blocks behind the tip" and "Peers" by
+direction, whose table adds the peer set's ready and unready counts from the metrics.
+`activity.rs` is the activity row: Recent problems and This run (views from
+`ui/src/components/log_insights.rs`) and the Peers card with its caption, the table of
+connected peers from `NodeDetails` and the handshake and obsolete-peer counters from the
+metrics. `details.rs` holds the Node and Chain cards, each with Copy, from the status, the
+statistics, the details, the settings, the metrics and the log facts. Every slot renders
+in every state: loading, running, stopped and refetching replace values in place.
 
 **Log analysis.** `ui/src/insights.rs` folds every log batch, in `seq` order, into a
 summary of the run: the sync stage from zebrad's `sync::progress` lines (syncing, near
@@ -356,9 +402,37 @@ the tip, at the tip, slow, stalled, waiting for genesis), deduplicated warnings,
 and stderr lines with counts, lines per minute by level over the last hour, and the
 startup milestones of the current run (state opened, peers, RPC, first progress report)
 with the peer, checkpoint and mempool facts. The Logs page shows these cards in a
-collapsible analysis panel and the dashboard shows the stage, the recent problems and
-the activity chart; picking a problem filters the Logs page to it. The Logs tab carries
-a count of problems that arrived while the page was not shown.
+collapsible analysis panel, with the stage card and the activity chart; the dashboard
+shows the recent problems and This run; picking a problem filters the Logs page to it. The
+Logs tab carries a count of problems that arrived while the page was not shown.
+
+**Run events.** This run lists the newest events of the current run, newest first, from two
+sources (`Insights::events`, `ui/src/insights/events.rs`). The log gives the run's
+milestones (those within 2 s of each other on one row), the first appearance of each ERROR
+and stderr problem, one line per earlier run, and the launcher's own notes since the
+previous run stopped: `launcher_event` reads the supervisor's `zebrad started (pid N)`,
+`stop requested`, `zebrad exited (...)`, `restarting zebrad in` and `not restarting zebrad`
+lines and its reports of a stale zebrad terminated or a start, stop or kill that failed.
+The session gives what the UI observed itself, recorded with
+`Insights::record_session_event`: status transitions (a new phase, a new last exit, a stale
+zebrad found; `status_events`), the updater's steps (`update_events`) and the configuration
+changes (`config_outcome_event`, `config_replaced_event`). `merge_events` puts both in one
+list: a session event that repeats a logged one of the same kind within `DEDUPE_WINDOW`
+(120 s; problems must also match in text) is dropped, except for exits and restarts, where
+the session's copy carries the backend's exit time and crash count and the log's copy goes
+instead.
+
+**Mock states.** Outside Tauri (`trunk serve`), `ui/src/mock.rs` stands in for the backend
+and the page URL's query picks the state it starts in; the table at the top of that file
+lists every flag, and [ui/README.md](../ui/README.md#develop-in-a-browser-mock-mode)
+describes the states. The dashboard's verdicts come from `?running` (zebrad is already
+running when the page loads), `?stalled` (the height stops while the tip estimate creeps
+on: "Sync stalled"), `?nopeers` (0 peers everywhere and an empty peer list: "No peers" once
+two minutes of samples agree), `?crashloop` (zebrad panics about 15 s after every start and
+is restarted after 5, 10 and 20 s: "zebrad crashed", then "Crash loop", with the exits and
+restarts on This run), `?eos=soon` and `?eos=halt` (the end-of-support warning and halt),
+`?stale` (an earlier zebrad still running), and `?update=countdown` and `?update=health`
+(the install countdown and a launcher update that did not come back healthy).
 
 **Appearance.** `Settings.theme` (`system`, `light`, `dark`) is resolved against the
 system preference in `ui/src/theme.rs` and applied as `data-theme` on `<html>`; every

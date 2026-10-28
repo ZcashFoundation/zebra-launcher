@@ -28,9 +28,10 @@ fixes this on every platform (shutdown when its stdin closes) is proposed upstre
 - Runs the bundled `zebrad` as a supervised child process: start, stop and restart from
   the window or the tray, graceful shutdown, crash backoff, and a clear reason when
   zebrad cannot run (bad config, port in use, database locked, end of support).
-- **Dashboard:** sync progress with the block rate and the time left to the tip, stat
-  tiles and charts of height, peers and mempool since the launcher opened, the sync
-  stage and recent problems read from zebrad's own log, and the node's addresses.
+- **Dashboard:** a health verdict with the actions that fix it, sync progress with the
+  block rate and the time left to the tip, stat tiles, charts of blocks behind the tip and
+  peers by direction since the launcher opened, recent problems and this run's events read
+  from zebrad's and the launcher's log, the connected peers, and the node and chain details.
 - **Logs:** zebrad's output with level, target and text filters, match highlighting,
   and an analysis panel (sync stage, deduplicated warnings and errors, lines per
   minute, the startup timeline of the current run).
