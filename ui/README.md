@@ -74,7 +74,8 @@ backend that makes every page demoable:
   instead of Install) and `&stalecheck` for the stale-check warning (no successful check for
   20 days). Saving the Off mode returns the updater to Idle, like the backend.
 
-The flags are read from the query string once, when the page loads.
+The flags are read from the query string once, when the page loads; the table at the top of
+[`src/mock.rs`](src/mock.rs) lists every one.
 
 ## Build
 

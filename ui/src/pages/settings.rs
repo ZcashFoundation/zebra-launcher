@@ -2,7 +2,7 @@
 //! Save sends the whole settings object to `set_settings`; the data directory is changed only
 //! through `choose_data_dir`, so Save always sends the stored one.
 
-use launcher_types::{Network, Settings, Theme, is_loopback_http_url};
+use launcher_types::{Network, OpenTarget, Settings, Theme, is_loopback_http_url};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -576,7 +576,7 @@ fn WarningIcon() -> impl IntoView {
 fn About() -> impl IntoView {
     let state = AppState::get();
     let error = RwSignal::new(None::<String>);
-    let open = move |target: &'static str, what: &'static str| {
+    let open = move |target: OpenTarget, what: &'static str| {
         error.set(None);
         spawn_local(async move {
             if let Err(failure) = api::open_path(target).await {
@@ -616,13 +616,13 @@ fn About() -> impl IntoView {
                 <dd>{network}</dd>
             </dl>
             <div class="buttons">
-                <button type="button" on:click=move |_| open("log_dir", "the logs folder")>
+                <button type="button" on:click=move |_| open(OpenTarget::LogDir, "the logs folder")>
                     "Open logs folder"
                 </button>
-                <button type="button" on:click=move |_| open("data_dir", "the data folder")>
+                <button type="button" on:click=move |_| open(OpenTarget::DataDir, "the data folder")>
                     "Open data folder"
                 </button>
-                <button type="button" on:click=move |_| open("config_dir", "the config folder")>
+                <button type="button" on:click=move |_| open(OpenTarget::ConfigDir, "the config folder")>
                     "Open config folder"
                 </button>
             </div>

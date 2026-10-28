@@ -3,7 +3,7 @@
 
 use std::time::SystemTime;
 
-use launcher_types::{RecoveryAction, UpdateInfo, UpdateState};
+use launcher_types::{OpenTarget, RecoveryAction, UpdateInfo, UpdateState};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -311,7 +311,7 @@ pub fn UpdateActions() -> impl IntoView {
                 Action::Cancel => api::cancel_update().await,
                 // The new state arrives as events, like every other.
                 Action::Check => api::check_for_update().await.map(|_| ()),
-                Action::OpenReleases => api::open_path("releases_page").await,
+                Action::OpenReleases => api::open_path(OpenTarget::ReleasesPage).await,
             };
             if let Err(failure) = result {
                 error.set(Some(format!("Could not {what}: {failure}")));
@@ -612,7 +612,7 @@ pub fn HealthFailureBanner() -> impl IntoView {
 fn HealthFailurePanel() -> impl IntoView {
     let state = AppState::get();
     let error = RwSignal::new(None::<String>);
-    let open = move |target: &'static str, what: &'static str| {
+    let open = move |target: OpenTarget, what: &'static str| {
         error.set(None);
         spawn_local(async move {
             if let Err(failure) = api::open_path(target).await {
@@ -625,7 +625,7 @@ fn HealthFailurePanel() -> impl IntoView {
         match action {
         RecoveryAction::OpenLogs => view! {
             <li>
-                <button type="button" on:click=move |_| open("log_dir", "the log folder")>
+                <button type="button" on:click=move |_| open(OpenTarget::LogDir, "the log folder")>
                     "Open the log folder"
                 </button>
                 <span class="muted">"The launcher and zebrad logs show what went wrong."</span>
@@ -656,7 +656,7 @@ fn HealthFailurePanel() -> impl IntoView {
                                     </button>
                                     <button
                                         type="button"
-                                        on:click=move |_| open("config_dir", "the config folder")
+                                        on:click=move |_| open(OpenTarget::ConfigDir, "the config folder")
                                     >
                                         "Open the config folder"
                                     </button>
@@ -671,7 +671,7 @@ fn HealthFailurePanel() -> impl IntoView {
             <li>
                 <button
                     type="button"
-                    on:click=move |_| open("releases_page", "the releases page")
+                    on:click=move |_| open(OpenTarget::ReleasesPage, "the releases page")
                 >
                     "Open the releases page"
                 </button>

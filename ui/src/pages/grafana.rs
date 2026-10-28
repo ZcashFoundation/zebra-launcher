@@ -2,7 +2,7 @@
 //! dashboard picker, time range and refresh interval. While no Grafana URL is set, a setup card
 //! explains the shipped observability stack and saves a URL into the settings.
 
-use launcher_types::is_loopback_http_url;
+use launcher_types::{OpenTarget, is_loopback_http_url};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -102,7 +102,7 @@ fn Setup() -> impl IntoView {
     let open_repo = move |_| {
         open_error.set(None);
         spawn_local(async move {
-            if let Err(error) = api::open_path("repo").await {
+            if let Err(error) = api::open_path(OpenTarget::Repo).await {
                 open_error.try_set(Some(format!("Could not open the browser: {error}")));
             }
         });
@@ -279,7 +279,7 @@ fn Embedded(url: String) -> impl IntoView {
     let open_in_browser = move |_| {
         open_error.set(None);
         spawn_local(async move {
-            if let Err(error) = api::open_path("grafana").await {
+            if let Err(error) = api::open_path(OpenTarget::Grafana).await {
                 open_error.try_set(Some(format!("Could not open the browser: {error}")));
             }
         });

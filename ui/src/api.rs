@@ -5,8 +5,8 @@ use std::{cell::Cell, fmt};
 
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
-    ImportOutcome, LogLine, NodeStats, Settings, StaleProcessInfo, Status, UpdateHealthFailure,
-    UpdateInfo, UpdateState, events,
+    ImportOutcome, LogLine, NodeStats, OpenTarget, Settings, StaleProcessInfo, Status,
+    UpdateHealthFailure, UpdateInfo, UpdateState, events,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
@@ -416,14 +416,11 @@ pub async fn on_update_health_failed(
 
 #[derive(Serialize)]
 struct OpenPathArgs {
-    target: &'static str,
+    target: OpenTarget,
 }
 
-/// Opens one of the backend's fixed locations with the system's default handler. `target` is
-/// the wire name of a `launcher_types::OpenTarget` (`config_dir`, `data_dir`, `log_dir`,
-/// `releases_page`, `repo`, `grafana`); the backend refuses anything else. The string form stays
-/// until the call sites take the enum.
-pub async fn open_path(target: &'static str) -> ApiResult<()> {
+/// Opens one of the backend's fixed locations with the system's default handler.
+pub async fn open_path(target: OpenTarget) -> ApiResult<()> {
     if !is_tauri() {
         mock::open_path(target).await;
         return Ok(());
