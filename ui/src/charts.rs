@@ -17,7 +17,7 @@ use std::{
 use launcher_types::Phase;
 
 use crate::{
-    format::{rough_duration, thousands},
+    format::{bytes, rough_duration, thousands},
     stats_history::{Field, Sample},
 };
 
@@ -374,6 +374,29 @@ pub fn signed(delta: i64) -> String {
     }
 }
 
+/// A transfer rate in decimal units with one decimal: `1.2 MB/s`, `512 bytes/s`. A negative
+/// or non-finite rate reads as nothing moving.
+#[allow(dead_code, reason = "read by the dashboard once its view lands")]
+pub fn byte_rate(bytes_per_sec: f64) -> String {
+    let rounded = if bytes_per_sec.is_finite() && bytes_per_sec > 0.0 {
+        bytes_per_sec.round() as u64
+    } else {
+        0
+    };
+    format!("{}/s", bytes(rounded))
+}
+
+/// A size delta with its sign: `+1.1 GB`, `-3.0 MB`, `0 bytes`.
+#[allow(dead_code, reason = "read by the dashboard once its view lands")]
+pub fn signed_bytes(delta: i64) -> String {
+    let magnitude = bytes(delta.unsigned_abs());
+    match delta {
+        0 => magnitude,
+        d if d > 0 => format!("+{magnitude}"),
+        _ => format!("-{magnitude}"),
+    }
+}
+
 /// The sync hero's figure: a progress fraction with one decimal, rounded down so `99.99 %`
 /// never reads `100.0 %` before the tip. Kept apart from [`crate::format::percent`] (two
 /// decimals, rounded to nearest) for that floor.
@@ -690,6 +713,8 @@ mod tests {
             peers,
             mempool_transactions: 10,
             verification_progress: height as f64 / 3_120_000.0,
+            peers_inbound: None,
+            peers_outbound: None,
         }
     }
 
@@ -875,6 +900,14 @@ mod tests {
         assert_eq!(signed(1240), "+1,240");
         assert_eq!(signed(-3), "-3");
         assert_eq!(signed(0), "0");
+        assert_eq!(byte_rate(1_234_567.8), "1.2 MB/s");
+        assert_eq!(byte_rate(512.0), "512 bytes/s");
+        assert_eq!(byte_rate(0.0), "0 bytes/s");
+        assert_eq!(byte_rate(-5.0), "0 bytes/s");
+        assert_eq!(byte_rate(f64::NAN), "0 bytes/s");
+        assert_eq!(signed_bytes(1_100_000_000), "+1.1 GB");
+        assert_eq!(signed_bytes(-3_000_000), "-3.0 MB");
+        assert_eq!(signed_bytes(0), "0 bytes");
         assert_eq!(percent_1(0.946), "94.6 %");
         assert_eq!(percent_1(0.99995), "99.9 %");
         assert_eq!(percent_1(0.0), "0.0 %");
