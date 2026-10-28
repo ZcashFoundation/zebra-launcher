@@ -144,7 +144,7 @@ fn Setup() -> impl IntoView {
                 </p>
                 <div class="buttons">
                     <button type="button" on:click=open_repo>"Open the repository"</button>
-                    {move || open_error.get().map(|error| view! { <span class="error">{error}</span> })}
+                    <OutcomeNote outcome=Signal::derive(move || open_error.get().map(Err)) />
                 </div>
                 <div class="grafana-command">
                     <pre>{COMPOSE_COMMAND}</pre>
@@ -184,7 +184,7 @@ fn Setup() -> impl IntoView {
                         >
                             {move || if saving.get() { "Saving…" } else { "Use this Grafana" }}
                         </button>
-                        {move || save_error.get().map(|error| view! { <span class="error">{error}</span> })}
+                        <OutcomeNote outcome=Signal::derive(move || save_error.get().map(Err)) />
                     </div>
                 </form>
             </div>
@@ -309,7 +309,7 @@ fn Embedded(url: String) -> impl IntoView {
                 "Reload"
             </button>
             <button type="button" on:click=open_in_browser>"Open in browser"</button>
-            {move || open_error.get().map(|error| view! { <span class="error">{error}</span> })}
+            <OutcomeNote outcome=Signal::derive(move || open_error.get().map(Err)) />
             <span class="grafana-host">
                 <span class="muted">{host}</span>
                 <button type="button" class="link" on:click=move |_| state.tab.set(Tab::Settings)>

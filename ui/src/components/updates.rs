@@ -9,7 +9,12 @@ use leptos::{prelude::*, task::spawn_local};
 use crate::{
     api,
     app::{AppState, Tab},
-    components::reset_config::ResetConfigButton,
+    components::{
+        outcome_note::OutcomeNote,
+        reset_config::ResetConfigButton,
+        rows::{Rows, text_rows},
+        transient::Transient,
+    },
     format::{
         NOTES_EXCERPT_CHARS, data_change_allowed, download_progress, notes_excerpt, relative,
         update_state_text,
@@ -374,7 +379,7 @@ pub fn UpdateActions() -> impl IntoView {
 
     view! {
         {buttons}
-        {move || error.get().map(|error| view! { <span class="error">{error}</span> })}
+        <OutcomeNote outcome=Signal::derive(move || error.get().map(Err)) />
     }
 }
 
@@ -438,50 +443,46 @@ pub fn CheckForUpdate(
 ) -> impl IntoView {
     let state = AppState::get();
     let busy = RwSignal::new(false);
-    // What the check returned. It only feeds the text next to the button: `update_state` and
+    // What the check returned. It only feeds the note next to the button: `update_state` and
     // `update_info` events drive the updater state everywhere else, and may already be newer.
-    let outcome = RwSignal::new(None::<Result<UpdateState, String>>);
+    // A state the check found stays for a while; a check that could not run, or found the
+    // updater failed, holds until the next check.
+    let outcome = Transient::<Result<UpdateState, String>>::new();
 
     let check = move |_| {
         busy.set(true);
-        outcome.set(None);
         spawn_local(async move {
-            outcome.set(Some(api::check_for_update().await.map_err(|failure| {
-                format!("Could not check for updates: {failure}")
-            })));
+            match api::check_for_update().await {
+                Ok(found @ UpdateState::Error { .. }) => outcome.hold(Ok(found)),
+                Ok(found) => outcome.show(Ok(found)),
+                Err(failure) => {
+                    outcome.hold(Err(format!("Could not check for updates: {failure}")));
+                }
+            }
             busy.set(false);
         });
     };
     let blocked = move || {
         busy.get() || with_info(state, |info| info.is_some_and(|i| check_blocked(&i.state)))
     };
-    // What the check found.
-    let result = move || {
-        outcome.with(|reply| match reply.as_ref()? {
-            Ok(_) if show_result => Some(
-                view! {
-                    <span class="update-result">
-                        {move || {
-                            outcome
-                                .with(|outcome| match outcome {
-                                    Some(Ok(found)) => Some(update_state_text(found, state.now.get())),
-                                    _ => None,
-                                })
-                        }}
-                    </span>
-                }
-                .into_any(),
-            ),
-            Ok(_) => None,
-            Err(error) => Some(view! { <span class="error">{error.clone()}</span> }.into_any()),
+    // The note: a check that could not run always; what it found only where asked, a failed
+    // updater as a failure.
+    let note = Signal::derive(move || {
+        outcome.get().and_then(|outcome| match outcome {
+            Err(failure) => Some(Err(failure)),
+            Ok(_) if !show_result => None,
+            Ok(found @ UpdateState::Error { .. }) => {
+                Some(Err(update_state_text(&found, state.now.get())))
+            }
+            Ok(found) => Some(Ok(update_state_text(&found, state.now.get()))),
         })
-    };
+    });
 
     view! {
         <button type="button" disabled=blocked on:click=check>
             {move || if busy.get() { "Checking…" } else { label }}
         </button>
-        {result}
+        <OutcomeNote outcome=note />
     }
 }
 
@@ -697,16 +698,14 @@ fn HealthFailurePanel() -> impl IntoView {
                     <strong>"The last launcher update did not come back healthy."</strong>
                 </p>
                 <p>{failure.message}</p>
-                <dl class="rows">
-                    <dt>"Expected version"</dt>
-                    <dd>{failure.expected_version}</dd>
-                    <dt>"Running version"</dt>
-                    <dd>{failure.running_version}</dd>
-                </dl>
+                <Rows rows=text_rows([
+                    ("Expected version", failure.expected_version),
+                    ("Running version", failure.running_version),
+                ]) />
                 <ul class="recovery">
                     {failure.recovery.into_iter().map(recovery).collect_view()}
                 </ul>
-                {move || error.get().map(|error| view! { <p class="error">{error}</p> })}
+                <OutcomeNote outcome=Signal::derive(move || error.get().map(Err)) block=true />
             </div>
         })
     }
