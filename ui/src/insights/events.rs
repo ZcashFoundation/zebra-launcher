@@ -460,7 +460,8 @@ pub fn config_outcome_event(outcome: &ApplyOutcome, now: SystemTime) -> RunEvent
     }
 }
 
-/// A problem's first appearance as a timeline row: `ERROR: block download failed ×3`.
+/// A problem's first appearance in the current run as a timeline row:
+/// `ERROR: block download failed ×3`.
 pub fn problem_event(problem: &Problem) -> RunEvent {
     let text = message_text(&problem.sample);
     let text = if text.is_empty() {
@@ -480,7 +481,7 @@ pub fn problem_event(problem: &Problem) -> RunEvent {
         ProblemLevel::Warn => Tone::Warning,
         ProblemLevel::Error | ProblemLevel::Stderr => Tone::Critical,
     };
-    event(problem.first, EventKind::Problem, text, tone)
+    event(problem.run_first, EventKind::Problem, text, tone)
 }
 
 /// `Metrics opened` as `metrics opened` for the middle of a row; an acronym such as `RPC
@@ -1067,7 +1068,8 @@ mod tests {
             pattern: "block download failed hash=_".into(),
             sample: "block download failed hash=block::Hash(\"abc\")".into(),
             count: 3,
-            first: at(50),
+            first: at(20),
+            run_first: at(50),
             last: at(90),
             last_seq: 9,
         };
@@ -1075,7 +1077,11 @@ mod tests {
         assert_eq!(event.kind, EventKind::Problem);
         assert_eq!(event.text, "ERROR: block download failed ×3");
         assert_eq!(event.tone, Tone::Critical);
-        assert_eq!(event.at, at(50), "dated at the first appearance");
+        assert_eq!(
+            event.at,
+            at(50),
+            "dated at the first appearance in this run"
+        );
         let stderr = Problem {
             level: ProblemLevel::Stderr,
             sample: "thread 'main' panicked at x.rs:1:1:".into(),

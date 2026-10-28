@@ -186,7 +186,10 @@ pub struct Problem {
     /// The most recent message with this pattern.
     pub sample: String,
     pub count: u32,
+    /// The first appearance in the session.
     pub first: SystemTime,
+    /// The first appearance in the current run: the time of the row on the This run timeline.
+    pub run_first: SystemTime,
     pub last: SystemTime,
     pub last_seq: u64,
 }
@@ -490,12 +493,17 @@ impl Insights {
         };
         self.unseen_problems = self.unseen_problems.saturating_add(1);
         let pattern = pattern_of(&line.message);
+        let run_start = self.runs.last().map(|run| run.started_at);
         if let Some(problem) = self.problems.iter_mut().find(|p| p.pattern == pattern) {
             problem.count = problem.count.saturating_add(1);
             problem.last = problem.last.max(at);
             problem.last_seq = line.seq;
             problem.sample = line.message.clone();
             problem.level = level;
+            // A pattern from an earlier run recurring in this one: this run's first time.
+            if run_start.is_some_and(|start| problem.run_first < start && at >= start) {
+                problem.run_first = at;
+            }
             return;
         }
         if self.problems.len() >= PROBLEMS_KEPT
@@ -515,6 +523,7 @@ impl Insights {
             sample: line.message.clone(),
             count: 1,
             first: at,
+            run_first: at,
             last: at,
             last_seq: line.seq,
         });
@@ -852,7 +861,7 @@ impl Insights {
             self.problems
                 .iter()
                 .filter(|problem| problem.level != ProblemLevel::Warn)
-                .filter(|problem| run_start.is_none_or(|start| problem.first >= start))
+                .filter(|problem| run_start.is_none_or(|start| problem.run_first >= start))
                 .map(events::problem_event),
         );
         let session: Vec<RunEvent> = self
@@ -1372,6 +1381,7 @@ mod tests {
             sample: String::new(),
             count: 1,
             first: at(0),
+            run_first: at(0),
             last: at(last_secs),
             last_seq: seq,
         }
@@ -1963,6 +1973,52 @@ mod tests {
             insights.runs()[0].shutdown_reason.as_deref(),
             Some("zebrad exited (exit code 101, Crash)")
         );
+    }
+
+    #[test]
+    fn a_problem_recurring_in_the_next_run_is_on_its_timeline() {
+        let mut insights = Insights::default();
+        let failed = |seq, stamp, hash| {
+            stamped(
+                seq,
+                stamp,
+                LogLevel::Error,
+                "zebrad::components::sync",
+                &format!("block download failed hash=block::Hash(\"{hash}\")"),
+            )
+        };
+        let mut lines = full_run(0, "2026-10-23T18:35:00Z", "2026-10-23T18:35:01Z");
+        let n = lines.len() as u64;
+        lines.push(failed(n, "2026-10-23T18:37:00Z", "abc"));
+        lines.push(launcher_at(
+            n + 1,
+            "2026-10-23T18:40:01Z",
+            "zebrad exited (exit code 101, Crash)",
+        ));
+        lines.extend(full_run(
+            n + 2,
+            "2026-10-23T18:40:06Z",
+            "2026-10-23T18:40:07Z",
+        ));
+        let m = lines.len() as u64;
+        lines.push(failed(m, "2026-10-23T18:45:00Z", "def"));
+        insights.ingest(&lines, at("2026-10-23T18:46:00Z"));
+
+        // Recent problems spans the session: one pattern, seen twice, first in run 1.
+        let problems = insights.problems(5);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].count, 2);
+        assert_eq!(problems[0].first, at("2026-10-23T18:37:00Z"));
+        assert_eq!(problems[0].run_first, at("2026-10-23T18:45:00Z"));
+        // This run's timeline shows the recurrence at this run's time.
+        let events = insights.events(20);
+        let problem_rows: Vec<&RunEvent> = events
+            .iter()
+            .filter(|e| e.kind == EventKind::Problem)
+            .collect();
+        assert_eq!(problem_rows.len(), 1);
+        assert_eq!(problem_rows[0].text, "ERROR: block download failed ×2");
+        assert_eq!(problem_rows[0].at, at("2026-10-23T18:45:00Z"));
     }
 
     #[test]
