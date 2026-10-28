@@ -44,6 +44,14 @@
 //! `FAKE_ZEBRAD_DEPRECATION_FAILURES=N` makes the first `N` `getdeprecationinfo`
 //! calls fail with the JSON-RPC error code in
 //! `FAKE_ZEBRAD_DEPRECATION_ERROR_CODE` (default `-32000`).
+//!
+//! When the config sets `metrics.endpoint_addr`, the fake binds a metrics
+//! listener there too (port 0 picks a free port; the bound address is printed
+//! in the `Opened metrics endpoint at` line) and answers `GET /metrics` with
+//! the captured page `tests/fixtures/zebrad-7.0.0-metrics.txt`. Without the
+//! key it only prints the line, with zebrad's default address. When the
+//! address is taken it logs a warning and carries on without the listener,
+//! where zebrad would abort (the `port-in-use` mode plays that).
 
 use std::{
     hash::{BuildHasher, Hasher, RandomState},
@@ -67,6 +75,8 @@ use tokio::{
 const VERSION: &str = include_str!("../../../../ZEBRAD_VERSION").trim_ascii();
 const RPC_ADDR: &str = "127.0.0.1:8232";
 const METRICS_ADDR: &str = "127.0.0.1:9999";
+/// The page the metrics endpoint serves: a real zebrad's, see the fixtures README.
+const METRICS_PAGE: &str = include_str!("../../tests/fixtures/zebrad-7.0.0-metrics.txt");
 
 /// Why the fake is shutting down, worded like zebrad's `zebrad::signal` lines.
 enum Shutdown {
@@ -191,17 +201,39 @@ async fn run(
         ),
     }
     let global = Some("{zebrad=\"fake\" net=\"Regtest\"}");
+    // With a configured endpoint the listener is real; otherwise only the
+    // lines the log detectors key on are printed.
+    let metrics_addr = match config.as_deref().and_then(metrics_config) {
+        Some(addr) => match start_metrics_server(addr).await {
+            Ok(bound) => bound.to_string(),
+            // Unlike zebrad (see the `port-in-use` mode), carry on without
+            // the listener: the tests run many fakes on the launcher's
+            // managed config, which names one metrics port, at the same time.
+            Err(err) => {
+                log(
+                    "WARN",
+                    global,
+                    "fake_zebrad",
+                    &format!(
+                        "could not bind the metrics endpoint at {addr}: {err}; serving no metrics"
+                    ),
+                );
+                addr.to_string()
+            }
+        },
+        None => METRICS_ADDR.to_string(),
+    };
     log(
         "INFO",
         global,
         "zebrad::components::metrics",
-        &format!("Trying to open metrics endpoint at {METRICS_ADDR}..."),
+        &format!("Trying to open metrics endpoint at {metrics_addr}..."),
     );
     if mode == "port-in-use" {
         panic_and_abort(
             "zebrad/src/components/metrics.rs:38:27",
             &format!(
-                "Opening metrics endpoint listener {METRICS_ADDR} failed: FailedToCreateHTTPListener(\"Address already in use (os error 98)\"). Hint: Check if another zebrad or zcashd process is running. Try changing the metrics endpoint_addr in the Zebra config."
+                "Opening metrics endpoint listener {metrics_addr} failed: FailedToCreateHTTPListener(\"Address already in use (os error 98)\"). Hint: Check if another zebrad or zcashd process is running. Try changing the metrics endpoint_addr in the Zebra config."
             ),
         );
     }
@@ -209,7 +241,7 @@ async fn run(
         "INFO",
         global,
         "zebrad::components::metrics",
-        &format!("Opened metrics endpoint at {METRICS_ADDR}"),
+        &format!("Opened metrics endpoint at {metrics_addr}"),
     );
     log("INFO", None, "zebrad::commands::start", "Starting zebrad");
     log(
@@ -420,6 +452,71 @@ fn rpc_config(path: &Path) -> Option<RpcConfig> {
         listen_addr,
         cookie_dir,
     })
+}
+
+/// Reads `metrics.endpoint_addr`. Returns `None` when the file is unreadable
+/// or sets no endpoint.
+fn metrics_config(path: &Path) -> Option<SocketAddr> {
+    let doc: toml_edit::DocumentMut = std::fs::read_to_string(path).ok()?.parse().ok()?;
+    doc.get("metrics")?
+        .as_table_like()?
+        .get("endpoint_addr")?
+        .as_str()?
+        .parse()
+        .ok()
+}
+
+/// Binds the metrics listener and serves [`METRICS_PAGE`] in the background.
+/// Returns the bound address.
+async fn start_metrics_server(addr: SocketAddr) -> std::io::Result<SocketAddr> {
+    let listener = TcpListener::bind(addr).await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    tokio::spawn(async move {
+                        let _ =
+                            tokio::time::timeout(Duration::from_secs(10), serve_metrics(stream))
+                                .await;
+                    });
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    });
+    Ok(addr)
+}
+
+/// Serves one HTTP/1.1 request: the page for `GET /metrics`, 404 for anything
+/// else, then closes the connection.
+async fn serve_metrics(stream: TcpStream) -> std::io::Result<()> {
+    const MAX_HEADER_LINES: usize = 100;
+
+    let (read, mut write) = stream.into_split();
+    let mut reader = BufReader::new(read);
+    let mut line = String::new();
+    if reader.read_line(&mut line).await? == 0 {
+        return Ok(());
+    }
+    let is_metrics = line.split_whitespace().take(2).collect::<Vec<_>>() == ["GET", "/metrics"];
+    for _ in 0..MAX_HEADER_LINES {
+        line.clear();
+        if reader.read_line(&mut line).await? == 0 || line.trim_end().is_empty() {
+            break;
+        }
+    }
+    let (status, body) = if is_metrics {
+        ("200 OK", METRICS_PAGE)
+    } else {
+        ("404 Not Found", "")
+    };
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    write.write_all(response.as_bytes()).await?;
+    write.shutdown().await
 }
 
 /// Binds the RPC listener, writes the cookie, and serves requests in the

@@ -1,5 +1,6 @@
 //! zebrad's Prometheus metrics: a parser for the text exposition format its
-//! `/metrics` endpoint serves.
+//! `/metrics` endpoint serves, and the poller that reads the page while zebrad
+//! runs ([`poller`]).
 //!
 //! The format (<https://prometheus.io/docs/instrumenting/exposition_formats/>):
 //!
@@ -22,6 +23,8 @@
 use std::{collections::HashMap, time::SystemTime};
 
 use launcher_types::{MetricFamily, MetricKind, MetricSample, MetricsSnapshot};
+
+pub mod poller;
 
 /// A line of the page could not be parsed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
