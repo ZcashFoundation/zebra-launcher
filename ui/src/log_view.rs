@@ -106,8 +106,11 @@ impl LogBuffer {
             }
             previous_seq = Some(line.seq);
 
-            let shown = match (line.level, line.stream) {
-                (Some(level), _) => {
+            let shown = match (line.stream, line.level) {
+                // stderr and launcher lines are always worth seeing, whatever their level or
+                // target.
+                (LogStream::Stderr | LogStream::Launcher, _) => true,
+                (LogStream::Stdout, Some(level)) => {
                     let level_ok = filter.min_level.is_none_or(|min| level >= min);
                     let target_ok = filter
                         .target
@@ -116,9 +119,7 @@ impl LogBuffer {
                     parent_visible = level_ok && target_ok;
                     parent_visible
                 }
-                (None, LogStream::Stdout) => parent_visible,
-                // stderr and launcher notes are always worth seeing.
-                (None, LogStream::Stderr | LogStream::Launcher) => true,
+                (LogStream::Stdout, None) => parent_visible,
             };
             if shown && (needle.is_empty() || matches_text(line, &needle)) {
                 entries.push(LogEntry::Line(line.clone()));
@@ -131,12 +132,13 @@ impl LogBuffer {
 /// What the log page shows.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LogFilter {
-    /// Hide leveled lines below this level. `None` shows everything.
+    /// Hide zebrad's leveled lines below this level. `None` shows everything. stderr and
+    /// launcher lines stay visible whatever their level.
     pub min_level: Option<LogLevel>,
     /// Show only lines containing this text, ignoring case. Empty shows everything.
     pub text: String,
     /// Show only lines from this `tracing` target (and their continuation lines). `None` shows
-    /// every target. stderr and launcher lines, which have no target, stay visible.
+    /// every target. stderr and launcher lines stay visible whatever their target.
     pub target: Option<String>,
 }
 
@@ -296,6 +298,15 @@ mod tests {
         }
     }
 
+    /// A launcher note as the supervisor writes it: stamped, at INFO, from its own target.
+    fn note(seq: u64, message: &str) -> LogLine {
+        LogLine {
+            stream: LogStream::Launcher,
+            target: Some("launcher_core::supervisor".into()),
+            ..line(seq, Some(LogLevel::Info), message)
+        }
+    }
+
     fn seqs(buffer: &LogBuffer) -> Vec<u64> {
         buffer.lines.iter().map(|line| line.seq).collect()
     }
@@ -427,9 +438,11 @@ mod tests {
         // Only the typed field marks a gap: the note below reads like a marker but is a real
         // line, so it shows as one and the jump before it is a separate gap.
         let mut buffer = LogBuffer::default();
-        let mut note = line(4, None, "7 lines dropped");
-        note.stream = LogStream::Launcher;
-        buffer.merge(vec![line(0, None, "a"), line(1, None, "b"), note]);
+        buffer.merge(vec![
+            line(0, None, "a"),
+            line(1, None, "b"),
+            note(4, "7 lines dropped"),
+        ]);
         let entries = buffer.entries(&LogFilter::default());
         assert_eq!(entries.len(), 4);
         assert_eq!(
@@ -503,21 +516,20 @@ mod tests {
         network.target = Some("zebra_network::peer_set::initialize".into());
         let mut stderr = line(4, None, "panicked");
         stderr.stream = LogStream::Stderr;
-        let mut note = line(5, None, "zebrad exited with code 0");
-        note.stream = LogStream::Launcher;
         buffer.merge(vec![
             line(0, Some(LogLevel::Info), "Diagnostic metadata:"),
             line(1, None, "version: 7.0.0"),
             network,
             line(3, Some(LogLevel::Warn), "careful"),
             stderr,
-            note,
+            note(5, "zebrad exited with code 0"),
         ]);
         let filter = LogFilter {
             target: Some("zebrad::commands::start".into()),
             ..LogFilter::default()
         };
         assert_eq!(shown_seqs(&buffer, &filter), [0, 1, 3, 4, 5]);
+        // The launcher's INFO note stays under a WARN filter for another target.
         let filter = LogFilter {
             target: Some("zebra_network::peer_set::initialize".into()),
             min_level: Some(LogLevel::Warn),
@@ -532,6 +544,7 @@ mod tests {
             buffer.targets_by_count(10),
             [
                 ("zebrad::commands::start".to_owned(), 2),
+                ("launcher_core::supervisor".to_owned(), 1),
                 ("zebra_network::peer_set::initialize".to_owned(), 1),
             ]
         );

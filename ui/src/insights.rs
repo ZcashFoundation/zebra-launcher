@@ -58,8 +58,8 @@ const PROGRESS_TARGET: &str = "zebrad::components::sync::progress";
 pub struct Insights {
     /// The highest `seq` folded in; lines at or below it are duplicates.
     last_seq: Option<u64>,
-    /// The time of the last timestamped line. Continuation lines, stderr lines and launcher
-    /// notes carry no timestamp and take it, since they follow the line they belong to.
+    /// The time of the last timestamped line. Continuation lines and stderr lines carry no
+    /// timestamp and take it, since they follow the line they belong to.
     last_at: Option<SystemTime>,
     totals: LevelTotals,
     lines_total: u64,
@@ -654,8 +654,8 @@ impl Insights {
     }
 
     fn start_run(&mut self, at: SystemTime) {
-        // The launcher's start note precedes this line without a timestamp of its own, so it
-        // carried the time of the previous run's last line; the run begins here.
+        // The launcher's start note is stamped when zebrad was spawned, a moment before
+        // zebrad's first line; the run begins at that line, so the note moves to it.
         if let Some(note) = self.launcher_events.back_mut()
             && note.kind == EventKind::Started
             && note.at < at
@@ -1003,11 +1003,22 @@ mod tests {
         }
     }
 
-    fn launcher(seq: u64, message: &str) -> LogLine {
+    /// A launcher note as the supervisor writes it: stamped, at INFO, from its own target.
+    fn launcher_at(seq: u64, timestamp: &str, message: &str) -> LogLine {
         LogLine {
             stream: LogStream::Launcher,
-            ..continuation(seq, message)
+            ..stamped(
+                seq,
+                timestamp,
+                LogLevel::Info,
+                "launcher_core::supervisor",
+                message,
+            )
         }
+    }
+
+    fn launcher(seq: u64, message: &str) -> LogLine {
+        launcher_at(seq, T0, message)
     }
 
     fn progress(seq: u64, timestamp: &str, height: u64) -> LogLine {
@@ -1580,7 +1591,11 @@ mod tests {
             "zebrad::commands::start",
             "stopping zebrad",
         ));
-        lines.push(launcher(n + 3, "zebrad exited with code 0"));
+        lines.push(launcher_at(
+            n + 3,
+            "2026-10-23T18:40:03Z",
+            "zebrad exited with code 0",
+        ));
         lines.extend(startup(n + 4, "2026-10-23T18:41:00Z"));
         let m = n + 4 + startup(0, "2026-10-23T18:41:00Z").len() as u64;
         lines.push(stamped(
@@ -1590,19 +1605,27 @@ mod tests {
             "zebrad::signal",
             "stdin closed, starting shutdown",
         ));
-        lines.push(launcher(m + 1, "zebrad exited with code 1"));
+        lines.push(launcher_at(
+            m + 1,
+            "2026-10-23T18:41:32Z",
+            "zebrad exited with code 1",
+        ));
         insights.ingest(&lines, at("2026-10-23T18:42:00Z"));
 
         assert_eq!(insights.runs().len(), 2);
         let first = &insights.runs()[0];
         assert_eq!(first.shutdown_reason.as_deref(), Some("SIGTERM"));
-        assert_eq!(first.stopped_at, Some(at("2026-10-23T18:40:02Z")));
+        assert_eq!(
+            first.stopped_at,
+            Some(at("2026-10-23T18:40:02Z")),
+            "zebrad's own stop line, not the exit note after it"
+        );
         let second = insights.current_run().unwrap();
         assert_eq!(second.started_at, at("2026-10-23T18:41:00Z"));
         assert_eq!(second.shutdown_reason.as_deref(), Some("stdin closed"));
-        // No `stopping zebrad`: the launcher's exit note gives the stop time, dated by the
-        // line before it rather than by the ingest time.
-        assert_eq!(second.stopped_at, Some(at("2026-10-23T18:41:30Z")));
+        // No `stopping zebrad`: the launcher's exit note, stamped by the supervisor, gives the
+        // stop time.
+        assert_eq!(second.stopped_at, Some(at("2026-10-23T18:41:32Z")));
         // Per-run facts were reset by the second run and refilled by its startup.
         assert_eq!(insights.peers().initial_successes, 12);
         assert_eq!(insights.checkpoints().blocks_verified, 800);
@@ -1626,7 +1649,7 @@ mod tests {
         let mut insights = Insights::default();
         insights.ingest(
             &[
-                launcher(0, "zebrad exited with code 101"),
+                launcher_at(0, "2026-10-23T18:36:00Z", "zebrad exited with code 101"),
                 stderr(1, "zebrad fatal error: boom"),
             ],
             at(T0),
@@ -1634,8 +1657,8 @@ mod tests {
         assert_eq!(insights.current_run(), None);
         assert_eq!(insights.problems(5).len(), 1);
         assert_eq!(insights.problems(5)[0].level, ProblemLevel::Stderr);
-        // With no timestamped line anywhere, the ingest time is all there is.
-        assert_eq!(insights.problems(5)[0].first, at(T0));
+        // The stderr line takes the time of the stamped note before it, not the ingest time.
+        assert_eq!(insights.problems(5)[0].first, at("2026-10-23T18:36:00Z"));
     }
 
     #[test]
@@ -1714,7 +1737,11 @@ mod tests {
         let mut insights = Insights::default();
         assert_eq!(insights.last_at(), None);
         insights.ingest(&[launcher(0, "zebrad started (pid 1)")], at(T0));
-        assert_eq!(insights.last_at(), None, "a note has no stamp of its own");
+        assert_eq!(
+            insights.last_at(),
+            Some(at(T0)),
+            "a note carries its own stamp"
+        );
         insights.ingest(
             &[
                 stamped(1, "2026-10-23T18:35:01Z", LogLevel::Info, "t", "a"),
@@ -1725,10 +1752,14 @@ mod tests {
         assert_eq!(insights.last_at(), Some(at("2026-10-23T18:35:01Z")));
     }
 
-    /// The real stream of a run: the launcher's start note, the startup, a progress line, a
-    /// problem, a stop and the exit note.
-    fn full_run(first_seq: u64, stamp: &str) -> Vec<LogLine> {
-        let mut lines = vec![launcher(first_seq, "zebrad started (pid 4242)")];
+    /// The real stream of a run's start: the launcher's note, stamped when zebrad was spawned,
+    /// then zebrad's startup lines from `stamp` on.
+    fn full_run(first_seq: u64, note_stamp: &str, stamp: &str) -> Vec<LogLine> {
+        let mut lines = vec![launcher_at(
+            first_seq,
+            note_stamp,
+            "zebrad started (pid 4242)",
+        )];
         lines.extend(startup(first_seq + 1, stamp));
         lines
     }
@@ -1736,7 +1767,7 @@ mod tests {
     #[test]
     fn events_tell_the_run_newest_first() {
         let mut insights = Insights::default();
-        let mut lines = full_run(0, "2026-10-23T18:35:01Z");
+        let mut lines = full_run(0, "2026-10-23T18:35:00Z", "2026-10-23T18:35:01Z");
         let n = lines.len() as u64;
         lines.push(progress(n, "2026-10-23T18:36:01Z", 2_950_000));
         lines.push(stamped(
@@ -1779,7 +1810,7 @@ mod tests {
                 (EventKind::Started, "zebrad started (pid 4242)"),
             ]
         );
-        // The start note took the run's first stamp, not the ingest time or an earlier one.
+        // The start note, stamped a second before zebrad's first line, took that line's time.
         assert_eq!(events[3].at, at("2026-10-23T18:35:01Z"));
         assert_eq!(
             events[0].at,
@@ -1812,7 +1843,7 @@ mod tests {
     #[test]
     fn events_fold_earlier_runs_into_one_line_and_keep_the_gap() {
         let mut insights = Insights::default();
-        let mut lines = full_run(0, "2026-10-23T18:35:01Z");
+        let mut lines = full_run(0, "2026-10-23T18:35:00Z", "2026-10-23T18:35:01Z");
         let n = lines.len() as u64;
         lines.push(stamped(
             n,
@@ -1826,9 +1857,21 @@ mod tests {
             "thread 'main' panicked at zebrad/src/x.rs:1:1:",
         ));
         lines.push(stderr(n + 2, "boom"));
-        lines.push(launcher(n + 3, "zebrad exited (exit code 101, Crash)"));
-        lines.push(launcher(n + 4, "restarting zebrad in 5s"));
-        lines.extend(full_run(n + 5, "2026-10-23T18:40:06Z"));
+        lines.push(launcher_at(
+            n + 3,
+            "2026-10-23T18:40:01Z",
+            "zebrad exited (exit code 101, Crash)",
+        ));
+        lines.push(launcher_at(
+            n + 4,
+            "2026-10-23T18:40:01Z",
+            "restarting zebrad in 5s",
+        ));
+        lines.extend(full_run(
+            n + 5,
+            "2026-10-23T18:40:06Z",
+            "2026-10-23T18:40:07Z",
+        ));
         insights.ingest(&lines, at("2026-10-23T18:41:00Z"));
 
         let events = insights.events(20);
@@ -1849,10 +1892,14 @@ mod tests {
         );
         assert_eq!(
             events[1].at,
-            at("2026-10-23T18:40:06Z"),
+            at("2026-10-23T18:40:07Z"),
             "re-dated to the run's first line"
         );
-        assert_eq!(events[3].at, at("2026-10-23T18:40:00Z"));
+        assert_eq!(
+            events[3].at,
+            at("2026-10-23T18:40:01Z"),
+            "the exit note's own stamp"
+        );
         assert_eq!(events[3].tone, Tone::Critical);
         // The first run's stderr problem is not this run's.
         assert!(events.iter().all(|e| e.kind != EventKind::Problem));
@@ -1865,7 +1912,10 @@ mod tests {
     #[test]
     fn session_events_merge_with_the_log() {
         let mut insights = Insights::default();
-        insights.ingest(&full_run(0, "2026-10-23T18:35:01Z"), at(T0));
+        insights.ingest(
+            &full_run(0, "2026-10-23T18:35:00Z", "2026-10-23T18:35:01Z"),
+            at(T0),
+        );
         // The UI saw the same start two seconds later, and a stop the log has not caught up with.
         insights.record_session_event(RunEvent {
             at: at("2026-10-23T18:35:03Z"),

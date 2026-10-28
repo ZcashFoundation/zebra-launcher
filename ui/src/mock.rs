@@ -452,10 +452,15 @@ impl Mock {
         self.notes.update(|notes| notes.push(line));
     }
 
-    /// Adds a launcher note to the log stream, as the supervisor's `note` does: a plain line
-    /// without a timestamp, level or target.
+    /// Adds a launcher note to the log stream, as the supervisor's `note` does: stamped now,
+    /// at INFO, from the supervisor's target.
     fn note(&self, text: impl Into<String>) {
-        self.push_line(LogStream::Launcher, None, None, text.into());
+        self.push_line(
+            LogStream::Launcher,
+            Some(LogLevel::Info),
+            Some("launcher_core::supervisor"),
+            text.into(),
+        );
     }
 
     /// One of zebrad's own INFO lines, stamped now.

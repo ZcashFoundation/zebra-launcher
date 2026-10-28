@@ -17,9 +17,10 @@ use crate::format::{exit_class_text, exit_code_words, rough_duration};
 use super::{EventKind, Problem, ProblemLevel, RunEvent, Tone, fields::message_text};
 
 /// A session event and a log event of the same kind this close together describe one
-/// happening. Launcher notes carry no timestamp and take the time of the stamped line before
-/// them, which can be a minute old when zebrad hung before it was killed.
-pub const DEDUPE_WINDOW: Duration = Duration::from_secs(120);
+/// happening. The supervisor stamps its notes, so the two differ by the exit drain and the
+/// status delivery, seconds at most; the window stays well under the shortest restart backoff,
+/// so a replayed restart decision is not mistaken for the next crash's.
+pub const DEDUPE_WINDOW: Duration = Duration::from_secs(10);
 
 /// Milestones this close together share one row.
 pub const COLLAPSE_WINDOW: Duration = Duration::from_secs(2);
@@ -1218,5 +1219,14 @@ mod tests {
         assert_eq!(merge_events(Vec::new(), &session, 10).len(), 6);
         let only_log = vec![ev(1, EventKind::Exited, "zebrad exited: crash (code 101)")];
         assert_eq!(merge_events(only_log, &[], 10).len(), 1);
+        // A restart decision only the log knows (a replayed history) is not the next crash's
+        // restart: the window is shorter than the shortest backoff.
+        let replayed = vec![ev(300, EventKind::Restarting, "Restarting in 10 s")];
+        let next = vec![ev(
+            325,
+            EventKind::Restarting,
+            "Restarting in 20 s (crash 3)",
+        )];
+        assert_eq!(merge_events(replayed, &next, 10).len(), 2);
     }
 }
