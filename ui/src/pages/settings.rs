@@ -65,6 +65,26 @@ fn parse_grafana_url(input: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// True when the form differs from `stored`: a choice in `draft`, or a text field that reads
+/// differently. A text that does not parse differs whatever is stored, even where its parsed
+/// value would read as the stored one (a bad URL where none is stored): the user typed
+/// something the form will not save, so Revert is offered and a change made elsewhere does
+/// not refill the form over it.
+fn draft_differs(stored: &Settings, draft: &Settings, fields: &TextFields) -> bool {
+    let (Ok(grafana_url), Ok(stop_grace_secs)) = (
+        parse_grafana_url(&fields.grafana_url),
+        parse_stop_grace(&fields.stop_grace_secs),
+    ) else {
+        return true;
+    };
+    let edited = Settings {
+        grafana_url,
+        stop_grace_secs,
+        ..draft.clone()
+    };
+    edited != *stored
+}
+
 /// A change in flight on this page. Only one runs at a time: Save sends the whole settings
 /// object, so a Save racing a data folder change could store the folder it read before the
 /// change, and neither should run while node data is being deleted.
@@ -94,14 +114,6 @@ pub fn SettingsPage() -> impl IntoView {
         );
         draft.set(loaded);
     };
-    // The form's current values as settings, for comparing with what is stored.
-    let edited = move || {
-        let mut edited = draft.get()?;
-        let f = fields.get();
-        edited.grafana_url = parse_grafana_url(&f.grafana_url).ok().flatten();
-        edited.stop_grace_secs = parse_stop_grace(&f.stop_grace_secs).unwrap_or(0);
-        Some(edited)
-    };
     // Fill the form when the settings arrive, and again when they change elsewhere (the
     // first-run flow, the data folder) while the form is not edited. The data folder is not a
     // form field, so it does not count as an edit.
@@ -109,9 +121,14 @@ pub fn SettingsPage() -> impl IntoView {
         let loaded = state.settings.get();
         let untouched = match previous.flatten() {
             None => true,
-            Some(previous) => untrack(edited).is_none_or(|mut edited| {
-                edited.data_dir = previous.data_dir.clone();
-                edited == previous
+            Some(previous) => draft.with_untracked(|draft| {
+                draft.as_ref().is_none_or(|draft| {
+                    let previous = Settings {
+                        data_dir: draft.data_dir.clone(),
+                        ..previous
+                    };
+                    !fields.with_untracked(|fields| draft_differs(&previous, draft, fields))
+                })
             }),
         };
         if loaded.is_some() && untouched {
@@ -134,13 +151,17 @@ pub fn SettingsPage() -> impl IntoView {
         Memo::new(move |_| fields.with(|f| parse_grafana_url(&f.grafana_url).err()));
     let grace_error =
         Memo::new(move |_| fields.with(|f| parse_stop_grace(&f.stop_grace_secs).err()));
+    // Save and Revert are offered while the form differs from what is stored.
     let dirty = move || {
-        let Some(edited) = edited() else {
-            return false;
-        };
-        state
-            .settings
-            .with(|loaded| loaded.as_ref() != Some(&edited))
+        draft.with(|draft| {
+            draft.as_ref().is_some_and(|draft| {
+                state.settings.with(|stored| {
+                    stored.as_ref().is_none_or(|stored| {
+                        fields.with(|fields| draft_differs(stored, draft, fields))
+                    })
+                })
+            })
+        })
     };
 
     let save = move |event: leptos::ev::SubmitEvent| {
@@ -826,6 +847,43 @@ mod tests {
         assert!(parse_stop_grace("3601").is_err());
         assert!(parse_stop_grace("1.5").is_err());
         assert!(parse_stop_grace("").is_err());
+    }
+
+    #[test]
+    fn a_draft_differs_by_a_choice_a_text_field_or_a_text_that_does_not_parse() {
+        let stored = Settings::default();
+        let fields = TextFields::from_settings(&stored);
+        assert!(!draft_differs(&stored, &stored, &fields));
+        // A choice.
+        let draft = Settings {
+            close_to_tray: !stored.close_to_tray,
+            ..stored.clone()
+        };
+        assert!(draft_differs(&stored, &draft, &fields));
+        // A text field is read as it would be saved: padding is not a change, a new URL is.
+        let padded = TextFields {
+            stop_grace_secs: format!(" {} ", stored.stop_grace_secs),
+            ..fields.clone()
+        };
+        assert!(!draft_differs(&stored, &stored, &padded));
+        let other_url = TextFields {
+            grafana_url: "http://127.0.0.1:3000".into(),
+            ..fields.clone()
+        };
+        assert!(draft_differs(&stored, &stored, &other_url));
+        // A text that does not parse differs whatever is stored, even where its parsed value
+        // would read as the stored one: no URL is stored, and a bad URL is not "no URL".
+        assert_eq!(stored.grafana_url, None);
+        let bad_url = TextFields {
+            grafana_url: "http://example.com".into(),
+            ..fields.clone()
+        };
+        assert!(draft_differs(&stored, &stored, &bad_url));
+        let bad_grace = TextFields {
+            stop_grace_secs: "0".into(),
+            ..fields
+        };
+        assert!(draft_differs(&stored, &stored, &bad_grace));
     }
 
     #[test]
