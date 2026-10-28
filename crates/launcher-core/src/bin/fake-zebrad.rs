@@ -66,7 +66,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use launcher_core::clock::timestamp;
+use launcher_core::clock::rfc3339;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -828,7 +828,10 @@ fn wait_for_signal() -> impl std::future::Future<Output = Shutdown> + 'static {
 /// Prints a line in zebrad's `tracing` Full format.
 fn log(level: &str, spans: Option<&str>, target: &str, message: &str) {
     let spans = spans.map(|s| format!("{s}: ")).unwrap_or_default();
-    println!("{} {level:>5} {spans}{target}: {message}", timestamp());
+    println!(
+        "{} {level:>5} {spans}{target}: {message}",
+        rfc3339(SystemTime::now())
+    );
 }
 
 /// Mimics a release-build panic: Rust's panic header on stderr, the message on

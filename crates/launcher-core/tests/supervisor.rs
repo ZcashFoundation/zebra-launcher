@@ -6,16 +6,17 @@
 use std::{
     io::{BufRead, BufReader},
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use launcher_core::{
+    clock,
     logfile::RotatingLogConfig,
     logs::Detector,
     pidfile,
-    supervisor::{self, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle},
+    supervisor::{self, Note, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle},
 };
-use launcher_types::{ExitClass, LogEvent, LogStream, Phase};
+use launcher_types::{ExitClass, LogEvent, LogLevel, LogStream, Phase};
 use tokio::time::timeout;
 
 #[path = "support/helpers.rs"]
@@ -716,4 +717,83 @@ async fn stop_during_startup_and_restart() {
     within(handle.restart()).await.expect("restart");
     assert_eq!(handle.status().phase, Phase::Running);
     within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launcher_notes_join_the_log_stream_with_their_fields() {
+    let fx = fixture("ok");
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    let mut sub = within(handle.subscribe()).await.expect("subscribe");
+
+    // A note from a caller, such as the launcher's tracing layer. It never waits.
+    let before = SystemTime::now();
+    assert!(handle.note(
+        LogLevel::Warn,
+        "zebra_launcher::updater",
+        "update check failed err=offline"
+    ));
+    let after = SystemTime::now();
+    let line = within(sub.live.recv()).await.expect("live line");
+    assert_eq!(line.seq, 0);
+    assert_eq!(line.stream, LogStream::Launcher);
+    assert_eq!(line.level, Some(LogLevel::Warn));
+    assert_eq!(line.target.as_deref(), Some("zebra_launcher::updater"));
+    assert_eq!(line.message, "update check failed err=offline");
+    assert_eq!(line.spans, None);
+    assert!(!line.is_gap_marker());
+    // Timestamped by the launcher's clock in zebrad's format, so the lines sort together.
+    let timestamp = line.timestamp.clone().expect("a timestamp");
+    assert!(
+        clock::rfc3339(before) <= timestamp && timestamp <= clock::rfc3339(after),
+        "{timestamp}"
+    );
+
+    // A note with its own time keeps it.
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_210_144);
+    assert!(handle.note_at(Note {
+        at,
+        level: LogLevel::Error,
+        target: "zebra_launcher::apply".into(),
+        message: "zebrad refused the new configuration".into(),
+    }));
+    let line = within(sub.live.recv()).await.expect("live line");
+    assert_eq!(line.seq, 1);
+    assert_eq!(
+        line.timestamp.as_deref(),
+        Some("2026-10-28T17:55:44.000000Z")
+    );
+    assert_eq!(line.level, Some(LogLevel::Error));
+    assert_eq!(line.target.as_deref(), Some("zebra_launcher::apply"));
+
+    // The actor's own notes carry the same fields.
+    within(handle.start()).await.expect("start");
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert_eq!(
+        history[0].message, "update check failed err=offline",
+        "notes are retained like any line"
+    );
+    let started = history
+        .iter()
+        .find(|l| l.message.starts_with("zebrad started"))
+        .expect("start note");
+    assert_eq!(started.stream, LogStream::Launcher);
+    assert_eq!(started.level, Some(LogLevel::Info));
+    assert_eq!(started.target.as_deref(), Some("launcher_core::supervisor"));
+    assert!(
+        started
+            .timestamp
+            .as_deref()
+            .is_some_and(|t| t.ends_with('Z'))
+    );
+
+    within(handle.shutdown()).await.expect("shutdown");
+    // On disk the line is in zebrad's format, behind the launcher marker.
+    let log = std::fs::read_to_string(fx.config.log_file.as_ref().unwrap().path.clone())
+        .unwrap_or_default();
+    assert!(
+        log.contains(
+            "[launcher] 2026-10-28T17:55:44.000000Z ERROR zebra_launcher::apply: zebrad refused the new configuration"
+        ),
+        "log file: {log:?}"
+    );
 }
