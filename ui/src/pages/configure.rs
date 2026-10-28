@@ -30,6 +30,28 @@ use crate::{
 /// How long the line last edited in the form stays highlighted.
 const FLASH_FOR: Duration = Duration::from_millis(1200);
 
+/// The gap the stuck footer keeps above itself, as `--cfg-footer-gap` in styles.css has it;
+/// the value used should the token be missing from the stylesheet.
+const FOOTER_GAP_PX: i32 = 8;
+
+/// The pixel length of a custom property on `:root`, or `fallback` when it is missing or not
+/// a length in px. The page shares such numbers with the stylesheet by reading its tokens
+/// rather than repeating them.
+fn root_px(name: &str, fallback: i32) -> i32 {
+    document()
+        .document_element()
+        .and_then(|root| window().get_computed_style(&root).ok().flatten())
+        .and_then(|style| style.get_property_value(name).ok())
+        .and_then(|value| parse_px(&value))
+        .unwrap_or(fallback)
+}
+
+/// `8px` (spaces around it allowed) as 8, rounded; `None` for any other unit or text.
+fn parse_px(value: &str) -> Option<i32> {
+    let number: f64 = value.trim().strip_suffix("px")?.trim().parse().ok()?;
+    number.is_finite().then(|| number.round() as i32)
+}
+
 #[component]
 pub fn Configure() -> impl IntoView {
     let editor = ConfigEditor::new();
@@ -134,8 +156,9 @@ pub fn Configure() -> impl IntoView {
             || editor.load.with(|load| *load == Load::Loading)
     });
     // The file pane's height budget: the scrolling page's height minus the stuck footer's (and
-    // its 8px gap), measured, so the header's and the footer's banners shrink the pane instead
-    // of hiding its bottom under the footer. A hidden tab measures 0 and is skipped.
+    // its gap, the stylesheet's `--cfg-footer-gap`), measured, so the header's and the footer's
+    // banners shrink the pane instead of hiding its bottom under the footer. A hidden tab
+    // measures 0 and is skipped.
     let footer = NodeRef::<html::Div>::new();
     let pane_room = RwSignal::new(None::<i32>);
     Effect::new(move |_| {
@@ -145,12 +168,13 @@ pub fn Configure() -> impl IntoView {
         let Some(page) = footer.closest(".page").ok().flatten() else {
             return;
         };
+        let gap = root_px("--cfg-footer-gap", FOOTER_GAP_PX);
         let measure = {
             let (footer, page) = (footer.clone(), page.clone());
             move || {
                 let height = page.client_height();
                 if height > 0 {
-                    pane_room.set(Some(height - footer.offset_height() - 8));
+                    pane_room.set(Some(height - footer.offset_height() - gap));
                 }
             }
         };
@@ -439,5 +463,21 @@ fn reveal_line(body: NodeRef<html::Div>, number: usize) {
         body.client_height(),
     ) {
         body.set_scroll_top(top);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stylesheet_length_in_px_is_read_and_anything_else_is_not() {
+        assert_eq!(parse_px("8px"), Some(8));
+        assert_eq!(parse_px(" 8px "), Some(8));
+        assert_eq!(parse_px("8.4px"), Some(8));
+        assert_eq!(parse_px("8"), None);
+        assert_eq!(parse_px("1em"), None);
+        assert_eq!(parse_px(""), None);
+        assert_eq!(parse_px("px"), None);
     }
 }
