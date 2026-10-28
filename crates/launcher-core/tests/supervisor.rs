@@ -227,7 +227,7 @@ fn draining_crash_fixture(linger: Duration) -> Fixture {
 /// has had time to record the exit, while its pipes are still open.
 async fn start_and_wait_for_the_crash(handle: &SupervisorHandle) {
     let mut sub = within(handle.subscribe()).await.expect("subscribe");
-    within(handle.start()).await.expect("start");
+    start_a_crashing_fake(handle).await;
     loop {
         let line = within(sub.live.recv()).await.expect("live line");
         if line.message.contains("simulated crash") {
@@ -333,12 +333,22 @@ async fn config_error_fails_without_restarting() {
     within(handle.shutdown()).await.expect("shutdown");
 }
 
+/// Starts a fake in `crash` mode. It exits right after it reports `Starting
+/// zebrad`, and that line and the exit reach the actor from different tasks,
+/// so `start` either succeeds or learns of the exit; the crash is handled the
+/// same way afterwards, which is what these tests check.
+async fn start_a_crashing_fake(handle: &SupervisorHandle) {
+    match within(handle.start()).await {
+        Ok(()) | Err(SupervisorError::ExitedDuringStart(_)) => {}
+        Err(err) => panic!("start: {err}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crashes_restart_with_backoff_then_give_up() {
     let fx = fixture("crash");
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
-    // The fake crashes right after it reports `Starting zebrad`, so start succeeds.
-    within(handle.start()).await.expect("start");
+    start_a_crashing_fake(&handle).await;
     let status = wait_phase(&handle, |p| matches!(p, Phase::Failed { .. })).await;
     assert_eq!(
         status.phase,
