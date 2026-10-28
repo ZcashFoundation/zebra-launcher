@@ -491,23 +491,28 @@ pub fn CheckForUpdate(
 pub fn UpdateStatus() -> impl IntoView {
     let state = AppState::get();
 
+    // Built with the updater info; the two times in it follow the clock on their own.
     let summary = move || {
-        let now = state.now.get();
         with_info(state, |info| {
             let Some(info) = info else {
                 return view! { <p class="muted">"Reading the updater state…"</p> }.into_any();
             };
-            let last_check = info
-                .last_successful_check
-                .map_or_else(|| "never".to_owned(), |at| relative(at, now));
+            let last_check = info.last_successful_check;
+            let update_state = info.state.clone();
             view! {
                 <p class="muted">
                     {format!(
-                        "This is Zebra Launcher {}. Last successful check: {last_check}.",
+                        "This is Zebra Launcher {}. Last successful check: ",
                         info.current_version,
                     )}
+                    {move || {
+                        last_check.map_or_else(|| "never".to_owned(), |at| relative(at, state.now.get()))
+                    }}
+                    "."
                 </p>
-                <p class="update-state">{update_state_text(&info.state, now)}</p>
+                <p class="update-state">
+                    {move || update_state_text(&update_state, state.now.get())}
+                </p>
             }
             .into_any()
         })
