@@ -41,7 +41,9 @@ pub const FEW_PEERS_FOR: Duration = Duration::from_secs(5 * 60);
 /// [`STALL_PROBLEM`].
 pub const STALL_ATTENTION: Duration = Duration::from_secs(2 * 60);
 pub const STALL_PROBLEM: Duration = Duration::from_secs(10 * 60);
-/// No new block at the tip, with the tip estimate frozen too, this long wants a look.
+/// No new block at the tip this long wants a look. zebrad's tip estimate keeps creeping a
+/// block per 75 s meanwhile: a frozen height under a moving estimate is what a tip stall
+/// looks like.
 pub const STALL_AT_TIP: Duration = Duration::from_secs(10 * 60);
 /// Errors in the log newer than this want a look.
 pub const RECENT_ERRORS: Duration = Duration::from_secs(10 * 60);
@@ -722,22 +724,29 @@ impl<'a> Facts<'a> {
         }
     }
 
-    // Rule 10.
+    // Rule 10. zebrad's own stall line counts too, since rule 9 leaves the tip to this rule.
     fn quiet_at_tip(&self) -> Option<Verdict> {
         let latest = self.latest?;
         if !latest.at_tip() || latest.peers == 0 {
             return None;
         }
         let quiet = self.quiet_for()?;
-        let estimate_quiet = self.ago(self.unchanged_since(Field::EstimatedHeight)?);
-        if quiet < STALL_AT_TIP || estimate_quiet < STALL_AT_TIP {
+        let stage_stalled = self.stage() == Some(SyncStage::Stalled);
+        if quiet < STALL_AT_TIP && !stage_stalled {
             return None;
         }
+        let reason = match latest.remaining() {
+            0 | 1 => "Blocks usually arrive every 75 s · the tip estimate has not moved".to_owned(),
+            behind => format!(
+                "Blocks usually arrive every 75 s · the tip estimate is {} blocks ahead",
+                thousands(behind)
+            ),
+        };
         Some(Verdict::new(
             Level::Attention,
             10,
             format!("No new block {}", for_text(quiet)),
-            "Blocks usually arrive every 75 s · the tip estimate has not moved",
+            reason,
             vec![Action::ShowInLogs("sync".to_owned())],
         ))
     }
@@ -1917,37 +1926,75 @@ mod tests {
     fn rule_10_quiet_at_tip() {
         let mut scene = Scene::at_tip(1200);
         assert_eq!(scene.verdict().rule, 18);
-        // Height and estimate frozen for ten minutes with peers: attention.
+        // The shape of a tip stall: the height freezes at 3,120,008 after ten minutes while
+        // zebrad's time-based estimate keeps rising a block every 75 s, so the node stays
+        // "at the tip" (99.99 % or more) for hours. Attention after ten quiet minutes.
         let frozen = Scene::at_tip(600);
         scene.history = frozen.history.clone();
-        for secs in (605..=1200).step_by(5) {
-            scene.history.push(&NodeStats {
-                estimated_height: 3_120_008,
-                verification_progress: 1.0,
+        let creeping = |secs: u64| {
+            let estimate = 3_120_008 + (secs - 600) / 75;
+            NodeStats {
+                estimated_height: estimate,
+                verification_progress: 3_120_008.0 / estimate as f64,
                 ..stats(secs, 3_120_008, 12)
-            });
+            }
+        };
+        for secs in (605..=1200).step_by(5) {
+            scene.history.push(&creeping(secs));
         }
-        scene.stats = Some(NodeStats {
-            estimated_height: 3_120_008,
-            verification_progress: 1.0,
-            ..stats(1200, 3_120_008, 12)
-        });
+        scene.stats = Some(creeping(1200));
+        assert!(scene.stats.as_ref().unwrap().verification_progress < 1.0);
         let verdict = scene.verdict();
         assert_eq!((verdict.rule, verdict.level), (10, Level::Attention));
         assert_eq!(verdict.headline, "No new block for 10 min");
         assert_eq!(
             verdict.reason,
-            "Blocks usually arrive every 75 s · the tip estimate has not moved"
+            "Blocks usually arrive every 75 s · the tip estimate is 8 blocks ahead"
         );
         assert_eq!(verdict.actions, vec![Action::ShowInLogs("sync".into())]);
-        // The estimate moving on means the network has blocks we lack: not this rule.
-        scene.history.push(&NodeStats {
-            estimated_height: 3_120_020,
+        // A minute short of the threshold: still healthy.
+        scene.now = t(1140);
+        scene.stats = Some(creeping(1140));
+        assert_eq!(scene.verdict().rule, 18);
+        // An estimate that stands still with the height reads as "has not moved".
+        let mut still = Scene::at_tip(600);
+        for secs in (605..=1200).step_by(5) {
+            still.history.push(&NodeStats {
+                estimated_height: 3_120_008,
+                verification_progress: 1.0,
+                ..stats(secs, 3_120_008, 12)
+            });
+        }
+        still.stats = Some(NodeStats {
+            estimated_height: 3_120_008,
             verification_progress: 1.0,
-            ..stats(1205, 3_120_008, 12)
+            ..stats(1200, 3_120_008, 12)
         });
-        scene.now = t(1205);
-        assert_ne!(scene.verdict().rule, 10);
+        still.now = t(1200);
+        let verdict = still.verdict();
+        assert_eq!(verdict.rule, 10);
+        assert_eq!(
+            verdict.reason,
+            "Blocks usually arrive every 75 s · the tip estimate has not moved"
+        );
+        // zebrad's own stall line fires the rule before the ten minutes are up, since rule 9
+        // leaves the tip alone; its time wins when longer than ours.
+        let mut stalled = Scene::at_tip(600);
+        stalled.frozen_from(300);
+        stalled.insights = insights(&[
+            tracing_started(0, 1),
+            progress(
+                1,
+                590,
+                "chain updates have stalled, state height has not increased for 5 minutes. Hint: check your network connection sync_percent=99.999% current_height=Height(3120003) time_since_last_state_block=5m 0s",
+            ),
+        ]);
+        let verdict = stalled.verdict();
+        assert_eq!((verdict.rule, verdict.level), (10, Level::Attention));
+        assert_eq!(verdict.headline, "No new block for 5 min");
+        // Without peers the stall is rule 8's, not this one's.
+        stalled.peers_from(0, 0);
+        assert_eq!(stalled.verdict().rule, 8);
     }
 
     #[test]
