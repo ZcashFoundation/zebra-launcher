@@ -5,7 +5,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Seek, SeekFrom, Write},
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -162,10 +162,21 @@ impl RotatingFile {
         Ok(())
     }
 
-    /// Empties the current file in place.
+    /// Empties the current file and reopens it.
+    ///
+    /// Not `set_len(0)` on the open handle: that handle is append-only, and on
+    /// Windows an append-only handle may not change the file's length (access
+    /// denied). A second, write handle truncates the file; the append handle
+    /// is then reopened so the next line starts at the new end.
     fn truncate(&mut self) -> io::Result<()> {
-        self.file.set_len(0)?;
-        self.file.seek(SeekFrom::Start(0))?;
+        self.file.flush()?;
+        let path = &self.config.path;
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        self.file = OpenOptions::new().create(true).append(true).open(path)?;
         self.size = 0;
         Ok(())
     }
