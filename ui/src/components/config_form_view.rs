@@ -365,6 +365,103 @@ fn field_row(
     }
 }
 
+/// What differs between the text inputs of [`user_control`]: the attributes a kind sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TextAttrs {
+    /// `cfg-mono` for a path or an address.
+    class: Option<&'static str>,
+    placeholder: Option<&'static str>,
+    /// Off for anything that is not prose.
+    spellcheck_off: bool,
+    inputmode: Option<&'static str>,
+}
+
+impl TextAttrs {
+    /// Prose: the browser's defaults.
+    const NONE: Self = Self {
+        class: None,
+        placeholder: None,
+        spellcheck_off: false,
+        inputmode: None,
+    };
+    /// A path, here and as the custom folder of a BoolOrPath field.
+    const PATH: Self = Self {
+        class: Some("cfg-mono"),
+        spellcheck_off: true,
+        ..Self::NONE
+    };
+}
+
+/// The attributes of a text kind's input ([`TextAttrs::NONE`] for a kind with another control).
+fn text_attrs(field: &Field) -> TextAttrs {
+    match field.kind {
+        Kind::Integer { .. } => TextAttrs {
+            spellcheck_off: true,
+            inputmode: Some("numeric"),
+            ..TextAttrs::NONE
+        },
+        Kind::Path => TextAttrs::PATH,
+        Kind::SocketAddr { .. } => TextAttrs {
+            placeholder: Some("127.0.0.1:8232"),
+            ..TextAttrs::PATH
+        },
+        Kind::Duration => TextAttrs {
+            placeholder: Some(field.default.unwrap_or("30s")),
+            ..TextAttrs::NONE
+        },
+        Kind::Text | Kind::Bool | Kind::Choice(_) | Kind::StringList | Kind::BoolOrPath => {
+            TextAttrs::NONE
+        }
+    }
+}
+
+/// A text input of the form: what links it to its label and meta line, and its attributes.
+struct TextInput {
+    id: String,
+    hint_id: String,
+    attrs: TextAttrs,
+    /// An `aria-label` for an input that is part of a control and has no `<label>` of its own.
+    label: Option<String>,
+    /// Hidden while it is not the control's chosen option.
+    hidden: Option<Signal<bool>>,
+}
+
+/// The one text input of the form, bound to a field's text: `shown` is its value, `invalid`
+/// marks it, `on_text` gets what is typed and `on_blur` runs when it loses focus (the
+/// unset-on-empty rule).
+fn text_input(
+    input: TextInput,
+    shown: Signal<String>,
+    invalid: impl Fn() -> bool + Copy + Send + Sync + 'static,
+    on_text: impl Fn(web_sys::Event) + Copy + 'static,
+    on_blur: impl Fn(web_sys::FocusEvent) + Copy + 'static,
+) -> impl IntoView {
+    let TextInput {
+        id,
+        hint_id,
+        attrs,
+        label,
+        hidden,
+    } = input;
+    view! {
+        <input
+            type="text"
+            id=id
+            class=attrs.class
+            placeholder=attrs.placeholder
+            spellcheck=attrs.spellcheck_off.then_some("false")
+            inputmode=attrs.inputmode
+            aria-label=label
+            aria-describedby=hint_id
+            hidden=move || hidden.is_some_and(|hidden| hidden.get())
+            class:invalid=invalid
+            prop:value=move || shown.get()
+            on:input=on_text
+            on:blur=on_blur
+        />
+    }
+}
+
 /// A user field's signals.
 #[derive(Clone, Copy)]
 struct Values {
@@ -413,76 +510,27 @@ fn user_control(
             </div>
         }
         .into_any(),
-        // A text input, not a number one: a number input's value is "" while it holds a
-        // not-yet-valid number such as a lone "-", and writing that "" back as the controlled
-        // value erases the minus sign as it is typed. `validate` checks the range instead.
-        Kind::Integer { .. } => view! {
-            <input
-                type="text"
-                inputmode="numeric"
-                spellcheck="false"
-                id=input_id
-                aria-describedby=hint_id.clone()
-                class:invalid=invalid
-                prop:value=move || shown.get()
-                on:input=on_text
-                on:blur=unset_if_empty
-            />
-        }
-        .into_any(),
-        Kind::Text => view! {
-            <input
-                type="text"
-                id=input_id
-                aria-describedby=hint_id.clone()
-                class:invalid=invalid
-                prop:value=move || shown.get()
-                on:input=on_text
-                on:blur=unset_if_empty
-            />
-        }
-        .into_any(),
-        Kind::Path => view! {
-            <input
-                type="text"
-                class="cfg-mono"
-                spellcheck="false"
-                id=input_id
-                aria-describedby=hint_id.clone()
-                class:invalid=invalid
-                prop:value=move || shown.get()
-                on:input=on_text
-                on:blur=unset_if_empty
-            />
-        }
-        .into_any(),
-        Kind::SocketAddr { .. } => view! {
-            <input
-                type="text"
-                class="cfg-mono"
-                spellcheck="false"
-                placeholder="127.0.0.1:8232"
-                id=input_id
-                aria-describedby=hint_id.clone()
-                class:invalid=invalid
-                prop:value=move || shown.get()
-                on:input=on_text
-                on:blur=unset_if_empty
-            />
-        }
-        .into_any(),
-        Kind::Duration => view! {
-            <input
-                type="text"
-                placeholder=default.unwrap_or("30s")
-                id=input_id
-                aria-describedby=hint_id.clone()
-                class:invalid=invalid
-                prop:value=move || shown.get()
-                on:input=on_text
-                on:blur=unset_if_empty
-            />
-        }
+        // An integer gets a text input, not a number one: a number input's value is "" while
+        // it holds a not-yet-valid number such as a lone "-", and writing that "" back as the
+        // controlled value erases the minus sign as it is typed. `validate` checks the range
+        // instead.
+        Kind::Integer { .. }
+        | Kind::Text
+        | Kind::Path
+        | Kind::SocketAddr { .. }
+        | Kind::Duration => text_input(
+            TextInput {
+                id: input_id,
+                hint_id: hint_id.clone(),
+                attrs: text_attrs(field),
+                label: None,
+                hidden: None,
+            },
+            shown,
+            invalid,
+            on_text,
+            unset_if_empty,
+        )
         .into_any(),
         Kind::Choice(options) => view! {
             <select
@@ -535,18 +583,21 @@ fn user_control(
                     <option value="false">"Off"</option>
                     <option value="custom">"Custom folder…"</option>
                 </select>
-                <input
-                    type="text"
-                    class="cfg-mono"
-                    spellcheck="false"
-                    id=format!("{input_id}-path")
-                    aria-label=format!("{}: custom folder", field.label)
-                    aria-describedby=hint_id.clone()
-                    hidden=move || choice.get() != "custom"
-                    class:invalid=invalid
-                    prop:value=move || custom_path(raw.get().as_deref())
-                    on:input=on_text
-                />
+                {text_input(
+                    TextInput {
+                        id: format!("{input_id}-path"),
+                        hint_id: hint_id.clone(),
+                        attrs: TextAttrs::PATH,
+                        label: Some(format!("{}: custom folder", field.label)),
+                        hidden: Some(Signal::derive(move || choice.get() != "custom")),
+                    },
+                    Signal::derive(move || custom_path(raw.get().as_deref())),
+                    invalid,
+                    on_text,
+                    // Not unset when left empty, unlike the other text inputs (see the next
+                    // commit).
+                    |_| (),
+                )}
             }
             .into_any()
         }
@@ -640,6 +691,44 @@ mod tests {
         assert_eq!(custom_path(Some("/tmp/x")), "/tmp/x");
         assert_eq!(custom_path(Some("true")), "");
         assert_eq!(custom_path(None), "");
+    }
+
+    #[test]
+    fn text_inputs_differ_by_their_attributes_only() {
+        assert_eq!(
+            text_attrs(&PORT),
+            TextAttrs {
+                spellcheck_off: true,
+                inputmode: Some("numeric"),
+                ..TextAttrs::NONE
+            }
+        );
+        assert_eq!(
+            text_attrs(&ADDR),
+            TextAttrs {
+                class: Some("cfg-mono"),
+                spellcheck_off: true,
+                placeholder: Some("127.0.0.1:8232"),
+                inputmode: None,
+            }
+        );
+        let duration = Field {
+            kind: Kind::Duration,
+            default: Some("5m"),
+            ..PORT
+        };
+        assert_eq!(text_attrs(&duration).placeholder, Some("5m"));
+        let unset_duration = Field {
+            default: None,
+            ..duration
+        };
+        assert_eq!(text_attrs(&unset_duration).placeholder, Some("30s"));
+        let path = Field {
+            kind: Kind::Path,
+            ..PORT
+        };
+        assert_eq!(text_attrs(&path), TextAttrs::PATH);
+        assert_eq!(text_attrs(&PEERS), TextAttrs::NONE);
     }
 
     #[test]
