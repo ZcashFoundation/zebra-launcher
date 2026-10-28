@@ -173,7 +173,14 @@ pub(super) fn RangeRow(dash: Dash) -> impl IntoView {
     let state = dash.state;
     let fresh = Memo::new(move |_| {
         let now = state.now.get();
-        let rpc_at = dash.latest.get().map(|sample| sample.at);
+        // A sample from before this run says nothing about this run's RPC: until the first
+        // answer the sentence waits, as the verdict's rule 7 does.
+        let started = state.status.with(|status| status.started_at);
+        let rpc_at = dash
+            .latest
+            .get()
+            .map(|sample| sample.at)
+            .filter(|at| started.is_none_or(|started| *at >= started));
         let metrics_at = dash.metrics.get().map(|facts| facts.at);
         let log_at = state.insights.with(|insights| insights.last_at());
         state
@@ -263,10 +270,16 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
             Tone::Muted
         }
     });
+    // The log's own rate stands in while the window is too short; a stopped node's log rate
+    // is a stale fact, so the detail names the window instead.
     let rate_detail = Signal::derive(move || {
-        let from_logs = state
-            .insights
-            .with(|insights| insights.sync_rate_from_logs());
+        let from_logs = if running.get() {
+            state
+                .insights
+                .with(|insights| insights.sync_rate_from_logs())
+        } else {
+            None
+        };
         rate_detail(rate.get(), from_logs, range.get())
     });
 

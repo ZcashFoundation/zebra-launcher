@@ -14,8 +14,8 @@ use crate::{
     charts::{hhmm, phase_note, sync_summary, tz_offset_min_at, widgets::Meter},
     clipboard::copy_to_clipboard,
     components::{reset_config::ResetConfigButton, transient::Transient, updates::CheckForUpdate},
-    format::{relative, thousands},
-    health::{Action, Level, summary_text},
+    format::{relative, rough_duration, thousands},
+    health::{Action, Level, humantime_secs, summary_text},
     insights::SyncStage,
     stats_history::HERO_RATE_WINDOW,
 };
@@ -74,18 +74,21 @@ pub fn action_verb(action: &Action) -> &'static str {
     }
 }
 
-/// `last block 5 s ago`: from the sample history, or from zebrad's own words in its progress
-/// log (`5s`, `1m 2s`) while the history saw no rise.
+/// `last block 5 s ago`: from the sample history, or, while the history saw no rise, from
+/// zebrad's own words in its progress log (`5s`, `1m 2s`, stamped when it said so) aged to
+/// now and written in the page's units.
 pub fn last_block_text(
     change_at: Option<SystemTime>,
-    zebrad_words: Option<&str>,
+    zebrad: Option<(&str, SystemTime)>,
     now: SystemTime,
 ) -> Option<String> {
-    match (change_at, zebrad_words) {
-        (Some(at), _) => Some(format!("last block {}", relative(at, now))),
-        (None, Some(words)) => Some(format!("last block {words} ago")),
-        (None, None) => None,
+    if let Some(at) = change_at {
+        return Some(format!("last block {}", relative(at, now)));
     }
+    let (words, said_at) = zebrad?;
+    let said = Duration::from_secs(humantime_secs(words)?);
+    let since = said + now.duration_since(said_at).unwrap_or(Duration::ZERO);
+    Some(format!("last block {} ago", rough_duration(since)))
 }
 
 /// The stage words zebrad's progress log adds to the hero line, when the report belongs to
@@ -272,9 +275,13 @@ pub(super) fn StatusCard(dash: Dash) -> impl IntoView {
         let words = state.insights.with(|insights| {
             insights
                 .sync()
-                .and_then(|sync| sync.since_last_block.clone())
+                .and_then(|sync| Some((sync.since_last_block.clone()?, sync.at)))
         });
-        last_block_text(change_at, words.as_deref(), now)
+        last_block_text(
+            change_at,
+            words.as_ref().map(|(words, at)| (words.as_str(), *at)),
+            now,
+        )
     });
     let stage = Memo::new(move |_| {
         let started = state.status.with(|status| status.started_at);
@@ -426,13 +433,19 @@ mod tests {
     fn last_block_words() {
         let now = at(100);
         assert_eq!(
-            last_block_text(Some(at(95)), Some("1m"), now),
+            last_block_text(Some(at(95)), Some(("1m", at(90))), now),
             Some("last block 5 s ago".into())
         );
+        // zebrad said "1m 20s" ten seconds ago: a minute and a half, in the page's units.
         assert_eq!(
-            last_block_text(None, Some("1m 2s"), now),
-            Some("last block 1m 2s ago".into())
+            last_block_text(None, Some(("1m 20s", at(90))), now),
+            Some("last block 1 min ago".into())
         );
+        assert_eq!(
+            last_block_text(None, Some(("5s", at(100))), now),
+            Some("last block 5 s ago".into())
+        );
+        assert_eq!(last_block_text(None, Some(("soon", at(100))), now), None);
         assert_eq!(last_block_text(None, None, now), None);
     }
 

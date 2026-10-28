@@ -973,7 +973,7 @@ fn sentence(text: &str) -> String {
 
 /// The seconds in a `humantime` duration as zebrad logs it: `5s`, `7m 2s`, `1h 2m`,
 /// `2days 3h`. Parts under a second count as nothing; an unknown unit is no duration.
-fn humantime_secs(text: &str) -> Option<u64> {
+pub fn humantime_secs(text: &str) -> Option<u64> {
     let mut total = 0u64;
     let mut any = false;
     for part in text.split_whitespace() {

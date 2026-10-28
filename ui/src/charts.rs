@@ -158,7 +158,7 @@ pub fn nice_ticks(min: f64, max: f64, count: usize) -> Vec<f64> {
 }
 
 /// Labels for value ticks: compact, with just enough decimals to tell neighbours apart, or
-/// the full number when even three decimals would not.
+/// the full number when even three decimals would not. A zero tick is `0`, whatever the unit.
 pub fn tick_labels(ticks: &[f64]) -> Vec<String> {
     let full = |tick: &f64| thousands(tick.round().max(0.0) as u64);
     let max = ticks.iter().fold(0.0f64, |max, tick| max.max(tick.abs()));
@@ -169,7 +169,13 @@ pub fn tick_labels(ticks: &[f64]) -> Vec<String> {
     for decimals in 0..=3 {
         let labels: Vec<String> = ticks
             .iter()
-            .map(|tick| format!("{:.*}{suffix}", decimals, tick / unit))
+            .map(|tick| {
+                if *tick == 0.0 {
+                    "0".to_owned()
+                } else {
+                    format!("{:.*}{suffix}", decimals, tick / unit)
+                }
+            })
             .collect();
         let distinct = labels
             .iter()
@@ -811,7 +817,11 @@ mod tests {
         );
         assert_eq!(
             tick_labels(&[0.0, 20_000.0, 40_000.0]),
-            vec!["0K", "20K", "40K"]
+            vec!["0", "20K", "40K"]
+        );
+        assert_eq!(
+            tick_labels(&[0.0, 100_000.0, 200_000.0]),
+            vec!["0", "100K", "200K"]
         );
     }
 
@@ -1060,6 +1070,11 @@ mod tests {
             g.ys[0]
         );
         assert_eq!(g.end_label, "0");
+        // A count in the thousands from zero: the zero tick is plain.
+        let behind =
+            ChartData::from_samples(&samples, &[("Behind", "chart-series-1", Field::Behind)]);
+        let g = geometry(&behind, true, |_| 0, VIEW_W).unwrap();
+        assert_eq!(g.y_ticks[0].1, "0");
         // A useless width falls back to the default.
         assert_eq!(geometry(&peers, true, |_| 0, 0.0).unwrap().width, VIEW_W);
         assert_eq!(
