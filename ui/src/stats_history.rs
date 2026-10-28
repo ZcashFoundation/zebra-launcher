@@ -15,9 +15,6 @@ pub const MIN_RATE_SPAN: Duration = Duration::from_secs(30);
 /// range control (the whole history while it is shorter).
 pub const HERO_RATE_WINDOW: Duration = Duration::from_secs(15 * 60);
 
-/// A peer list is attached to the sample of the same poll: one within this much of its time.
-pub const PEER_SPLIT_FRESH: Duration = Duration::from_secs(15);
-
 /// One published statistics value, reduced to the fields the dashboard plots.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sample {
@@ -92,7 +89,9 @@ pub enum Field {
     PeersOutbound,
 }
 
-/// The newest peer list's counts, stamped with the list's time.
+/// The newest peer list's counts, stamped with the list's time. A list belongs to the sample
+/// with its time: the monitor stamps a poll's statistics and details with one `now`, whichever
+/// of the two lands first.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PeerSplit {
     inbound: u32,
@@ -128,13 +127,9 @@ impl PeerSplit {
         }
     }
 
-    /// Whether the list belongs to the poll of a sample taken at `at`.
+    /// Whether the list belongs to the poll of a sample taken at `at`: the two share one stamp.
     fn fits(&self, at: SystemTime) -> bool {
-        let gap = match at.duration_since(self.at) {
-            Ok(gap) => gap,
-            Err(earlier) => earlier.duration(),
-        };
-        gap <= PEER_SPLIT_FRESH
+        self.at == at
     }
 
     fn apply(&self, sample: &mut Sample) {
@@ -178,27 +173,14 @@ impl StatsHistory {
         }
     }
 
-    /// Records the peer list of a poll: its inbound and outbound counts go onto the sample of
-    /// the same poll (the closest within [`PEER_SPLIT_FRESH`], already filed or still to come).
+    /// Records the peer list of a poll: its inbound and outbound counts go onto the sample with
+    /// its time, already filed or still to come. A neighbouring poll's sample is left alone.
     pub fn record_peers(&mut self, details: &NodeDetails) {
         let split = PeerSplit::of(details);
         self.peer_split = Some(split);
-        let after = self.samples.partition_point(|s| s.at < split.at);
-        let candidates = [after.checked_sub(1), Some(after)];
-        let closest = candidates
-            .into_iter()
-            .flatten()
-            .filter_map(|index| {
-                let sample = self.samples.get(index)?;
-                let gap = match sample.at.duration_since(split.at) {
-                    Ok(gap) => gap,
-                    Err(earlier) => earlier.duration(),
-                };
-                (gap <= PEER_SPLIT_FRESH).then_some((gap, index))
-            })
-            .min_by_key(|(gap, _)| *gap);
-        if let Some((_, index)) = closest {
-            split.apply(&mut self.samples[index]);
+        let index = self.samples.partition_point(|s| s.at < split.at);
+        if let Some(sample) = self.samples.get_mut(index).filter(|s| split.fits(s.at)) {
+            split.apply(sample);
         }
     }
 
@@ -645,7 +627,7 @@ mod tests {
         assert_eq!(history.latest().unwrap().peer_split(), None);
         assert!(!history.has_peer_split(None, at(5)));
         assert!(!history.no_inbound_over(None, at(5)));
-        // The list of the same poll, landing after the stats: the newest sample takes it.
+        // The list of the same poll, landing after the stats: the sample of its time takes it.
         let list = vec![
             peer(true, None),
             peer(false, None),
@@ -653,7 +635,7 @@ mod tests {
             peer(false, Some("failed")),
             peer(true, Some("Responded")),
         ];
-        history.record_peers(&details(6, list.clone()));
+        history.record_peers(&details(5, list.clone()));
         let newest = *history.latest().unwrap();
         assert_eq!(
             newest.peer_split(),
@@ -675,12 +657,18 @@ mod tests {
         history.record_peers(&details(10, vec![peer(false, None)]));
         history.push(&stats(10, 120));
         assert_eq!(history.latest().unwrap().peer_split(), Some((0, 1)));
-        // A stale list is not attached to a much later sample.
+        // The previous poll's list is not attached to the next poll's sample.
         history.push(&stats(40, 130));
         assert_eq!(history.latest().unwrap().peer_split(), None);
-        // The list goes to the closest sample within the freshness, not just the newest.
+        // The list goes to the sample of its time, not the newest one.
         history.push(&stats(45, 131));
-        history.record_peers(&details(41, vec![peer(true, None)]));
+        history.record_peers(&details(40, vec![peer(true, None)]));
+        let samples = history.window(None, at(45));
+        assert_eq!(samples[samples.len() - 2].peer_split(), Some((1, 0)));
+        assert_eq!(samples[samples.len() - 1].peer_split(), None);
+        // A list of a poll whose sample landed first, a neighbouring poll's sample already
+        // filed: neither neighbour takes it.
+        history.record_peers(&details(43, vec![peer(true, None), peer(true, None)]));
         let samples = history.window(None, at(45));
         assert_eq!(samples[samples.len() - 2].peer_split(), Some((1, 0)));
         assert_eq!(samples[samples.len() - 1].peer_split(), None);
