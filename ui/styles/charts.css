@@ -823,6 +823,28 @@
   gap: 6px;
 }
 
+/* A shortened hash with its Copy button and the "Copied" note. */
+.dash-row-copy {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+
+.dash-hash {
+  font-family: var(--mono);
+}
+
+.dash-row-copy .link {
+  margin: 0;
+  font-weight: 500;
+}
+
+.dash-row-copy .dash-copy-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .dash-row-warning .icon {
   color: var(--status-warning);
 }

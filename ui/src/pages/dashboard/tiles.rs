@@ -312,7 +312,7 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
             Some(sample) if !running.get() => last_seen_text(sample.at, state.now.get()),
             _ => {
                 // The bytes from the poll that gave the count; the metrics gauge otherwise.
-                let size = state
+                let size = dash
                     .details
                     .with(|details| details.as_ref().and_then(|details| details.mempool_bytes))
                     .or_else(|| dash.metrics.get().and_then(|facts| facts.mempool_bytes));

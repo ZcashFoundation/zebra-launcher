@@ -12,7 +12,7 @@ mod tiles;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use launcher_types::{EOS_WARNING_WINDOW, EosInfo, ExitClass, Phase, eos_within};
+use launcher_types::{EOS_WARNING_WINDOW, EosInfo, ExitClass, NodeDetails, Phase, eos_within};
 use leptos::prelude::*;
 use wasm_bindgen::JsValue;
 
@@ -121,6 +121,10 @@ pub(crate) struct Dash {
     pub verdict: Memo<Verdict>,
     /// The facts from the newest metrics snapshot, kept while zebrad is stopped.
     pub metrics: Memo<Option<MetricsFacts>>,
+    /// The details behind the statistics (the peer list, the best block, the chain's supply
+    /// and pools): the published ones, or the last ones once zebrad stopped publishing, so
+    /// the Chain card keeps its last values. The peer table reads the live `state.details`.
+    pub details: Memo<Option<NodeDetails>>,
 }
 
 impl Dash {
@@ -392,6 +396,9 @@ pub fn Dashboard() -> impl IntoView {
         })
     });
     let metrics = Memo::new(move |_| state.metrics_history.with(MetricsFacts::from_history));
+    let details = Memo::new(move |previous: Option<&Option<NodeDetails>>| {
+        state.details.get().or_else(|| previous.cloned().flatten())
+    });
     // Until the first status the launcher is still connecting; the rules need a status.
     let verdict = Memo::new(move |_| {
         if !state.status_loaded.get() {
@@ -418,6 +425,7 @@ pub fn Dashboard() -> impl IntoView {
         latest,
         verdict,
         metrics,
+        details,
     };
 
     let behind = Memo::new(move |_| window.with(|window| behind_chart(window)));
