@@ -585,6 +585,166 @@ pub fn eos_within(estimated_time: SystemTime, now: SystemTime, window: Duration)
     }
 }
 
+/// One read of zebrad's Prometheus metrics endpoint (`/metrics`), parsed from
+/// the text exposition format: the `metrics` event and `get_metrics`. `None`
+/// on the wire while zebrad is not running or its endpoint stopped answering.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetricsSnapshot {
+    /// When the page was read.
+    pub at: SystemTime,
+    /// The metric families, in the order of the page.
+    pub families: Vec<MetricFamily>,
+}
+
+impl MetricsSnapshot {
+    /// The family called `name` (the base name, such as `zcash_net_peers`).
+    pub fn family(&self, name: &str) -> Option<&MetricFamily> {
+        self.families.iter().find(|family| family.name == name)
+    }
+
+    /// The value of the gauge `name`: its unlabelled sample, or its only
+    /// sample ([`MetricFamily::single`]). `None` for a family of another kind
+    /// (an untyped family counts as a gauge) or with several labelled
+    /// samples; use [`MetricsSnapshot::total`] for those.
+    pub fn gauge(&self, name: &str) -> Option<f64> {
+        self.family(name)
+            .filter(|family| matches!(family.kind, MetricKind::Gauge | MetricKind::Untyped))?
+            .single()
+    }
+
+    /// The value of the counter `name`, like [`MetricsSnapshot::gauge`].
+    pub fn counter(&self, name: &str) -> Option<f64> {
+        self.family(name)
+            .filter(|family| matches!(family.kind, MetricKind::Counter | MetricKind::Untyped))?
+            .single()
+    }
+
+    /// The sum over every sample of the counter or gauge `name`
+    /// ([`MetricFamily::total`]), such as `state_requests` over its `type`
+    /// labels.
+    pub fn total(&self, name: &str) -> Option<f64> {
+        self.family(name)?.total()
+    }
+}
+
+/// A metric and its samples: one per label set, plus the `_bucket`, `_sum`
+/// and `_count` samples of a histogram or summary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetricFamily {
+    /// The base name as exported, such as `zcash_net_peers`. zebrad registers
+    /// dotted names (`zcash.net.peers`); its exporter writes dots as
+    /// underscores.
+    pub name: String,
+    /// The `# TYPE`, or [`MetricKind::Untyped`] without one.
+    pub kind: MetricKind,
+    /// The `# HELP` text, if the page had one.
+    pub help: Option<String>,
+    /// The samples, in the order of the page.
+    pub samples: Vec<MetricSample>,
+}
+
+impl MetricFamily {
+    /// The family's one value: the sample without labels, or the only sample
+    /// when there is just one (zebrad labels some gauges with `network`).
+    /// `None` for several labelled samples, for the parts of a histogram or
+    /// summary, and for an empty family.
+    pub fn single(&self) -> Option<f64> {
+        let own = self
+            .samples
+            .iter()
+            .filter(|sample| sample.name == self.name);
+        if let Some(sample) = own.clone().find(|sample| sample.labels.is_empty()) {
+            return Some(sample.value);
+        }
+        match self.samples.as_slice() {
+            [only] if only.name == self.name => Some(only.value),
+            _ => None,
+        }
+    }
+
+    /// The sum over every sample, for a counter, gauge or untyped family.
+    /// `None` for a histogram or summary, whose samples are not one quantity,
+    /// and for an empty family.
+    pub fn total(&self) -> Option<f64> {
+        if matches!(self.kind, MetricKind::Histogram | MetricKind::Summary)
+            || self.samples.is_empty()
+        {
+            return None;
+        }
+        Some(self.samples.iter().map(|sample| sample.value).sum())
+    }
+}
+
+/// A metric family's `# TYPE`. On the wire it is the snake_case name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricKind {
+    /// Only goes up, such as `zcash_net_in_bytes_total`.
+    Counter,
+    /// Goes up and down, such as `zcash_net_peers`.
+    Gauge,
+    /// `_bucket{le="..."}` counts, `_sum` and `_count`.
+    Histogram,
+    /// `{quantile="..."}` values, `_sum` and `_count`.
+    Summary,
+    /// No `# TYPE` line.
+    Untyped,
+}
+
+/// One sample of a metric family.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetricSample {
+    /// The full sample name, such as `sync_block_verify_duration_seconds_bucket`.
+    pub name: String,
+    /// The label pairs in page order, such as `("le", "0.5")`.
+    pub labels: Vec<(String, String)>,
+    /// The value. `NaN` and the infinities travel as the strings `"NaN"`,
+    /// `"+Inf"` and `"-Inf"`, because JSON has no such numbers.
+    #[serde(with = "metric_value")]
+    pub value: f64,
+}
+
+/// Serde for [`MetricSample::value`]: finite values are numbers; `NaN`,
+/// `+Inf` and `-Inf` are those strings; and a `null`, which is what
+/// serde_json writes for a bare non-finite float, reads as `NaN`.
+mod metric_value {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        if value.is_finite() {
+            serializer.serialize_f64(*value)
+        } else if value.is_nan() {
+            serializer.serialize_str("NaN")
+        } else if value.is_sign_positive() {
+            serializer.serialize_str("+Inf")
+        } else {
+            serializer.serialize_str("-Inf")
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Number(Option<f64>),
+        Text(String),
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Number(Some(value)) => value,
+            Wire::Number(None) => f64::NAN,
+            Wire::Text(text) => match text.as_str() {
+                "NaN" => f64::NAN,
+                "+Inf" | "Inf" => f64::INFINITY,
+                "-Inf" => f64::NEG_INFINITY,
+                other => {
+                    return Err(D::Error::custom(format!("invalid metric value {other:?}")));
+                }
+            },
+        })
+    }
+}
+
 /// The launcher-managed `zebrad.toml`, as shown in the editor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigDocument {
@@ -1086,5 +1246,153 @@ mod tests {
             let parsed: Theme = serde_json::from_value(serde_json::json!(theme.as_str())).unwrap();
             assert_eq!(parsed, theme);
         }
+    }
+
+    fn sample(name: &str, labels: &[(&str, &str)], value: f64) -> MetricSample {
+        MetricSample {
+            name: name.into(),
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            value,
+        }
+    }
+
+    fn family(name: &str, kind: MetricKind, samples: Vec<MetricSample>) -> MetricFamily {
+        MetricFamily {
+            name: name.into(),
+            kind,
+            help: None,
+            samples,
+        }
+    }
+
+    #[test]
+    fn metric_values_survive_json() {
+        for (value, json) in [
+            (1.5, serde_json::json!(1.5)),
+            (0.0, serde_json::json!(0.0)),
+            (f64::INFINITY, serde_json::json!("+Inf")),
+            (f64::NEG_INFINITY, serde_json::json!("-Inf")),
+        ] {
+            let encoded = serde_json::to_value(sample("m", &[("le", "+Inf")], value)).unwrap();
+            assert_eq!(encoded["value"], json);
+            assert_eq!(encoded["labels"], serde_json::json!([["le", "+Inf"]]));
+            let decoded: MetricSample = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded.value, value);
+        }
+        let encoded = serde_json::to_value(sample("m", &[], f64::NAN)).unwrap();
+        assert_eq!(encoded["value"], "NaN");
+        let decoded: MetricSample = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.value.is_nan());
+        // A bare non-finite float is `null` in JSON; that reads as NaN too.
+        let decoded: MetricSample =
+            serde_json::from_str(r#"{"name":"m","labels":[],"value":null}"#).unwrap();
+        assert!(decoded.value.is_nan());
+        assert!(
+            serde_json::from_str::<MetricSample>(r#"{"name":"m","labels":[],"value":"lots"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn metric_kinds_are_snake_case_on_the_wire() {
+        for (kind, name) in [
+            (MetricKind::Counter, "counter"),
+            (MetricKind::Gauge, "gauge"),
+            (MetricKind::Histogram, "histogram"),
+            (MetricKind::Summary, "summary"),
+            (MetricKind::Untyped, "untyped"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
+            let parsed: MetricKind = serde_json::from_value(serde_json::json!(name)).unwrap();
+            assert_eq!(parsed, kind);
+        }
+        let snapshot = MetricsSnapshot {
+            at: SystemTime::UNIX_EPOCH,
+            families: vec![family(
+                "zcash_net_peers",
+                MetricKind::Gauge,
+                vec![sample("zcash_net_peers", &[("network", "main")], 8.0)],
+            )],
+        };
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(json["families"][0]["kind"], "gauge");
+        assert_eq!(json["families"][0]["help"], serde_json::Value::Null);
+        let round_trip: MetricsSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, snapshot);
+    }
+
+    #[test]
+    fn snapshot_lookups() {
+        let snapshot = MetricsSnapshot {
+            at: SystemTime::UNIX_EPOCH,
+            families: vec![
+                family(
+                    "zcash_net_peers",
+                    MetricKind::Gauge,
+                    vec![sample("zcash_net_peers", &[("network", "main")], 8.0)],
+                ),
+                MetricFamily {
+                    help: Some("Requests".into()),
+                    ..family(
+                        "state_requests",
+                        MetricKind::Counter,
+                        vec![
+                            sample("state_requests", &[("type", "tip")], 2.0),
+                            sample("state_requests", &[("type", "block")], 3.0),
+                        ],
+                    )
+                },
+                family(
+                    "mixed",
+                    MetricKind::Gauge,
+                    vec![
+                        sample("mixed", &[("a", "1")], 1.0),
+                        sample("mixed", &[], 5.0),
+                    ],
+                ),
+                family(
+                    "h",
+                    MetricKind::Histogram,
+                    vec![
+                        sample("h_bucket", &[("le", "+Inf")], 2.0),
+                        sample("h_sum", &[], 1.0),
+                        sample("h_count", &[], 2.0),
+                    ],
+                ),
+                family("u", MetricKind::Untyped, vec![sample("u", &[], 7.0)]),
+                family("empty", MetricKind::Gauge, Vec::new()),
+            ],
+        };
+        // A gauge with one labelled sample is still a single value.
+        assert_eq!(snapshot.gauge("zcash_net_peers"), Some(8.0));
+        assert_eq!(snapshot.counter("zcash_net_peers"), None);
+        assert_eq!(snapshot.total("zcash_net_peers"), Some(8.0));
+        // Several labelled samples: only the total.
+        assert_eq!(snapshot.counter("state_requests"), None);
+        assert_eq!(snapshot.gauge("state_requests"), None);
+        assert_eq!(snapshot.total("state_requests"), Some(5.0));
+        // The unlabelled sample wins over labelled ones.
+        assert_eq!(snapshot.gauge("mixed"), Some(5.0));
+        assert_eq!(snapshot.total("mixed"), Some(6.0));
+        // Histograms have parts, not a value.
+        assert_eq!(snapshot.gauge("h"), None);
+        assert_eq!(snapshot.total("h"), None);
+        assert_eq!(snapshot.family("h").map(|f| f.samples.len()), Some(3));
+        assert_eq!(snapshot.family("h_sum"), None);
+        // Untyped families answer as either.
+        assert_eq!(snapshot.gauge("u"), Some(7.0));
+        assert_eq!(snapshot.counter("u"), Some(7.0));
+        assert_eq!(snapshot.gauge("empty"), None);
+        assert_eq!(snapshot.total("empty"), None);
+        assert_eq!(snapshot.gauge("missing"), None);
+        assert_eq!(
+            snapshot
+                .family("state_requests")
+                .and_then(|f| f.help.as_deref()),
+            Some("Requests")
+        );
     }
 }
