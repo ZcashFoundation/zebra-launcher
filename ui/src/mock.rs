@@ -23,8 +23,16 @@
 //! | `?update=available`, `downloading`, `ready`, `countdown`, `error`, `health` | The updater starts in that state, with the mode that goes with it ([`updates::UpdateFlag`]). |
 //! | `?deb` | This installation cannot update itself: "Open releases page" instead of Install. |
 //! | `?stalecheck` | No successful update check for 20 days: the stale-check warning. |
+//! | `?stalled` | The sync stalls: the height stops moving while the tip estimate creeps on, no blocks are committed, and zebrad's progress lines report the stall (the verdict's "Sync stalled"). |
+//! | `?nopeers` | zebrad finds no peers: 0 peers in every sample and gauge, an empty peer list, the initial connections fail and the log waits for ready peers (the verdict's "No peers" once two minutes of samples agree). |
+//! | `?crashloop` | zebrad panics about 15 s after every start and the launcher restarts it after a backoff that doubles (5, 10, 20 s): "zebrad crashed", then "Crash loop" from the third crash, with the exits and restarts in the log and on the timeline. |
+//!
+//! The launcher's own notes (`zebrad started (pid N)`, `stop requested (stdin closed)`,
+//! `zebrad exited (exit code 0, Clean, stop requested)`, `restarting zebrad in 5s`) join the
+//! log stream as they do in the real backend, so the dashboard's "This run" has content.
 
 mod config;
+mod details;
 mod log_lines;
 mod metrics;
 mod updates;
@@ -39,8 +47,9 @@ use std::{
 
 use launcher_types::{
     ConfigDocument, DataDirChoice, EosInfo, ExitClass, ExitInfo, FirstRunInfo, ImportOutcome,
-    LegacyInstall, LogLine, MetricsSnapshot, NodeStats, OpenTarget, Phase, Settings,
-    StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo, UpdateMode, UpdateState,
+    LegacyInstall, LogLevel, LogLine, LogStream, MetricsSnapshot, NodeDetails, NodeStats,
+    OpenTarget, Phase, Settings, StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo,
+    UpdateMode, UpdateState,
 };
 use leptos::prelude::*;
 
@@ -49,6 +58,7 @@ use crate::{clock, format};
 use config::SAMPLE_CONFIG;
 pub use config::{apply_config, read_config, reset_config};
 use log_lines::sample_line;
+use metrics::MetricsInput;
 pub use metrics::{get_metrics, on_metrics};
 use updates::{MOCK_RELEASES_URL, MOCK_VERSION, UpdateFlag, health_failure};
 pub use updates::{
@@ -77,6 +87,24 @@ const FREE_ELSEWHERE: u64 = 120_000_000_000;
 
 /// The size of the chain state outside first-run mode.
 const SYNCED_STATE_BYTES: u64 = 248_300_000_000;
+
+/// The height the first mock run starts at.
+const FIRST_HEIGHT: u64 = 2_950_000;
+
+/// zebrad's estimate of the chain tip when the mock starts.
+const FIRST_TIP: u64 = 3_120_000;
+
+/// How long a `?crashloop` run lives before it panics.
+const CRASH_AFTER: Duration = Duration::from_secs(15);
+
+/// The first restart delay of `?crashloop`; it doubles with every crash up to [`MAX_BACKOFF`].
+const FIRST_BACKOFF: Duration = Duration::from_secs(5);
+const MAX_BACKOFF: Duration = Duration::from_secs(20);
+
+/// The panic a `?crashloop` run dies of, as zebrad prints it on stderr.
+const PANIC_LINE: &str =
+    "thread 'tokio-rt-worker' (210439) panicked at zebra-network/src/peer/connection.rs:1313:23:";
+const PANIC_DETAIL: &str = "(mock) called `Option::unwrap()` on a `None` value";
 
 /// The alpha.4 leftovers `?firstrun` simulates.
 fn sample_legacy() -> LegacyInstall {
@@ -122,6 +150,12 @@ struct Flags {
     deb: bool,
     /// `?stalecheck`.
     stale_check: bool,
+    /// `?stalled`.
+    stalled: bool,
+    /// `?nopeers`.
+    no_peers: bool,
+    /// `?crashloop`.
+    crash_loop: bool,
 }
 
 impl Flags {
@@ -153,8 +187,36 @@ impl Flags {
             update: value("update").and_then(UpdateFlag::parse),
             deb: flag("deb"),
             stale_check: flag("stalecheck"),
+            stalled: flag("stalled"),
+            no_peers: flag("nopeers"),
+            crash_loop: flag("crashloop"),
         }
     }
+
+    /// What the node's sync looks like: `?nopeers` wins over `?stalled`, since a node without
+    /// peers cannot help stalling.
+    fn scenario(self) -> Scenario {
+        if self.no_peers {
+            Scenario::NoPeers
+        } else if self.stalled {
+            Scenario::Stalled
+        } else {
+            Scenario::Normal
+        }
+    }
+}
+
+/// How the mock node's sync goes, from the flags; the log lines, statistics, details and
+/// metrics all follow it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Scenario {
+    /// Catching up at a steady pace with 8 to 12 peers.
+    #[default]
+    Normal,
+    /// `?stalled`: the height does not move.
+    Stalled,
+    /// `?nopeers`: no peer answers.
+    NoPeers,
 }
 
 /// What `?eos=…` simulates.
@@ -184,6 +246,8 @@ impl EosFlag {
 struct Mock {
     status: ArcRwSignal<Status>,
     stats: ArcRwSignal<Option<NodeStats>>,
+    /// The details behind the statistics, published with every stats tick.
+    details: ArcRwSignal<Option<NodeDetails>>,
     /// zebrad's metrics page, refreshed every tenth stats tick while running.
     metrics: ArcRwSignal<Option<MetricsSnapshot>>,
     /// Stats ticks so far, for the metrics cadence and its moving values.
@@ -192,6 +256,16 @@ struct Mock {
     config: ArcRwSignal<ConfigDocument>,
     /// The next log sequence number.
     next_seq: Arc<AtomicU64>,
+    /// The sequence number of the current run's first zebrad line: every run replays the
+    /// startup sequence.
+    run_first_seq: Arc<AtomicU64>,
+    /// The height the current run started at: a run continues where the last one stopped.
+    height_base: Arc<AtomicU64>,
+    /// Lines waiting for the next log batch: the launcher's notes and zebrad's shutdown and
+    /// panic lines, which happen between the generated lines.
+    notes: ArcRwSignal<Vec<LogLine>>,
+    /// Crashes so far, for `?crashloop`'s backoff and `Phase::Backoff::crashes`.
+    crashes: Arc<AtomicU32>,
     /// Bumped by every command, so a delayed transition from an older command is skipped.
     generation: Arc<AtomicU64>,
     next_pid: Arc<AtomicU32>,
@@ -231,6 +305,7 @@ impl Mock {
         let mock = Self {
             status: ArcRwSignal::new(Status::default()),
             stats: ArcRwSignal::new(None),
+            details: ArcRwSignal::new(None),
             metrics: ArcRwSignal::new(None),
             ticks: Arc::new(AtomicU64::new(0)),
             settings: ArcRwSignal::new(Settings {
@@ -245,6 +320,10 @@ impl Mock {
                 path: "/home/user/.local/share/org.zfnd.zebra-launcher/zebrad.toml".into(),
             }),
             next_seq: Arc::new(AtomicU64::new(0)),
+            run_first_seq: Arc::new(AtomicU64::new(0)),
+            height_base: Arc::new(AtomicU64::new(FIRST_HEIGHT)),
+            notes: ArcRwSignal::new(Vec::new()),
+            crashes: Arc::new(AtomicU32::new(0)),
             generation: Arc::new(AtomicU64::new(0)),
             next_pid: Arc::new(AtomicU32::new(4242)),
             // `?configfail`: the first `read_config` fails, as for an unreadable file.
@@ -351,6 +430,44 @@ impl Mock {
         );
     }
 
+    /// Queues a line for the next log batch, with the next sequence number.
+    fn push_line(
+        &self,
+        stream: LogStream,
+        level: Option<LogLevel>,
+        target: Option<&str>,
+        message: String,
+    ) {
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        let line = LogLine {
+            seq,
+            stream,
+            timestamp: level.is_some().then(clock::now_iso),
+            level,
+            spans: None,
+            target: target.map(Into::into),
+            message,
+            dropped: None,
+        };
+        self.notes.update(|notes| notes.push(line));
+    }
+
+    /// Adds a launcher note to the log stream, as the supervisor's `note` does: a plain line
+    /// without a timestamp, level or target.
+    fn note(&self, text: impl Into<String>) {
+        self.push_line(LogStream::Launcher, None, None, text.into());
+    }
+
+    /// One of zebrad's own INFO lines, stamped now.
+    fn stdout(&self, target: &str, message: &str) {
+        self.push_line(
+            LogStream::Stdout,
+            Some(LogLevel::Info),
+            Some(target),
+            message.to_owned(),
+        );
+    }
+
     fn start(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
         let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
@@ -361,9 +478,15 @@ impl Mock {
             status.rpc_addr = None;
             status.metrics_addr = None;
         });
+        self.note(format!("zebrad started (pid {pid})"));
+        // The run's own lines start after the note, from the startup sequence.
+        self.run_first_seq
+            .store(self.next_seq.load(Ordering::Relaxed), Ordering::Relaxed);
         if self.flags.eos == EosFlag::Halt {
             // zebrad 7.0.0 refuses to run past its end of support and exits with code 1.
             self.after(Duration::from_millis(1500), |mock| {
+                mock.note("zebrad exited (exit code 1, EosHalt)");
+                mock.note("not restarting zebrad (EosHalt)");
                 mock.status.update(|status| {
                     status.phase = Phase::Failed {
                         class: ExitClass::EosHalt,
@@ -392,12 +515,30 @@ impl Mock {
                 status.metrics_addr = "127.0.0.1:9999".parse().ok();
             });
         });
+        if self.flags.crash_loop {
+            self.after(CRASH_AFTER, Mock::crash);
+        }
+    }
+
+    /// zebrad is gone: the readings stop and the next run continues from this height.
+    fn clear_run(&self) {
+        if let Some(height) = self.stats.get_untracked().map(|stats| stats.height) {
+            self.height_base.store(height, Ordering::Relaxed);
+        }
+        self.stats.set(None);
+        self.details.set(None);
+        self.metrics.set(None);
     }
 
     fn stop(&self, then_start: bool) {
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.status.update(|status| status.phase = Phase::Stopping);
+        self.note("stop requested (stdin closed)");
         self.after(Duration::from_millis(1500), move |mock| {
+            mock.stdout("zebrad::signal", "stdin closed, starting shutdown");
+            mock.stdout("zebrad::components::tokio", "shutting down Zebra");
+            mock.stdout("zebrad::commands::start", "stopping zebrad");
+            mock.note("zebrad exited (exit code 0, Clean, stop requested)");
             mock.status.update(|status| {
                 status.phase = Phase::Stopped;
                 status.pid = None;
@@ -412,27 +553,59 @@ impl Mock {
                     requested: true,
                 });
             });
-            mock.stats.set(None);
-            mock.metrics.set(None);
+            mock.clear_run();
             if then_start {
                 mock.start();
             }
         });
     }
 
+    /// `?crashloop`: zebrad panics, the launcher notes the exit and schedules a restart with a
+    /// backoff that doubles with every crash.
+    fn crash(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        let crashes = self.crashes.fetch_add(1, Ordering::Relaxed) + 1;
+        let delay = (FIRST_BACKOFF * 2u32.pow(crashes - 1)).min(MAX_BACKOFF);
+        self.push_line(LogStream::Stderr, None, None, PANIC_LINE.to_owned());
+        self.push_line(LogStream::Stderr, None, None, PANIC_DETAIL.to_owned());
+        self.note("zebrad exited (exit code 101, Crash)");
+        self.note(format!("restarting zebrad in {delay:?}"));
+        self.status.update(|status| {
+            status.phase = Phase::Backoff {
+                until: clock::now() + delay,
+                crashes,
+            };
+            status.pid = None;
+            status.started_at = None;
+            status.rpc_addr = None;
+            status.metrics_addr = None;
+            status.last_exit = Some(ExitInfo {
+                code: Some(101),
+                class: ExitClass::Crash,
+                detail: Some(format!("{PANIC_LINE} {PANIC_DETAIL}")),
+                at: clock::now(),
+                requested: false,
+            });
+        });
+        self.clear_run();
+        self.after(delay, Mock::start);
+    }
+
     fn tick_stats(&self) {
         if self.phase() != Phase::Running {
             return;
         }
+        let scenario = self.flags.scenario();
         let jitter = (js_sys::Math::random() * 3.0) as u64;
         let eos_days = if self.flags.eos == EosFlag::Soon {
             10
         } else {
             41
         };
+        let height_base = self.height_base.load(Ordering::Relaxed);
         let mut stats = self.stats.get_untracked().unwrap_or_else(|| NodeStats {
-            height: 2_950_000,
-            estimated_height: 3_120_000,
+            height: height_base,
+            estimated_height: FIRST_TIP.max(height_base),
             verification_progress: 0.0,
             peers: 8,
             mempool_transactions: 0,
@@ -445,22 +618,62 @@ impl Mock {
             }),
             updated_at: clock::now(),
         });
-        stats.height = (stats.height + 40 + jitter * 20).min(stats.estimated_height);
-        stats.estimated_height += jitter / 2;
-        stats.verification_progress = stats.height as f64 / stats.estimated_height as f64;
-        stats.peers = 6 + jitter as u32 * 3;
-        stats.mempool_transactions = 10 + jitter * 7;
-        stats.updated_at = clock::now();
         let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
-        if tick.is_multiple_of(10) {
-            self.metrics
-                .set(Some(metrics::snapshot(&stats, tick / 10, clock::now())));
+        match scenario {
+            Scenario::Normal => {
+                stats.height = (stats.height + 40 + jitter * 20).min(stats.estimated_height);
+                stats.estimated_height += jitter / 2;
+                stats.peers = 8 + jitter as u32 * 2;
+                stats.mempool_transactions = 10 + jitter * 7;
+            }
+            Scenario::Stalled => {
+                // The network goes on at a block every 75 s; this node does not.
+                if tick.is_multiple_of(75) {
+                    stats.estimated_height += 1;
+                }
+                stats.peers = 8 + jitter as u32 * 2;
+                stats.mempool_transactions = 0;
+            }
+            Scenario::NoPeers => {
+                stats.peers = 0;
+                stats.mempool_transactions = 0;
+            }
         }
+        stats.verification_progress = stats.height as f64 / stats.estimated_height as f64;
+        stats.updated_at = clock::now();
+        let state_bytes = self.state_bytes.load(Ordering::Relaxed);
+        if tick.is_multiple_of(10) {
+            self.metrics.set(Some(metrics::snapshot(&MetricsInput {
+                stats: &stats,
+                tick: tick / 10,
+                run_height_base: height_base,
+                state_bytes,
+                scenario,
+                at: clock::now(),
+            })));
+        }
+        self.details
+            .set(Some(details::details(&stats, tick, state_bytes, scenario)));
         self.stats.set(Some(stats));
     }
 
+    /// Whether zebrad's own lines flow: it was spawned and has not exited.
+    fn zebrad_logs(&self) -> bool {
+        matches!(
+            self.phase(),
+            Phase::Starting | Phase::Running | Phase::Stopping
+        )
+    }
+
     fn line(&self, seq: u64) -> LogLine {
-        let (stream, level, spans, target, message) = sample_line(seq);
+        let seq_in_run = seq.saturating_sub(self.run_first_seq.load(Ordering::Relaxed));
+        // The log tells of the same height the RPC does; before the first poll, the run's start.
+        let height = self
+            .stats
+            .with_untracked(|stats| stats.as_ref().map(|stats| stats.height))
+            .unwrap_or_else(|| self.height_base.load(Ordering::Relaxed));
+        let (stream, level, spans, target, message) =
+            sample_line(seq_in_run, height, self.flags.scenario());
         let has_prefix = level.is_some();
         LogLine {
             seq,
@@ -495,6 +708,17 @@ pub fn on_status(handler: impl Fn(Status) + 'static) {
 pub fn on_node_stats(handler: impl Fn(Option<NodeStats>) + 'static) {
     let stats = mock().stats;
     Effect::new(move |_| handler(stats.get()));
+}
+
+/// Calls `handler` with every node details change, starting with the current value.
+pub fn on_node_details(handler: impl Fn(Option<NodeDetails>) + 'static) {
+    let details = mock().details;
+    Effect::new(move |_| handler(details.get()));
+}
+
+pub async fn get_node_details() -> Option<NodeDetails> {
+    sleep(50).await;
+    mock().details.get_untracked()
 }
 
 pub async fn get_status() -> Status {
@@ -540,17 +764,21 @@ pub async fn restart_zebrad() {
 }
 
 /// Streams batches of sample lines while zebrad is "running", skipping a few sequence numbers
-/// now and then to show the dropped-lines marker.
+/// now and then to show the dropped-lines marker. The launcher's notes and zebrad's shutdown
+/// and panic lines, queued by the commands, go out with the next batch, whatever the phase.
 pub fn subscribe_logs(on_batch: impl Fn(Vec<LogLine>) + 'static) {
     let mock = mock();
     let batches = AtomicU64::new(0);
     set_interval(
         move || {
-            if mock.phase().is_settled() {
+            let mut batch = mock.notes.try_update(std::mem::take).unwrap_or_default();
+            if !mock.zebrad_logs() {
+                if !batch.is_empty() {
+                    on_batch(batch);
+                }
                 return;
             }
             let batch_number = batches.fetch_add(1, Ordering::Relaxed);
-            let mut batch = Vec::new();
             if batch_number % 60 == 59 {
                 // Like the bridge after lagging: the lost lines are replaced by one gap marker
                 // that takes the seq of the last of them.
@@ -757,7 +985,7 @@ mod tests {
         // Every flag in the module doc's table, combined.
         assert_eq!(
             Flags::parse(
-                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck"
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop"
             ),
             Flags {
                 first_run: true,
@@ -769,8 +997,17 @@ mod tests {
                 update: Some(UpdateFlag::Countdown),
                 deb: true,
                 stale_check: true,
+                stalled: true,
+                no_peers: true,
+                crash_loop: true,
             }
         );
+        assert_eq!(Flags::parse("?stalled").scenario(), Scenario::Stalled);
+        assert_eq!(
+            Flags::parse("?nopeers&stalled").scenario(),
+            Scenario::NoPeers
+        );
+        assert_eq!(Flags::parse("?crashloop").scenario(), Scenario::Normal);
         assert_eq!(Flags::parse("?eos=soon").eos, EosFlag::Soon);
         // Unknown values and flags are ignored.
         assert_eq!(

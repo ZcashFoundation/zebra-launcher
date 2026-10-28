@@ -5,7 +5,10 @@ use std::time::SystemTime;
 
 use crate::{
     format::{relative, thousands},
-    insights::{Checkpoints, Mempool, Peers, Run},
+    insights::{
+        Checkpoints, Mempool, Peers, Run,
+        events::{ending_words, parse_exit_note},
+    },
 };
 
 /// `12 peers connected at start, 3 failed`, with the later troubles appended.
@@ -88,12 +91,16 @@ pub fn earlier_runs_line(earlier: usize) -> Option<String> {
     }
 }
 
-/// `Stopped 5 min ago (SIGTERM)`.
+/// `Stopped 5 min ago (SIGTERM)`, or from the launcher's exit note `Stopped 5 min ago: crash
+/// (code 101)`.
 pub fn shutdown_line(run: &Run, now: SystemTime) -> Option<String> {
     let stopped = run.stopped_at?;
     let mut text = format!("Stopped {}", relative(stopped, now));
     if let Some(reason) = &run.shutdown_reason {
-        text.push_str(&format!(" ({reason})"));
+        match parse_exit_note(reason) {
+            Some(note) => text.push_str(&format!(": {}", ending_words(note.class, note.code))),
+            None => text.push_str(&format!(" ({reason})")),
+        }
     }
     Some(text)
 }
@@ -221,6 +228,16 @@ mod tests {
                 now
             ),
             None
+        );
+        assert_eq!(
+            shutdown_line(
+                &Run {
+                    shutdown_reason: Some("zebrad exited (exit code 101, Crash)".into()),
+                    ..run.clone()
+                },
+                now
+            ),
+            Some("Stopped 5 min ago: crash (code 101)".into())
         );
         assert_eq!(
             shutdown_line(

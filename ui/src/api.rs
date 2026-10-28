@@ -5,8 +5,8 @@ use std::{cell::Cell, fmt};
 
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
-    ImportOutcome, LogLine, MetricsSnapshot, NodeStats, OpenTarget, Settings, StaleProcessInfo,
-    Status, UpdateHealthFailure, UpdateInfo, UpdateState, events,
+    ImportOutcome, LogLine, MetricsSnapshot, NodeDetails, NodeStats, OpenTarget, Settings,
+    StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo, UpdateState, events,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
@@ -151,6 +151,20 @@ pub async fn on_node_stats(
     Ok(tauri::listen(events::NODE_STATS, on_stats, on_error).await?)
 }
 
+/// Calls `on_details` with every `node_details` event: the details behind the node statistics
+/// (the peer list, the chain's supply, the best block), from the same RPC poll, `None` while
+/// zebrad does not run.
+pub async fn on_node_details(
+    on_details: impl Fn(Option<NodeDetails>) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::on_node_details(mock_handler("`node_details` event", on_details, on_error));
+        return Ok(());
+    }
+    Ok(tauri::listen(events::NODE_DETAILS, on_details, on_error).await?)
+}
+
 /// Calls `on_metrics` with every `metrics` event: zebrad's metrics page, read every 10 s while
 /// it runs, `None` while it does not.
 pub async fn on_metrics(
@@ -262,6 +276,14 @@ pub async fn get_node_stats() -> ApiResult<Option<NodeStats>> {
         return Ok(wire(mock::get_node_stats().await)?);
     }
     Ok(tauri::invoke0("get_node_stats").await?)
+}
+
+/// The details behind the node statistics, `None` whenever `get_node_stats` is.
+pub async fn get_node_details() -> ApiResult<Option<NodeDetails>> {
+    if !is_tauri() {
+        return Ok(wire(mock::get_node_details().await)?);
+    }
+    Ok(tauri::invoke0("get_node_details").await?)
 }
 
 /// The newest reading of zebrad's metrics page, if zebrad runs and answered.

@@ -6,6 +6,7 @@
 //! clocks (a line without a timestamp takes the time of the timestamped line before it; the
 //! ingest `now` stands in only until one has been seen).
 
+pub mod events;
 pub mod fields;
 pub mod text;
 
@@ -39,6 +40,15 @@ const RUNS_KEPT: usize = 5;
 /// How many characters [`pick_filter`] returns at most.
 const FILTER_CHARS: usize = 60;
 
+/// How many of the launcher's own notes, as events, are kept.
+const LAUNCHER_EVENTS_KEPT: usize = 40;
+
+/// How many status transitions the UI observed are kept.
+const SESSION_EVENTS_KEPT: usize = 40;
+
+/// A launcher start note this far from a run's first line belongs to that run.
+const START_NOTE_SLACK: Duration = Duration::from_secs(30);
+
 /// Where zebrad's progress task logs.
 const PROGRESS_TARGET: &str = "zebrad::components::sync::progress";
 
@@ -65,6 +75,14 @@ pub struct Insights {
     mempool: Mempool,
     /// Oldest first, at most [`RUNS_KEPT`].
     runs: Vec<Run>,
+    /// The launcher's own notes as timeline rows, oldest first, at most
+    /// [`LAUNCHER_EVENTS_KEPT`].
+    launcher_events: VecDeque<RunEvent>,
+    /// Status transitions the UI observed ([`Insights::record_session_event`]), oldest first,
+    /// at most [`SESSION_EVENTS_KEPT`].
+    session_events: VecDeque<RunEvent>,
+    /// The percentage of the current run's first progress line.
+    first_progress_percent: Option<f64>,
     /// The last leveled line was `Diagnostic metadata:`, so continuation lines carry the
     /// version and network of the current run.
     in_metadata: bool,
@@ -198,9 +216,8 @@ pub enum SyncStage {
     Stalled,
 }
 
-/// One line of the dashboard's "This run" timeline.
+/// One line of the dashboard's "This run" timeline, from [`Insights::events`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code, reason = "built by the dashboard's events workstream")]
 pub struct RunEvent {
     pub at: SystemTime,
     pub kind: EventKind,
@@ -211,17 +228,27 @@ pub struct RunEvent {
 
 /// What kind of thing happened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code, reason = "built by the dashboard's events workstream")]
 pub enum EventKind {
+    /// zebrad was spawned (`zebrad started (pid 4242)`), or a stale zebrad was stopped for it.
     Started,
+    /// A startup step of the current run (`State database opened`).
     Milestone,
+    /// The launcher asked zebrad to stop.
     StopRequested,
+    /// zebrad exited (`zebrad exited: crash (code 101)`).
     Exited,
+    /// A restart is scheduled (`Restarting in 5 s (crash 2)`), or was cancelled.
     Restarting,
+    /// `zebrad.toml` was applied or replaced.
     ConfigApplied,
+    /// zebrad rejected a new `zebrad.toml` and the old one is back.
     ConfigRolledBack,
+    /// A step of the launcher's updater.
     Update,
+    /// Something went wrong: an ERROR or stderr line's first appearance, a launcher failure, a
+    /// run the launcher gave up on, a stale zebrad.
     Problem,
+    /// The one line an earlier run gets (`Run 2 ended: SIGTERM`).
     EarlierRun,
 }
 
@@ -503,6 +530,12 @@ impl Insights {
                 run.shutdown_reason
                     .get_or_insert_with(|| message.to_owned());
             }
+            if let Some(event) = events::launcher_event(message, at) {
+                self.launcher_events.push_back(event);
+                while self.launcher_events.len() > LAUNCHER_EVENTS_KEPT {
+                    self.launcher_events.pop_front();
+                }
+            }
             return;
         }
         if line.level.is_none() {
@@ -620,6 +653,14 @@ impl Insights {
     }
 
     fn start_run(&mut self, at: SystemTime) {
+        // The launcher's start note precedes this line without a timestamp of its own, so it
+        // carried the time of the previous run's last line; the run begins here.
+        if let Some(note) = self.launcher_events.back_mut()
+            && note.kind == EventKind::Started
+            && note.at < at
+        {
+            note.at = at;
+        }
         self.runs.push(Run {
             started_at: at,
             version: None,
@@ -636,6 +677,7 @@ impl Insights {
         self.peers = Peers::default();
         self.mempool = Mempool::default();
         self.progress_points.clear();
+        self.first_progress_percent = None;
     }
 
     fn reach(&mut self, milestone: Milestone, at: SystemTime) {
@@ -646,9 +688,13 @@ impl Insights {
 
     fn read_progress(&mut self, stage: SyncStage, message: &str, at: SystemTime) {
         let height = field(message, "current_height").and_then(height_of);
+        let percent = field(message, "sync_percent").and_then(percent_of);
+        if self.first_progress_percent.is_none() {
+            self.first_progress_percent = percent;
+        }
         self.sync = Some(SyncSnapshot {
             stage,
-            percent: field(message, "sync_percent").and_then(percent_of),
+            percent,
             height,
             remaining: field(message, "remaining_sync_blocks").and_then(u64_of),
             network_upgrade: field(message, "network_upgrade").map(str::to_owned),
@@ -752,22 +798,134 @@ impl Insights {
     }
 
     /// The most recent run.
-    /// The newest `limit` events of the session, newest first: milestones, exits, restarts, the
-    /// launcher's decisions and problems. Filled in by the dashboard's events workstream.
-    #[allow(dead_code)]
+    pub fn current_run(&self) -> Option<&Run> {
+        self.runs.last()
+    }
+
+    /// Keeps a status transition the UI observed ([`events::status_events`] and the like), so
+    /// [`Insights::events`] can merge it with what the log says.
+    pub fn record_session_event(&mut self, event: RunEvent) {
+        self.session_events.push_back(event);
+        while self.session_events.len() > SESSION_EVENTS_KEPT {
+            self.session_events.pop_front();
+        }
+    }
+
+    /// The "This run" timeline: the newest `limit` events, newest first. The current run's
+    /// milestones (those within 2 s of each other on one row), the launcher's own notes since
+    /// the previous run stopped, the first appearance of each ERROR and stderr problem of the
+    /// run, the status transitions the UI observed, and one line per earlier run. A session
+    /// event that repeats a logged one is shown once ([`events::merge_events`]).
+    #[allow(dead_code, reason = "read by the dashboard once its view lands")]
     pub fn events(&self, limit: usize) -> Vec<RunEvent> {
-        let _ = limit;
-        Vec::new()
+        let mut log = Vec::new();
+        let current = self.runs.last();
+        // Events before the previous run stopped belong to that run's one line; a run's own
+        // exit is that line too.
+        let earlier = self
+            .runs
+            .len()
+            .checked_sub(2)
+            .map(|index| &self.runs[index]);
+        let cutoff = earlier
+            .and_then(|run| run.stopped_at)
+            .or_else(|| current.map(|run| run.started_at));
+        let run_start = current.map(|run| run.started_at);
+        let keeps = |event: &RunEvent| {
+            cutoff.is_none_or(|cutoff| event.at >= cutoff)
+                && !(event.kind == EventKind::Exited
+                    && run_start.is_some_and(|start| event.at < start))
+        };
+        if let Some(run) = current {
+            log.extend(events::collapse_milestones(self.milestone_events(run)));
+        }
+        for (index, window) in self.runs.windows(2).enumerate() {
+            let (run, next) = (&window[0], &window[1]);
+            log.push(events::earlier_run_event(
+                index + 1,
+                run.shutdown_reason.as_deref(),
+                run.stopped_at.unwrap_or(next.started_at),
+            ));
+        }
+        log.extend(self.launcher_events.iter().filter(|e| keeps(e)).cloned());
+        log.extend(
+            self.problems
+                .iter()
+                .filter(|problem| problem.level != ProblemLevel::Warn)
+                .filter(|problem| run_start.is_none_or(|start| problem.first >= start))
+                .map(events::problem_event),
+        );
+        let session: Vec<RunEvent> = self
+            .session_events
+            .iter()
+            .filter(|e| keeps(e))
+            .cloned()
+            .collect();
+        events::merge_events(log, &session, limit)
+    }
+
+    /// The current run's startup steps as rows, oldest first. The launcher's start note stands
+    /// for the run's first line; without one (a log without launcher notes) the first line
+    /// itself does. `Starting zebrad` is the launcher's cue, not a step the reader needs.
+    fn milestone_events(&self, run: &Run) -> Vec<RunEvent> {
+        let started_note = self.launcher_events.iter().any(|event| {
+            event.kind == EventKind::Started
+                && event.at
+                    >= run
+                        .started_at
+                        .checked_sub(START_NOTE_SLACK)
+                        .unwrap_or(run.started_at)
+                && event.at <= run.started_at + START_NOTE_SLACK
+        });
+        run.milestones
+            .iter()
+            .filter_map(|&(milestone, at)| {
+                let (kind, text) = match milestone {
+                    Milestone::Tracing if started_note => return None,
+                    Milestone::Tracing => (EventKind::Started, "zebrad started".to_owned()),
+                    Milestone::Started => return None,
+                    Milestone::StateOpened => {
+                        (EventKind::Milestone, "State database opened".to_owned())
+                    }
+                    Milestone::P2pListening => {
+                        (EventKind::Milestone, "Listening for peers".to_owned())
+                    }
+                    Milestone::Rpc => (EventKind::Milestone, "RPC opened".to_owned()),
+                    Milestone::Metrics => (EventKind::Milestone, "Metrics opened".to_owned()),
+                    Milestone::PeersConnected => (
+                        EventKind::Milestone,
+                        format!(
+                            "Initial peers connected ({} of {})",
+                            self.peers.initial_successes,
+                            self.peers.initial_successes + self.peers.initial_errors
+                        ),
+                    ),
+                    Milestone::FirstProgress => (
+                        EventKind::Milestone,
+                        match self.first_progress_percent {
+                            Some(percent) => format!("First progress report ({percent:.1} %)"),
+                            None => "First progress report".to_owned(),
+                        },
+                    ),
+                    Milestone::MempoolActive => (EventKind::Milestone, "Mempool active".to_owned()),
+                    Milestone::FullValidation => {
+                        (EventKind::Milestone, "Full validation started".to_owned())
+                    }
+                };
+                Some(RunEvent {
+                    at,
+                    kind,
+                    text,
+                    tone: Tone::Neutral,
+                })
+            })
+            .collect()
     }
 
     /// When the newest timestamped line was logged.
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "read by the dashboard once its view lands")]
     pub fn last_at(&self) -> Option<SystemTime> {
-        None
-    }
-
-    pub fn current_run(&self) -> Option<&Run> {
-        self.runs.last()
+        self.last_at
     }
 }
 
@@ -1503,6 +1661,219 @@ mod tests {
             .iter()
             .find(|b| b.minute_start == at("2026-10-23T20:34:00Z"));
         assert_eq!(m2034.map(|b| b.other), Some(1));
+    }
+
+    #[test]
+    fn last_at_is_the_newest_stamp() {
+        let mut insights = Insights::default();
+        assert_eq!(insights.last_at(), None);
+        insights.ingest(&[launcher(0, "zebrad started (pid 1)")], at(T0));
+        assert_eq!(insights.last_at(), None, "a note has no stamp of its own");
+        insights.ingest(
+            &[
+                stamped(1, "2026-10-23T18:35:01Z", LogLevel::Info, "t", "a"),
+                continuation(2, "more"),
+            ],
+            at(T0),
+        );
+        assert_eq!(insights.last_at(), Some(at("2026-10-23T18:35:01Z")));
+    }
+
+    /// The real stream of a run: the launcher's start note, the startup, a progress line, a
+    /// problem, a stop and the exit note.
+    fn full_run(first_seq: u64, stamp: &str) -> Vec<LogLine> {
+        let mut lines = vec![launcher(first_seq, "zebrad started (pid 4242)")];
+        lines.extend(startup(first_seq + 1, stamp));
+        lines
+    }
+
+    #[test]
+    fn events_tell_the_run_newest_first() {
+        let mut insights = Insights::default();
+        let mut lines = full_run(0, "2026-10-23T18:35:01Z");
+        let n = lines.len() as u64;
+        lines.push(progress(n, "2026-10-23T18:36:01Z", 2_950_000));
+        lines.push(stamped(
+            n + 1,
+            "2026-10-23T18:36:30Z",
+            LogLevel::Warn,
+            "zebra_network::peer_set::set",
+            "dropping stalled peer: exceeded FindBlocks/FindHeaders stall threshold addr=203.0.113.5:8233",
+        ));
+        lines.push(stamped(
+            n + 2,
+            "2026-10-23T18:37:00Z",
+            LogLevel::Error,
+            "zebrad::components::sync",
+            "block download failed hash=block::Hash(\"abc\")",
+        ));
+        lines.push(stamped(
+            n + 3,
+            "2026-10-23T18:37:05Z",
+            LogLevel::Error,
+            "zebrad::components::sync",
+            "block download failed hash=block::Hash(\"def\")",
+        ));
+        insights.ingest(&lines, at("2026-10-23T18:38:00Z"));
+
+        let events = insights.events(20);
+        let rows: Vec<(EventKind, &str)> =
+            events.iter().map(|e| (e.kind, e.text.as_str())).collect();
+        assert_eq!(
+            rows,
+            [
+                (EventKind::Problem, "ERROR: block download failed ×2"),
+                (EventKind::Milestone, "First progress report (12.3 %)"),
+                // The startup lines share one stamp: one row of milestones, in the order reached,
+                // `Starting zebrad` and the tracing line left out.
+                (
+                    EventKind::Milestone,
+                    "Metrics opened · state database opened · listening for peers · initial peers connected (12 of 15) · RPC opened · full validation started · mempool active"
+                ),
+                (EventKind::Started, "zebrad started (pid 4242)"),
+            ]
+        );
+        // The start note took the run's first stamp, not the ingest time or an earlier one.
+        assert_eq!(events[3].at, at("2026-10-23T18:35:01Z"));
+        assert_eq!(
+            events[0].at,
+            at("2026-10-23T18:37:00Z"),
+            "the problem's first time"
+        );
+        assert_eq!(events[0].tone, Tone::Critical);
+        // The WARN problem is on the Recent problems card, not the timeline.
+        assert!(events.iter().all(|e| !e.text.starts_with("WARN")));
+        assert_eq!(insights.events(2).len(), 2);
+        assert_eq!(
+            insights.events(2)[0].text,
+            "ERROR: block download failed ×2"
+        );
+        assert!(insights.events(0).is_empty());
+    }
+
+    #[test]
+    fn events_without_a_start_note_use_the_first_line() {
+        let mut insights = Insights::default();
+        insights.ingest(&startup(0, "2026-10-23T18:35:01Z"), at(T0));
+        let events = insights.events(10);
+        let started = events.last().unwrap();
+        assert_eq!(started.kind, EventKind::Started);
+        assert_eq!(started.text, "zebrad started");
+        assert_eq!(started.at, at("2026-10-23T18:35:01Z"));
+        assert_eq!(Insights::default().events(10), Vec::new());
+    }
+
+    #[test]
+    fn events_fold_earlier_runs_into_one_line_and_keep_the_gap() {
+        let mut insights = Insights::default();
+        let mut lines = full_run(0, "2026-10-23T18:35:01Z");
+        let n = lines.len() as u64;
+        lines.push(stamped(
+            n,
+            "2026-10-23T18:40:00Z",
+            LogLevel::Info,
+            "zebrad::components::sync",
+            "extending tips",
+        ));
+        lines.push(stderr(
+            n + 1,
+            "thread 'main' panicked at zebrad/src/x.rs:1:1:",
+        ));
+        lines.push(stderr(n + 2, "boom"));
+        lines.push(launcher(n + 3, "zebrad exited (exit code 101, Crash)"));
+        lines.push(launcher(n + 4, "restarting zebrad in 5s"));
+        lines.extend(full_run(n + 5, "2026-10-23T18:40:06Z"));
+        insights.ingest(&lines, at("2026-10-23T18:41:00Z"));
+
+        let events = insights.events(20);
+        let rows: Vec<(EventKind, &str)> =
+            events.iter().map(|e| (e.kind, e.text.as_str())).collect();
+        assert_eq!(
+            rows,
+            [
+                (
+                    EventKind::Milestone,
+                    "Metrics opened · state database opened · listening for peers · initial peers connected (12 of 15) · RPC opened · full validation started · mempool active"
+                ),
+                (EventKind::Started, "zebrad started (pid 4242)"),
+                // The launcher's decision between the runs stays; the exit note is the run's line.
+                (EventKind::Restarting, "Restarting in 5 s"),
+                (EventKind::EarlierRun, "Run 1 ended: crash (code 101)"),
+            ]
+        );
+        assert_eq!(
+            events[1].at,
+            at("2026-10-23T18:40:06Z"),
+            "re-dated to the run's first line"
+        );
+        assert_eq!(events[3].at, at("2026-10-23T18:40:00Z"));
+        assert_eq!(events[3].tone, Tone::Critical);
+        // The first run's stderr problem is not this run's.
+        assert!(events.iter().all(|e| e.kind != EventKind::Problem));
+        assert_eq!(
+            insights.runs()[0].shutdown_reason.as_deref(),
+            Some("zebrad exited (exit code 101, Crash)")
+        );
+    }
+
+    #[test]
+    fn session_events_merge_with_the_log() {
+        let mut insights = Insights::default();
+        insights.ingest(&full_run(0, "2026-10-23T18:35:01Z"), at(T0));
+        // The UI saw the same start two seconds later, and a stop the log has not caught up with.
+        insights.record_session_event(RunEvent {
+            at: at("2026-10-23T18:35:03Z"),
+            kind: EventKind::Started,
+            text: "zebrad started (pid 4242)".into(),
+            tone: Tone::Neutral,
+        });
+        insights.record_session_event(RunEvent {
+            at: at("2026-10-23T18:45:00Z"),
+            kind: EventKind::StopRequested,
+            text: "Stop requested (graceful)".into(),
+            tone: Tone::Neutral,
+        });
+        let events = insights.events(10);
+        assert_eq!(events[0].text, "Stop requested (graceful)");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.kind == EventKind::Started)
+                .count(),
+            1,
+            "{events:#?}"
+        );
+        assert_eq!(
+            events.last().unwrap().at,
+            at("2026-10-23T18:35:01Z"),
+            "the log's time"
+        );
+        // Session events older than the run's start are not this run's.
+        insights.record_session_event(RunEvent {
+            at: at("2026-10-23T18:00:00Z"),
+            kind: EventKind::Update,
+            text: "Launcher updated to 0.2.0".into(),
+            tone: Tone::Good,
+        });
+        assert!(
+            insights
+                .events(10)
+                .iter()
+                .all(|e| e.kind != EventKind::Update)
+        );
+        // Without a run, every session event shows.
+        let mut fresh = Insights::default();
+        for i in 0..(SESSION_EVENTS_KEPT as u64 + 5) {
+            fresh.record_session_event(RunEvent {
+                at: at(T0) + Duration::from_secs(i),
+                kind: EventKind::Update,
+                text: format!("event {i}"),
+                tone: Tone::Neutral,
+            });
+        }
+        let events = fresh.events(100);
+        assert_eq!(events.len(), SESSION_EVENTS_KEPT, "bounded");
+        assert_eq!(events[0].text, format!("event {}", SESSION_EVENTS_KEPT + 4));
     }
 
     #[test]
