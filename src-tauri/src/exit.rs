@@ -13,12 +13,8 @@
 //! without libappindicator) closing the window quits as above. The tray's
 //! Show item, a second launch and the macOS dock icon show it again.
 
-use std::{
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use launcher_core::supervisor;
 use tauri::{AppHandle, Manager, RunEvent, Runtime, WindowEvent};
 
 use crate::app_state::AppState;
@@ -97,9 +93,11 @@ pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
 }
 
 /// Stops zebrad and the supervisor, giving up after the cap.
+///
+/// The cap is the supervisor's: its grace is fixed at launch, while the
+/// settings may have changed since.
 async fn shutdown(state: &AppState) {
-    let grace = Duration::from_secs(state.settings.current().stop_grace_secs);
-    let cap = supervisor::shutdown_cap(grace);
+    let cap = state.supervisor.shutdown_cap();
     tracing::info!(cap_secs = cap.as_secs(), "stopping zebrad before exit");
     match tokio::time::timeout(cap, state.supervisor.shutdown()).await {
         // `Closed` means an earlier shutdown already ended the actor.

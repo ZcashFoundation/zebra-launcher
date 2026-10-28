@@ -5,7 +5,6 @@ members = ["crates/launcher-types", "crates/launcher-core", "ui", "src-tauri"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.90"
 license = "MIT"
 repository = "https://github.com/ZcashFoundation/zebra-launcher"
 publish = false

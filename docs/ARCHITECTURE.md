@@ -5,8 +5,8 @@ logs, edits its config, and shows node status. A small Rust team must be able to
 maintain it for years, so the rules are: Rust only (no Node toolchain), a thin Tauri
 layer over testable crates, and no mutexes.
 
-This document describes the target design. It lands milestone by milestone (M1–M12);
-sections name the milestone where that matters.
+This document describes the launcher as built. The plan it grew from is [PLAN.md](PLAN.md),
+kept as the historical design record; where the two differ, this file describes the code.
 
 ## Overview
 
@@ -39,8 +39,8 @@ sections name the milestone where that matters.
 | `crates/launcher-types` | serde types shared by backend and UI (`Status`, `LogLine`, `Settings`, `NodeStats`, errors). Builds natively and to wasm; no tokio, no Tauri. |
 | `crates/launcher-core` | Logic that does not need Tauri: supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, paths, end-of-support, install kind. |
 | `crates/launcher-core/src/bin/fake-zebrad.rs` | Scripted stand-in for zebrad, used by tests and PR bundle builds. |
-| `src-tauri` | Thin Tauri 2.12 app: commands, the `Channel` bridge, tray, updater, exit flow, capabilities. Joins the workspace in M5. |
-| `ui` | Leptos CSR crate built by trunk into `ui/dist` (M5). Talks to Tauri through about 100 lines of hand-written `wasm_bindgen` externs to `window.__TAURI__`. |
+| `src-tauri` | Thin Tauri 2.12 app: commands, the `Channel` bridge, tray, updater, exit flow, capabilities. |
+| `ui` | Leptos CSR crate built by trunk into `ui/dist`. Talks to Tauri through about 100 lines of hand-written `wasm_bindgen` externs to `window.__TAURI__`. |
 
 Single sources of truth: `[workspace.package] version` in [`Cargo.toml`](../Cargo.toml)
 for the launcher version, [`ZEBRAD_VERSION`](../ZEBRAD_VERSION) for the bundled zebrad,
@@ -52,10 +52,10 @@ One actor task owns the zebrad child. Nothing else touches it.
 
 | Channel | Direction | Carries |
 | --- | --- | --- |
-| `mpsc<Command>` | in | `Start`, `Stop`, `Restart`, `ApplyConfig`, `Shutdown` |
-| `watch<Status>` | out | `Stopped`, `Starting`, `Running{pid, since, rpc_ready}`, `Stopping`, `Exited{code, class}`, `Failed{class}` |
+| `mpsc<Cmd>` | in | `Start{options}`, `Stop`, `Shutdown`, `Subscribe`, `History{since}` (`crates/launcher-core/src/supervisor.rs`). `SupervisorHandle::restart` is a `Stop` followed by a `Start`; applying a config is the `apply_config` Tauri command, built on the same handle. |
+| `watch<Status>` | out | `phase` (`Stopped`, `Starting`, `Running`, `Stopping`, `Backoff{until, crashes}`, `Failed{class}`), `pid`, `started_at`, the `rpc_addr` and `metrics_addr` zebrad logged as opened, `last_exit` (`ExitInfo{code, class, detail, requested}`) and `stale` (`crates/launcher-types/src/lib.rs`) |
 | `broadcast<LogLine>` | out | live log lines, each with a monotonic `seq` |
-| `oneshot` | reply | `History{since}` from the 10 000-line `VecDeque` ring, for late subscribers |
+| `oneshot` | reply | each command's answer; `History{since}` returns lines from the 10 000-line `VecDeque` ring, for late subscribers |
 
 The actor also writes a rotating `zebrad.log` for post-crash support. The Tauri side
 (`src-tauri/src/bridge.rs`) sends the retained history, then batches live lines every
@@ -107,20 +107,26 @@ blocking-pool thread, because Linux `PR_SET_PDEATHSIG` fires when the spawning *
 exits.
 
 **Exit classification.** Reader tasks drain stdout and stderr to EOF before an exit is
-classified. Classifiers are anchored on level and target, not bare substrings:
+classified (`logs::classify_exit`, then `finalize` in `supervisor/actor.rs`). The
+deterministic causes are detected from zebrad's own lines and win over the exit code
+(zebrad exits 1 for a config error and aborts with 134 for the panics, which alone say
+little). `ExitClass` has these variants:
 
-| Class | Matches | Retried |
+| Class | Set when | Then |
 | --- | --- | --- |
-| `ConfigError` | `Zebra could not load the provided configuration` | no |
-| `EosHalt` | `Zebra refuses to run` | no |
-| `EosWarn` | `Your Zebra release is too old` | warning only |
-| `PortInUse` | address already in use | no |
-| `DbLocked` | `Database likely already open` | no |
-| `BinaryMissing` | sidecar not found | no |
-| crash | anything else | 1 → 60 s backoff, gives up after 5 in 10 min |
+| `ConfigError` | stderr `Zebra could not load the provided configuration` | `Failed`, not retried |
+| `EosHalt` | panic `Zebra refuses to run` | `Failed`, not retried |
+| `DbLocked` | panic `Database likely already open` | `Failed`, not retried |
+| `PortInUse` | panic `... already in use` while opening a listener | `Failed`, not retried |
+| `SpawnFailed` | the process could not be started, for example because the sidecar is missing | `Failed`, not retried |
+| `Crash` | any other exit the launcher did not ask for: non-zero code, signal or panic | `Backoff`: 1 s doubling to 60 s; `Failed{Crash}` after 5 crashes in 10 min |
+| `Clean` | exit code 0, or a kill by the launcher after the grace period (`detail: "killed by the launcher"`); a non-zero exit or panic during a requested stop keeps its own class and is still not restarted | `Stopped` |
 
-Disk full is also deterministic and never retried. The log lines these depend on are
-pinned by fixtures captured from real zebrad; see
+The end-of-support warning (`Your Zebra release is too old`) is a log event
+(`LogEvent::EosWarn`), not an exit class: zebrad keeps running and the UI shows a banner.
+There is no disk-full class; a full disk ends the run as whatever zebrad does then,
+normally `Crash`. The log lines these depend on are pinned by fixtures captured from real
+zebrad; see
 [`crates/launcher-core/tests/fixtures/README.md`](../crates/launcher-core/tests/fixtures/README.md).
 
 **Spawn environment.** `zebrad -c <app_config_dir>/zebrad.toml start`. Every inherited
@@ -133,22 +139,27 @@ pinned by fixtures captured from real zebrad; see
 
 | | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| Graceful stop once zebrad has stdin-close (M6) | close stdin | close stdin | close stdin |
-| Graceful stop until then | `SIGTERM` | `SIGTERM` | none: terminate the job; the UI says "hard stop" |
-| Escalation after the grace period (default 60 s) | `SIGKILL`, `wait()` | `SIGKILL`, `wait()` | `TerminateJobObject`, wait |
-| Launcher dies | `PR_SET_PDEATHSIG(SIGTERM)`; stdin EOF | stdin EOF | per-zebrad Job Object; stdin EOF |
+| Graceful stop with `LAUNCHER_STDIN_CLOSE=1` (zebrad started with `--shutdown-on-stdin-close`: fake-zebrad, or a zebrad with the proposed upstream flag) | close stdin | close stdin | close stdin |
+| Graceful stop otherwise (the pinned zebrad today) | `SIGTERM` | `SIGTERM` | none: the Job Object is terminated at once |
+| Escalation after the grace period (default 60 s) | `SIGKILL` to the process group, `wait()` | `SIGKILL` to the process group, `wait()` | `TerminateJobObject`, wait |
+| Launcher exits | the exit flow stops zebrad first; `PR_SET_PDEATHSIG(SIGTERM)` covers a crash | the exit flow stops zebrad first; after a crash zebrad runs on until the next launch finds it through the pidfile | `KILL_ON_JOB_CLOSE` on the per-zebrad Job Object |
 | Stale zebrad on start | pidfile | pidfile | pidfile |
 
-- **Stdin-close shutdown (M6)** is an upstream, opt-in zebrad flag: zebrad shuts down
+- **Stdin-close shutdown** is a proposed upstream, opt-in zebrad flag: zebrad shuts down
   when its stdin reaches EOF and logs `stdin closed, starting shutdown` (target
   `zebrad::signal`). It is one mechanism on every OS, and a launcher crash closes the
   pipe too. Windows needs it because zebrad there only handles Ctrl-C, which a
-  console-less GUI parent cannot deliver reliably.
+  console-less GUI parent cannot deliver reliably. The pinned zebrad does not have the
+  flag yet, so the launcher passes it only when `LAUNCHER_STDIN_CLOSE=1` is set
+  ([DEVELOPMENT.md](DEVELOPMENT.md#run-the-app)); fake-zebrad implements it. Until then a
+  stop on Windows is a hard stop: zebrad is terminated without running its shutdown (no
+  `stopping zebrad` lines), and the UI does not label it differently.
 - **Windows Job Object:** one per zebrad, created with `CREATE_SUSPENDED` → assign →
   resume, as `zebra-test`'s `process_group/windows.rs` does. The launcher itself is never
   in a job (that would kill the NSIS updater and browsers it opened). `KILL_ON_JOB_CLOSE`
-  is set only while the pinned zebrad lacks stdin-close; afterwards the job is kept for
-  escalation only. `CREATE_NO_WINDOW` is kept.
+  is always set today (`ZebradCommand::kill_on_launcher_exit`); once the pinned zebrad has
+  stdin-close it can be dropped, so a launcher crash lets zebrad shut down through stdin
+  EOF while the job stays for escalation. `CREATE_NO_WINDOW` is kept.
 - **Stale process:** an orphan cannot be adopted, because its pipes are gone. On startup
   the user chooses "wait for it to exit" or "kill".
 - **AppImage:** the sidecar is copied out of the FUSE mount into the app data dir
@@ -205,7 +216,8 @@ until the schema is updated.
 The managed keys are launcher-owned: the supervisor and the RPC monitor rely on them.
 `config::ensure` rewrites them at every start, and `config::begin_apply_with_managed`
 overrides any edit to them before saving, so the editor cannot change them; they change
-only through the launcher (first run, `PortInUse` remediation).
+only through the launcher (the network and the data directory chosen at first run or in
+Settings).
 
 Applying an edit:
 
@@ -226,10 +238,13 @@ file as the same `zebrad.toml.bak`, and returns the new `ConfigDocument`. It run
 while zebrad is `Stopped` or `Failed`, holding the data-change gate (see below) so zebrad
 cannot start meanwhile, and refuses while an apply is in flight or its marker is pending.
 
-When the bundled zebrad version changes, the config is validated with a 10 s probe run
-first; on failure the managed keys are regenerated, the user's other keys kept, and the
-change shown. `PortInUse` remediation offers other ports and writes them into the managed
-keys. The RPC address always comes from the written config, never from log lines.
+A bundled zebrad version change is not special-cased: the next start runs the existing
+file against the new zebrad, and a key the new version rejects fails that start as
+`ConfigError`, for the user to fix in Configure. `PortInUse` is not remediated either:
+zebrad fails, the launcher does not retry, and the RPC and metrics ports cannot be moved in
+the launcher, so the user frees the port
+([TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-port-is-already-in-use)). The RPC monitor polls
+the address zebrad logged as opened (`Status.rpc_addr`), which is the managed one.
 
 Launcher settings live in `launcher.json` (with `schema_version`), owned by a settings
 actor. `set_settings` saves everything the UI sends except `first_run_done` and
@@ -254,7 +269,7 @@ directories; the commands in `src-tauri/src/commands.rs` call it off the async r
 | `import_legacy_state` | `ImportOutcome` | renames `dirs::cache_dir()/zebra/state` into the current state dir; across volumes it fails and asks the user to move it by hand, never copying |
 | `delete_legacy_state` | `u64` (bytes freed) | removes `dirs::cache_dir()/zebra/state` only (the peer cache stays), with the rules of `delete_node_data` and the zebra cache dir as the only root; refuses when the launcher's own state dir is inside that cache dir |
 | `delete_node_data` | `u64` (bytes freed) | removes `<data dir>/state` only, and only inside the launcher's data dir or the chosen one; the bytes come from a size measured earlier in the session, 0 (unknown) otherwise, never from a walk of the whole state |
-| `copy_diagnostics` | `String` | versions, OS, status, settings (URL credentials redacted), `zebrad.toml`, last 200 lines of each log; never the RPC cookie |
+| `copy_diagnostics` | `String` | versions, OS, the resolved zebrad binary, the stop grace in effect and in the settings, status and any stale zebrad, node statistics, settings (URL credentials redacted), the updater record and pending-update marker, `zebrad.toml`, last 200 lines of each log; never the RPC cookie |
 | `complete_first_run` | `()` | sets `first_run_done`; from then on zebrad starts at launch |
 
 zebrad is not started before the first run is complete: `firstrun::start_allowed` is the
@@ -321,7 +336,7 @@ On Mainnet, zebrad warns 42 days and halts 56 days after its estimated release h
 so an install that never updates stops working. The UI shows an EOS countdown, a warning
 banner, and a blocking halt card with no restart loop.
 
-## Updater (opt-in, M11)
+## Updater (opt-in)
 
 Modes `Off`, `Notify`, `Auto` (`settings.update_mode`); Off until the first-run choice,
 which preselects Notify.
@@ -422,7 +437,7 @@ is kept in `<config>/updater.json`.
 - Updatable formats: AppImage, NSIS per-user, `.app.tar.gz` per macOS arch. The plugin's
   `zip` feature is off, so zipped NSIS and gzipped AppImage updates are refused.
 
-## Release pipeline (M9, M10)
+## Release pipeline
 
 ```text
 ZEBRAD_VERSION
@@ -446,10 +461,13 @@ Targets: macOS Apple Silicon, macOS Intel, Windows x64, Linux x64 and arm64. Lin
 AppImage and deb, built in `ubuntu:22.04` containers (glibc floor 2.35, above zebrad's
 2.34). See [RELEASING.md](RELEASING.md) and [SECURITY.md](SECURITY.md).
 
-CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs fmt, clippy with the
-mutex ban, tests and `cargo deny` on Linux, and clippy and tests on `windows-2025` and
-`macos-15`. `bundle.yml` (M9) builds unsigned bundles with the real zebrad for all five
-targets.
+CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs, on Linux,
+`scripts/check-versions.sh`, fmt, clippy with the mutex ban, the tests, the UI crate's
+clippy for `wasm32-unknown-unknown` and `trunk build --release`, `cargo deny`, and
+shellcheck and actionlint over the scripts and workflows; clippy and tests on
+`windows-2025` and `macos-15`; and, on pushes to `main` and on pull requests that change
+the zebrad pin, the real-zebrad contract tests against the verified release binary.
+`bundle.yml` builds unsigned bundles with the real zebrad for all five targets.
 
 ## Decisions
 
@@ -475,4 +493,4 @@ Routine choices: minimal managed `zebrad.toml`; an app-owned state dir chosen at
 run, never reusing a CLI zebrad's state; `zcashd_compat` unsupported; a GitHub App token
 for bot PRs.
 
-<!-- TODO: link the approved plan once it is committed to the repository. -->
+The full plan these decisions come from is [PLAN.md](PLAN.md).

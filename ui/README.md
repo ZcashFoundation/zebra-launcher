@@ -74,7 +74,8 @@ backend that makes every page demoable:
   instead of Install) and `&stalecheck` for the stale-check warning (no successful check for
   20 days). Saving the Off mode returns the updater to Idle, like the backend.
 
-The flags are read from the query string once, when the page loads.
+The flags are read from the query string once, when the page loads; the table at the top of
+[`src/mock.rs`](src/mock.rs) lists every one.
 
 ## Build
 
@@ -88,7 +89,7 @@ selected by `data-cargo-profile-release` in `index.html`, then `wasm-opt -Oz`.
 
 ## How Tauri embeds it
 
-The Tauri app (`src-tauri`, rewritten in M5) points at this crate:
+The Tauri app (`src-tauri`) points at this crate:
 
 ```json
 "build": {
@@ -112,15 +113,27 @@ to the CSP when it serves the bundled assets.
 
 | File | What |
 | --- | --- |
+| `src/main.rs` | Entry point: mounts the app in the browser; the native build only prints a hint |
 | `src/tauri.rs` | `#[wasm_bindgen]` externs to `window.__TAURI__`, JSON-compatible (de)serialization |
 | `src/api.rs` | One typed function per backend command or event, Tauri or mock |
 | `src/mock.rs` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads |
-| `src/log_view.rs`, `src/format.rs` | Pure logic (log buffer, gaps, filters, formatting), unit-tested natively |
+| `src/app.rs` | Shared state (`AppState`), backend subscriptions, the shell: header, the five tabs and the first-run wizard |
+| `src/theme.rs` | Light and dark appearance: resolves the setting against the system preference and applies it to the document |
+| `src/clock.rs` | The current time from JavaScript's `Date` (`SystemTime::now()` panics on wasm) |
 | `src/clipboard.rs` | Copying text to the system clipboard |
-| `src/app.rs` | Shared state, subscriptions, the shell |
-| `src/components/` | The tabs, the status strip, the stale-process banner, the update-mode radio buttons shared by the wizard and Settings, and the updater UI (`updates.rs`: header banners, update buttons, "Check for updates", recovery panel) |
-| `src/pages/` | The four pages and the first-run wizard (`first_run.rs`) |
+| `src/format.rs` | Display helpers: numbers, durations, relative times, exit classes. Pure, tested natively |
+| `src/log_view.rs` | The Logs page's data model: a capped, de-duplicated buffer in `seq` order, dropped-line markers, level and text filters. Pure, tested natively |
+| `src/insights.rs`, `src/insights/fields.rs` | Log analysis: sync stage, problems, startup milestones and activity counts folded from the log stream; tolerant readers for the fields of a zebrad line. Pure, tested natively |
+| `src/stats_history.rs` | The `NodeStats` samples since the launcher opened, for the dashboard's charts and rates. Pure, tested natively |
+| `src/charts.rs`, `src/charts/line_chart.rs`, `src/charts/widgets.rs` | Inline SVG line charts (crosshair, keyboard navigation, table view), stat tiles with sparklines, the sync meter and the range control; the geometry is pure and tested natively |
+| `src/grafana_url.rs` | Builds the URL the Grafana tab embeds from the saved Grafana URL, the picked dashboard, time range, refresh and theme. Pure, tested natively |
+| `src/config_form.rs`, `src/config_form/schema.rs` | zebrad's configuration as a form: the schema of every key the bundled zebrad accepts, values read from `zebrad.toml` with `toml_edit`, validation, and edits written back into the same document. Pure, tested natively; a test pins the schema to the `zebrad generate` fixture |
+| `src/config_view.rs` | Helpers for the Configure page's file pane: changed lines, where a key is written, how far to scroll. Pure, tested natively |
+| `src/components/` | `nav.rs` (header and tabs), `status_strip.rs` (phase, progress, Start/Stop/Restart), `stale_banner.rs`, `updates.rs` (update banner, buttons, "Check for updates", recovery panel), `update_mode_choice.rs` (radio buttons shared by the wizard and Settings), `config_form.rs` (the two-view configuration editor), `log_insights.rs` (analysis cards), `reset_config.rs`, `tooltip.rs` |
+| `src/pages/` | The five tabs (`dashboard.rs`, `logs.rs`, `grafana.rs`, `configure.rs`, `settings.rs`) and the first-run wizard (`first_run.rs`) |
 
 The crate also compiles natively so `cargo clippy --workspace --all-targets` and
 `cargo test --workspace` cover it; the native binary only prints a hint. Check the wasm build with
-`cargo clippy -p ui --target wasm32-unknown-unknown`.
+`cargo clippy -p ui --target wasm32-unknown-unknown`. CI runs that and `trunk build --release` on
+every pull request (`.github/workflows/ci.yml`), so a dependency or an API that does not exist on
+wasm fails there, not in the bundle build after the merge.

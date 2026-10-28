@@ -1,10 +1,10 @@
 //! Contract tests against a real zebrad.
 //!
-//! Skipped unless `ZEBRAD_BIN` names a zebrad binary, so `cargo test` stays
-//! hermetic. Run them with:
+//! Ignored by default, so `cargo test` stays hermetic; CI runs them on bump pull
+//! requests with a fetched release binary. Run them by hand with:
 //!
 //! ```sh
-//! ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-core --test real_zebrad -- --nocapture
+//! ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-core --test real_zebrad -- --include-ignored --nocapture
 //! ```
 //!
 //! They start zebrad on Regtest through the supervisor, with every listener on
@@ -13,10 +13,8 @@
 //! generous enough for a slow CI machine.
 
 use std::{
-    future::Future,
     net::{Ipv4Addr, SocketAddr, TcpListener},
     path::{Path, PathBuf},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -26,8 +24,11 @@ use launcher_core::{
     process::ZebradCommand,
     supervisor::{self, SupervisorConfig, SupervisorError, SupervisorHandle},
 };
-use launcher_types::{ExitClass, LogEvent, LogLine, Phase, Status};
-use tokio::time::timeout;
+use launcher_types::{ExitClass, LogEvent, Phase};
+
+#[path = "support/helpers.rs"]
+mod support;
+use support::{contains, dump, wait_status, within_limit};
 
 /// Starting includes opening the state database, which can be slow on CI.
 const START_LIMIT: Duration = Duration::from_secs(120);
@@ -36,13 +37,8 @@ const STOP_LIMIT: Duration = Duration::from_secs(90);
 /// Commands that only talk to the actor.
 const CMD_LIMIT: Duration = Duration::from_secs(10);
 
-async fn within<F: Future>(limit: Duration, what: &str, future: F) -> F::Output {
-    timeout(limit, future)
-        .await
-        .unwrap_or_else(|_| panic!("{what} did not finish within {limit:?}"))
-}
-
-/// The zebrad under test, or `None` (with a note) when the test should be skipped.
+/// The zebrad under test. The tests are `#[ignore]`, so reaching this without `ZEBRAD_BIN`
+/// means `--include-ignored` was passed by mistake: fail loudly instead of passing silently.
 fn zebrad_bin() -> Option<PathBuf> {
     match std::env::var_os("ZEBRAD_BIN").filter(|v| !v.is_empty()) {
         Some(path) => {
@@ -54,12 +50,10 @@ fn zebrad_bin() -> Option<PathBuf> {
             );
             Some(path)
         }
-        None => {
-            eprintln!(
-                "skipping: set ZEBRAD_BIN to a zebrad binary to run the real-zebrad contract tests"
-            );
-            None
-        }
+        None => panic!(
+            "ZEBRAD_BIN is not set: these contract tests are ignored by default and run only with \
+             `--include-ignored` and ZEBRAD_BIN pointing at a zebrad binary"
+        ),
     }
 }
 
@@ -124,17 +118,6 @@ fn instance(zebrad: &Path, dir: &Path, state_dir: &Path) -> Instance {
     }
 }
 
-fn contains(lines: &[Arc<LogLine>], needle: &str) -> bool {
-    lines.iter().any(|line| line.message.contains(needle))
-}
-
-/// Prints the history, so a failure on CI shows what zebrad said.
-fn dump(lines: &[Arc<LogLine>]) {
-    for line in lines {
-        eprintln!("[{:?}] {}", line.stream, line.message);
-    }
-}
-
 /// The name of each startup event the supervisor depends on.
 fn startup_event_name(event: &LogEvent) -> Option<&'static str> {
     Some(match event {
@@ -148,22 +131,11 @@ fn startup_event_name(event: &LogEvent) -> Option<&'static str> {
     })
 }
 
-async fn wait_status(
-    handle: &SupervisorHandle,
-    limit: Duration,
-    what: &str,
-    predicate: impl FnMut(&Status) -> bool,
-) -> Status {
-    within(limit, what, handle.wait_until(predicate))
-        .await
-        .expect("supervisor is alive")
-}
-
 /// Starts `config` and waits until zebrad's RPC and metrics endpoints are open.
 async fn start_running(config: SupervisorConfig) -> SupervisorHandle {
     let handle = supervisor::spawn(config).expect("spawn supervisor");
-    if let Err(err) = within(START_LIMIT, "start", handle.start()).await {
-        let history = within(CMD_LIMIT, "history", handle.history_since(0))
+    if let Err(err) = within_limit(START_LIMIT, "start", handle.start()).await {
+        let history = within_limit(CMD_LIMIT, "history", handle.history_since(0))
             .await
             .unwrap_or_default();
         dump(&history);
@@ -176,6 +148,7 @@ async fn start_running(config: SupervisorConfig) -> SupervisorHandle {
     handle
 }
 
+#[ignore = "needs ZEBRAD_BIN; run with -- --include-ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn regtest_starts_reports_and_stops_cleanly() {
     let Some(zebrad) = zebrad_bin() else {
@@ -200,7 +173,7 @@ async fn regtest_starts_reports_and_stops_cleanly() {
     assert_ne!(rpc_addr.port(), 0, "the real port is reported, not 0");
 
     // The startup events, recomputed from the history, in the order zebrad logs them.
-    let sub = within(CMD_LIMIT, "subscribe", handle.subscribe())
+    let sub = within_limit(CMD_LIMIT, "subscribe", handle.subscribe())
         .await
         .expect("subscribe");
     let mut detector = Detector::new();
@@ -247,7 +220,7 @@ async fn regtest_starts_reports_and_stops_cleanly() {
     }
 
     let stop_started = Instant::now();
-    within(STOP_LIMIT, "stop", handle.stop())
+    within_limit(STOP_LIMIT, "stop", handle.stop())
         .await
         .expect("stop");
     eprintln!(
@@ -256,7 +229,7 @@ async fn regtest_starts_reports_and_stops_cleanly() {
     );
 
     let status = handle.status();
-    let history = within(CMD_LIMIT, "history", handle.history_since(0))
+    let history = within_limit(CMD_LIMIT, "history", handle.history_since(0))
         .await
         .expect("history");
     let exit = status.last_exit.clone().expect("exit recorded");
@@ -283,7 +256,7 @@ async fn regtest_starts_reports_and_stops_cleanly() {
         "the stop did not escalate to a kill"
     );
 
-    within(CMD_LIMIT, "shutdown", handle.shutdown())
+    within_limit(CMD_LIMIT, "shutdown", handle.shutdown())
         .await
         .expect("shutdown");
     // The writer thread flushes once the actor is gone; poll briefly for the file.
@@ -294,7 +267,7 @@ async fn regtest_starts_reports_and_stops_cleanly() {
             break;
         }
         assert!(Instant::now() < deadline, "log file incomplete:\n{text}");
-        within(
+        within_limit(
             CMD_LIMIT,
             "poll",
             tokio::time::sleep(Duration::from_millis(100)),
@@ -303,6 +276,7 @@ async fn regtest_starts_reports_and_stops_cleanly() {
     }
 }
 
+#[ignore = "needs ZEBRAD_BIN; run with -- --include-ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_instance_on_the_same_state_fails_with_db_locked() {
     let Some(zebrad) = zebrad_bin() else {
@@ -318,7 +292,7 @@ async fn second_instance_on_the_same_state_fails_with_db_locked() {
     let second_handle = supervisor::spawn(second.config).expect("spawn supervisor");
     // zebrad logs "Starting zebrad" before it opens the state, so the start can
     // succeed and the lock panic follow it, or zebrad can exit first.
-    match within(START_LIMIT, "second start", second_handle.start()).await {
+    match within_limit(START_LIMIT, "second start", second_handle.start()).await {
         Ok(()) => eprintln!("second zebrad reached Running before the lock panic"),
         Err(SupervisorError::ExitedDuringStart(info)) => {
             eprintln!("second zebrad exited before reaching Running");
@@ -330,7 +304,7 @@ async fn second_instance_on_the_same_state_fails_with_db_locked() {
         !matches!(s.phase, Phase::Starting | Phase::Running)
     })
     .await;
-    let history = within(CMD_LIMIT, "history", second_handle.history_since(0))
+    let history = within_limit(CMD_LIMIT, "history", second_handle.history_since(0))
         .await
         .expect("history");
     if status.phase
@@ -359,7 +333,7 @@ async fn second_instance_on_the_same_state_fails_with_db_locked() {
     assert!(contains(&history, "Database likely already open"));
 
     // A deterministic failure is not retried.
-    within(
+    within_limit(
         CMD_LIMIT,
         "no restart",
         tokio::time::sleep(Duration::from_secs(2)),
@@ -369,17 +343,17 @@ async fn second_instance_on_the_same_state_fails_with_db_locked() {
 
     // The first zebrad was not disturbed.
     assert_eq!(first_handle.status().phase, Phase::Running);
-    within(STOP_LIMIT, "stop first", first_handle.stop())
+    within_limit(STOP_LIMIT, "stop first", first_handle.stop())
         .await
         .expect("stop first");
     let exit = first_handle.status().last_exit.expect("exit recorded");
     assert_eq!(exit.code, Some(0), "{exit:?}");
     assert_eq!(exit.class, ExitClass::Clean);
 
-    within(CMD_LIMIT, "shutdown second", second_handle.shutdown())
+    within_limit(CMD_LIMIT, "shutdown second", second_handle.shutdown())
         .await
         .expect("shutdown second");
-    within(CMD_LIMIT, "shutdown first", first_handle.shutdown())
+    within_limit(CMD_LIMIT, "shutdown first", first_handle.shutdown())
         .await
         .expect("shutdown first");
 }

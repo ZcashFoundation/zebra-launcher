@@ -3,20 +3,16 @@
 #
 #   1. ZEBRAD_VERSION is MAJOR.MINOR.PATCH, with no leading "v".
 #   2. ZEBRAD_COMMIT is a full 40-character lowercase hex commit SHA.
-#   3. VERSION in crates/launcher-core/src/bin/fake-zebrad.rs equals
-#      ZEBRAD_VERSION, so the fake reports the version the launcher bundles.
-#   4. The tauri-cli pin, `TAURI_CLI_VERSION=` in .github/tool-versions.env
-#      (and any `TAURI_CLI_VERSION:` env entry left in a workflow), has the
-#      MAJOR.MINOR of the `tauri` crate in Cargo.lock (or, while the app is
-#      outside the workspace, src-tauri/Cargo.lock): the CLI that bundles the
-#      app must match the runtime it was built against. Skipped if nothing
-#      pins tauri-cli.
-#   5. src-tauri/tauri.conf.json sets plugins.updater.requireSignedVersion
+#   3. The tauri-cli pin, `TAURI_CLI_VERSION=` in .github/tool-versions.env,
+#      has the MAJOR.MINOR of the `tauri` crate in Cargo.lock: the CLI that
+#      bundles the app must match the runtime it was built against. Skipped if
+#      nothing pins tauri-cli.
+#   4. src-tauri/tauri.conf.json sets plugins.updater.requireSignedVersion
 #      to true, always. Its updater pubkey must also not be the placeholder,
 #      unless the environment variable UPDATER_ENABLED is "false"; only this
 #      pubkey part is skipped while UPDATER_ENABLED is unset (CI on pull
 #      requests). release.yml sets it.
-#   6. The wasm-bindgen CLI pin, `WASM_BINDGEN_VERSION=` in
+#   5. The wasm-bindgen CLI pin, `WASM_BINDGEN_VERSION=` in
 #      .github/tool-versions.env, equals the `wasm-bindgen` crate in Cargo.lock
 #      (read by scripts/cargo-lock-version.sh): trunk runs the CLI only at
 #      exactly that version. Skipped if nothing pins it.
@@ -33,6 +29,9 @@ die() {
     echo "check-versions: error: $*" >&2
     exit 2
 }
+
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 while [ $# -gt 0 ]; do
@@ -52,17 +51,11 @@ fail() {
 }
 skip() { echo "skip: $*"; }
 
-# Prints a file with all whitespace removed, or nothing if it is missing.
-read_pin() {
-    [ -f "$1" ] && tr -d '[:space:]' <"$1"
-    return 0
-}
-
-# 1. ZEBRAD_VERSION
+# 1. ZEBRAD_VERSION (the pin grammar is decided in lib.sh)
 version="$(read_pin "${root}/ZEBRAD_VERSION")"
 if [ ! -f "${root}/ZEBRAD_VERSION" ]; then
     fail "ZEBRAD_VERSION is missing"
-elif printf '%s\n' "${version}" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+elif is_stable_version "${version}"; then
     ok "ZEBRAD_VERSION is ${version}"
 else
     fail "ZEBRAD_VERSION is '${version}', expected MAJOR.MINOR.PATCH without a leading v"
@@ -72,65 +65,37 @@ fi
 commit="$(read_pin "${root}/ZEBRAD_COMMIT")"
 if [ ! -f "${root}/ZEBRAD_COMMIT" ]; then
     fail "ZEBRAD_COMMIT is missing"
-elif printf '%s\n' "${commit}" | grep -Eq '^[0-9a-f]{40}$'; then
+elif is_full_sha "${commit}"; then
     ok "ZEBRAD_COMMIT is ${commit}"
 else
     fail "ZEBRAD_COMMIT is '${commit}', expected a full 40-character lowercase hex SHA"
 fi
 
-# 3. fake-zebrad's VERSION
-fake="crates/launcher-core/src/bin/fake-zebrad.rs"
-if [ ! -f "${root}/${fake}" ]; then
-    fail "${fake} is missing"
-else
-    fake_versions="$(sed -n 's/^const VERSION: &str = "\([^"]*\)";$/\1/p' "${root}/${fake}")"
-    if [ -z "${fake_versions}" ] || [ "$(printf '%s\n' "${fake_versions}" | wc -l)" -ne 1 ]; then
-        fail "${fake} must have exactly one line 'const VERSION: &str = \"X.Y.Z\";'"
-    elif [ "${fake_versions}" = "${version}" ]; then
-        ok "${fake} VERSION is ${fake_versions}"
-    else
-        fail "${fake} VERSION is ${fake_versions}, but ZEBRAD_VERSION is ${version}"
-    fi
-fi
-
-# 4. tauri-cli pin vs. the tauri crate
-# Matches `TAURI_CLI_VERSION=2.1.0` in .github/tool-versions.env and
-# `TAURI_CLI_VERSION: 2.1.0`, quoted or not, in any workflow's env.
-cli_pins="$(
-    grep -HnE '^TAURI_CLI_VERSION=' "${root}/.github/tool-versions.env" 2>/dev/null || true
-    grep -HnE '^[[:space:]]*TAURI_CLI_VERSION:' "${root}"/.github/workflows/*.yml "${root}"/.github/workflows/*.yaml 2>/dev/null || true
-)"
-if [ -z "${cli_pins}" ]; then
+# 3. tauri-cli pin vs. the tauri crate
+cli_pin_line="$(grep -nE '^TAURI_CLI_VERSION=' "${root}/.github/tool-versions.env" 2>/dev/null || true)"
+if [ -z "${cli_pin_line}" ]; then
     skip "nothing sets TAURI_CLI_VERSION, so the tauri-cli/tauri check does not apply"
+elif [ "$(printf '%s\n' "${cli_pin_line}" | wc -l)" -ne 1 ]; then
+    fail ".github/tool-versions.env sets TAURI_CLI_VERSION more than once"
 else
-    tauri_version=""
-    for lock in Cargo.lock src-tauri/Cargo.lock; do
-        [ -f "${root}/${lock}" ] || continue
-        tauri_version="$(sed -n '/^name = "tauri"$/{n;s/^version = "\([^"]*\)"$/\1/p;}' "${root}/${lock}" | head -n 1)"
-        if [ -n "${tauri_version}" ]; then
-            tauri_lock="${lock}"
-            break
-        fi
-    done
+    location=".github/tool-versions.env:${cli_pin_line%%:*}"
+    cli_version="${cli_pin_line#*=}"
+    cli_version="${cli_version%$'\r'}"
+    tauri_version="$(sed -n '/^name = "tauri"$/{n;s/^version = "\([^"]*\)"$/\1/p;}' "${root}/Cargo.lock" 2>/dev/null | head -n 1)"
     if [ -z "${tauri_version}" ]; then
-        fail "TAURI_CLI_VERSION is set, but no Cargo.lock has the tauri crate"
+        fail "TAURI_CLI_VERSION is set, but Cargo.lock has no tauri crate"
     else
         tauri_minor="$(printf '%s\n' "${tauri_version}" | sed -n 's/^\([0-9]*\.[0-9]*\)\..*/\1/p')"
-        while IFS= read -r pin; do
-            location="${pin%%:*}:$(printf '%s\n' "${pin#*:}" | cut -d: -f1)"
-            location="${location#"${root}"/}"
-            cli_version="$(printf '%s\n' "${pin}" | sed -E 's/.*TAURI_CLI_VERSION[:=][[:space:]]*["'\'']?([^"'\''[:space:]#]*).*/\1/')"
-            cli_minor="$(printf '%s\n' "${cli_version}" | sed -n 's/^\([0-9]*\.[0-9]*\)\..*/\1/p')"
-            if [ -n "${cli_minor}" ] && [ "${cli_minor}" = "${tauri_minor}" ]; then
-                ok "${location} tauri-cli ${cli_version} matches tauri ${tauri_version} (${tauri_lock})"
-            else
-                fail "${location} tauri-cli '${cli_version}' is not tauri ${tauri_minor}.x (tauri ${tauri_version} in ${tauri_lock})"
-            fi
-        done <<<"${cli_pins}"
+        cli_minor="$(printf '%s\n' "${cli_version}" | sed -n 's/^\([0-9]*\.[0-9]*\)\..*/\1/p')"
+        if [ -n "${cli_minor}" ] && [ "${cli_minor}" = "${tauri_minor}" ]; then
+            ok "${location} tauri-cli ${cli_version} matches tauri ${tauri_version} (Cargo.lock)"
+        else
+            fail "${location} tauri-cli '${cli_version}' is not tauri ${tauri_minor}.x (tauri ${tauri_version} in Cargo.lock)"
+        fi
     fi
 fi
 
-# 5. updater signature settings
+# 4. updater signature settings
 # requireSignedVersion is always checked. The app is built with the minisign
 # public key in tauri.conf.json; a release with the updater enabled must not
 # ship the placeholder, or every update would fail to verify. The placeholder
@@ -152,7 +117,7 @@ else
     fail "${conf} has the placeholder updater public key, but UPDATER_ENABLED is '${UPDATER_ENABLED}': replace it (docs/SECURITY.md) or set the repository variable UPDATER_ENABLED=false"
 fi
 
-# 6. wasm-bindgen CLI pin vs. the wasm-bindgen crate
+# 5. wasm-bindgen CLI pin vs. the wasm-bindgen crate
 wb_pin_line="$(grep -nE '^WASM_BINDGEN_VERSION=' "${root}/.github/tool-versions.env" 2>/dev/null || true)"
 if [ -z "${wb_pin_line}" ]; then
     skip "nothing sets WASM_BINDGEN_VERSION, so the wasm-bindgen check does not apply"

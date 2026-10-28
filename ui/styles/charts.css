@@ -1,5 +1,7 @@
 /* Dashboard charts: stat tiles, the sync meter and the inline SVG charts (see ui/src/charts.rs).
-   Colours come from the tokens in styles.css only. No transitions: data changes must not move. */
+   The grid, axis, tooltip, key and table classes are shared with the log activity chart
+   (ui/src/components/log_insights.rs). Colours come from the tokens in styles.css only. No
+   transitions: data changes must not move. */
 
 /* Sync hero */
 
@@ -40,21 +42,7 @@
   color: var(--muted);
 }
 
-.dash-icon {
-  flex: none;
-  width: 16px;
-  height: 16px;
-}
-
-.dash-icon path {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.dash-icon-ok {
+.dash-hero-line .icon-check {
   color: var(--status-good);
 }
 
@@ -279,10 +267,6 @@
   font-size: 12px;
 }
 
-.chart-toggle[aria-pressed="true"] {
-  background: var(--border);
-}
-
 .chart-legend {
   display: flex;
   flex-wrap: wrap;
@@ -316,6 +300,14 @@
   height: 2px;
   border-radius: 1px;
   background: var(--series);
+}
+
+/* A column chart's key: a square, coloured by the segment's class. */
+.chart-key-block {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
 }
 
 /* The plot */
@@ -416,18 +408,36 @@
   position: absolute;
   top: 8px;
   z-index: 2;
-  transform: translateX(10px);
   padding: 6px 10px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
+  box-shadow: 0 2px 8px var(--shadow);
   font-size: 12px;
   white-space: nowrap;
   pointer-events: none;
 }
 
+/* How the box hangs from its `left`: beside a crosshair (right of it, or left near the plot's
+   right edge), or centred on a column and, near the plot's edges, inward. */
+.chart-tooltip-right {
+  transform: translateX(10px);
+}
+
 .chart-tooltip-left {
   transform: translateX(calc(-100% - 10px));
+}
+
+.chart-tooltip-centred {
+  transform: translateX(-50%);
+}
+
+.chart-tooltip-start {
+  transform: none;
+}
+
+.chart-tooltip-end {
+  transform: translateX(-100%);
 }
 
 .chart-tooltip-time {

@@ -32,7 +32,8 @@ const SHUTDOWN_MARGIN: Duration = Duration::from_secs(10);
 const MIN_SHUTDOWN_CAP: Duration = Duration::from_secs(70);
 
 /// How long to wait for zebrad to stop, given the stop grace period, before
-/// giving up on a clean shutdown.
+/// giving up on a clean shutdown. Callers of a running supervisor use
+/// [`SupervisorHandle::shutdown_cap`], which applies its actual grace.
 pub fn shutdown_cap(grace: Duration) -> Duration {
     (grace + SHUTDOWN_MARGIN).max(MIN_SHUTDOWN_CAP)
 }
@@ -42,7 +43,8 @@ pub fn shutdown_cap(grace: Duration) -> Duration {
 pub struct SupervisorConfig {
     /// The zebrad command line.
     pub command: ZebradCommand,
-    /// How long a requested stop may take before zebrad is killed.
+    /// How long a requested stop may take before zebrad is killed. Fixed for
+    /// the supervisor's lifetime; [`SupervisorHandle::stop_grace`] reports it.
     pub stop_grace: Duration,
     /// After zebrad exits, how long to wait for its pipes to close before the
     /// run is classified (a grandchild could keep them open).
@@ -146,6 +148,7 @@ enum Cmd {
 pub struct SupervisorHandle {
     cmd: mpsc::Sender<Cmd>,
     status: watch::Receiver<Status>,
+    stop_grace: Duration,
 }
 
 /// Starts the supervisor actor. Must be called from within a Tokio runtime.
@@ -153,12 +156,17 @@ pub struct SupervisorHandle {
 /// zebrad is not started until [`SupervisorHandle::start`] is called.
 pub fn spawn(config: SupervisorConfig) -> io::Result<SupervisorHandle> {
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
-    let (status_tx, status_rx) = watch::channel(Status::default());
+    let (status_tx, status_rx) = watch::channel(Status {
+        stop_is_graceful: config.command.stop_is_graceful(),
+        ..Status::default()
+    });
+    let stop_grace = config.stop_grace;
     let actor = actor::Actor::new(config, cmd_rx, status_tx)?;
     tokio::spawn(actor.run());
     Ok(SupervisorHandle {
         cmd: cmd_tx,
         status: status_rx,
+        stop_grace,
     })
 }
 
@@ -166,6 +174,19 @@ impl SupervisorHandle {
     /// The current status.
     pub fn status(&self) -> Status {
         self.status.borrow().clone()
+    }
+
+    /// How long a requested stop may take before zebrad is killed
+    /// ([`SupervisorConfig::stop_grace`]).
+    pub fn stop_grace(&self) -> Duration {
+        self.stop_grace
+    }
+
+    /// How long a caller should wait for [`Self::stop`] or [`Self::shutdown`]
+    /// before giving up: [`shutdown_cap`] of the actual grace, so the cap
+    /// always outlasts the escalation to a kill.
+    pub fn shutdown_cap(&self) -> Duration {
+        shutdown_cap(self.stop_grace)
     }
 
     /// A receiver that wakes on every status change.

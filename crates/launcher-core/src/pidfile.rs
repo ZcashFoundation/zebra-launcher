@@ -7,17 +7,17 @@
 //! find out, runs the recorded binary. The UI asks the user before killing
 //! anything.
 //!
-//! The executable check is best effort: it reads `/proc/<pid>/exe` on Linux,
-//! calls `proc_pidpath` on macOS and `QueryFullProcessImageNameW` on Windows.
-//! On other platforms, or when the executable cannot be read (for example a
-//! process owned by another user), the entry is trusted as before.
+//! The executable check is best effort ([`process::executable_of`]): where
+//! the platform cannot tell, the entry is trusted as before.
 
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
 
-use crate::fsutil;
+use launcher_types::StaleProcessInfo;
+
+use crate::{fsutil, process};
 
 /// A zebrad process recorded by a previous launcher run.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +26,16 @@ pub struct StaleProcess {
     pub pid: u32,
     /// The zebrad binary that was started, for display.
     pub binary: PathBuf,
+}
+
+/// The wire form for the UI: the one place the two types are mapped.
+impl From<&StaleProcess> for StaleProcessInfo {
+    fn from(stale: &StaleProcess) -> Self {
+        Self {
+            pid: stale.pid,
+            binary: stale.binary.display().to_string(),
+        }
+    }
 }
 
 /// Writes `pid` and `binary` to `path`, replacing any previous content.
@@ -79,7 +89,7 @@ pub fn check(path: &Path) -> io::Result<Option<StaleProcess>> {
 /// Whether the live process `pid` runs `binary`. True when the executable of
 /// `pid` cannot be determined, so the check only ever rules a process out.
 fn runs_binary(pid: u32, binary: &Path) -> bool {
-    let Some(live) = executable_of(pid) else {
+    let Some(live) = process::executable_of(pid) else {
         return true;
     };
     let matches = same_file_path(&live, binary);
@@ -105,145 +115,22 @@ fn same_file_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// The executable of the running process `pid`, if the platform tells us.
-#[cfg(target_os = "linux")]
-fn executable_of(pid: u32) -> Option<PathBuf> {
-    let link = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    // A binary replaced or removed since the process started reads as
-    // "<path> (deleted)".
-    let link = match link.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
-        Some(stripped) => PathBuf::from(stripped),
-        None => link,
-    };
-    Some(link)
-}
-
-/// The executable of the running process `pid`, if the platform tells us.
-#[cfg(target_os = "macos")]
-fn executable_of(pid: u32) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStringExt;
-
-    let pid = libc::c_int::try_from(pid).ok()?;
-    let mut buf = vec![0u8; usize::try_from(libc::PROC_PIDPATHINFO_MAXSIZE).ok()?];
-    let size = u32::try_from(buf.len()).ok()?;
-    // SAFETY: `buf` is writable for `size` bytes for the duration of the call.
-    let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), size) };
-    let len = usize::try_from(len).ok().filter(|&len| len > 0)?;
-    buf.truncate(len);
-    Some(PathBuf::from(std::ffi::OsString::from_vec(buf)))
-}
-
-/// The executable of the running process `pid`, if the platform tells us.
-#[cfg(windows)]
-fn executable_of(pid: u32) -> Option<PathBuf> {
-    use std::os::windows::{
-        ffi::OsStringExt,
-        io::{AsRawHandle, FromRawHandle, OwnedHandle},
-    };
-
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
-    };
-
-    // SAFETY: OpenProcess has no preconditions; a null result is checked below.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return None;
-    }
-    // SAFETY: the handle was just returned by OpenProcess and is owned by us.
-    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
-    let mut buf = vec![0u16; 32_768];
-    let mut size = u32::try_from(buf.len()).ok()?;
-    // SAFETY: the handle is valid, `buf` is writable for `size` UTF-16 units and
-    // `size` points to writable memory.
-    let ok = unsafe {
-        QueryFullProcessImageNameW(
-            handle.as_raw_handle(),
-            PROCESS_NAME_WIN32,
-            buf.as_mut_ptr(),
-            &mut size,
-        )
-    };
-    if ok == 0 {
-        return None;
-    }
-    buf.truncate(usize::try_from(size).ok()?);
-    Some(PathBuf::from(std::ffi::OsString::from_wide(&buf)))
-}
-
-/// Other platforms cannot tell; the pid alone is trusted.
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn executable_of(_pid: u32) -> Option<PathBuf> {
-    None
-}
-
 /// True for pids that never name a recorded zebrad: 0 (which `kill` treats as
 /// the caller's own process group) and the launcher itself.
 fn is_own_or_group(pid: u32) -> bool {
     pid == 0 || pid == std::process::id()
 }
 
-/// Returns true when a process with `pid` exists.
+/// Returns true when a process with `pid` exists ([`process::is_alive`]).
 ///
 /// Always false for pid 0 and for the launcher's own pid.
-#[cfg(unix)]
 pub fn is_alive(pid: u32) -> bool {
-    use nix::{errno::Errno, sys::signal::kill, unistd::Pid};
-    if is_own_or_group(pid) {
-        return false;
-    }
-    let Ok(pid) = i32::try_from(pid) else {
-        return false;
-    };
-    // Signal 0 performs the permission and existence checks without sending anything.
-    match kill(Pid::from_raw(pid), None) {
-        Ok(()) => true,
-        // The process exists but belongs to another user.
-        Err(Errno::EPERM) => true,
-        Err(_) => false,
-    }
+    !is_own_or_group(pid) && process::is_alive(pid)
 }
 
-/// Returns true when a process with `pid` exists and has not exited.
-///
-/// Always false for pid 0 and for the launcher's own pid.
-#[cfg(windows)]
-pub fn is_alive(pid: u32) -> bool {
-    if is_own_or_group(pid) {
-        return false;
-    }
-    use std::os::windows::io::{FromRawHandle, OwnedHandle};
-
-    use windows_sys::Win32::{
-        Foundation::STILL_ACTIVE,
-        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
-    };
-
-    // SAFETY: OpenProcess has no preconditions; a null result is checked below.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return false;
-    }
-    // SAFETY: the handle was just returned by OpenProcess and is owned by us.
-    let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
-    let mut exit_code: u32 = 0;
-    // SAFETY: the handle is valid for the call and exit_code points to writable memory.
-    let ok = unsafe {
-        GetExitCodeProcess(
-            std::os::windows::io::AsRawHandle::as_raw_handle(&handle),
-            &mut exit_code,
-        )
-    };
-    // STILL_ACTIVE is 259; a process that happens to exit with 259 is misreported, which
-    // is the documented limitation of this API and acceptable for a stale-pid hint.
-    ok != 0 && exit_code == STILL_ACTIVE as u32
-}
-
-/// Sends the platform's termination request to `pid`.
-///
-/// On Unix this is `SIGTERM`; on Windows it is `TerminateProcess`, because a
-/// stale process is not in a job the launcher owns.
+/// Sends the platform's termination request to `pid`
+/// ([`process::terminate_pid`]): `SIGTERM` on Unix, `TerminateProcess` on
+/// Windows, because a stale process is not in a job the launcher owns.
 ///
 /// Refuses pid 0 (on Unix, the launcher's own process group) and the
 /// launcher's own pid.
@@ -254,31 +141,7 @@ pub fn terminate(pid: u32) -> io::Result<()> {
             format!("refusing to terminate pid {pid}: it is not a separate process"),
         ));
     }
-    #[cfg(unix)]
-    {
-        crate::process::unix::terminate(pid)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
-        };
-
-        // SAFETY: OpenProcess has no preconditions; a null result is checked below.
-        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
-        if handle.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: the handle was just returned by OpenProcess and is owned by us.
-        let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
-        // SAFETY: the handle is valid and has PROCESS_TERMINATE access.
-        if unsafe { TerminateProcess(handle.as_raw_handle(), 1) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
+    process::terminate_pid(pid)
 }
 
 #[cfg(test)]
@@ -296,7 +159,7 @@ mod tests {
             .and_then(|p| fs::canonicalize(p).ok());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let seen = executable_of(pid);
+            let seen = process::executable_of(pid);
             let seen_canonical = seen.as_ref().and_then(|p| fs::canonicalize(p).ok());
             if seen.is_some() && (ours.is_none() || seen_canonical != ours) {
                 return seen;
@@ -341,6 +204,21 @@ mod tests {
         assert!(still_alive, "the process itself is alive");
         assert_eq!(found.expect("read"), None);
         assert!(!path.exists(), "the mismatched entry is removed");
+    }
+
+    #[test]
+    fn the_wire_form_shows_the_binary_path() {
+        let stale = StaleProcess {
+            pid: 4242,
+            binary: PathBuf::from("/opt/zebrad"),
+        };
+        assert_eq!(
+            StaleProcessInfo::from(&stale),
+            StaleProcessInfo {
+                pid: 4242,
+                binary: "/opt/zebrad".to_string(),
+            }
+        );
     }
 
     #[test]

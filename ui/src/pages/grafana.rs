@@ -2,15 +2,14 @@
 //! dashboard picker, time range and refresh interval. While no Grafana URL is set, a setup card
 //! explains the shipped observability stack and saves a URL into the settings.
 
-use std::time::Duration;
-
-use launcher_types::is_loopback_http_url;
+use launcher_types::{OpenTarget, is_loopback_http_url};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
     api,
     app::{AppState, Tab},
     clipboard::copy_to_clipboard,
+    components::{outcome_note::OutcomeNote, transient::Transient},
     grafana_url::{
         DASHBOARDS, DEFAULT_UID, Range, Refresh, custom_uid, embed_url, host_in, uid_in,
     },
@@ -34,9 +33,6 @@ const URL_ERROR: &str = "Only http:// URLs on 127.0.0.1 or localhost can be embe
 const STORED_DASHBOARD: &str = "grafana.dashboard";
 const STORED_RANGE: &str = "grafana.range";
 const STORED_REFRESH: &str = "grafana.refresh";
-
-/// How long the copy result stays visible.
-const NOTE_DURATION: Duration = Duration::from_secs(3);
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -84,9 +80,7 @@ fn Setup() -> impl IntoView {
     let input = RwSignal::new(SUGGESTED_URL.to_owned());
     let saving = RwSignal::new(false);
     let save_error = RwSignal::new(None::<String>);
-    let copy_note = RwSignal::new(None::<String>);
-    // Bumped by every copy, so the timer of an earlier copy does not clear a newer note.
-    let copy_generation = StoredValue::new(0u64);
+    let copy_note = Transient::<Result<String, String>>::new();
 
     let valid = Memo::new(move |_| input.with(|input| is_loopback_http_url(input.trim())));
     // The rule, shown as soon as something invalid is typed; an empty field just disables Save.
@@ -97,21 +91,10 @@ fn Setup() -> impl IntoView {
 
     let copy_command = move |_| {
         spawn_local(async move {
-            let note = match copy_to_clipboard(COMPOSE_COMMAND).await {
-                Ok(()) => "Copied".to_owned(),
-                Err(error) => format!("Copy failed: {error}"),
-            };
-            copy_generation.update_value(|generation| *generation += 1);
-            let mine = copy_generation.get_value();
-            copy_note.set(Some(note));
-            set_timeout(
-                move || {
-                    if copy_generation.get_value() == mine {
-                        copy_note.try_set(None);
-                    }
-                },
-                NOTE_DURATION,
-            );
+            copy_note.report(match copy_to_clipboard(COMPOSE_COMMAND).await {
+                Ok(()) => Ok("Copied".to_owned()),
+                Err(error) => Err(format!("Copy failed: {error}")),
+            });
         });
     };
 
@@ -119,7 +102,7 @@ fn Setup() -> impl IntoView {
     let open_repo = move |_| {
         open_error.set(None);
         spawn_local(async move {
-            if let Err(error) = api::open_path("repo").await {
+            if let Err(error) = api::open_path(OpenTarget::Repo).await {
                 open_error.try_set(Some(format!("Could not open the browser: {error}")));
             }
         });
@@ -166,7 +149,7 @@ fn Setup() -> impl IntoView {
                 <div class="grafana-command">
                     <pre>{COMPOSE_COMMAND}</pre>
                     <button type="button" on:click=copy_command>"Copy"</button>
-                    {move || copy_note.get().map(|note| view! { <span class="muted">{note}</span> })}
+                    <OutcomeNote outcome=copy_note.signal() />
                 </div>
                 <p class="muted grafana-linux">
                     "On Linux, add " <code>"-f docs/observability/docker-compose.linux.yml"</code>
@@ -296,14 +279,14 @@ fn Embedded(url: String) -> impl IntoView {
     let open_in_browser = move |_| {
         open_error.set(None);
         spawn_local(async move {
-            if let Err(error) = api::open_path("grafana").await {
+            if let Err(error) = api::open_path(OpenTarget::Grafana).await {
                 open_error.try_set(Some(format!("Could not open the browser: {error}")));
             }
         });
     };
 
     view! {
-        <div class="grafana-toolbar">
+        <div class="toolbar grafana-toolbar">
             <select aria-label="Dashboard" prop:value=move || selected.get() on:change=pick_dashboard>
                 {options
                     .iter()

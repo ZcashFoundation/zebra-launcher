@@ -1,8 +1,9 @@
 //! Forwards launcher-core's channels to the webview.
 //!
 //! Status and node statistics change rarely, so every change is emitted as a
-//! Tauri event (`status`, `node_stats`). Logs can arrive by the thousand per
-//! second, so they go through a `tauri::ipc::Channel` in batches.
+//! Tauri event ([`events::STATUS`], [`events::NODE_STATS`]). Logs can arrive
+//! by the thousand per second, so they go through a `tauri::ipc::Channel` in
+//! batches.
 
 use std::{
     sync::{
@@ -13,7 +14,7 @@ use std::{
 };
 
 use launcher_core::supervisor::LogSubscription;
-use launcher_types::{LogLevel, LogLine, LogStream, NodeStats, Status};
+use launcher_types::{LogLine, NodeStats, Status, events};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, ipc::Channel};
 use tokio::{
@@ -21,23 +22,19 @@ use tokio::{
     time::MissedTickBehavior,
 };
 
-/// The event carrying every [`Status`] change.
-pub const STATUS_EVENT: &str = "status";
-/// The event carrying every `Option<NodeStats>` change.
-pub const NODE_STATS_EVENT: &str = "node_stats";
 /// How long log lines are collected before a batch is sent.
 pub const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(100);
 /// A batch is sent early once it holds this many lines.
 pub const MAX_LOG_BATCH: usize = 1000;
 
-/// Emits `status` now and on every change, until the supervisor ends.
+/// Emits [`events::STATUS`] now and on every change, until the supervisor ends.
 pub fn forward_status<R: Runtime>(app: AppHandle<R>, rx: watch::Receiver<Status>) {
-    tauri::async_runtime::spawn(forward_watch(app, STATUS_EVENT, rx));
+    tauri::async_runtime::spawn(forward_watch(app, events::STATUS, rx));
 }
 
-/// Emits `node_stats` now and on every change, until the monitor ends.
+/// Emits [`events::NODE_STATS`] now and on every change, until the monitor ends.
 pub fn forward_node_stats<R: Runtime>(app: AppHandle<R>, rx: watch::Receiver<Option<NodeStats>>) {
-    tauri::async_runtime::spawn(forward_watch(app, NODE_STATS_EVENT, rx));
+    tauri::async_runtime::spawn(forward_watch(app, events::NODE_STATS, rx));
 }
 
 async fn forward_watch<R: Runtime, T: Clone + Serialize>(
@@ -132,25 +129,16 @@ pub async fn pump_logs(
     }
 }
 
-/// A launcher line standing in for `dropped` lines the UI fell behind on.
-///
-/// It takes the sequence number of the last dropped line (`next_seq - 1`), so
-/// the sequence the UI sees stays contiguous; the lines themselves can be
-/// fetched with `log_history` while they are still retained.
+/// A launcher line standing in for `dropped` lines the UI fell behind on
+/// ([`LogLine::gap_marker`]), placed before the live line with `next_seq`: it
+/// takes the sequence number of the last dropped line, `next_seq - 1`.
 pub fn gap_marker(dropped: u64, next_seq: u64) -> LogLine {
-    LogLine {
-        seq: next_seq.saturating_sub(1),
-        stream: LogStream::Launcher,
-        timestamp: None,
-        level: Some(LogLevel::Warn),
-        spans: None,
-        target: None,
-        message: format!("{dropped} lines dropped"),
-    }
+    LogLine::gap_marker(dropped, next_seq.saturating_sub(1))
 }
 
 #[cfg(test)]
 mod tests {
+    use launcher_types::LogStream;
     use tokio::sync::broadcast;
 
     use super::*;
@@ -164,6 +152,7 @@ mod tests {
             spans: None,
             target: None,
             message: format!("line {seq}"),
+            dropped: None,
         })
     }
 
@@ -199,16 +188,21 @@ mod tests {
         let seqs: Vec<u64> = lines.iter().map(|l| l.seq).collect();
         assert_eq!(seqs, vec![0, 1, 4, 5, 6]);
         assert_eq!(lines[2].stream, LogStream::Launcher);
+        assert_eq!(lines[2].dropped, Some(3));
         assert_eq!(lines[2].message, "3 lines dropped");
+        assert!(lines.iter().filter(|line| line.is_gap_marker()).count() == 1);
     }
 
     #[test]
     fn gap_marker_shape() {
         let marker = gap_marker(7, 10);
         assert_eq!(marker.seq, 9);
-        assert_eq!(
-            serde_json::to_value(&marker).expect("serialize")["stream"],
-            "launcher"
-        );
+        assert_eq!(marker.dropped, Some(7));
+        let json = serde_json::to_value(&marker).expect("serialize");
+        assert_eq!(json["stream"], "launcher");
+        assert_eq!(json["dropped"], 7);
+        // Ordinary lines carry no `dropped` key, so the field is invisible to them.
+        let json = serde_json::to_value(&*line(3)).expect("serialize");
+        assert!(json.get("dropped").is_none(), "{json}");
     }
 }

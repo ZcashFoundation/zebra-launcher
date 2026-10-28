@@ -22,7 +22,7 @@ use tauri::{
 };
 use tokio::sync::watch;
 
-use crate::app_state::{AppState, is_stopped};
+use crate::app_state::AppState;
 
 const SHOW: &str = "show";
 const START: &str = "start";
@@ -140,11 +140,11 @@ pub fn tooltip(phase: &Phase) -> String {
     format!("Zebra Launcher: {what}")
 }
 
-/// Whether Start and Stop are enabled in `phase`; Start only when
-/// `may_start` ([`start_allowed`]).
+/// Whether Start and Stop are enabled in `phase`: Start while zebrad is
+/// settled, and only when `may_start` ([`start_allowed`]); Stop while it is
+/// active. Neither while it is stopping.
 pub fn menu_state(phase: &Phase, may_start: bool) -> (bool, bool) {
-    let stopped = is_stopped(phase);
-    (stopped && may_start, !stopped && *phase != Phase::Stopping)
+    (phase.is_settled() && may_start, phase.is_active())
 }
 
 #[cfg(test)]

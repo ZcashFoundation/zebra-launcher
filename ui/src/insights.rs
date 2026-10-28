@@ -15,7 +15,6 @@ use std::{
 
 use launcher_types::{LogLevel, LogLine, LogStream};
 
-use crate::log_view::is_gap_marker;
 use fields::{
     epoch_minute, field, height_of, message_text, minute_start, parse_timestamp, pattern_of,
     percent_of, u64_of,
@@ -359,8 +358,8 @@ impl Insights {
                 continue;
             }
             self.last_seq = Some(line.seq);
-            if is_gap_marker(line) {
-                self.dropped_lines += dropped_count(&line.message);
+            if let Some(dropped) = line.dropped {
+                self.dropped_lines += dropped;
                 continue;
             }
             let at = match line.timestamp.as_deref().and_then(parse_timestamp) {
@@ -730,14 +729,6 @@ impl Insights {
     }
 }
 
-/// The count in a gap marker's `N lines dropped`.
-fn dropped_count(message: &str) -> u64 {
-    message
-        .strip_suffix(" lines dropped")
-        .and_then(|count| count.parse().ok())
-        .unwrap_or(0)
-}
-
 /// `+0.08 s`, `+1.2 s`, `+45 s`, `+3 min`: a step's time since the run started.
 pub fn elapsed_text(elapsed: Duration) -> String {
     let secs = elapsed.as_secs_f64();
@@ -747,20 +738,6 @@ pub fn elapsed_text(elapsed: Duration) -> String {
         format!("+{secs:.1} s")
     } else {
         format!("+{}", crate::format::rough_duration(elapsed))
-    }
-}
-
-/// `1,234` below ten thousand, then `12.3K`, `2.95M`: a count that must fit a tick label.
-pub fn compact(value: u64) -> String {
-    fn trimmed(value: f64, decimals: usize) -> String {
-        let text = format!("{value:.decimals$}");
-        let text = text.trim_end_matches('0');
-        text.trim_end_matches('.').to_owned()
-    }
-    match value {
-        0..10_000 => crate::format::thousands(value),
-        10_000..1_000_000 => format!("{}K", trimmed(value as f64 / 1_000.0, 1)),
-        _ => format!("{}M", trimmed(value as f64 / 1_000_000.0, 2)),
     }
 }
 
@@ -787,6 +764,7 @@ mod tests {
             spans: None,
             target: Some(target.into()),
             message: message.into(),
+            dropped: None,
         }
     }
 
@@ -799,6 +777,7 @@ mod tests {
             spans: None,
             target: None,
             message: message.into(),
+            dropped: None,
         }
     }
 
@@ -956,15 +935,15 @@ mod tests {
     #[test]
     fn gap_markers_count_dropped_lines_and_are_not_analysed() {
         let mut insights = Insights::default();
-        let marker = LogLine {
-            level: Some(LogLevel::Warn),
-            ..launcher(9, "7 lines dropped")
-        };
-        insights.ingest(&[marker], at(T0));
+        insights.ingest(&[LogLine::gap_marker(7, 9)], at(T0));
         assert_eq!(insights.dropped_lines(), 7);
         assert_eq!(insights.lines_total(), 0);
         assert!(insights.problems(10).is_empty());
         assert_eq!(insights.unseen_problems(), 0);
+        // A launcher note that reads like a marker is an ordinary line.
+        insights.ingest(&[launcher(10, "7 lines dropped")], at(T0));
+        assert_eq!(insights.dropped_lines(), 7);
+        assert_eq!(insights.lines_total(), 1);
     }
 
     #[test]
@@ -1490,12 +1469,5 @@ mod tests {
         assert_eq!(elapsed_text(Duration::from_millis(1_234)), "+1.2 s");
         assert_eq!(elapsed_text(Duration::from_secs(45)), "+45 s");
         assert_eq!(elapsed_text(Duration::from_secs(190)), "+3 min");
-        assert_eq!(compact(0), "0");
-        assert_eq!(compact(999), "999");
-        assert_eq!(compact(9_999), "9,999");
-        assert_eq!(compact(12_345), "12.3K");
-        assert_eq!(compact(20_000), "20K");
-        assert_eq!(compact(2_950_000), "2.95M");
-        assert_eq!(compact(3_000_000), "3M");
     }
 }

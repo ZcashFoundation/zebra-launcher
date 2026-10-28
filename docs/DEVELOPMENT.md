@@ -26,12 +26,17 @@ No Node, npm or pnpm is needed.
 
 ### Linux (Debian, Ubuntu)
 
+The packages CI installs, from `LINUX_PACKAGES` in
+[`.github/tool-versions.env`](../.github/tool-versions.env): the WebKitGTK and tray
+libraries Tauri builds against, `patchelf` for the AppImage bundler, `libfuse2` and `file`
+to run and inspect an AppImage, and the build basics (`build-essential`, `pkg-config`,
+`curl`, `git`, `jq`):
+
 ```sh
-sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+sudo apt-get install $(sed -n 's/^LINUX_PACKAGES=//p' .github/tool-versions.env)
 ```
 
-Plus a C toolchain (`build-essential`). CI builds in an `ubuntu:22.04` container, which is
-the oldest supported base.
+CI builds the bundles in an `ubuntu:22.04` container, which is the oldest supported base.
 
 ### macOS
 
@@ -53,8 +58,8 @@ Binaries are never committed.
   `fake-zebrad` and copies it into place. It takes no arguments. fake-zebrad starts
   fast, needs no chain state, and can be scripted into failure modes with the
   `FAKE_ZEBRAD_MODE` environment variable (`ok`, `crash`, `config-error`, `eos-warn`,
-  `eos-halt`, `port-in-use`, `db-locked`, `hang-on-signal`, `stderr-flood`, `non-utf8`,
-  `stdin-close`), which it inherits from the launcher.
+  `eos-halt`, `port-in-use`, `db-locked`, `hang-on-signal`, `stderr-flood`, `non-utf8`),
+  which it inherits from the launcher.
 - **Real zebrad:** the version in [`ZEBRAD_VERSION`](../ZEBRAD_VERSION), fetched
   (`scripts/fetch-zebrad-linux.sh`, Linux) or built from the Zebra tag
   (`scripts/build-zebrad.sh`, `scripts/build-zebrad.ps1`); see [SIDECARS.md](SIDECARS.md).
@@ -75,7 +80,7 @@ it, rebuilding on changes. Useful environment variables:
 | --- | --- |
 | `RUST_LOG` | Launcher log filter, default `info`. Debug builds also log to stderr. |
 | `FAKE_ZEBRAD_MODE` | fake-zebrad's behaviour, see above. |
-| `LAUNCHER_STDIN_CLOSE=1` | Spawn zebrad with `--shutdown-on-stdin-close` and stop it by closing its stdin (fake-zebrad, or a zebrad with the upstream change from M6). |
+| `LAUNCHER_STDIN_CLOSE=1` | Spawn zebrad with `--shutdown-on-stdin-close` and stop it by closing its stdin (fake-zebrad, or a zebrad with the proposed upstream flag; the pinned zebrad does not have it yet). |
 
 The launcher keeps its files in the per-user directories for the identifier
 `org.zfnd.zebra-launcher` (`zebrad.toml` and `launcher.json` in the config directory,
@@ -85,20 +90,24 @@ and `zebrad.log` in the log directory). The `open_path` command opens them.
 On Linux, if the window is blank, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 To see dashboards in the Grafana tab, start the stack in [GRAFANA.md](GRAFANA.md). Without
-Tauri, `trunk serve` in `ui/` shows the UI against a mock backend at http://localhost:1420
-(`?running` starts it with a running node; see the flags at the top of `ui/src/mock.rs`).
+Tauri, `trunk serve` in `ui/` shows the UI against a mock backend at http://localhost:1420.
+The mock starts zebrad on load; query flags such as `?firstrun`, `?stale`, `?eos=halt` or
+`?update=available` put it into other states (`?running` is a first-run flag: zebrad is
+already running and Start fails). The table at the top of [ui/src/mock.rs](../ui/src/mock.rs)
+lists every flag; [ui/README.md](../ui/README.md#develop-in-a-browser-mock-mode) describes the
+states.
 
 ### Release build
 
-`cargo tauri build` embeds `ui/dist`, which `trunk build --release` produces (the
-`beforeBuildCommand`). Until the `ui` crate is in the tree, build in two steps and
-expect the second to fail without it:
+`cargo tauri build` runs `trunk build --release` in `ui/` first (the `beforeBuildCommand`
+in `tauri.conf.json`) and embeds the resulting `ui/dist`, so one command builds the app
+and its bundles. Without the updater key, skip the updater artifacts:
 
 ```sh
-(cd ui && trunk build --release)          # 1. the frontend, into ui/dist
-# 2. the app and its bundles; without the updater key, skip the updater artifacts
 cargo tauri build --debug --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
+
+To build the frontend alone, run `trunk build --release` in `ui/`.
 
 `tauri.conf.json` sets `bundle.createUpdaterArtifacts`, which needs
 `TAURI_SIGNING_PRIVATE_KEY`; only the release workflow has it.
@@ -122,19 +131,25 @@ cargo fmt --all --check
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --locked
 cargo test --workspace --locked
 cargo deny check
+scripts/check-versions.sh
+RUSTFLAGS="-D warnings" cargo clippy -p ui --target wasm32-unknown-unknown --locked
+(cd ui && trunk build --release)
+shellcheck scripts/*.sh docs/observability/*.sh && actionlint   # CI pins their versions
 ```
 
 Run `scripts/dev-sidecar.sh` first: the app crate's build script fails without the
 sidecar file. On Linux the app also needs the WebKitGTK packages listed above; without
 them, check everything else with `--exclude zebra-launcher`, and the app with
-`cargo clippy -p zebra-launcher --target x86_64-pc-windows-msvc --all-targets` (Tauri's
-Windows backend needs no system libraries to type-check; `rustup target add
-x86_64-pc-windows-msvc`, and an empty `src-tauri/binaries/zebra-launcher-zebrad-x86_64-pc-windows-msvc.exe`
-satisfies the build script).
+[`scripts/check-windows.sh`](../scripts/check-windows.sh), which type-checks it for
+Windows (`cargo clippy -p zebra-launcher --target x86_64-pc-windows-msvc --all-targets`).
+Tauri's Windows backend needs no system libraries to type-check; the script installs the
+target, creates the placeholder sidecar file the build script wants, and provides the
+stub C compiler and archiver that the `ring`, `embed-resource` and `vswhom-sys` build
+scripts ask for on a non-Windows host. Run it whenever you touch `cfg(windows)` code.
 
-From M5, also `trunk build` in `ui/`. Windows and macOS CI run clippy and tests too, so
-`cfg(windows)` and `cfg(target_os = "macos")` code is checked; when you change it, run
-clippy for that target or rely on CI.
+Windows and macOS CI run clippy and tests too, so `cfg(windows)` and
+`cfg(target_os = "macos")` code is checked; when you change it, run
+`scripts/check-windows.sh` or clippy for that target, or rely on CI.
 
 Tests in `launcher-core` drive the `fake-zebrad` binary (`CARGO_BIN_EXE_fake-zebrad`)
 and put a timeout on every await, so a hang fails the test instead of stalling CI.
@@ -159,8 +174,9 @@ Use instead:
 
 Dependabot bumps the crates (the `tauri` and `wasm` groups in
 [`.github/dependabot.yml`](../.github/dependabot.yml)) but not the CLI tools CI downloads:
-tauri-cli, trunk, wasm-bindgen and wasm-opt (binaryen), pinned with a sha256 per
-platform in [`.github/tool-versions.env`](../.github/tool-versions.env). A Dependabot PR
+tauri-cli, trunk, wasm-bindgen and wasm-opt (binaryen), and the linters shellcheck and
+actionlint, pinned with a sha256 per platform in
+[`.github/tool-versions.env`](../.github/tool-versions.env). A Dependabot PR
 that moves the `wasm-bindgen` crate fails `scripts/check-versions.sh` until
 `WASM_BINDGEN_VERSION` follows it, and a `tauri` minor bump needs a matching tauri-cli.
 Refresh a pin with
@@ -171,12 +187,48 @@ scripts/refresh-tool-pins.sh wasm-bindgen 0.2.130          # dry run: prints the
 scripts/refresh-tool-pins.sh --write wasm-bindgen 0.2.130  # rewrites the version and hashes
 ```
 
-It takes `wasm-bindgen`, `binaryen`, `tauri-cli` or `trunk` and a version, downloads the
-release asset for every platform the file already pins, hashes it, and, with `gh`
+It takes `wasm-bindgen`, `binaryen`, `tauri-cli`, `trunk`, `shellcheck` or `actionlint`
+and a version, downloads the release asset for every platform the file already pins,
+hashes it, and, with `gh`
 installed, checks each hash against the `digest` GitHub reports for the asset; it writes
 nothing unless every platform downloaded and matched. Then update the comments above the
 lines (the date the hashes were computed, notes such as trunk's default wasm-opt
 version) and run `scripts/check-versions.sh`.
+
+## Icons
+
+The application icons in `src-tauri/icons/` are generated, never edited by hand. The source
+is `src-tauri/icons/source/zebra-icon.png`; [`scripts/make-icons.py`](../scripts/make-icons.py)
+composes the 1024 px icon, runs `cargo tauri icon` for the PNG set and rewrites `icon.ico`
+and `icon.icns` with a simplified variant for the tiny sizes (the details are in
+[`src-tauri/icons/README.md`](../src-tauri/icons/README.md)). It needs the pinned tauri-cli
+and Pillow, pinned in [`scripts/requirements-icons.txt`](../scripts/requirements-icons.txt):
+
+```sh
+python3 -m pip install -r scripts/requirements-icons.txt   # in a virtualenv if you prefer
+python3 -P scripts/make-icons.py
+```
+
+Run it after changing the source image or the script, and commit the result. `64x64.png`
+is also the header icon of the UI (`ui/index.html` copies it into the bundle).
+
+## UI screenshots
+
+The repository has no screenshot tooling. For a reproducible capture, serve the mock and
+use any Chrome or Chromium in headless mode; `--virtual-time-budget` lets the wasm load
+before the capture:
+
+```sh
+(cd ui && trunk serve)                       # http://localhost:1420
+chromium --headless=new --window-size=1280,900 --virtual-time-budget=5000 \
+  --screenshot=dashboard.png 'http://localhost:1420/?running'
+```
+
+The query flags in [ui/README.md](../ui/README.md#develop-in-a-browser-mock-mode) select
+the state to capture (`?firstrun`, `?stale`, `?eos=halt`, `?update=ready`, ...). The mock's
+appearance follows the browser's `prefers-color-scheme`; choose Light or Dark in Settings
+first, or emulate the media feature through the DevTools protocol, to capture a specific
+theme.
 
 ## Log fixtures
 
@@ -194,7 +246,7 @@ Re-capture them when the pinned zebrad changes its log wording, normally as part
    metrics port already bound, `zebrad generate -o`).
 3. Replace absolute paths with `<DATA_DIR>`, and rename the files for the new version.
 4. Update the README (version, git commit, date, exit codes) and the test paths in
-   `crates/launcher-core/tests/fixtures.rs`.
+   `crates/launcher-core/tests/log_fixtures.rs`.
 5. Run `cargo test -p launcher-core`. A failing classifier test means zebrad changed a
    line the supervisor relies on: update the classifier and `fake-zebrad` together.
 
@@ -211,11 +263,15 @@ zebrad binary, so `cargo test` needs no zebrad and no network. Run them locally 
 the zebrad you are about to pin:
 
 ```sh
-ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-core --test real_zebrad -- --nocapture
+ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-core --test real_zebrad -- --include-ignored --nocapture
 ```
 
 They take a few seconds. On failure they print zebrad's whole output. Run them on every
-`ZEBRAD_VERSION` bump, next to re-capturing the [log fixtures](#log-fixtures).
+`ZEBRAD_VERSION` bump, next to re-capturing the [log fixtures](#log-fixtures). CI runs
+them too (the `real-zebrad` job of `ci.yml`): on every push to `main`, and on pull
+requests that change `ZEBRAD_VERSION` or `ZEBRAD_COMMIT`, with the release binary
+fetched and verified by `scripts/fetch-zebrad-linux.sh`. Other pull requests skip them,
+so plain `cargo test` still needs no zebrad.
 
 ## Observability stack
 

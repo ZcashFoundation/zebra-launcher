@@ -4,69 +4,42 @@
 //! stalling the test run.
 
 use std::{
-    future::Future,
-    path::PathBuf,
+    io::{BufRead, BufReader},
     process::{Command, Stdio},
-    sync::Arc,
     time::Duration,
 };
 
 use launcher_core::{
     logfile::RotatingLogConfig,
+    logs::Detector,
     pidfile,
-    policy::RestartPolicy,
-    process::ZebradCommand,
     supervisor::{self, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle},
 };
-use launcher_types::{ExitClass, LogLine, LogStream, Phase};
+use launcher_types::{ExitClass, LogEvent, LogStream, Phase};
 use tokio::time::timeout;
 
-const LIMIT: Duration = Duration::from_secs(20);
-
-async fn within<F: Future>(future: F) -> F::Output {
-    timeout(LIMIT, future)
-        .await
-        .expect("operation finished within the test limit")
-}
-
-fn fake_zebrad() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_fake-zebrad"))
-}
+#[path = "support/helpers.rs"]
+mod support;
+use support::{
+    LIMIT, contains, fake_zebrad, fake_zebrad_command, fast_supervisor_config, messages,
+    wait_status, within,
+};
 
 struct Fixture {
     _dir: tempfile::TempDir,
     config: SupervisorConfig,
 }
 
+/// fake-zebrad in `mode` on a Regtest config in a temporary directory, with a
+/// pid file and a log file next to it.
 fn fixture(mode: &str) -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let config_path = dir.path().join("zebrad.toml");
     std::fs::write(&config_path, "[network]\nnetwork = \"Regtest\"\n").expect("write config");
-    let mut command = ZebradCommand::new(fake_zebrad(), &config_path);
-    command.env = vec![
-        ("FAKE_ZEBRAD_MODE".into(), mode.into()),
-        ("FAKE_ZEBRAD_HEARTBEAT_MS".into(), "50".into()),
-    ];
-    let mut config = SupervisorConfig::new(command);
-    config.stop_grace = Duration::from_secs(3);
-    config.exit_drain = Duration::from_millis(500);
-    config.restart = RestartPolicy {
-        initial_backoff: Duration::from_millis(50),
-        max_backoff: Duration::from_millis(200),
-        window: Duration::from_secs(60),
-        max_crashes: 3,
-    };
+    let mut config = fast_supervisor_config(fake_zebrad_command(mode, &config_path));
     config.pidfile = Some(dir.path().join("zebrad.pid"));
     config.log_file = Some(RotatingLogConfig::new(dir.path().join("zebrad.log")));
     Fixture { _dir: dir, config }
-}
-
-fn messages(lines: &[Arc<LogLine>]) -> Vec<String> {
-    lines.iter().map(|l| l.message.clone()).collect()
-}
-
-fn contains(lines: &[Arc<LogLine>], needle: &str) -> bool {
-    lines.iter().any(|l| l.message.contains(needle))
 }
 
 async fn wait_phase(
@@ -74,9 +47,7 @@ async fn wait_phase(
     f: impl FnMut(&Phase) -> bool,
 ) -> launcher_types::Status {
     let mut f = f;
-    within(handle.wait_until(|s| f(&s.phase)))
-        .await
-        .expect("supervisor is alive")
+    wait_status(handle, LIMIT, "the phase", |s| f(&s.phase)).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -85,6 +56,8 @@ async fn starts_streams_logs_and_stops_cleanly() {
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
     let mut sub = within(handle.subscribe()).await.expect("subscribe");
     assert!(sub.history.is_empty());
+    // SIGTERM is graceful; without the stdin mode Windows terminates.
+    assert_eq!(handle.status().stop_is_graceful, cfg!(unix));
 
     within(handle.start()).await.expect("start");
     assert_eq!(handle.status().phase, Phase::Running);
@@ -148,9 +121,15 @@ async fn stdin_close_mode_stops_gracefully_on_every_platform() {
     let mut fx = fixture("ok");
     fx.config.command.shutdown_on_stdin_close = true;
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    assert!(handle.status().stop_is_graceful);
     within(handle.start()).await.expect("start");
     within(handle.stop()).await.expect("stop");
-    let exit = handle.status().last_exit.expect("exit recorded");
+    let status = handle.status();
+    assert!(
+        status.stop_is_graceful,
+        "fixed for the supervisor's lifetime"
+    );
+    let exit = status.last_exit.expect("exit recorded");
     assert_eq!(exit.code, Some(0), "{exit:?}");
     let history = within(handle.history_since(0)).await.expect("history");
     assert!(
@@ -180,6 +159,8 @@ async fn hanging_child_is_killed_after_the_grace_period() {
     let exit = handle.status().last_exit.expect("exit recorded");
     assert!(exit.requested);
     assert_ne!(exit.code, Some(0), "{exit:?}");
+    // The kill finished the stop the user asked for: not a crash.
+    assert_eq!(exit.class, ExitClass::Clean, "{exit:?}");
     assert_eq!(exit.detail.as_deref(), Some("killed by the launcher"));
     let history = within(handle.history_since(0)).await.expect("history");
     assert!(
@@ -193,6 +174,127 @@ async fn hanging_child_is_killed_after_the_grace_period() {
         contains(&history, "ignoring in hang-on-signal mode"),
         "{:#?}",
         messages(&history)
+    );
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crash_during_a_graceful_stop_is_not_clean() {
+    let mut fx = fixture("crash-on-stop");
+    // The graceful path on every platform, so the stop is never forced.
+    fx.config.command.shutdown_on_stdin_close = true;
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    within(handle.start()).await.expect("start");
+    within(handle.stop()).await.expect("stop");
+
+    let status = handle.status();
+    assert_eq!(
+        status.phase,
+        Phase::Stopped,
+        "a requested stop never restarts"
+    );
+    let exit = status.last_exit.expect("exit recorded");
+    assert_eq!(exit.code, Some(3), "{exit:?}");
+    assert_eq!(exit.class, ExitClass::Crash, "{exit:?}");
+    assert!(exit.requested, "{exit:?}");
+    assert_eq!(exit.detail, None, "not killed by the launcher: {exit:?}");
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(
+        contains(
+            &history,
+            "zebrad exited (exit code 3, Crash, stop requested)"
+        ),
+        "{:#?}",
+        messages(&history)
+    );
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+/// A crashing fake whose output pipes stay open for `linger` after it exits
+/// (a grandchild holds them, as a zebrad subprocess could), so the supervisor
+/// sits in its exit drain with the phase still `Running`.
+fn draining_crash_fixture(linger: Duration) -> Fixture {
+    let mut fx = fixture("crash");
+    fx.config.exit_drain = Duration::from_millis(1500);
+    fx.config.command.env.push((
+        "FAKE_ZEBRAD_LINGER_MS".into(),
+        linger.as_millis().to_string().into(),
+    ));
+    fx
+}
+
+/// Starts `handle` and returns once the fake has crashed and the supervisor
+/// has had time to record the exit, while its pipes are still open.
+async fn start_and_wait_for_the_crash(handle: &SupervisorHandle) {
+    let mut sub = within(handle.subscribe()).await.expect("subscribe");
+    within(handle.start()).await.expect("start");
+    loop {
+        let line = within(sub.live.recv()).await.expect("live line");
+        if line.message.contains("simulated crash") {
+            break;
+        }
+    }
+    // The exit event follows the last line within microseconds; the actor
+    // processes child events before commands.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        handle.status().phase,
+        Phase::Running,
+        "the exit is not classified while the pipes are open"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_after_the_exit_does_not_signal_or_relabel_the_crash() {
+    let fx = draining_crash_fixture(Duration::from_secs(4));
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    start_and_wait_for_the_crash(&handle).await;
+
+    // Answered when the drain ends, not after the stop grace.
+    within(handle.stop()).await.expect("stop");
+    let status = handle.status();
+    assert_eq!(status.phase, Phase::Stopped);
+    let exit = status.last_exit.expect("exit recorded");
+    assert_eq!(exit.code, Some(2), "{exit:?}");
+    assert_eq!(exit.class, ExitClass::Crash, "{exit:?}");
+    assert!(!exit.requested, "the stop did not end the run: {exit:?}");
+
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(
+        !contains(&history, "stop requested ("),
+        "no signal to a reaped pid: {:#?}",
+        messages(&history)
+    );
+    assert!(
+        contains(&history, "stop requested after zebrad exited"),
+        "{:#?}",
+        messages(&history)
+    );
+    // The user asked for a stop: the crash policy does not restart zebrad.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(handle.status().phase, Phase::Stopped);
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(!contains(&history, "restarting zebrad in"));
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_during_the_exit_drain_learns_that_zebrad_exited() {
+    let fx = draining_crash_fixture(Duration::from_secs(4));
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    start_and_wait_for_the_crash(&handle).await;
+
+    let err = within(handle.start()).await.expect_err("the child is gone");
+    let SupervisorError::ExitedDuringStart(info) = err else {
+        panic!("unexpected error: {err}");
+    };
+    assert_eq!(info.class, ExitClass::Crash, "{info:?}");
+    assert_eq!(info.code, Some(2), "{info:?}");
+    // Nobody asked for a stop, so the crash policy applies.
+    assert!(
+        !matches!(handle.status().phase, Phase::Stopped),
+        "{:?}",
+        handle.status().phase
     );
     within(handle.shutdown()).await.expect("shutdown");
 }
@@ -296,6 +398,68 @@ async fn database_lock_and_port_conflicts_are_deterministic_failures() {
             class: ExitClass::PortInUse
         }
     );
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_end_of_support_halt_is_a_deterministic_failure() {
+    let fx = fixture("eos-halt");
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    // The fake prints `Starting zebrad` before it panics, so the start can resolve first.
+    let _ = within(handle.start()).await;
+    let status = wait_phase(&handle, |p| matches!(p, Phase::Failed { .. })).await;
+    assert_eq!(
+        status.phase,
+        Phase::Failed {
+            class: ExitClass::EosHalt
+        }
+    );
+    let exit = status.last_exit.expect("exit recorded");
+    assert_eq!(exit.class, ExitClass::EosHalt, "{exit:?}");
+    assert!(!exit.requested, "{exit:?}");
+    assert!(
+        exit.detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Zebra refuses to run"),
+        "{exit:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(handle.status().phase, status.phase, "must not restart");
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(
+        contains(&history, "not restarting zebrad (EosHalt)"),
+        "{:#?}",
+        messages(&history)
+    );
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_end_of_support_warning_keeps_zebrad_running() {
+    let fx = fixture("eos-warn");
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    let mut sub = within(handle.subscribe()).await.expect("subscribe");
+    within(handle.start()).await.expect("start");
+    // The warning is detected as `EosWarn` from the heartbeat lines.
+    let mut detector = Detector::new();
+    loop {
+        let line = within(sub.live.recv()).await.expect("live line");
+        if let Some(LogEvent::EosWarn { message }) = detector.detect(&line) {
+            assert!(
+                message.starts_with("Your Zebra release is too old"),
+                "{message}"
+            );
+            break;
+        }
+    }
+    // A warning only: zebrad keeps running and nothing is classified.
+    let status = handle.status();
+    assert_eq!(status.phase, Phase::Running);
+    assert_eq!(status.last_exit, None);
+    within(handle.stop()).await.expect("stop");
+    let exit = handle.status().last_exit.expect("exit recorded");
+    assert_eq!(exit.class, ExitClass::Clean, "{exit:?}");
     within(handle.shutdown()).await.expect("shutdown");
 }
 
@@ -423,6 +587,76 @@ async fn stale_pidfile_blocks_start_unless_killed() {
     // before its handler was up; either way it is gone.
     let _status = within(reaper).await.unwrap().expect("orphan reaped");
     assert!(!pidfile::is_alive(orphan_pid));
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_actor_answers_commands_while_a_stale_zebrad_is_terminated() {
+    let fx = fixture("ok");
+    // A left-behind zebrad that ignores the termination request, so the
+    // supervisor waits the whole stale-kill period for it (on Unix; Windows
+    // terminates it outright).
+    let mut orphan = Command::new(fake_zebrad())
+        .args([
+            "-c",
+            &fx.config.command.config.display().to_string(),
+            "start",
+        ])
+        .env("FAKE_ZEBRAD_MODE", "hang-on-signal")
+        .env("FAKE_ZEBRAD_HEARTBEAT_MS", "60000")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn orphan");
+    // Its signal handlers are installed before its first line.
+    let mut stdout = BufReader::new(orphan.stdout.take().expect("piped stdout"));
+    let mut first_line = String::new();
+    tokio::task::spawn_blocking(move || stdout.read_line(&mut first_line))
+        .await
+        .expect("task")
+        .expect("the orphan started");
+    let orphan_pid = orphan.id();
+    pidfile::write(
+        fx.config.pidfile.as_ref().unwrap(),
+        orphan_pid,
+        &fake_zebrad(),
+    )
+    .expect("write pidfile");
+
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    let starter = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.start_with(StartOptions { kill_stale: true }).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The actor is not blocked on the stale zebrad.
+    let history = timeout(Duration::from_secs(1), handle.history_since(0))
+        .await
+        .expect("the actor answers while the stale zebrad is waited for")
+        .expect("supervisor is alive");
+    assert!(
+        !contains(&history, "zebrad started"),
+        "{:#?}",
+        messages(&history)
+    );
+    #[cfg(unix)]
+    assert!(!starter.is_finished(), "the stale zebrad is still alive");
+
+    let result = within(starter).await.expect("task");
+    if cfg!(unix) {
+        assert!(
+            matches!(result, Err(SupervisorError::StaleProcess(ref s)) if s.pid == orphan_pid),
+            "{result:?}"
+        );
+        assert_eq!(
+            handle.status().stale.as_ref().map(|s| s.pid),
+            Some(orphan_pid)
+        );
+    } else {
+        result.expect("the stale zebrad was terminated");
+    }
+    orphan.kill().expect("kill orphan");
+    orphan.wait().expect("reap orphan");
     within(handle.shutdown()).await.expect("shutdown");
 }
 

@@ -6,6 +6,7 @@
 
 use std::{fs, io, path::PathBuf};
 
+pub use launcher_types::{MAX_STOP_GRACE_SECS, MIN_STOP_GRACE_SECS, STOP_GRACE_SECS};
 use launcher_types::{Settings, is_loopback_http_url};
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -17,6 +18,11 @@ pub enum SettingsError {
     /// The Grafana URL is not `http://127.0.0.1` or `http://localhost`.
     #[error("the Grafana URL {0:?} must start with http://127.0.0.1 or http://localhost")]
     InvalidGrafanaUrl(String),
+    /// The stop grace period is outside [`MIN_STOP_GRACE_SECS`]..=[`MAX_STOP_GRACE_SECS`].
+    #[error(
+        "the stop grace period of {0} s must be between {MIN_STOP_GRACE_SECS} and {MAX_STOP_GRACE_SECS} s"
+    )]
+    InvalidStopGrace(u64),
     /// The settings file could not be read or written.
     #[error("settings file I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -28,23 +34,30 @@ pub enum SettingsError {
     Closed,
 }
 
-/// Checks settings before they are saved.
+/// Checks settings before they are saved: a loopback Grafana URL and a stop
+/// grace period within bounds (the supervisor adds it to an `Instant`, and a
+/// very short one would kill zebrad before it can stop).
 pub fn validate(settings: &Settings) -> Result<(), SettingsError> {
     if let Some(url) = &settings.grafana_url
         && !is_loopback_http_url(url)
     {
         return Err(SettingsError::InvalidGrafanaUrl(url.clone()));
     }
+    if !STOP_GRACE_SECS.contains(&settings.stop_grace_secs) {
+        return Err(SettingsError::InvalidStopGrace(settings.stop_grace_secs));
+    }
     Ok(())
 }
 
 /// Replaces `current` with settings sent by the UI (`set_settings`), keeping
 /// the fields the UI may not set directly: `first_run_done` (only
-/// `complete_first_run` sets it) and `data_dir` (only `choose_data_dir`
-/// changes it, after its checks).
+/// `complete_first_run` sets it), `data_dir` (only `choose_data_dir` changes
+/// it, after its checks) and `schema_version` (always the version this
+/// launcher writes, so a stale copy cannot undo the migration marker).
 pub fn apply_from_ui(current: &mut Settings, mut incoming: Settings) {
     incoming.first_run_done = current.first_run_done;
     incoming.data_dir = current.data_dir.take();
+    incoming.schema_version = Settings::SCHEMA_VERSION;
     *current = incoming;
 }
 
@@ -207,16 +220,9 @@ fn load(path: &std::path::Path) -> Result<(Settings, bool), SettingsError> {
         (settings, migrated)
     };
     match serde_json::from_slice::<Settings>(&bytes) {
-        Ok(settings) if validate(&settings).is_ok() => Ok(with_migration(settings)),
-        Ok(settings) => {
-            tracing::warn!(
-                url = ?settings.grafana_url,
-                "launcher.json has an invalid Grafana URL; ignoring it"
-            );
-            Ok(with_migration(Settings {
-                grafana_url: None,
-                ..settings
-            }))
+        Ok(mut settings) => {
+            sanitize(&mut settings);
+            Ok(with_migration(settings))
         }
         Err(err) => {
             let backup = corrupt_path(path);
@@ -240,6 +246,26 @@ fn load(path: &std::path::Path) -> Result<(Settings, bool), SettingsError> {
             }
             Ok((Settings::default(), false))
         }
+    }
+}
+
+/// Replaces the values of a loaded file that [`validate`] would refuse with
+/// their defaults, so a hand-edited or older `launcher.json` still loads.
+fn sanitize(settings: &mut Settings) {
+    if let Some(url) = &settings.grafana_url
+        && !is_loopback_http_url(url)
+    {
+        tracing::warn!(%url, "launcher.json has an invalid Grafana URL; ignoring it");
+        settings.grafana_url = None;
+    }
+    if !STOP_GRACE_SECS.contains(&settings.stop_grace_secs) {
+        let default = Settings::default().stop_grace_secs;
+        tracing::warn!(
+            secs = settings.stop_grace_secs,
+            default,
+            "launcher.json has a stop grace period out of range; using the default"
+        );
+        settings.stop_grace_secs = default;
     }
 }
 
@@ -267,13 +293,14 @@ mod tests {
     }
 
     #[test]
-    fn ui_settings_keep_the_data_dir_and_first_run_marker() {
+    fn ui_settings_keep_the_data_dir_first_run_marker_and_schema_version() {
         let mut current = Settings {
             data_dir: Some("/chosen".into()),
             first_run_done: true,
             ..Settings::default()
         };
         let stale = Settings {
+            schema_version: 0,
             data_dir: None,
             first_run_done: false,
             network: Network::Testnet,
@@ -282,7 +309,56 @@ mod tests {
         apply_from_ui(&mut current, stale);
         assert_eq!(current.data_dir.as_deref(), Some("/chosen"));
         assert!(current.first_run_done);
+        assert_eq!(current.schema_version, Settings::SCHEMA_VERSION);
         assert_eq!(current.network, Network::Testnet);
+    }
+
+    #[test]
+    fn the_stop_grace_must_be_within_bounds() {
+        for secs in [MIN_STOP_GRACE_SECS, 60, MAX_STOP_GRACE_SECS] {
+            let settings = Settings {
+                stop_grace_secs: secs,
+                ..Settings::default()
+            };
+            validate(&settings).unwrap_or_else(|err| panic!("{secs}: {err}"));
+        }
+        for secs in [
+            0,
+            MIN_STOP_GRACE_SECS - 1,
+            MAX_STOP_GRACE_SECS + 1,
+            u64::MAX,
+        ] {
+            let settings = Settings {
+                stop_grace_secs: secs,
+                ..Settings::default()
+            };
+            assert!(
+                matches!(validate(&settings), Err(SettingsError::InvalidStopGrace(s)) if s == secs),
+                "{secs}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_out_of_range_stop_grace_is_rejected_and_loads_as_the_default() {
+        let (_dir, paths) = paths();
+        let store = SettingsStore::open(&paths).expect("open");
+        let err = timeout(T, store.update(|s| s.stop_grace_secs = 0))
+            .await
+            .expect("in time")
+            .expect_err("zero grace");
+        assert!(matches!(err, SettingsError::InvalidStopGrace(0)), "{err:?}");
+        assert_eq!(store.current(), Settings::default());
+        drop(store);
+
+        // A hand-edited file keeps loading, with the default grace.
+        fs::create_dir_all(paths.config_dir()).expect("mkdir");
+        let edited = br#"{ "schema_version": 2, "stop_grace_secs": 18446744073709551615, "network": "testnet" }"#;
+        fs::write(paths.settings_file(), edited).expect("write");
+        let store = SettingsStore::open(&paths).expect("open");
+        let current = store.current();
+        assert_eq!(current.stop_grace_secs, Settings::default().stop_grace_secs);
+        assert_eq!(current.network, Network::Testnet, "the rest is kept");
     }
 
     #[tokio::test]

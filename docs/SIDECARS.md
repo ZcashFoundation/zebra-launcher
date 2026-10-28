@@ -2,11 +2,9 @@
 
 Zebra Launcher ships zebrad as a Tauri sidecar. Tauri looks for it at
 `src-tauri/binaries/zebra-launcher-zebrad-<target triple>` (with `.exe` on
-Windows). This prefixed name takes effect with the rewritten app
-crate (milestone M5); until it lands, the old `src-tauri/tauri.conf.json` still
-names the sidecar `binaries/zebrad`, so `cargo tauri build` does not find the
-files these scripts install. That directory is git-ignored, so the binary always comes from one of
-the scripts below and is never committed. The `zebra-launcher-` prefix keeps the
+Windows), the name `bundle.externalBin` in `src-tauri/tauri.conf.json` gives.
+That directory is git-ignored, so the binary always comes from one of the
+scripts below and is never committed. The `zebra-launcher-` prefix keeps the
 Linux `.deb` from shadowing a system `/usr/bin/zebrad`.
 
 The zebrad version is pinned in [`ZEBRAD_VERSION`](../ZEBRAD_VERSION), written
@@ -119,6 +117,14 @@ gh workflow run bundle.yml -f zebrad_ref=main -f targets=x86_64-pc-windows-msvc 
   [`.github/targets.json`](../.github/targets.json). Leave it empty for all
   five. Without `zebrad_ref`, it narrows a regular run in the same way.
 
+`gh workflow run` only finds workflows that exist on the repository's default
+branch. Until `bundle.yml` is on `main`, the `rebuild` branch carries
+[`dev-windows.yml`](../.github/workflows/dev-windows.yml), which calls
+`bundle.yml` with `zebrad_ref=main` and `targets=x86_64-pc-windows-msvc`
+whenever a line is appended to `.github/dev-build-request` and pushed to
+`rebuild`. Delete both files in the pull request that puts `bundle.yml` on
+`main`.
+
 The first job resolves `zebrad_ref` to one commit, so every target builds the
 same code even if the branch moves during the run. Every selected target then
 builds zebrad from source at that commit, Linux included, with
@@ -169,7 +175,7 @@ the commands without running them.
 `scripts/dev-sidecar.sh` (or `scripts/dev-sidecar.ps1` on Windows) builds the
 workspace's `fake-zebrad` test binary and installs it as the host's sidecar.
 After that, `cargo tauri dev` and `cargo tauri build` work without the real
-node, once the rewritten app crate (M5) expects the prefixed sidecar name. Never ship a bundle built this way. Replace the fake with the real
+node. Never ship a bundle built this way. Replace the fake with the real
 zebrad first:
 
 ```sh
@@ -273,10 +279,9 @@ To bump by hand, or to finish the watcher's pull request:
      ```
 
      Check the result against the commit shown on the GitHub release page.
-3. Update `VERSION` in `crates/launcher-core/src/bin/fake-zebrad.rs` so the
-   fake reports the same version. Then run `scripts/check-versions.sh`.
-   `scripts/bump-zebrad.sh <ver> <commit>` does steps 2 and 3 and runs the
-   check.
+3. Run `scripts/check-versions.sh`. The fake zebrad reads `ZEBRAD_VERSION`
+   when it is built, so nothing else carries the version.
+   `scripts/bump-zebrad.sh <ver> <commit>` does step 2 and runs the check.
 4. Check the new Linux release locally:
    `scripts/fetch-zebrad-linux.sh --out /tmp/zebrad-check/zebrad`. The cosign
    and attestation checks fail if `ZEBRAD_COMMIT` is not the commit that
