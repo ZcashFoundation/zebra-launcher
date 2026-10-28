@@ -850,3 +850,54 @@ async fn launcher_notes_join_the_log_stream_with_their_fields() {
         "log file: {log:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_multi_line_note_continues_like_a_multi_line_zebrad_message() {
+    let fx = fixture("ok");
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    let mut sub = within(handle.subscribe()).await.expect("subscribe");
+
+    // A field whose Display spans lines, such as a TOML parse error; the
+    // trailing line ending goes, as it does for zebrad's lines.
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_210_144);
+    assert!(handle.note_at(Note {
+        at,
+        level: LogLevel::Error,
+        target: "zebra_launcher::config".into(),
+        message: "a\nb\n".into(),
+    }));
+    let first = within(sub.live.recv()).await.expect("live line");
+    assert_eq!(first.seq, 0);
+    assert_eq!(first.stream, LogStream::Launcher);
+    assert_eq!(
+        first.timestamp.as_deref(),
+        Some("2026-10-28T17:55:44.000000Z")
+    );
+    assert_eq!(first.level, Some(LogLevel::Error));
+    assert_eq!(first.target.as_deref(), Some("zebra_launcher::config"));
+    assert_eq!(first.message, "a");
+    // The continuation line: the same stream, no timestamp, level or target.
+    let second = within(sub.live.recv()).await.expect("live line");
+    assert_eq!(second.seq, 1);
+    assert_eq!(second.stream, LogStream::Launcher);
+    assert_eq!(second.timestamp, None);
+    assert_eq!(second.level, None);
+    assert_eq!(second.target, None);
+    assert_eq!(second.message, "b");
+
+    within(handle.shutdown()).await.expect("shutdown");
+    // On disk each line is behind the launcher marker. The writer thread may
+    // still be draining, so poll.
+    let path = fx.config.log_file.as_ref().unwrap().path.clone();
+    let expected =
+        "[launcher] 2026-10-28T17:55:44.000000Z ERROR zebra_launcher::config: a\n[launcher] b\n";
+    let deadline = std::time::Instant::now() + LIMIT;
+    loop {
+        let log = std::fs::read_to_string(&path).unwrap_or_default();
+        if log.contains(expected) {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "log file: {log:?}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}

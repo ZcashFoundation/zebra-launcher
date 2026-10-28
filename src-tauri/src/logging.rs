@@ -38,9 +38,8 @@ pub const NOTE_QUEUE: usize = 256;
 
 /// Targets whose events never go to the log ring, with their submodules: they
 /// log per line or batch forwarded to the UI, so a note from them would log
-/// again, without end. The logging module itself is listed for the same
-/// reason.
-pub const EXCLUDED_TARGETS: &[&str] = &["zebra_launcher::bridge", "zebra_launcher::logging"];
+/// again, without end.
+pub const EXCLUDED_TARGETS: &[&str] = &["zebra_launcher::bridge"];
 
 /// `RUST_LOG`, or `info` when it is unset or invalid.
 fn filter() -> EnvFilter {
@@ -253,16 +252,23 @@ mod tests {
     }
 
     #[test]
-    fn the_bridge_and_this_module_are_left_out() {
+    fn only_the_bridge_is_left_out() {
         let notes = capture(NOTE_QUEUE, || {
             tracing::warn!(target: "zebra_launcher::bridge", "could not emit an event");
             tracing::warn!(target: "zebra_launcher::bridge::logs", "log channel closed");
-            tracing::error!(target: "zebra_launcher::logging", "about itself");
             tracing::warn!(target: "zebra_launcher::bridges", "a different module");
-            tracing::warn!("this test module is under logging");
+            // The panic hook's event: no target, so this module's.
+            tracing::error!("the launcher panicked");
         });
-        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(notes.len(), 2, "{notes:?}");
         assert_eq!(notes[0].target, "zebra_launcher::bridges");
+        assert_eq!(notes[1].level, LogLevel::Error);
+        assert!(
+            notes[1].target.starts_with("zebra_launcher::logging"),
+            "{}",
+            notes[1].target
+        );
+        assert_eq!(notes[1].message, "the launcher panicked");
     }
 
     #[test]

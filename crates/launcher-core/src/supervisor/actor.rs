@@ -789,17 +789,25 @@ impl Actor {
 
     /// Records a launcher line: on disk in zebrad's line format, behind the
     /// launcher marker, and in the history and the live feed with its
-    /// timestamp, level and target set.
+    /// timestamp, level and target set. A message of several lines is the
+    /// stamped line and continuation lines, as zebrad's multi-line messages
+    /// are: each behind the marker on disk, without timestamp, level or
+    /// target in the ring.
     fn push_note(&mut self, note: Note) {
         let timestamp = clock::rfc3339(note.at);
+        let mut lines = note
+            .message
+            .trim_end_matches(['\r', '\n'])
+            .split('\n')
+            .map(|line| line.trim_end_matches('\r'));
+        let first = lines.next().unwrap_or_default();
         if let Some(log_file) = &self.log_file {
             log_file.write_line(
                 LogStream::Launcher,
                 &format!(
-                    "{timestamp} {:>5} {}: {}",
+                    "{timestamp} {:>5} {}: {first}",
                     note.level.as_str(),
-                    note.target,
-                    note.message
+                    note.target
                 ),
             );
         }
@@ -811,9 +819,12 @@ impl Actor {
             level: Some(note.level),
             spans: None,
             target: Some(note.target),
-            message: note.message,
+            message: first.to_string(),
             dropped: None,
         }));
+        for line in lines {
+            self.push_line(LogStream::Launcher, line.to_string());
+        }
     }
 
     /// The next sequence number.

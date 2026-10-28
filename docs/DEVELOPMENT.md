@@ -93,9 +93,10 @@ To see dashboards in the Grafana tab, start the stack in [GRAFANA.md](GRAFANA.md
 Tauri, `trunk serve` in `ui/` shows the UI against a mock backend at http://localhost:1420.
 The mock starts zebrad on load; query flags such as `?firstrun`, `?stale`, `?eos=halt` or
 `?update=available` put it into other states (`?running` is a first-run flag: zebrad is
-already running and Start fails). The table at the top of [ui/src/mock.rs](../ui/src/mock.rs)
-lists every flag; [ui/README.md](../ui/README.md#develop-in-a-browser-mock-mode) describes the
-states.
+already running and Start fails), and `?stalled`, `?nopeers` and `?crashloop` put the
+dashboard's verdict into its warning states. The table at the top of
+[ui/src/mock.rs](../ui/src/mock.rs) lists every flag;
+[ui/README.md](../ui/README.md#develop-in-a-browser-mock-mode) describes the states.
 
 ### Release build
 
@@ -225,10 +226,10 @@ chromium --headless=new --window-size=1280,900 --virtual-time-budget=5000 \
 ```
 
 The query flags in [ui/README.md](../ui/README.md#develop-in-a-browser-mock-mode) select
-the state to capture (`?firstrun`, `?stale`, `?eos=halt`, `?update=ready`, ...). The mock's
-appearance follows the browser's `prefers-color-scheme`; choose Light or Dark in Settings
-first, or emulate the media feature through the DevTools protocol, to capture a specific
-theme.
+the state to capture (`?firstrun`, `?stale`, `?eos=halt`, `?update=ready`, `?stalled`,
+`?crashloop`, ...). The mock's appearance follows the browser's `prefers-color-scheme`;
+choose Light or Dark in Settings first, or emulate the media feature through the DevTools
+protocol, to capture a specific theme.
 
 ## Log fixtures
 

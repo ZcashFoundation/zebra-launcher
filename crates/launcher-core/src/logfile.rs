@@ -1,7 +1,9 @@
 //! A size-rotated copy of zebrad's output on disk, for support after a crash.
 //!
 //! Writes happen on a dedicated thread. The supervisor never blocks on disk:
-//! when the channel to the writer is full, lines are dropped and counted.
+//! when the channel to the writer is full, lines are dropped and counted. A
+//! write that fails is reported to the log once per streak of failures
+//! ([`FailureStreak`]), not once per line.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -54,11 +56,10 @@ impl LogFileWriter {
         thread::Builder::new()
             .name("zebrad-log-writer".into())
             .spawn(move || {
+                let mut failures = FailureStreak::default();
                 // The loop ends when every sender is dropped.
                 while let Ok(line) = rx.recv() {
-                    if let Err(err) = file.write_line(&line) {
-                        tracing::warn!(?err, "could not write to the zebrad log file");
-                    }
+                    failures.observe(file.write_line(&line));
                 }
                 let _ = file.flush();
             })?;
@@ -93,6 +94,61 @@ impl LogFileWriter {
     }
 }
 
+/// Reports the writer's failures to the log once per streak, on the first
+/// failure after a success. A disk that stays full would otherwise get one
+/// warning per line, and the launcher's log events are copied into this very
+/// file, so each warning would be one more line to fail, without end.
+#[derive(Debug, Default)]
+struct FailureStreak {
+    /// A write failed and was reported; quiet until one succeeds.
+    writes: bool,
+    /// A rotation failed and was reported; quiet until one succeeds.
+    rotations: bool,
+}
+
+impl FailureStreak {
+    fn observe(&mut self, written: io::Result<Written>) {
+        match written {
+            Ok(Written::Plain) => self.writes = false,
+            Ok(Written::Rotated) => {
+                self.writes = false;
+                self.rotations = false;
+            }
+            Ok(Written::Truncated(err)) => {
+                self.writes = false;
+                if !self.rotations {
+                    self.rotations = true;
+                    tracing::warn!(
+                        ?err,
+                        "could not rotate the zebrad log file and truncated it instead; later failed rotations are not reported until one succeeds"
+                    );
+                }
+            }
+            Err(err) => {
+                if !self.writes {
+                    self.writes = true;
+                    tracing::warn!(
+                        ?err,
+                        "could not write to the zebrad log file; later failures are not reported until a write succeeds"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// How a line got to disk.
+#[derive(Debug)]
+enum Written {
+    /// Appended to the current file.
+    Plain,
+    /// Appended after the file was rotated.
+    Rotated,
+    /// Appended to the current file, emptied in place because rotating it
+    /// failed with this error; rotation is tried again at the next limit.
+    Truncated(io::Error),
+}
+
 struct RotatingFile {
     config: RotatingLogConfig,
     file: File,
@@ -112,23 +168,33 @@ impl RotatingFile {
         Ok(Self { config, file, size })
     }
 
-    fn write_line(&mut self, line: &[u8]) -> io::Result<()> {
+    /// Appends `line`, rotating first when it would not fit. Nothing is
+    /// logged here: the caller reports failures, so that a failing disk does
+    /// not get one warning per line.
+    fn write_line(&mut self, line: &[u8]) -> io::Result<Written> {
         let len = line.len() as u64;
-        if self.size > 0
-            && self.size + len > self.config.max_bytes
-            && let Err(err) = self.rotate()
-        {
-            // Keep the on-disk log alive rather than freezing it: lose the
-            // current file's content and try rotating again next time.
-            tracing::warn!(
-                ?err,
-                "could not rotate the zebrad log file; truncating it instead"
-            );
-            self.truncate()?;
+        let mut written = Written::Plain;
+        if self.size > 0 && self.size + len > self.config.max_bytes {
+            written = match self.rotate() {
+                Ok(()) => Written::Rotated,
+                // Keep the on-disk log alive rather than freezing it: lose the
+                // current file's content and try rotating again next time.
+                Err(rotate_err) => match self.truncate() {
+                    Ok(()) => Written::Truncated(rotate_err),
+                    Err(truncate_err) => {
+                        return Err(io::Error::new(
+                            rotate_err.kind(),
+                            format!(
+                                "could not rotate the file ({rotate_err}) nor truncate it ({truncate_err})"
+                            ),
+                        ));
+                    }
+                },
+            };
         }
         self.file.write_all(line)?;
         self.size += len;
-        Ok(())
+        Ok(written)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -201,6 +267,8 @@ pub fn existing_files(config: &RotatingLogConfig) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt;
+
     use super::*;
 
     #[test]
@@ -244,9 +312,13 @@ mod tests {
 
         let mut file = RotatingFile::open(config.clone()).expect("open");
         let line = |i: usize| format!("line {i:02} {}\n", "x".repeat(21));
+        let mut truncated = 0;
         for i in 0..10 {
-            file.write_line(line(i).as_bytes()).expect("write");
+            if let Written::Truncated(_) = file.write_line(line(i).as_bytes()).expect("write") {
+                truncated += 1;
+            }
         }
+        assert_eq!(truncated, 3, "every third line hits the limit");
         file.flush().expect("flush");
         let current = fs::read_to_string(&config.path).expect("read");
         assert!(current.len() <= 100, "{current}");
@@ -254,9 +326,13 @@ mod tests {
 
         // Once the obstacle is gone, rotation works again.
         fs::remove_dir_all(&blocker).expect("rmdir");
+        let mut rotated = 0;
         for i in 10..20 {
-            file.write_line(line(i).as_bytes()).expect("write");
+            if let Written::Rotated = file.write_line(line(i).as_bytes()).expect("write") {
+                rotated += 1;
+            }
         }
+        assert_eq!(rotated, 3);
         file.flush().expect("flush");
         assert!(blocker.is_file(), "rotation resumed");
         let current = fs::read_to_string(&config.path).expect("read");
@@ -281,6 +357,134 @@ mod tests {
         let current = fs::read_to_string(&config.path).expect("read");
         assert!(current.len() <= 100, "{current}");
         assert!(current.starts_with("line 09"), "{current}");
+    }
+
+    /// The messages of the WARN events `f` emits on this thread.
+    fn warnings(f: impl FnOnce()) -> Vec<String> {
+        struct Warnings(mpsc::Sender<String>);
+
+        struct Message(Option<String>);
+
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = Some(format!("{value:?}"));
+                }
+            }
+        }
+
+        impl tracing::Subscriber for Warnings {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                *metadata.level() == tracing::Level::WARN
+            }
+
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+            fn event(&self, event: &tracing::Event<'_>) {
+                let mut message = Message(None);
+                event.record(&mut message);
+                let _ = self.0.send(message.0.unwrap_or_default());
+            }
+
+            fn enter(&self, _: &tracing::span::Id) {}
+
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        let (tx, rx) = mpsc::channel();
+        tracing::subscriber::with_default(Warnings(tx), f);
+        rx.try_iter().collect()
+    }
+
+    #[test]
+    fn a_persistently_failing_sink_warns_once_per_streak() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = RotatingLogConfig::new(dir.path().join("zebrad.log"));
+        let mut file = RotatingFile::open(config.clone()).expect("open");
+        // A read-only handle refuses every write, on every platform.
+        let read_only = || File::open(&config.path).expect("open read-only");
+        let append = || {
+            OpenOptions::new()
+                .append(true)
+                .open(&config.path)
+                .expect("open append")
+        };
+        let mut failures = FailureStreak::default();
+
+        file.file = read_only();
+        let warned = warnings(|| {
+            for _ in 0..5 {
+                failures.observe(file.write_line(b"line\n"));
+            }
+        });
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(
+            warned[0].contains("later failures are not reported until a write succeeds"),
+            "{warned:?}"
+        );
+
+        // A successful write ends the streak; the next failure is reported again.
+        file.file = append();
+        let warned = warnings(|| failures.observe(file.write_line(b"line\n")));
+        assert!(warned.is_empty(), "{warned:?}");
+        file.file = read_only();
+        let warned = warnings(|| {
+            for _ in 0..3 {
+                failures.observe(file.write_line(b"line\n"));
+            }
+        });
+        assert_eq!(warned.len(), 1, "{warned:?}");
+    }
+
+    #[test]
+    fn a_failing_rotation_warns_once_per_streak() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = RotatingLogConfig {
+            path: dir.path().join("zebrad.log"),
+            max_bytes: 100,
+            keep: 1,
+        };
+        let blocker = dir.path().join("zebrad.log.1");
+        let block = || {
+            fs::create_dir(&blocker).expect("mkdir");
+            fs::write(blocker.join("inner"), b"x").expect("write inner");
+        };
+        block();
+        let mut file = RotatingFile::open(config.clone()).expect("open");
+        let line = |i: usize| format!("line {i:02} {}\n", "x".repeat(21));
+        let mut failures = FailureStreak::default();
+
+        // Three rotations fail and truncate instead: one warning.
+        let warned = warnings(|| {
+            for i in 0..10 {
+                failures.observe(file.write_line(line(i).as_bytes()));
+            }
+        });
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("truncated it instead"), "{warned:?}");
+
+        // A rotation that works ends the streak; the next failure is reported.
+        fs::remove_dir_all(&blocker).expect("rmdir");
+        let warned = warnings(|| {
+            for i in 10..16 {
+                failures.observe(file.write_line(line(i).as_bytes()));
+            }
+        });
+        assert!(warned.is_empty(), "{warned:?}");
+        fs::remove_file(&blocker).expect("remove the rotated file");
+        block();
+        let warned = warnings(|| {
+            for i in 16..26 {
+                failures.observe(file.write_line(line(i).as_bytes()));
+            }
+        });
+        assert_eq!(warned.len(), 1, "{warned:?}");
     }
 
     #[test]
