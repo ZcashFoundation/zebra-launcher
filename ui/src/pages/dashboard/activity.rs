@@ -204,6 +204,8 @@ mod tests {
             peers,
             mempool_transactions: 0,
             verification_progress: 0.5,
+            peers_inbound: None,
+            peers_outbound: None,
         }
     }
 

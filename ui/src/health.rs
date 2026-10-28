@@ -1234,6 +1234,8 @@ mod tests {
             last_exit: None,
             stale: None,
             stop_is_graceful: true,
+            restarts: 0,
+            last_stop: None,
         }
     }
 
@@ -2323,8 +2325,8 @@ End of support: block 3,160,000, about 2 Dec 2026 (in 40 days)
 Recent problems:
   23 Oct, 19:08 ERROR zebrad::components::sync · block download failed hash=block::Hash(\"abc\") ×2
 This run:
+  23 Oct, 19:08 ERROR: block download failed ×2
   23 Oct, 19:00 zebrad started
-  23 Oct, 19:00 Tracing started
 ";
         assert_eq!(summary, expected);
         // Stopped before any answer: the shorter report.

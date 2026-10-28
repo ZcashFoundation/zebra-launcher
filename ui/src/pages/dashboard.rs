@@ -461,6 +461,8 @@ mod tests {
             peers,
             mempool_transactions: 3,
             verification_progress: height as f64 / estimated as f64,
+            peers_inbound: None,
+            peers_outbound: None,
         }
     }
 

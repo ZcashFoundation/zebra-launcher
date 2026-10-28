@@ -799,6 +799,8 @@ mod tests {
             last_exit: None,
             stale: None,
             stop_is_graceful: true,
+            restarts: 0,
+            last_stop: None,
         }
     }
 
