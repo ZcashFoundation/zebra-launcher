@@ -487,7 +487,8 @@ fn user_control(
     let invalid = move || error.get().is_some();
     let on_text = move |event: web_sys::Event| set(Some(event_target_value(&event)));
     // A cleared (or blank) text control means "use the default": when it loses focus the value
-    // is unset and the control shows the default again.
+    // is unset and the control shows the default again. The custom folder of a BoolOrPath
+    // field too: left empty, its select shows "Default location" again, as the file has it.
     let unset_if_empty = move |_| {
         if raw.with(|raw| {
             raw.as_deref()
@@ -594,9 +595,7 @@ fn user_control(
                     Signal::derive(move || custom_path(raw.get().as_deref())),
                     invalid,
                     on_text,
-                    // Not unset when left empty, unlike the other text inputs (see the next
-                    // commit).
-                    |_| (),
+                    unset_if_empty,
                 )}
             }
             .into_any()
