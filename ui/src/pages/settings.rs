@@ -9,7 +9,11 @@ use crate::{
     api,
     app::AppState,
     clipboard::copy_to_clipboard,
-    components::{update_mode_choice::UpdateModeChoice, updates::UpdateStatus},
+    components::{
+        icons::warning_icon, outcome_note::OutcomeNote, radio_choice::RadioChoice, rows::Rows,
+        transient::Transient, typed_confirm::TypedConfirm, update_mode_choice::UpdateModeChoice,
+        updates::UpdateStatus,
+    },
     format::{bytes, data_change_allowed, is_low_space, state_dir},
     theme::theme_text,
 };
@@ -85,6 +89,28 @@ fn draft_differs(stored: &Settings, draft: &Settings, fields: &TextFields) -> bo
     edited != *stored
 }
 
+/// "212.4 GB free", or a note that it is unknown: the data folder row here and the wizard's
+/// data step.
+pub(crate) fn free_space_text(free: Option<u64>) -> String {
+    match free {
+        Some(free) => format!("{} free", bytes(free)),
+        None => "free space unknown".to_owned(),
+    }
+}
+
+/// The note after the data folder was changed: the free space there, with the warning when
+/// Mainnet would not fit.
+fn data_dir_saved_text(free: Option<u64>) -> String {
+    let mut text = match free {
+        Some(free) => format!("Saved. {} free there.", bytes(free)),
+        None => "Saved. The free space there could not be read.".to_owned(),
+    };
+    if is_low_space(free) {
+        text.push_str(" Mainnet needs hundreds of GB; this drive may fill up.");
+    }
+    text
+}
+
 /// A change in flight on this page. Only one runs at a time: Save sends the whole settings
 /// object, so a Save racing a data folder change could store the folder it read before the
 /// change, and neither should run while node data is being deleted.
@@ -102,7 +128,8 @@ pub fn SettingsPage() -> impl IntoView {
     let fields = RwSignal::new(TextFields::default());
     let busy = RwSignal::new(None::<Mutation>);
     let saving = move || busy.get() == Some(Mutation::Save);
-    let result = RwSignal::new(None::<Result<(), String>>);
+    // The outcome of Save, or why it is refused; the next edit clears it.
+    let outcome = Transient::<Result<String, String>>::new();
 
     let reset = move || {
         let loaded = state.settings.get_untracked();
@@ -179,7 +206,7 @@ pub fn SettingsPage() -> impl IntoView {
         ) {
             (Ok(url), Ok(secs)) => (url, secs),
             _ => {
-                result.set(Some(Err("Fix the highlighted fields first.".into())));
+                outcome.report(Err("Fix the highlighted fields first.".into()));
                 return;
             }
         };
@@ -190,15 +217,15 @@ pub fn SettingsPage() -> impl IntoView {
             .settings
             .with_untracked(|stored| stored.as_ref().and_then(|s| s.data_dir.clone()));
         busy.set(Some(Mutation::Save));
-        result.set(None);
+        outcome.clear();
         spawn_local(async move {
             match api::set_settings(settings).await {
                 Ok(stored) => {
                     state.settings.set(Some(stored));
                     reset();
-                    result.set(Some(Ok(())));
+                    outcome.report(Ok("Saved.".into()));
                 }
-                Err(error) => result.set(Some(Err(format!("Could not save: {error}")))),
+                Err(error) => outcome.report(Err(format!("Could not save: {error}"))),
             }
             busy.set(None);
         });
@@ -210,7 +237,7 @@ pub fn SettingsPage() -> impl IntoView {
                 change(draft, value);
             }
         });
-        result.set(None);
+        outcome.clear();
     };
     let read = move |pick: fn(&Settings) -> bool| {
         move || draft.with(|draft| draft.as_ref().is_some_and(pick))
@@ -236,7 +263,7 @@ pub fn SettingsPage() -> impl IntoView {
                                     d.update_mode = mode;
                                 }
                             });
-                            result.set(None);
+                            outcome.clear();
                         })
                     />
                     <UpdateStatus />
@@ -277,7 +304,7 @@ pub fn SettingsPage() -> impl IntoView {
                             prop:value=move || fields.with(|f| f.stop_grace_secs.clone())
                             on:input=move |event| {
                                 fields.update(|f| f.stop_grace_secs = event_target_value(&event));
-                                result.set(None);
+                                outcome.clear();
                             }
                         />
                         <span class="muted">"How long zebrad gets to shut down before it is killed."</span>
@@ -287,35 +314,26 @@ pub fn SettingsPage() -> impl IntoView {
 
                 <fieldset>
                     <legend>"Appearance"</legend>
-                    {THEMES
-                        .into_iter()
-                        .map(|theme| {
-                            let (label, explanation) = theme_text(theme);
-                            view! {
-                                <label class="radio">
-                                    <input
-                                        type="radio"
-                                        name="theme"
-                                        value=theme.as_str()
-                                        prop:checked=move || {
-                                            draft.with(|d| d.as_ref().is_some_and(|d| d.theme == theme))
-                                        }
-                                        on:change=move |_| {
-                                            draft.update(|d| {
-                                                if let Some(d) = d {
-                                                    d.theme = theme;
-                                                }
-                                            });
-                                            result.set(None);
-                                        }
-                                    />
-                                    <span>
-                                        {label} <span class="muted">{format!(" {explanation}")}</span>
-                                    </span>
-                                </label>
-                            }
+                    <RadioChoice
+                        name="theme"
+                        options=THEMES
+                            .into_iter()
+                            .map(|theme| {
+                                let (label, explanation) = theme_text(theme);
+                                (theme, label, explanation)
+                            })
+                            .collect()
+                        selected=Signal::derive(move || draft.with(|d| d.as_ref().map(|d| d.theme)))
+                        on_select=Callback::new(move |theme| {
+                            draft.update(|d| {
+                                if let Some(d) = d {
+                                    d.theme = theme;
+                                }
+                            });
+                            outcome.clear();
                         })
-                        .collect_view()}
+                        value=Theme::as_str
+                    />
                 </fieldset>
 
                 <fieldset>
@@ -339,7 +357,7 @@ pub fn SettingsPage() -> impl IntoView {
                                         d.network = network;
                                     }
                                 });
-                                result.set(None);
+                                outcome.clear();
                             }
                         >
                             <option value="mainnet">"Mainnet"</option>
@@ -363,7 +381,7 @@ pub fn SettingsPage() -> impl IntoView {
                             prop:value=move || fields.with(|f| f.grafana_url.clone())
                             on:input=move |event| {
                                 fields.update(|f| f.grafana_url = event_target_value(&event));
-                                result.set(None);
+                                outcome.clear();
                             }
                         />
                         <span class="muted">
@@ -379,7 +397,7 @@ pub fn SettingsPage() -> impl IntoView {
                         disabled=move || busy.get().is_some() || !dirty()
                         on:click=move |_| {
                             reset();
-                            result.set(None);
+                            outcome.clear();
                         }
                     >
                         "Revert"
@@ -394,14 +412,7 @@ pub fn SettingsPage() -> impl IntoView {
                     >
                         {move || if saving() { "Saving…" } else { "Save" }}
                     </button>
-                    {move || {
-                        result
-                            .get()
-                            .map(|result| match result {
-                                Ok(()) => view! { <span class="ok">"Saved."</span> }.into_any(),
-                                Err(error) => view! { <span class="error">{error}</span> }.into_any(),
-                            })
-                    }}
+                    <OutcomeNote outcome=outcome.signal() />
                 </div>
             </form>
             <section class="settings">
@@ -431,7 +442,7 @@ fn DataDirRow(
 ) -> impl IntoView {
     let state = AppState::get();
     let allowed = data_change_open(state);
-    let result = RwSignal::new(None::<Result<Option<u64>, String>>);
+    let outcome = Transient::<Result<String, String>>::new();
     // The free space at the folder in use, read (read-only) when the row mounts and whenever
     // the stored folder changes. Without a stored folder the launcher's default one is in use;
     // its path comes from the first-run info.
@@ -468,9 +479,10 @@ fn DataDirRow(
             return;
         }
         busy.set(Some(Mutation::DataDir));
-        result.set(None);
+        outcome.clear();
         spawn_local(async move {
-            let outcome = match api::pick_data_dir().await {
+            // Nothing to say when the picker was cancelled.
+            let saved = match api::pick_data_dir().await {
                 Ok(None) => None,
                 Ok(Some(path)) => Some(match api::choose_data_dir(path).await {
                     Ok(choice) => {
@@ -481,13 +493,15 @@ fn DataDirRow(
                                 draft.data_dir = data_dir;
                             }
                         });
-                        Ok(choice.free_bytes)
+                        Ok(data_dir_saved_text(choice.free_bytes))
                     }
                     Err(error) => Err(format!("Could not use that folder: {error}")),
                 }),
                 Err(error) => Some(Err(format!("Could not open the folder picker: {error}"))),
             };
-            result.set(outcome);
+            if let Some(saved) = saved {
+                outcome.report(saved);
+            }
             busy.set(None);
         });
     };
@@ -506,7 +520,7 @@ fn DataDirRow(
             {move || {
                 free_in_use
                     .get()
-                    .filter(|_| result.with(Option::is_none))
+                    .filter(|_| outcome.get().is_none())
                     .map(free_space_view)
             }}
             <div class="buttons">
@@ -527,32 +541,7 @@ fn DataDirRow(
                     }}
                 </span>
             </div>
-            {move || {
-                result
-                    .get()
-                    .map(|result| match result {
-                        Ok(free) => {
-                            view! {
-                                <span class="ok">
-                                    {match free {
-                                        Some(free) => format!("Saved. {} free there.", bytes(free)),
-                                        None => "Saved. The free space there could not be read.".into(),
-                                    }}
-                                </span>
-                                {is_low_space(free)
-                                    .then(|| {
-                                        view! {
-                                            <span class="error">
-                                                "Mainnet needs hundreds of GB; this drive may fill up."
-                                            </span>
-                                        }
-                                    })}
-                            }
-                                .into_any()
-                        }
-                        Err(error) => view! { <span class="error">{error}</span> }.into_any(),
-                    })
-            }}
+            <OutcomeNote outcome=outcome.signal() />
         </div>
     }
 }
@@ -561,34 +550,12 @@ fn DataDirRow(
 /// Mainnet would not fit, or `free space unknown`.
 fn free_space_view(free: Option<u64>) -> impl IntoView {
     let low = is_low_space(free);
-    let text = match free {
-        Some(free) => format!("{} free", bytes(free)),
-        None => "free space unknown".to_owned(),
-    };
     view! {
         <span class="data-dir-free" class:warn=low class:muted=!low>
-            {low.then(|| view! { <WarningIcon /> })}
-            {text}
+            {low.then(warning_icon)}
+            {free_space_text(free)}
             {low.then_some(" (Mainnet needs hundreds of GB; this drive may fill up)")}
         </span>
-    }
-}
-
-/// A small warning triangle, decorative: the text next to it says what is wrong.
-#[component]
-fn WarningIcon() -> impl IntoView {
-    view! {
-        <svg class="icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-            <path
-                d="M8 1.5 15 14H1Z"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-                stroke-linejoin="round"
-            />
-            <path d="M8 6v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-            <circle cx="8" cy="12" r="0.9" fill="currentColor" />
-        </svg>
     }
 }
 
@@ -596,12 +563,12 @@ fn WarningIcon() -> impl IntoView {
 #[component]
 fn About() -> impl IntoView {
     let state = AppState::get();
-    let error = RwSignal::new(None::<String>);
+    let note = Transient::<Result<String, String>>::new();
     let open = move |target: OpenTarget, what: &'static str| {
-        error.set(None);
+        note.clear();
         spawn_local(async move {
             if let Err(failure) = api::open_path(target).await {
-                error.set(Some(format!("Could not open {what}: {failure}")));
+                note.report(Err(format!("Could not open {what}: {failure}")));
             }
         });
     };
@@ -628,14 +595,11 @@ fn About() -> impl IntoView {
     view! {
         <fieldset class="about">
             <legend>"About"</legend>
-            <dl class="rows">
-                <dt>"Zebra Launcher"</dt>
-                <dd>{launcher}</dd>
-                <dt>"zebrad"</dt>
-                <dd>{zebrad}</dd>
-                <dt>"Network"</dt>
-                <dd>{network}</dd>
-            </dl>
+            <Rows rows=vec![
+                ("Zebra Launcher", launcher.into_any()),
+                ("zebrad", zebrad.into_any()),
+                ("Network", network.into_any()),
+            ] />
             <div class="buttons">
                 <button type="button" on:click=move |_| open(OpenTarget::LogDir, "the logs folder")>
                     "Open logs folder"
@@ -647,7 +611,7 @@ fn About() -> impl IntoView {
                     "Open config folder"
                 </button>
             </div>
-            {move || error.get().map(|error| view! { <p class="error">{error}</p> })}
+            <OutcomeNote outcome=note.signal() block=true />
         </fieldset>
     }
 }
@@ -657,29 +621,27 @@ fn About() -> impl IntoView {
 #[component]
 fn Diagnostics() -> impl IntoView {
     let busy = RwSignal::new(false);
-    let note = RwSignal::new(None::<Result<String, String>>);
+    let note = Transient::<Result<String, String>>::new();
     let fallback = RwSignal::new(None::<String>);
 
     let copy = move |_| {
         busy.set(true);
-        note.set(None);
+        note.clear();
         fallback.set(None);
         spawn_local(async move {
             match api::copy_diagnostics().await {
                 Ok(text) => match copy_to_clipboard(&text).await {
-                    Ok(()) => note.set(Some(Ok(
+                    Ok(()) => note.report(Ok(
                         "Copied to the clipboard, ready to paste into an issue.".into(),
-                    ))),
+                    )),
                     Err(error) => {
-                        note.set(Some(Err(format!(
+                        note.report(Err(format!(
                             "Could not copy to the clipboard ({error}). Select the text below and copy it by hand."
-                        ))));
+                        )));
                         fallback.set(Some(text));
                     }
                 },
-                Err(error) => {
-                    note.set(Some(Err(format!("Could not collect diagnostics: {error}"))))
-                }
+                Err(error) => note.report(Err(format!("Could not collect diagnostics: {error}"))),
             }
             busy.set(false);
         });
@@ -695,18 +657,7 @@ fn Diagnostics() -> impl IntoView {
                 <button type="button" disabled=move || busy.get() on:click=copy>
                     "Copy diagnostics"
                 </button>
-                {move || {
-                    note.get()
-                        .map(|note| match note {
-                            Ok(text) => {
-                                view! { <span class="ok diagnostics-note">{text}</span> }.into_any()
-                            }
-                            Err(text) => {
-                                view! { <span class="error diagnostics-note">{text}</span> }
-                                    .into_any()
-                            }
-                        })
-                }}
+                <OutcomeNote outcome=note.signal() />
             </div>
             {move || {
                 fallback
@@ -732,9 +683,8 @@ fn DeleteNodeData(busy: RwSignal<Option<Mutation>>) -> impl IntoView {
     let state = AppState::get();
     let allowed = data_change_open(state);
     let confirming = RwSignal::new(false);
-    let typed = RwSignal::new(String::new());
     let deleting = move || busy.get() == Some(Mutation::DeleteNodeData);
-    let result = RwSignal::new(None::<Result<String, String>>);
+    let outcome = Transient::<Result<String, String>>::new();
 
     let state_folder = move || {
         state
@@ -743,20 +693,19 @@ fn DeleteNodeData(busy: RwSignal<Option<Mutation>>) -> impl IntoView {
             .map(|dir| state_dir(&dir))
             .unwrap_or_else(|| "the state folder in the launcher's data folder".into())
     };
-    let delete = move |_| {
+    let delete = move || {
         if busy.get_untracked().is_some() {
             return;
         }
         busy.set(Some(Mutation::DeleteNodeData));
-        result.set(None);
+        outcome.clear();
         spawn_local(async move {
-            result.set(Some(match api::delete_node_data().await {
+            outcome.report(match api::delete_node_data().await {
                 Ok(freed) => Ok(format!("Deleted the node data, freeing {}.", bytes(freed))),
                 Err(error) => Err(format!("Could not delete the node data: {error}")),
-            }));
+            });
             busy.set(None);
             confirming.set(false);
-            typed.set(String::new());
         });
     };
 
@@ -768,7 +717,7 @@ fn DeleteNodeData(busy: RwSignal<Option<Mutation>>) -> impl IntoView {
                     type="button"
                     disabled=move || busy.get().is_some() || confirming.get() || !allowed()
                     on:click=move |_| {
-                        result.set(None);
+                        outcome.clear();
                         confirming.set(true);
                     }
                 >
@@ -785,53 +734,30 @@ fn DeleteNodeData(busy: RwSignal<Option<Mutation>>) -> impl IntoView {
                 </span>
             </div>
             <Show when=move || confirming.get()>
-                <div class="delete-confirm banner banner-warn">
+                <TypedConfirm
+                    word=DELETE_WORD
+                    action="Delete"
+                    busy_label="Deleting…"
+                    busy=Signal::derive(deleting)
+                    // Nothing typed enables Delete while the node runs or another change is in
+                    // flight.
+                    blocked=Signal::derive(move || {
+                        !allowed()
+                            || busy
+                                .get()
+                                .is_some_and(|mutation| mutation != Mutation::DeleteNodeData)
+                    })
+                    on_confirm=Callback::new(move |()| delete())
+                    on_cancel=Callback::new(move |()| confirming.set(false))
+                    class="delete-confirm"
+                >
                     <p>
                         "This deletes the chain state in " <code>{state_folder}</code>
                         " and nothing else: zebrad.toml, the launcher settings, the logs and the RPC cookie stay. The next start syncs the chain from scratch, which takes a day or more on Mainnet."
                     </p>
-                    <label class="field">
-                        <span>"Type " <code>{DELETE_WORD}</code> " to confirm"</span>
-                        <input
-                            type="text"
-                            autocomplete="off"
-                            prop:value=move || typed.get()
-                            on:input=move |event| typed.set(event_target_value(&event))
-                        />
-                    </label>
-                    <div class="buttons">
-                        <button
-                            type="button"
-                            class="danger"
-                            disabled=move || {
-                                busy.get().is_some() || !allowed()
-                                    || typed.with(|t| t.trim() != DELETE_WORD)
-                            }
-                            on:click=delete
-                        >
-                            {move || if deleting() { "Deleting…" } else { "Delete" }}
-                        </button>
-                        <button
-                            type="button"
-                            disabled=deleting
-                            on:click=move |_| {
-                                confirming.set(false);
-                                typed.set(String::new());
-                            }
-                        >
-                            "Cancel"
-                        </button>
-                    </div>
-                </div>
+                </TypedConfirm>
             </Show>
-            {move || {
-                result
-                    .get()
-                    .map(|result| match result {
-                        Ok(text) => view! { <p class="ok delete-result">{text}</p> }.into_any(),
-                        Err(text) => view! { <p class="error delete-result">{text}</p> }.into_any(),
-                    })
-            }}
+            <OutcomeNote outcome=outcome.signal() block=true />
         </fieldset>
     }
 }
@@ -884,6 +810,21 @@ mod tests {
             ..fields
         };
         assert!(draft_differs(&stored, &stored, &bad_grace));
+    }
+
+    #[test]
+    fn free_space_words() {
+        assert_eq!(free_space_text(Some(212_400_000_000)), "212.4 GB free");
+        assert_eq!(free_space_text(None), "free space unknown");
+        assert_eq!(
+            data_dir_saved_text(Some(400_000_000_000)),
+            "Saved. 400.0 GB free there."
+        );
+        assert!(data_dir_saved_text(Some(1_000_000_000)).ends_with("this drive may fill up."));
+        assert_eq!(
+            data_dir_saved_text(None),
+            "Saved. The free space there could not be read."
+        );
     }
 
     #[test]
