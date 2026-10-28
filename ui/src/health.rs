@@ -312,11 +312,9 @@ impl<'a> Facts<'a> {
         self.ago(self.started_at().unwrap_or(self.input.phase_since))
     }
 
-    /// Whether a time belongs to the current run: not before it started, give or take
-    /// [`RUN_SLACK`] for zebrad's own clock stamps. Everything counts without a start time.
+    /// [`this_run`] for the current run.
     fn this_run(&self, at: SystemTime) -> bool {
-        self.started_at()
-            .is_none_or(|started| at.checked_add(RUN_SLACK).is_none_or(|at| at >= started))
+        this_run(self.started_at(), at)
     }
 
     /// The log's current run, when it is this run.
@@ -434,13 +432,14 @@ impl<'a> Facts<'a> {
         parts.join(" · ")
     }
 
-    /// `last block 48 s ago`, from the samples or zebrad's own words.
+    /// [`last_block_text`] for this run.
     fn last_block_text(&self) -> Option<String> {
-        if let Some(at) = self.last_block_at() {
-            return Some(format!("last block {}", relative(at, self.now())));
-        }
-        let words = self.sync_snapshot()?.since_last_block.as_deref()?;
-        Some(format!("last block {words} ago"))
+        last_block_text(
+            self.input.history,
+            self.input.insights.sync(),
+            self.started_at(),
+            self.now(),
+        )
     }
 
     /// The running release's end of support and the sentence about it.
@@ -914,6 +913,36 @@ impl<'a> Facts<'a> {
             }
         }
     }
+}
+
+/// Whether a time belongs to the run started at `started_at`: not before it, give or take
+/// [`RUN_SLACK`] for zebrad's own clock stamps. Everything counts without a start time. The
+/// verdict's facts and the page's latest sample are filtered with it, so they agree on which
+/// run a figure belongs to.
+pub fn this_run(started_at: Option<SystemTime>, at: SystemTime) -> bool {
+    started_at.is_none_or(|started| at.checked_add(RUN_SLACK).is_none_or(|at| at >= started))
+}
+
+/// `last block 48 s ago`: the newest height rise among this run's samples or, while they show
+/// none, zebrad's own words in its progress line (`5s`, `1m 2s`, stamped when it said so) aged
+/// to `now` and written in the page's units. The hero line and the verdict both read it, so
+/// they never disagree.
+pub fn last_block_text(
+    history: &StatsHistory,
+    sync: Option<&SyncSnapshot>,
+    started_at: Option<SystemTime>,
+    now: SystemTime,
+) -> Option<String> {
+    if let Some(at) = history
+        .last_height_change_at()
+        .filter(|at| this_run(started_at, *at))
+    {
+        return Some(format!("last block {}", relative(at, now)));
+    }
+    let sync = sync.filter(|sync| this_run(started_at, sync.at))?;
+    let said = Duration::from_secs(humantime_secs(sync.since_last_block.as_deref()?)?);
+    let since = said + now.duration_since(sync.at).unwrap_or(Duration::ZERO);
+    Some(format!("last block {} ago", rough_duration(since)))
 }
 
 /// `for 12 min`.
@@ -2256,6 +2285,35 @@ mod tests {
         assert_eq!(Level::Healthy.tone(), "good");
         assert_eq!(Level::Problem.tone(), "critical");
         assert_eq!(Level::Urgent.tone(), "serious");
+        // No height rise sampled yet (the launcher just opened at the tip): zebrad's own words
+        // from its progress line, aged to now and in the page's units, as the hero shows them.
+        let at_tip_line = |secs, since| {
+            progress(
+                1,
+                secs,
+                &format!(
+                    "finished initial sync to chain tip, using gossiped blocks sync_percent=100.000% current_height=Height(3120000) time_since_last_state_block={since}"
+                ),
+            )
+        };
+        let mut scene = Scene::at_tip(630);
+        scene.history = history(300, 630, 3_120_000, 0, 12);
+        scene.stats = Some(stats(630, 3_120_000, 12));
+        scene.insights = insights(&[tracing_started(0, 1), at_tip_line(590, "1m 20s")]);
+        let verdict = scene.verdict();
+        assert_eq!(verdict.rule, 18);
+        assert_eq!(
+            verdict.reason,
+            "12 peers · last block 2 min ago · RPC answered just now"
+        );
+        scene.insights = insights(&[tracing_started(0, 1), at_tip_line(580, "5s")]);
+        assert_eq!(
+            scene.verdict().reason,
+            "12 peers · last block 55 s ago · RPC answered just now"
+        );
+        // A progress line from before this run says nothing about it.
+        scene.status.started_at = Some(t(600));
+        assert_eq!(scene.verdict().reason, "12 peers · RPC answered just now");
     }
 
     #[test]
@@ -2320,6 +2378,11 @@ mod tests {
         assert_eq!(log_filter(Some(&"x".repeat(80)), ""), "x".repeat(60));
         assert_eq!(peers_text(1), "1 peer");
         assert_eq!(crashes_text(2), "2 crashes");
+        // A run's time: everything without a start, else from the start less the slack.
+        assert!(this_run(None, t(0)));
+        assert!(this_run(Some(t(10)), t(10)));
+        assert!(this_run(Some(t(10)), t(8)), "within the slack");
+        assert!(!this_run(Some(t(10)), t(7)));
         assert_eq!(Level::Neutral.word(), None);
         assert_eq!(Level::Attention.word(), Some("Attention"));
         assert_eq!(Action::StartKillingStale.label(), "Stop it and start");
