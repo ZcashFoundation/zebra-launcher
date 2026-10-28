@@ -469,8 +469,10 @@ pub fn problem_event(problem: &Problem) -> RunEvent {
     } else {
         text
     };
+    // Only a cut message gets the ellipsis; the fields left off are not a cut.
+    let truncated = text.chars().count() > PROBLEM_CHARS;
     let mut text: String = text.chars().take(PROBLEM_CHARS).collect();
-    if text.len() < problem.sample.len() && problem.sample.chars().count() > PROBLEM_CHARS {
+    if truncated {
         text.push('…');
     }
     let mut text = format!("{}: {}", problem.level.label(), text.trim());
@@ -1081,6 +1083,18 @@ mod tests {
             event.at,
             at(50),
             "dated at the first appearance in this run"
+        );
+        // A short message with long fields is whole: no ellipsis for the fields left off.
+        let long_fields = Problem {
+            sample: format!(
+                "block download failed hash=block::Hash(\"{}\") height=Height(2950000) error=timeout",
+                "0".repeat(64)
+            ),
+            ..problem.clone()
+        };
+        assert_eq!(
+            problem_event(&long_fields).text,
+            "ERROR: block download failed ×3"
         );
         let stderr = Problem {
             level: ProblemLevel::Stderr,
