@@ -454,7 +454,7 @@ pub fn sync_summary(
     let mut parts = Vec::with_capacity(4);
     let (figure, fraction) = if sample.at_tip() {
         parts.push(format!(
-            "At chain tip · height {}",
+            "At the chain tip · height {}",
             thousands(sample.height)
         ));
         ("100 %".to_owned(), 1.0)
@@ -969,7 +969,7 @@ mod tests {
             None,
         );
         assert_eq!(tip.figure, "100 %");
-        assert_eq!(tip.line, "At chain tip · height 3,120,000");
+        assert_eq!(tip.line, "At the chain tip · height 3,120,000");
         assert!(tip.at_tip && tip.fraction == 1.0);
 
         assert_eq!(phase_note(&Phase::Running), None);

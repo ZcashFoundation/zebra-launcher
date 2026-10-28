@@ -18,16 +18,17 @@ use crate::{
         rows::{Row, Rows},
         transient::Transient,
     },
-    format::{bytes, exit_class_text, relative, rough_duration, thousands},
+    format::{
+        bytes, exit_class_text, local_date_short, local_datetime_short, relative, rough_duration,
+        thousands,
+    },
     stats_history::Sample,
 };
 
 /// How long "Copied" stays beside the best block's Copy button.
 const COPIED_FOR: Duration = Duration::from_secs(2);
 
-use super::{
-    Dash, Icon, MetricsFacts, local_date, local_short, status_card::CHECKPOINT_NEAR_BLOCKS,
-};
+use super::{Dash, Icon, MetricsFacts, status_card::CHECKPOINT_NEAR_BLOCKS};
 
 /// The Phase row: `Running for 2 d 4 h, since 23 Oct, 21:13`, `Restarting in 25 s (crash 2)`,
 /// `Failed · zebrad crashed`.
@@ -325,7 +326,7 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
             status.phase,
             Phase::Running | Phase::Starting | Phase::Stopping
         );
-        let since = status.started_at.map(local_short);
+        let since = status.started_at.map(local_datetime_short);
         let mut rows: Vec<Row> = Vec::new();
         {
             let status = status.clone();
@@ -383,7 +384,7 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
                 .stats
                 .with(|stats| stats.as_ref().and_then(|stats| stats.eos.clone()));
             if let Some(eos) = eos {
-                let date = local_date(eos.estimated_time);
+                let date = local_date_short(eos.estimated_time);
                 rows.push((
                     "End of support",
                     (move || eos_text(&eos, &date, state.now.get())).into_any(),

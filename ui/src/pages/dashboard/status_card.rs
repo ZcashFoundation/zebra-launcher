@@ -17,14 +17,10 @@ use crate::{
     format::{relative, thousands},
     health::{Action, Level, summary_text},
     insights::SyncStage,
-    stats_history::Sample,
+    stats_history::HERO_RATE_WINDOW,
 };
 
 use super::{Dash, Icon, with_health_input};
-
-/// The hero's rate and ETA come from this fixed window, whatever the range control says, so
-/// the ETA does not change when the reader switches the range.
-pub const HERO_WINDOW: Duration = Duration::from_secs(15 * 60);
 
 /// The checkpoint verifier is still at work while its height is within this many blocks of
 /// the verified height; further behind, it has finished and full validation runs.
@@ -78,16 +74,6 @@ pub fn action_verb(action: &Action) -> &'static str {
     }
 }
 
-/// When the height last rose: the `at` of the newest sample whose height exceeds its
-/// predecessor's (5 s resolution). `None` while no rise was seen.
-pub fn last_height_change_at(samples: &[Sample]) -> Option<SystemTime> {
-    samples
-        .windows(2)
-        .rev()
-        .find(|pair| pair[1].height > pair[0].height)
-        .map(|pair| pair[1].at)
-}
-
 /// `last block 5 s ago`: from the sample history, or from zebrad's own words in its progress
 /// log (`5s`, `1m 2s`) while the history saw no rise.
 pub fn last_block_text(
@@ -134,11 +120,9 @@ pub fn hero_line(
     if waiting {
         return line.to_owned();
     }
-    // The summary's own words, in the page's copy.
-    let line = line.replacen("At chain tip", "At the chain tip", 1);
     let mut parts = Vec::with_capacity(3);
     parts.extend(stage);
-    parts.push(line.as_str());
+    parts.push(line);
     parts.extend(last_block);
     parts.join(" · ")
 }
@@ -260,20 +244,21 @@ pub(super) fn StatusCard(dash: Dash) -> impl IntoView {
         });
     };
 
-    // The sync hero: a fixed 15 min window for the pace, the last block's age from the sample
-    // history (zebrad's own words as the fallback), stage words from this run's progress log
-    // and the checkpoint or full-validation note from the metrics and the log.
+    // The sync hero: the fixed `HERO_RATE_WINDOW` for the pace (the verdict's rule 17 reads
+    // the same figures), the last block's age from the sample history (zebrad's own words as
+    // the fallback), stage words from this run's progress log and the checkpoint or
+    // full-validation note from the metrics and the log.
     let rate = Memo::new(move |_| {
         let now = state.now.get();
         state
             .history
-            .with(|history| history.block_rate(Some(HERO_WINDOW), now))
+            .with(|history| history.block_rate(Some(HERO_RATE_WINDOW), now))
     });
     let eta = Memo::new(move |_| {
         let now = state.now.get();
         state
             .history
-            .with(|history| history.eta_to_tip(Some(HERO_WINDOW), now))
+            .with(|history| history.eta_to_tip(Some(HERO_RATE_WINDOW), now))
     });
     let hero = Memo::new(move |_| {
         let note = state.status.with(|status| phase_note(&status.phase));
@@ -283,7 +268,7 @@ pub(super) fn StatusCard(dash: Dash) -> impl IntoView {
         let now = state.now.get();
         let change_at = state
             .history
-            .with(|history| last_height_change_at(history.window(None, now)));
+            .with(|history| history.last_height_change_at());
         let words = state.insights.with(|insights| {
             insights
                 .sync()
@@ -399,19 +384,6 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(secs)
     }
 
-    fn sample(secs: u64, height: u64) -> Sample {
-        Sample {
-            at: at(secs),
-            height,
-            estimated_height: 3_120_000,
-            peers: 8,
-            mempool_transactions: 0,
-            verification_progress: height as f64 / 3_120_000.0,
-            peers_inbound: None,
-            peers_outbound: None,
-        }
-    }
-
     #[test]
     fn chip_words_and_classes() {
         assert_eq!(chip_word(Level::Healthy, "At the chain tip"), "Healthy");
@@ -448,25 +420,6 @@ mod tests {
         );
         assert_eq!(action_verb(&Action::Install), "install the update");
         assert_eq!(action_verb(&Action::OpenReleases), "open the releases page");
-    }
-
-    #[test]
-    fn last_height_change_is_the_newest_rise() {
-        assert_eq!(last_height_change_at(&[]), None);
-        assert_eq!(last_height_change_at(&[sample(0, 100)]), None);
-        let flat = [sample(0, 100), sample(5, 100), sample(10, 100)];
-        assert_eq!(last_height_change_at(&flat), None);
-        let rising = [
-            sample(0, 100),
-            sample(5, 110),
-            sample(10, 110),
-            sample(15, 112),
-            sample(20, 112),
-        ];
-        assert_eq!(last_height_change_at(&rising), Some(at(15)));
-        // A reorg down is not a rise.
-        let dip = [sample(0, 100), sample(5, 110), sample(10, 105)];
-        assert_eq!(last_height_change_at(&dip), Some(at(5)));
     }
 
     #[test]
@@ -526,7 +479,7 @@ mod tests {
         );
         assert_eq!(
             hero_line(
-                "At chain tip · height 3,120,012",
+                "At the chain tip · height 3,120,012",
                 false,
                 None,
                 Some("last block 48 s ago")

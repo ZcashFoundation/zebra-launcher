@@ -14,12 +14,12 @@ use crate::{
         widgets::{RangeControl, StatTile, Tone},
     },
     clock,
-    format::{bytes, exit_class_text, relative, thousands},
+    format::{bytes, exit_class_text, local_datetime_short, relative, thousands},
     health::STALE_AFTER,
     stats_history::Field,
 };
 
-use super::{Dash, Icon, local_short};
+use super::{Dash, Icon};
 
 /// The verdict rules that drive the Peers tile's warning tone, so tile and verdict agree.
 pub const PEER_RULES: [u8; 2] = [8, 12];
@@ -358,7 +358,7 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
             Tone::Muted
         }
     });
-    let since = Memo::new(move |_| started.get().map(local_short));
+    let since = Memo::new(move |_| started.get().map(local_datetime_short));
     // The exact start as the value's tooltip, beside the short form in the detail.
     let started_full = Signal::derive(move || {
         started.get().map_or_else(String::new, |started| {

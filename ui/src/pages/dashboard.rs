@@ -10,11 +10,10 @@ mod details;
 mod status_card;
 mod tiles;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use launcher_types::{EOS_WARNING_WINDOW, EosInfo, ExitClass, NodeDetails, Phase, eos_within};
 use leptos::prelude::*;
-use wasm_bindgen::JsValue;
 
 use crate::{
     app::{AppState, Tab},
@@ -24,7 +23,7 @@ use crate::{
         icons::{check_icon, clock_icon, cross_icon, info_icon, warning_icon},
         updates::CheckForUpdate,
     },
-    format::{relative, thousands},
+    format::{local_date_short, relative, thousands},
     health::{HealthInput, Level, Verdict, health_verdict},
     metrics_history::{MetricsHistory, names},
     stats_history::{Field, Sample},
@@ -176,50 +175,6 @@ pub(crate) fn with_health_input<R>(
     })
 }
 
-/// A `Date` for `time`.
-fn js_date(time: SystemTime) -> js_sys::Date {
-    let millis = time
-        .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |since| since.as_millis() as f64);
-    js_sys::Date::new(&JsValue::from_f64(millis))
-}
-
-/// `Intl` options from `(key, value)` pairs.
-fn intl_options(pairs: &[(&str, &str)]) -> JsValue {
-    let options = js_sys::Object::new();
-    for (key, value) in pairs {
-        let _ = js_sys::Reflect::set(&options, &JsValue::from_str(key), &JsValue::from_str(value));
-    }
-    options.into()
-}
-
-/// `time` as a short local date and time, such as `23 Oct, 21:13` (the locale orders the
-/// day and month), beside [`clock::local_string`]'s full form.
-pub(crate) fn local_short(time: SystemTime) -> String {
-    js_date(time)
-        .to_locale_string(
-            "default",
-            &intl_options(&[
-                ("day", "numeric"),
-                ("month", "short"),
-                ("hour", "2-digit"),
-                ("minute", "2-digit"),
-                ("hourCycle", "h23"),
-            ]),
-        )
-        .into()
-}
-
-/// `time` as a short local date, such as `3 Dec 2026`.
-pub(crate) fn local_date(time: SystemTime) -> String {
-    js_date(time)
-        .to_locale_date_string(
-            "default",
-            &intl_options(&[("day", "numeric"), ("month", "short"), ("year", "numeric")]),
-        )
-        .into()
-}
-
 /// The end-of-support warning: `End of support in 12 days. zebrad 7.0.0 stops working at block
 /// 3,160,000 (about 3 Dec 2026). Update the launcher before then.`
 pub(crate) fn eos_banner_text(version: &str, eos: &EosInfo, date: &str, now: SystemTime) -> String {
@@ -345,7 +300,7 @@ pub fn Dashboard() -> impl IntoView {
     });
     let eos_text = move || {
         eos.get().map(|(version, eos)| {
-            let date = local_date(eos.estimated_time);
+            let date = local_date_short(eos.estimated_time);
             move || eos_banner_text(&version, &eos, &date, state.now.get())
         })
     };
@@ -501,6 +456,8 @@ pub fn Dashboard() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
+    use std::time::UNIX_EPOCH;
+
     use launcher_types::{MetricFamily, MetricKind, MetricSample, MetricsSnapshot};
 
     use super::*;
