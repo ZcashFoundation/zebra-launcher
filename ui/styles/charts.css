@@ -1,12 +1,160 @@
-/* Dashboard charts: stat tiles, the sync meter and the inline SVG charts (see ui/src/charts.rs).
-   The grid, axis, tooltip, key and table classes are shared with the log activity chart
+/* Dashboard: the status card, range row, stat tiles, the inline SVG charts, the activity and
+   details rows and the Grafana line (see ui/src/pages/dashboard.rs, ui/src/charts.rs). The
+   grid, axis, tooltip, key and table classes are shared with the log activity chart
    (ui/src/components/log_insights.rs). Colours come from the tokens in styles.css only. No
    transitions: data changes must not move. */
 
-/* Sync hero */
+/* Status card: the verdict (3fr) beside the sync progress (2fr); stacked under 900 px. The
+   level's status colour sits on the card's left edge and the chip's icon, nowhere else. */
+
+.dash-status {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: 8px 24px;
+  margin-bottom: 12px;
+  padding: 12px 16px;
+  border-left: 3px solid var(--muted);
+  min-height: 120px;
+}
+
+@media (max-width: 900px) {
+  .dash-status {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.dash-level-good {
+  border-left-color: var(--status-good);
+}
+
+.dash-level-neutral {
+  border-left-color: var(--muted);
+}
+
+.dash-level-warning {
+  border-left-color: var(--status-warning);
+}
+
+.dash-level-serious {
+  border-left-color: var(--status-serious);
+}
+
+.dash-level-critical {
+  border-left-color: var(--status-critical);
+}
+
+.dash-level-good .dash-chip .icon {
+  color: var(--status-good);
+}
+
+.dash-level-neutral .dash-chip .icon {
+  color: var(--muted);
+}
+
+.dash-level-warning .dash-chip .icon {
+  color: var(--status-warning);
+}
+
+.dash-level-serious .dash-chip .icon {
+  color: var(--status-serious);
+}
+
+.dash-level-critical .dash-chip .icon {
+  color: var(--status-critical);
+}
+
+.dash-verdict {
+  min-width: 0;
+}
+
+.dash-verdict-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.dash-verdict-state {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  min-width: 0;
+}
+
+.dash-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dash-chip .icon {
+  width: 18px;
+  height: 18px;
+}
+
+.dash-verdict-headline {
+  min-width: 0;
+}
+
+.dash-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dash-copy .link {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.dash-copy .link:hover {
+  color: var(--text);
+}
+
+.dash-copy-note:empty {
+  display: none;
+}
+
+.dash-verdict-reason {
+  margin: 4px 0 0;
+  min-height: 20px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.dash-verdict-actions {
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.dash-verdict-actions:empty {
+  display: none;
+}
+
+.dash-verdict-actions button {
+  margin-right: 0;
+}
+
+.dash-verdict-actions .reset-config .buttons .muted {
+  display: none;
+}
+
+.dash-verdict-failure {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+/* The sync hero */
 
 .dash-hero {
-  margin-bottom: 12px;
+  min-width: 0;
 }
 
 .dash-hero-head {
@@ -22,8 +170,8 @@
 }
 
 .dash-hero-figure {
-  font-size: 44px;
-  line-height: 1.1;
+  font-size: 48px;
+  line-height: 1;
   font-weight: 600;
   font-variant-numeric: proportional-nums;
   letter-spacing: -0.5px;
@@ -34,7 +182,7 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  margin: 10px 0 0;
+  margin: 8px 0 0;
   color: var(--text-secondary);
 }
 
@@ -46,9 +194,15 @@
   color: var(--status-good);
 }
 
+.dash-hero-sub {
+  margin: 2px 0 0;
+  min-height: 17px;
+  font-size: 12px;
+}
+
 .meter {
   height: 10px;
-  margin-top: 10px;
+  margin-top: 8px;
   border-radius: 999px;
   background: var(--series-track);
   overflow: hidden;
@@ -60,14 +214,24 @@
   background: var(--series-1);
 }
 
-/* Range row */
+/* Range row: the control left, the freshness sentence right. */
+
+.dash-range-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  min-height: 32px;
+  margin: 0 0 12px;
+}
 
 .dash-range {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
-  margin: 0 0 12px;
+  margin: 0;
 }
 
 .dash-range-label {
@@ -87,6 +251,7 @@
   background: none;
   color: var(--muted);
   padding: 5px 12px;
+  margin: 0;
 }
 
 .dash-segmented button + button {
@@ -106,6 +271,21 @@
 .dash-segmented button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+
+.dash-fresh {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The text-grade warning token: the status tokens are mark colours and fail contrast as text. */
+.dash-fresh-warning {
+  color: var(--warn);
 }
 
 /* Stat tiles */
@@ -205,9 +385,8 @@
   fill: var(--series-1);
 }
 
-/* Chart cards. The SVG scales its 640-unit viewBox to the card, so a card narrower than about
-   560 px shrinks the 11 px axis text below reading size: two columns, with the height chart
-   across both, until the window is wide enough for three. */
+/* Chart cards: two across, stacked under 900 px. The plot measures its own width, so a 470 px
+   card keeps its 11 px axis text. */
 
 .chart-grid {
   display: grid;
@@ -216,23 +395,9 @@
   margin-bottom: 12px;
 }
 
-.chart-grid > .chart-card:first-child {
-  grid-column: 1 / -1;
-}
-
-@media (max-width: 1000px) {
+@media (max-width: 900px) {
   .chart-grid {
     grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-@media (min-width: 1800px) {
-  .chart-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .chart-grid > .chart-card:first-child {
-    grid-column: auto;
   }
 }
 
@@ -288,6 +453,10 @@
 
 .chart-series-1 {
   --series: var(--series-1);
+}
+
+.chart-series-2 {
+  --series: var(--series-2);
 }
 
 .chart-series-muted {
@@ -497,21 +666,111 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The log-analysis cards under the charts (styled by insights.css): the sync stage, the
-   recent problems and, wide enough, the activity chart beside them at double width. */
-.dash-insights {
+/* Activity row (styled by insights.css): Recent problems, This run and Peers, three across
+   from 1100 px; two across with Peers full width under them between 900 and 1100 px; stacked
+   below. The two list cards keep one height and scroll inside. */
+
+.dash-activity {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 12px;
 }
 
+.dash-activity > .card {
+  min-height: 260px;
+  max-height: 400px;
+}
+
+.dash-activity .dash-peers {
+  grid-column: 1 / -1;
+  min-height: 0;
+}
+
 @media (min-width: 1100px) {
-  .dash-insights {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+  .dash-activity {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .dash-insights .insight-activity {
-    grid-column: span 2;
+  .dash-activity .dash-peers {
+    grid-column: auto;
   }
+}
+
+@media (max-width: 900px) {
+  .dash-activity {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* One line per problem here; the Logs page's panel keeps two. */
+.dash-activity .insight-problem-msg {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dash-peers-caption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 15px;
+}
+
+.dash-peers-caption .icon {
+  width: 18px;
+  height: 18px;
+}
+
+/* Details: Node and Chain; the Node card's rows in two columns from 1100 px. */
+
+@media (min-width: 1100px) {
+  .dash-node .rows {
+    grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+  }
+}
+
+.dash-chain.dash-stopped .rows dd {
+  color: var(--muted);
+}
+
+.dash-folder {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+
+.dash-folder .link {
+  margin: 0;
+  font-weight: 500;
+}
+
+.dash-row-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dash-row-warning .icon {
+  color: var(--status-warning);
+}
+
+/* The Grafana line */
+
+.dash-grafana {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  min-height: 32px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.dash-grafana .link {
+  margin: 0;
+  font-weight: 500;
 }

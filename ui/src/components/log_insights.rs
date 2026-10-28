@@ -1,11 +1,11 @@
-//! Cards that show what the log stream says: sync stage, recent problems, activity and the
-//! startup timeline. Backed by [`crate::insights::Insights`].
+//! Cards that show what the log stream says: sync stage, recent problems, activity, the
+//! startup timeline and the dashboard's This run list. Backed by [`crate::insights::Insights`].
 //!
 //! The chart geometry ([`crate::charts::activity`]) and the sentences
-//! ([`crate::insights::text`]) are pure functions, tested natively; the components only wire
-//! them to signals.
+//! ([`crate::insights::text`] and the helpers here) are pure functions, tested natively; the
+//! components only wire them to signals.
 
-use std::time::SystemTime;
+use std::{cmp::Reverse, time::SystemTime};
 
 use leptos::prelude::*;
 
@@ -16,7 +16,7 @@ use crate::{
             Kind, LABELLED_COLUMNS, PLOT_BOTTOM, PLOT_LEFT, PLOT_RIGHT, PLOT_TOP, VIEW_HEIGHT,
             VIEW_WIDTH, geometry, segment_path, tooltip_class,
         },
-        hhmm, tz_offset_min_at,
+        hhmm, hhmmss, tz_offset_min_at,
     },
     components::{
         icons::{check_icon, clock_icon, cross_icon, warning_icon},
@@ -24,7 +24,8 @@ use crate::{
     },
     format::{percent, relative, thousands},
     insights::{
-        ACTIVITY_MINUTES, Problem, ProblemLevel, Run, SyncSnapshot, Tone, elapsed_text,
+        ACTIVITY_MINUTES, Problem, ProblemLevel, Run, RunEvent, SyncSnapshot, Tone, elapsed_text,
+        fields::epoch_minute,
         pick_filter,
         text::{
             checkpoints_line, earlier_runs_line, mempool_line, peers_line, run_head, shutdown_line,
@@ -35,6 +36,60 @@ use crate::{
 /// `time` as `HH:MM` in the browser's zone at that instant, as the line charts label theirs.
 fn local_hhmm(time: SystemTime) -> String {
     hhmm(time, tz_offset_min_at(time))
+}
+
+/// `time` as `HH:MM:SS` in the browser's zone at that instant: the absolute time beside a
+/// relative one, so a screenshot still reads later.
+fn local_hhmmss(time: SystemTime) -> String {
+    hhmmss(time, tz_offset_min_at(time))
+}
+
+/// The Recent problems head: `last hour: 3 WARN, 1 ERROR` (ERROR counts stderr lines too, as
+/// the minute buckets do), or `None` for a quiet hour.
+pub fn problem_counts_text(warn: u32, error: u32) -> Option<String> {
+    let mut parts = Vec::with_capacity(2);
+    if warn > 0 {
+        parts.push(format!("{warn} WARN"));
+    }
+    if error > 0 {
+        parts.push(format!("{error} ERROR"));
+    }
+    (!parts.is_empty()).then(|| format!("last hour: {}", parts.join(", ")))
+}
+
+/// Orders problems newest first by the minute they were last seen, errors and stderr ahead of
+/// warnings within a minute, then by the exact time.
+pub fn order_problems(problems: &mut [Problem]) {
+    let rank = |level: ProblemLevel| match level {
+        ProblemLevel::Error | ProblemLevel::Stderr => 0,
+        ProblemLevel::Warn => 1,
+    };
+    problems.sort_by_key(|problem| {
+        (
+            Reverse(epoch_minute(problem.last)),
+            rank(problem.level),
+            Reverse((problem.last, problem.last_seq)),
+        )
+    });
+}
+
+/// The class of a This run row: problem rows carry their tone's colour on the icon.
+pub fn event_class(tone: Tone) -> &'static str {
+    match tone {
+        Tone::Good => "insight-event insight-tone-good",
+        Tone::Neutral => "insight-event insight-tone-neutral",
+        Tone::Warning => "insight-event insight-tone-warning",
+        Tone::Critical => "insight-event insight-tone-critical",
+    }
+}
+
+/// The icon of a This run row: only problem rows carry one; the rest are neutral.
+fn event_icon(tone: Tone) -> Option<AnyView> {
+    match tone {
+        Tone::Warning => Some(warning_icon().into_any()),
+        Tone::Critical => Some(cross_icon().into_any()),
+        Tone::Good | Tone::Neutral => None,
+    }
 }
 
 fn tone_class(tone: Tone) -> &'static str {
@@ -352,15 +407,34 @@ pub fn SyncStageCard() -> impl IntoView {
     }
 }
 
-/// The distinct warnings, errors and stderr lines, newest first. Clicking one calls `on_pick`
-/// with a text filter for the Logs page.
+/// The distinct warnings, errors and stderr lines, newest first (errors ahead of warnings
+/// within a minute), with the hour's counts in the head and both the clock time and the age on
+/// each row. Clicking one calls `on_pick` with a text filter for the Logs page; `on_show_all`,
+/// when given, adds the footer link to the Logs page.
 #[component]
 pub fn RecentProblems(
     #[prop(default = 8)] limit: usize,
     on_pick: Callback<String>,
+    #[prop(optional)] on_show_all: Option<Callback<()>>,
 ) -> impl IntoView {
     let state = AppState::get();
-    let problems = Memo::new(move |_| state.insights.with(|insights| insights.problems(limit)));
+    let problems = Memo::new(move |_| {
+        let mut problems = state.insights.with(|insights| insights.problems(limit));
+        order_problems(&mut problems);
+        problems
+    });
+    let counts = Memo::new(move |_| {
+        let now = state.now.get();
+        let (warn, error) = state.insights.with(|insights| {
+            insights
+                .activity(now)
+                .iter()
+                .fold((0, 0), |(warn, error), bucket| {
+                    (warn + bucket.warn, error + bucket.error)
+                })
+        });
+        problem_counts_text(warn, error)
+    });
 
     let row = move |problem: Problem| {
         let pattern = problem.pattern.clone();
@@ -374,6 +448,7 @@ pub fn RecentProblems(
             ProblemLevel::Stderr => "lvl lvl-stderr",
         };
         let target = problem.target.clone();
+        let first = problem.first;
         let pick = move |_| {
             if let Some(problem) = current.get_untracked() {
                 on_pick.run(pick_filter(&problem));
@@ -381,7 +456,16 @@ pub fn RecentProblems(
         };
         view! {
             <li>
-                <button class="insight-problem" title="Show lines like this one" on:click=pick>
+                <button
+                    class="insight-problem"
+                    title=move || {
+                        format!(
+                            "First seen {} · shows lines like this one on the Logs page",
+                            relative(first, state.now.get())
+                        )
+                    }
+                    on:click=pick
+                >
                     <span class=level_class>{problem.level.label()}</span>
                     <span class="insight-problem-target">{target}</span>
                     <span class="insight-problem-msg">
@@ -393,7 +477,9 @@ pub fn RecentProblems(
                     <span class="insight-problem-when">
                         {move || {
                             let now = state.now.get();
-                            current.get().map_or(String::new(), |p| relative(p.last, now))
+                            current.get().map_or(String::new(), |p| {
+                                format!("{} · {}", local_hhmmss(p.last), relative(p.last, now))
+                            })
                         }}
                     </span>
                 </button>
@@ -403,17 +489,117 @@ pub fn RecentProblems(
 
     view! {
         <div class="card insight-card insight-problems">
-            <h3>"Recent problems"</h3>
+            <div class="insight-head">
+                <h3>"Recent problems"</h3>
+                <span class="insight-head-note" title="ERROR counts stderr lines too">
+                    {move || match counts.get() {
+                        Some(text) => text.into_any(),
+                        None => view! {
+                            {check_icon()}
+                            "none in the last hour"
+                        }
+                            .into_any(),
+                    }}
+                </span>
+            </div>
             <Show
                 when=move || problems.with(|problems| !problems.is_empty())
                 fallback=|| view! {
                     <p class="muted insight-empty">"No warnings or errors in this session"</p>
                 }
             >
-                <ul class="insight-problem-list">
+                <ul class="insight-problem-list insight-scroll">
                     <For each=move || problems.get() key=|problem| problem.pattern.clone() children=row />
                 </ul>
             </Show>
+            {on_show_all.map(|on_show_all| view! {
+                <p class="insight-footer">
+                    <button class="link" type="button" on:click=move |_| on_show_all.run(())>
+                        "All problems on the Logs page"
+                    </button>
+                </p>
+            })}
+        </div>
+    }
+}
+
+/// The dashboard's This run card: the run's head and the newest events of the session, each
+/// with its clock time and age, problem rows with their icon. `events` is merged and ordered
+/// by the caller (newest first).
+#[component]
+pub fn ThisRun(
+    #[prop(into)] events: Signal<Vec<RunEvent>>,
+    #[prop(optional)] on_show_all: Option<Callback<()>>,
+) -> impl IntoView {
+    let state = AppState::get();
+    let run = Memo::new(move |_| {
+        state
+            .insights
+            .with(|insights| insights.current_run().cloned())
+    });
+    let head = Memo::new(move |_| run.with(|run| run.as_ref().map(run_head)));
+    let started = Memo::new(move |_| run.with(|run| run.as_ref().map(|run| run.started_at)));
+
+    let row = move |event: RunEvent| {
+        let at = event.at;
+        view! {
+            <li class=event_class(event.tone)>
+                <span class="insight-event-time">
+                    {local_hhmmss(at)}
+                    <span class="insight-event-ago">{move || relative(at, state.now.get())}</span>
+                </span>
+                <span class="insight-event-text">
+                    {event_icon(event.tone)}
+                    <span>{event.text}</span>
+                </span>
+            </li>
+        }
+    };
+
+    view! {
+        <div class="card insight-card insight-timeline">
+            <div class="insight-head">
+                <h3>"This run"</h3>
+                <span class="insight-head-note">
+                    {move || head.get()}
+                    {move || {
+                        started.get().map(|started| {
+                            view! { " · started " {move || relative(started, state.now.get())} }
+                        })
+                    }}
+                </span>
+            </div>
+            <Show
+                when=move || events.with(|events| !events.is_empty())
+                fallback=move || {
+                    view! {
+                        <p class="muted insight-empty">
+                            {move || {
+                                if run.with(Option::is_some) {
+                                    "No events in this run yet."
+                                } else {
+                                    "No start of a run in the log yet. The timeline fills from zebrad's first line."
+                                }
+                            }}
+                        </p>
+                    }
+                }
+            >
+                <ol class="insight-events insight-scroll">
+                    <For
+                        each=move || events.get()
+                        key=|event| (event.at, event.text.clone())
+                        children=row
+                    />
+                </ol>
+            </Show>
+            {on_show_all.map(|on_show_all| view! {
+                <p class="insight-footer">
+                    <button class="link" type="button" on:click=move |_| on_show_all.run(())>
+                        "All milestones on the Logs page"
+                    </button>
+                </p>
+            })}
         </div>
     }
 }
@@ -514,5 +700,66 @@ pub fn LogInsightsPanel(on_pick: Callback<String>) -> impl IntoView {
                 <LogActivityChart />
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use super::*;
+
+    fn at(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    fn problem(level: ProblemLevel, last_secs: u64, seq: u64) -> Problem {
+        Problem {
+            level,
+            target: None,
+            pattern: format!("p{seq}"),
+            sample: String::new(),
+            count: 1,
+            first: at(0),
+            last: at(last_secs),
+            last_seq: seq,
+        }
+    }
+
+    #[test]
+    fn head_counts() {
+        assert_eq!(problem_counts_text(0, 0), None);
+        assert_eq!(problem_counts_text(3, 0), Some("last hour: 3 WARN".into()));
+        assert_eq!(problem_counts_text(0, 2), Some("last hour: 2 ERROR".into()));
+        assert_eq!(
+            problem_counts_text(3, 1),
+            Some("last hour: 3 WARN, 1 ERROR".into())
+        );
+    }
+
+    #[test]
+    fn problems_order_errors_first_within_a_minute() {
+        let mut problems = vec![
+            problem(ProblemLevel::Warn, 125, 1),
+            problem(ProblemLevel::Error, 121, 2),
+            problem(ProblemLevel::Warn, 59, 3),
+            problem(ProblemLevel::Stderr, 122, 4),
+            problem(ProblemLevel::Warn, 123, 5),
+            problem(ProblemLevel::Error, 180, 6),
+        ];
+        order_problems(&mut problems);
+        let order: Vec<u64> = problems.iter().map(|p| p.last_seq).collect();
+        // Minute 3 first; in minute 2 the stderr (122) and error (121) ahead of the warnings,
+        // newest first within each group; minute 0 last.
+        assert_eq!(order, vec![6, 4, 2, 1, 5, 3]);
+    }
+
+    #[test]
+    fn event_classes() {
+        assert_eq!(event_class(Tone::Good), "insight-event insight-tone-good");
+        assert_eq!(
+            event_class(Tone::Critical),
+            "insight-event insight-tone-critical"
+        );
     }
 }
