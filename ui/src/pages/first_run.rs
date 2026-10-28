@@ -14,13 +14,14 @@ use leptos::{prelude::*, task::spawn_local};
 use crate::{
     api,
     app::AppState,
-    components::update_mode_choice::UpdateModeChoice,
+    components::{
+        radio_choice::RadioChoice, rows::Rows, typed_confirm::TypedConfirm,
+        update_mode_choice::UpdateModeChoice,
+    },
     format::{bytes, is_low_space, state_dir},
+    pages::settings::{DELETE_WORD, free_space_text},
     update_text::update_mode_text,
 };
-
-/// The word to type before the alpha.4 chain state is deleted.
-const DELETE_WORD: &str = "delete";
 
 /// One page of the wizard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,14 +53,6 @@ fn steps(has_legacy: bool) -> Vec<Step> {
     }
     steps.extend([Step::Updates, Step::Notes]);
     steps
-}
-
-/// "212.4 GB free", or a note that it is unknown.
-fn free_text(free_bytes: Option<u64>) -> String {
-    match free_bytes {
-        Some(free) => format!("{} free", bytes(free)),
-        None => "free space unknown".to_owned(),
-    }
 }
 
 /// The warning shown below 300 GB of free space. The user may continue anyway.
@@ -116,7 +109,6 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
     // The bytes freed by deleting the alpha.4 state (0 when unknown).
     let deleted = RwSignal::new(None::<u64>);
     let confirm_delete = RwSignal::new(false);
-    let delete_typed = RwSignal::new(String::new());
     // Something was done with the alpha.4 state, so moving on no longer means leaving it.
     let legacy_done = move || moved.with(Option::is_some) || deleted.with(Option::is_some);
     // Updates step: Notify is preselected.
@@ -268,21 +260,6 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
         }
     };
 
-    let network_radio = move |value: Network, hint: &'static str| {
-        view! {
-            <label class="radio">
-                <input
-                    type="radio"
-                    name="first-run-network"
-                    prop:checked=move || network.get() == value
-                    on:change=move |_| network.set(value)
-                />
-                <span>{value.as_str()}</span>
-                <span class="muted">{hint}</span>
-            </label>
-        }
-    };
-
     let data_view = move || {
         view! {
             <p>
@@ -309,26 +286,24 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                         {move || {
                             current_dir()
                                 .map(|(dir, free, is_default)| {
+                                    let space = if free.is_none() && probing.get() {
+                                        "checking the free space…".to_owned()
+                                    } else {
+                                        free_space_text(free)
+                                    };
                                     view! {
-                                        <dl class="rows">
-                                            <dt>"Data folder"</dt>
-                                            <dd>
-                                                <code class="data-dir">{dir.clone()}</code>
-                                                {is_default.then_some(" (default)")}
-                                            </dd>
-                                            <dt>"Chain state"</dt>
-                                            <dd>
-                                                <code>{state_dir(&dir)}</code>
-                                            </dd>
-                                            <dt>"Space"</dt>
-                                            <dd class="free-space">
-                                                {if free.is_none() && probing.get() {
-                                                    "checking the free space…".to_owned()
-                                                } else {
-                                                    free_text(free)
-                                                }}
-                                            </dd>
-                                        </dl>
+                                        <Rows rows=vec![
+                                            (
+                                                "Data folder",
+                                                view! {
+                                                    <code class="data-dir">{dir.clone()}</code>
+                                                    {is_default.then_some(" (default)")}
+                                                }
+                                                    .into_any(),
+                                            ),
+                                            ("Chain state", view! { <code>{state_dir(&dir)}</code> }.into_any()),
+                                            ("Space", space.into_any()),
+                                        ] />
                                         {low_space_warning(free)}
                                     }
                                 })
@@ -377,11 +352,20 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
             }}
             <fieldset class="choices">
                 <legend>"Network"</legend>
-                {network_radio(Network::Mainnet, "the real Zcash network")}
-                {network_radio(
-                    Network::Testnet,
-                    "the public test network, with worthless coins and a much smaller chain",
-                )}
+                <RadioChoice
+                    name="first-run-network"
+                    options=vec![
+                        (Network::Mainnet, Network::Mainnet.as_str(), "the real Zcash network"),
+                        (
+                            Network::Testnet,
+                            Network::Testnet.as_str(),
+                            "the public test network, with worthless coins and a much smaller chain",
+                        ),
+                    ]
+                    selected=Signal::derive(move || Some(network.get()))
+                    on_select=Callback::new(move |value| network.set(value))
+                    value=Network::as_str
+                />
             </fieldset>
         }
     };
@@ -409,7 +393,7 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
             .map(state_dir)
             .unwrap_or_default();
         let delete_size = size.clone();
-        let delete_it = move |_| {
+        let delete_it = move || {
             busy.set(true);
             error.set(None);
             spawn_local(async move {
@@ -417,13 +401,37 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                     Ok(freed) => {
                         deleted.set(Some(freed));
                         confirm_delete.set(false);
-                        delete_typed.set(String::new());
                     }
                     Err(failure) => error.set(Some(format!("Could not delete it: {failure}"))),
                 }
                 busy.set(false);
             });
         };
+        let mut found = Vec::new();
+        if let Some(path) = legacy.config_file {
+            found.push((
+                "Old config",
+                view! {
+                    <code>{path}</code>
+                    <br />
+                    <span class="muted">
+                        "Not used: this launcher writes its own zebrad.toml. It goes away when you delete the old app."
+                    </span>
+                }
+                .into_any(),
+            ));
+        }
+        if let Some(dir) = legacy.state_dir {
+            found.push((
+                "Chain state",
+                view! {
+                    <code>{state_dir(&dir)}</code>
+                    <br />
+                    <span>{size}</span>
+                }
+                .into_any(),
+            ));
+        }
         let move_it = move |_| {
             busy.set(true);
             error.set(None);
@@ -439,34 +447,7 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
             <p>
                 "This computer has files from Zebra Launcher v0.0.0-alpha.4, or from a zebrad you ran yourself:"
             </p>
-            <dl class="rows">
-                {legacy
-                    .config_file
-                    .map(|path| {
-                        view! {
-                            <dt>"Old config"</dt>
-                            <dd>
-                                <code>{path}</code>
-                                <br />
-                                <span class="muted">
-                                    "Not used: this launcher writes its own zebrad.toml. It goes away when you delete the old app."
-                                </span>
-                            </dd>
-                        }
-                    })}
-                {legacy
-                    .state_dir
-                    .map(|dir| {
-                        view! {
-                            <dt>"Chain state"</dt>
-                            <dd>
-                                <code>{state_dir(&dir)}</code>
-                                <br />
-                                <span class="legacy-size">{size}</span>
-                            </dd>
-                        }
-                    })}
-            </dl>
+            <Rows rows=found />
             {if has_state {
                 view! {
                     <p>
@@ -493,7 +474,7 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                                 format!("Deleted {}.", old_state)
                             };
                             view! {
-                                <div class="banner banner-ok legacy-deleted" role="status">
+                                <div class="banner banner-ok" role="status">
                                     {text}
                                 </div>
                             }
@@ -532,7 +513,6 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                                     </button>
                                     <button
                                         type="button"
-                                        class="legacy-delete"
                                         disabled=move || {
                                             busy.get() || !legacy_ack.get() || confirm_delete.get()
                                         }
@@ -545,49 +525,30 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                                     </button>
                                 </div>
                                 <Show when=move || confirm_delete.get()>
-                                    <div class="delete-confirm banner banner-warn">
-                                        <p>
-                                            "This deletes the old chain state in "
-                                            <code>{old_state.clone()}</code> " for good, freeing "
-                                            {delete_size.clone()}
-                                            ". Only do this if you do not want to keep it: syncing it again takes a day or more on Mainnet."
-                                        </p>
-                                        <label class="field">
-                                            <span>"Type " <code>{DELETE_WORD}</code> " to confirm"</span>
-                                            <input
-                                                type="text"
-                                                class="legacy-delete-word"
-                                                autocomplete="off"
-                                                prop:value=move || delete_typed.get()
-                                                on:input=move |event| {
-                                                    delete_typed.set(event_target_value(&event))
-                                                }
-                                            />
-                                        </label>
-                                        <div class="buttons">
-                                            <button
-                                                type="button"
-                                                class="danger legacy-delete-confirm"
-                                                disabled=move || {
-                                                    busy.get()
-                                                        || delete_typed.with(|t| t.trim() != DELETE_WORD)
-                                                }
-                                                on:click=delete_it
+                                    {
+                                        // The confirmation's text is its own; the step's copies
+                                        // stay for the next time it opens.
+                                        let old_state = old_state.clone();
+                                        let delete_size = delete_size.clone();
+                                        view! {
+                                            <TypedConfirm
+                                                word=DELETE_WORD
+                                                action="Delete"
+                                                busy_label="Deleting…"
+                                                busy=busy
+                                                on_confirm=Callback::new(move |()| delete_it())
+                                                on_cancel=Callback::new(move |()| confirm_delete.set(false))
+                                                class="delete-confirm"
                                             >
-                                                {move || if busy.get() { "Deleting…" } else { "Delete" }}
-                                            </button>
-                                            <button
-                                                type="button"
-                                                disabled=move || busy.get()
-                                                on:click=move |_| {
-                                                    confirm_delete.set(false);
-                                                    delete_typed.set(String::new());
-                                                }
-                                            >
-                                                "Cancel"
-                                            </button>
-                                        </div>
-                                    </div>
+                                                <p>
+                                                    "This deletes the old chain state in "
+                                                    <code>{old_state}</code> " for good, freeing "
+                                                    {delete_size}
+                                                    ". Only do this if you do not want to keep it: syncing it again takes a day or more on Mainnet."
+                                                </p>
+                                            </TypedConfirm>
+                                        }
+                                    }
                                 </Show>
                             }
                                 .into_any()
@@ -647,16 +608,14 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                 </button>
             </div>
             <h3>"Summary"</h3>
-            <dl class="rows">
-                <dt>"Data folder"</dt>
-                <dd>
-                    <code>{move || current_dir().map(|(dir, _, _)| dir)}</code>
-                </dd>
-                <dt>"Network"</dt>
-                <dd>{move || network.get().as_str()}</dd>
-                <dt>"Updates"</dt>
-                <dd>{mode_label}</dd>
-            </dl>
+            <Rows rows=vec![
+                (
+                    "Data folder",
+                    view! { <code>{move || current_dir().map(|(dir, _, _)| dir)}</code> }.into_any(),
+                ),
+                ("Network", (move || network.get().as_str()).into_any()),
+                ("Updates", mode_label.into_any()),
+            ] />
         }
     };
 
@@ -798,7 +757,7 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
             view! {
                 <div class="modal-backdrop">
                     <div
-                        class="modal first-run"
+                        class="modal"
                         role="dialog"
                         aria-modal="true"
                         aria-labelledby="first-run-title"
@@ -813,7 +772,7 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                             }}
                         </p>
                         <h2 id="first-run-title">{move || step.get().title()}</h2>
-                        <div class="modal-body">{body}</div>
+                        <div>{body}</div>
                         {move || {
                             error
                                 .get()
@@ -853,11 +812,5 @@ mod tests {
                 Step::Notes
             ]
         );
-    }
-
-    #[test]
-    fn free_space_text() {
-        assert_eq!(free_text(Some(212_400_000_000)), "212.4 GB free");
-        assert_eq!(free_text(None), "free space unknown");
     }
 }

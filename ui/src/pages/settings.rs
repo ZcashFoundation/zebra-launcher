@@ -21,8 +21,8 @@ use crate::{
 /// The appearance radios, in order.
 const THEMES: [Theme; 3] = [Theme::System, Theme::Light, Theme::Dark];
 
-/// The word to type before node data is deleted.
-const DELETE_WORD: &str = "delete";
+/// The word to type before node data is deleted, here and in the first-run wizard.
+pub(crate) const DELETE_WORD: &str = "delete";
 
 /// Form fields that are typed as text and validated on Save.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -507,7 +507,7 @@ fn DataDirRow(
     };
 
     view! {
-        <div class="field data-dir-row">
+        <div class="field">
             <span>"Data folder"</span>
             <code class="readonly">
                 {move || {
