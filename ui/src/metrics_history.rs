@@ -6,9 +6,6 @@
 //! reduced to the families in [`KEPT_FAMILIES`]; the newest snapshot stays whole for the
 //! one-off gauges the page reads ([`MetricsHistory::latest`]).
 
-// Read by the dashboard's view workstream; the accessors it does not use yet stay for it.
-#![allow(dead_code, reason = "read by the dashboard once its view lands")]
-
 use std::time::{Duration, SystemTime};
 
 use launcher_types::MetricsSnapshot;
@@ -39,6 +36,7 @@ pub mod names {
     pub const NET_OUT_BYTES: &str = "zcash_net_out_bytes_total";
     pub const HANDSHAKE_FAILURES: &str = "zcash_net_peer_handshake_failures_total";
     pub const OBSOLETE_PEERS: &str = "zcash_net_peers_version_obsolete";
+    pub const OBSOLETE_REFUSED: &str = "zcash_net_peers_obsolete";
 }
 
 /// The families a kept snapshot holds: everything the dashboard plots or derives over time.
@@ -62,6 +60,7 @@ pub const KEPT_FAMILIES: &[&str] = &[
     names::NET_OUT_BYTES,
     names::HANDSHAKE_FAILURES,
     names::OBSOLETE_PEERS,
+    names::OBSOLETE_REFUSED,
 ];
 
 /// The snapshots, oldest first.
@@ -117,10 +116,6 @@ impl MetricsHistory {
         self.snapshots.drain(..excess);
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.snapshots.is_empty()
-    }
-
     /// The newest snapshot, whole.
     pub fn latest(&self) -> Option<&MetricsSnapshot> {
         self.newest.as_ref()
@@ -137,6 +132,16 @@ impl MetricsHistory {
         };
         let start = self.snapshots.partition_point(|s| s.at < cutoff);
         &self.snapshots[start..]
+    }
+
+    /// The reading of `name` in the newest snapshot taken at or before `at`; `None` before
+    /// the first one, or when no snapshot up to then had the family.
+    pub fn value_at(&self, name: &str, at: SystemTime) -> Option<f64> {
+        let end = self.snapshots.partition_point(|s| s.at <= at);
+        self.snapshots[..end]
+            .iter()
+            .rev()
+            .find_map(|s| value_of(s, name))
     }
 
     /// The series `name` over the window: `(time, value)` for every snapshot that has it.
@@ -233,11 +238,6 @@ impl MetricsHistory {
         self.newest_count(names::UNREADY_PEERS)
     }
 
-    /// Block downloads in flight, from the newest snapshot.
-    pub fn downloads_in_flight(&self) -> Option<u64> {
-        self.newest_count(names::DOWNLOADS_IN_FLIGHT)
-    }
-
     /// The checkpoint verifier's height, from the newest snapshot.
     pub fn checkpoint_height(&self) -> Option<u64> {
         self.newest_count(names::CHECKPOINT_HEIGHT)
@@ -273,6 +273,11 @@ impl MetricsHistory {
     /// Connected peers on an obsolete protocol version.
     pub fn obsolete_peers(&self) -> Option<u64> {
         self.newest_count(names::OBSOLETE_PEERS)
+    }
+
+    /// Peers refused for an obsolete protocol version since zebrad started.
+    pub fn obsolete_refused(&self) -> Option<u64> {
+        self.newest_count(names::OBSOLETE_REFUSED)
     }
 }
 
@@ -320,6 +325,7 @@ mod tests {
                 family(names::MEMPOOL_BYTES, MetricKind::Gauge, 44_400.0),
                 family(names::HANDSHAKE_FAILURES, MetricKind::Counter, 3.0),
                 family(names::OBSOLETE_PEERS, MetricKind::Gauge, 1.0),
+                family(names::OBSOLETE_REFUSED, MetricKind::Counter, 2.0),
                 // Not kept in the history, but on the newest snapshot.
                 family("rpc_active_requests", MetricKind::Gauge, 2.0),
                 MetricFamily {
@@ -347,8 +353,6 @@ mod tests {
     #[test]
     fn push_keeps_order_reduces_and_caps() {
         let mut history = history(&[(0, 1.0, 0.0, 0.0, 0.0), (10, 2.0, 0.0, 0.0, 0.0)]);
-        assert!(!history.is_empty());
-        assert!(MetricsHistory::default().is_empty());
         // A repeat and a late snapshot are ignored.
         history.push(&snapshot(10, 99.0, 0.0, 0.0, 0.0));
         history.push(&snapshot(5, 99.0, 0.0, 0.0, 0.0));
@@ -399,6 +403,16 @@ mod tests {
         let series = history.series(names::DISK_BYTES, Some(Duration::from_secs(90)), now);
         assert_eq!(series, vec![(at(120), 3.0), (at(180), 4.0)]);
         assert!(history.series("missing", None, now).is_empty());
+        // A reading at a time: the newest snapshot at or before it.
+        assert_eq!(
+            MetricsHistory::default().value_at(names::DISK_BYTES, at(59)),
+            None
+        );
+        assert_eq!(history.value_at(names::DISK_BYTES, at(59)), Some(1.0));
+        assert_eq!(history.value_at(names::DISK_BYTES, at(60)), Some(2.0));
+        assert_eq!(history.value_at(names::DISK_BYTES, at(119)), Some(2.0));
+        assert_eq!(history.value_at(names::DISK_BYTES, at(500)), Some(4.0));
+        assert_eq!(history.value_at("missing", at(500)), None);
     }
 
     #[test]
@@ -505,7 +519,7 @@ mod tests {
         let history = history(&[(0, 312_400_000_000.0, 0.0, 0.0, 0.0)]);
         assert_eq!(history.ready_peers(), Some(11));
         assert_eq!(history.unready_peers(), Some(1));
-        assert_eq!(history.downloads_in_flight(), Some(42));
+        assert_eq!(history.newest_value(names::DOWNLOADS_IN_FLIGHT), Some(42.0));
         assert_eq!(history.checkpoint_height(), Some(2_500_000));
         assert_eq!(history.chain_count(), Some(2));
         assert_eq!(history.disk_bytes(), Some(312_400_000_000));
@@ -513,6 +527,7 @@ mod tests {
         assert_eq!(history.mempool_bytes(), Some(44_400));
         assert_eq!(history.handshake_failures(), Some(3));
         assert_eq!(history.obsolete_peers(), Some(1));
+        assert_eq!(history.obsolete_refused(), Some(2));
         // A gauge with a non-finite value, or missing, is unknown; a negative one is zero.
         let mut odd = MetricsHistory::default();
         odd.push(&MetricsSnapshot {
@@ -524,7 +539,7 @@ mod tests {
             ],
         });
         assert_eq!(odd.ready_peers(), None);
-        assert_eq!(odd.downloads_in_flight(), None);
+        assert_eq!(odd.newest_value(names::DOWNLOADS_IN_FLIGHT), None);
         assert_eq!(odd.chain_count(), Some(0));
         assert_eq!(
             odd.memory_bytes(),

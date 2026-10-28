@@ -10,18 +10,16 @@ use leptos::prelude::*;
 
 use crate::{
     charts::{
-        MAX_POINTS, Range, compact, downsample, phase_note, signed, uptime_text,
+        MAX_POINTS, Range, compact, downsample, phase_note, signed, signed_bytes, uptime_text,
         widgets::{RangeControl, StatTile, Tone},
     },
     clock,
-    format::{bytes, exit_class_text, relative, thousands},
+    format::{bytes, exit_class_text, local_datetime_short, relative, thousands},
+    health::STALE_AFTER,
     stats_history::Field,
 };
 
-use super::{Dash, Icon, local_short};
-
-/// An RPC answer older than this, while zebrad runs, gets a warning in the freshness sentence.
-pub const RPC_STALE_AFTER: Duration = Duration::from_secs(30);
+use super::{Dash, Icon};
 
 /// The verdict rules that drive the Peers tile's warning tone, so tile and verdict agree.
 pub const PEER_RULES: [u8; 2] = [8, 12];
@@ -35,8 +33,9 @@ pub struct Freshness {
 }
 
 /// The freshness sentence: when the RPC, the metrics page and the log last answered, against
-/// `now`; a warning once the RPC is silent for [`RPC_STALE_AFTER`] while zebrad runs. In any
-/// other phase, that phase's note and the last answer.
+/// `now`; a warning once the RPC is silent for [`STALE_AFTER`] while zebrad runs (the limit of
+/// the verdict's rule 7, so the two agree). In any other phase, that phase's note and the
+/// last answer.
 pub fn freshness(
     phase: &Phase,
     rpc_at: Option<SystemTime>,
@@ -59,7 +58,7 @@ pub fn freshness(
         return plain("Waiting for the first answer".to_owned());
     };
     let age = now.duration_since(rpc_at).unwrap_or(Duration::ZERO);
-    if age > RPC_STALE_AFTER {
+    if age > STALE_AFTER {
         return Freshness {
             icon: Some(Icon::Warning),
             warning: true,
@@ -127,11 +126,17 @@ pub fn mempool_detail(size: Option<u64>, delta: Option<i64>, range: Range) -> St
 /// `+1.1 GB in the last hour`; without a delta yet, how the number arrives.
 pub fn disk_detail(delta: Option<i64>, range: Range) -> String {
     match delta {
-        Some(delta) => {
-            let sign = if delta < 0 { "-" } else { "+" };
-            format!("{sign}{} {}", bytes(delta.unsigned_abs()), range.phrase())
-        }
+        Some(delta) => format!("{} {}", signed_bytes(delta), range.phrase()),
         None => "from zebrad's metrics, every 10 s".to_owned(),
+    }
+}
+
+/// The Peers tile's detail: `8 outbound · 4 inbound` from the peer list of the newest poll,
+/// or the delta over the range until a list lands.
+pub fn peers_detail(split: Option<(u32, u32)>, delta: Option<i64>, range: Range) -> String {
+    match split {
+        Some((inbound, outbound)) => format!("{outbound} outbound · {inbound} inbound"),
+        None => delta_text(delta, range),
     }
 }
 
@@ -168,7 +173,14 @@ pub(super) fn RangeRow(dash: Dash) -> impl IntoView {
     let state = dash.state;
     let fresh = Memo::new(move |_| {
         let now = state.now.get();
-        let rpc_at = dash.latest.get().map(|sample| sample.at);
+        // A sample from before this run says nothing about this run's RPC: until the first
+        // answer the sentence waits, as the verdict's rule 7 does.
+        let started = state.status.with(|status| status.started_at);
+        let rpc_at = dash
+            .latest
+            .get()
+            .map(|sample| sample.at)
+            .filter(|at| started.is_none_or(|started| *at >= started));
         let metrics_at = dash.metrics.get().map(|facts| facts.at);
         let log_at = state.insights.with(|insights| insights.last_at());
         state
@@ -232,12 +244,16 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
         }
     });
 
-    // Blocks per minute over the range; the hero's pace is the status card's.
+    // Blocks per minute over the range, from zebrad's own verified-blocks counter when the
+    // metrics page gives one (gossiped blocks count too), else from the RPC heights; the
+    // hero's pace is the status card's.
     let rate = Memo::new(move |_| {
         let now = state.now.get();
+        let span = dash.span();
         state
-            .history
-            .with(|history| history.block_rate(dash.span(), now))
+            .metrics_history
+            .with(|metrics| metrics.verified_block_rate(span, now))
+            .or_else(|| state.history.with(|history| history.block_rate(span, now)))
     });
     let rate_value = Signal::derive(move || {
         if !running.get() {
@@ -254,14 +270,26 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
             Tone::Muted
         }
     });
+    // The log's own rate stands in while the window is too short; a stopped node's log rate
+    // is a stale fact, so the detail names the window instead.
     let rate_detail = Signal::derive(move || {
-        let from_logs = state
-            .insights
-            .with(|insights| insights.sync_rate_from_logs());
+        let from_logs = if running.get() {
+            state
+                .insights
+                .with(|insights| insights.sync_rate_from_logs())
+        } else {
+            None
+        };
         rate_detail(rate.get(), from_logs, range.get())
     });
 
-    // Peers: the warning tone follows the verdict's peer rules.
+    // Peers: by direction once the peer list landed; the warning tone follows the verdict's
+    // peer rules.
+    let peers_detail = Signal::derive(move || match latest.get() {
+        Some(sample) if !running.get() => last_seen_text(sample.at, state.now.get()),
+        Some(sample) => peers_detail(sample.peer_split(), delta(Field::Peers), range.get()),
+        None => delta_text(None, range.get()),
+    });
     let peers_tone = Signal::derive(move || {
         if latest.get().is_none() {
             Tone::Muted
@@ -296,7 +324,11 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
         match latest.get() {
             Some(sample) if !running.get() => last_seen_text(sample.at, state.now.get()),
             _ => {
-                let size = dash.metrics.get().and_then(|facts| facts.mempool_bytes);
+                // The bytes from the poll that gave the count; the metrics gauge otherwise.
+                let size = dash
+                    .details
+                    .with(|details| details.as_ref().and_then(|details| details.mempool_bytes))
+                    .or_else(|| dash.metrics.get().and_then(|facts| facts.mempool_bytes));
                 mempool_detail(size, delta(Field::Mempool), range.get())
             }
         }
@@ -339,7 +371,7 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
             Tone::Muted
         }
     });
-    let since = Memo::new(move |_| started.get().map(local_short));
+    let since = Memo::new(move |_| started.get().map(local_datetime_short));
     // The exact start as the value's tooltip, beside the short form in the detail.
     let started_full = Signal::derive(move || {
         started.get().map_or_else(String::new, |started| {
@@ -375,7 +407,7 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
             <StatTile
                 label="Peers"
                 value=dash_or(|s| s.peers.to_string())
-                detail=counted_detail(Field::Peers)
+                detail=peers_detail
                 spark=spark(Field::Peers)
                 tone=peers_tone
             />
@@ -518,6 +550,19 @@ mod tests {
             disk_detail(None, Range::Hour1),
             "from zebrad's metrics, every 10 s"
         );
+        assert_eq!(
+            disk_detail(Some(0), Range::Hour1),
+            "0 bytes in the last hour"
+        );
+        assert_eq!(
+            peers_detail(Some((4, 8)), Some(6), Range::Hour1),
+            "8 outbound · 4 inbound"
+        );
+        assert_eq!(
+            peers_detail(None, Some(6), Range::Hour1),
+            "+6 in the last hour"
+        );
+        assert_eq!(peers_detail(None, None, Range::Hour1), "—");
         assert_eq!(uptime_detail("23 Oct, 21:13", 0), "since 23 Oct, 21:13");
         assert_eq!(
             uptime_detail("23 Oct, 21:13", 1),

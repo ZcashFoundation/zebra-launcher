@@ -17,9 +17,14 @@ fn px(value: f64) -> String {
     format!("{value:.1}")
 }
 
-/// A sample value in the tooltip and the table.
+/// A sample value in the tooltip and the table; a non-finite value is a cell without a
+/// reading (a metric before its first snapshot).
 fn whole(value: f64) -> String {
-    thousands(value.round().max(0.0) as u64)
+    if value.is_finite() {
+        thousands(value.round().max(0.0) as u64)
+    } else {
+        "—".to_owned()
+    }
 }
 
 /// A chart card. `data` is the range's samples; `empty` is what the frame says while there are
@@ -33,7 +38,8 @@ pub fn LineChart(
     /// Start the y axis at zero (counts) instead of around the data (heights).
     #[prop(optional)]
     from_zero: bool,
-    /// Wash the area under the first line.
+    /// Wash the area under the line. Only a lone line is washed: under one of two the wash
+    /// would read as emphasis.
     #[prop(optional)]
     area: bool,
     /// What the Table button shows, when the table has columns the plot does not (a chart of
@@ -214,6 +220,7 @@ fn Plot(
             let g = l.as_ref()?;
             let classes = classes();
             let first_class = classes.first().copied().unwrap_or("chart-series-1");
+            let wash = area && classes.len() == 1;
             let n = g.xs.len();
             let right = g.width - PAD_R;
             Some(view! {
@@ -249,7 +256,7 @@ fn Plot(
                         })
                         .collect_view()}
                 </g>
-                {area
+                {wash
                     .then(|| {
                         view! { <path class=format!("chart-area {first_class}") d=g.area.clone() /> }
                     })}
@@ -271,7 +278,11 @@ fn Plot(
                         }
                     })
                     .collect_view()}
-                <text class="chart-direct-label" x=px(g.xs[n - 1] + 10.0) y=px(g.ys[0][n - 1] + 4.0)>
+                <text
+                    class="chart-direct-label"
+                    x=px(g.xs[n - 1] + 10.0)
+                    y=px(g.ys[g.end_label_series][n - 1] + 4.0)
+                >
                     {g.end_label.clone()}
                 </text>
             })
@@ -301,7 +312,7 @@ fn Plot(
         let index = highlighted()?;
         let (x, width) = layout.with(|l| l.as_ref().map(|g| (g.xs[index], g.width)))?;
         let (time, rows) = data.with(|d| {
-            let rows: Vec<_> = d
+            let mut rows: Vec<_> = d
                 .series
                 .iter()
                 .map(|s| {
@@ -314,6 +325,16 @@ fn Plot(
                     )
                 })
                 .collect();
+            // Two lines of one quantity (peers by direction): their sum too.
+            if d.series.len() >= 2 {
+                let total: f64 = d
+                    .series
+                    .iter()
+                    .filter_map(|s| s.values.get(index))
+                    .filter(|value| value.is_finite())
+                    .sum();
+                rows.push(("chart-series-muted", "Total", whole(total)));
+            }
             (d.times.get(index).copied(), rows)
         });
         let time = time?;

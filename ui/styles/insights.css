@@ -201,6 +201,11 @@
   color: var(--status-critical);
 }
 
+/* An explanation, not a state: the icon wears the text colour, not a status token. */
+.insight-tone-info .icon {
+  color: var(--text-secondary);
+}
+
 /* Recent problems */
 
 .insight-problem-list {

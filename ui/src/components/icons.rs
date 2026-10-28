@@ -2,8 +2,9 @@
 //! in `currentColor` and sized by `.icon` in styles.css, so a colour or size fix is one edit.
 //! They are decorative (`aria-hidden`): the text beside an icon says what it means.
 //!
-//! Used by the dashboard (the sync hero's check, the warning on a stale tile) and the sync
-//! stage card's tone. The Settings page's `WarningIcon` is the second phase's.
+//! Used by the dashboard (the sync hero's check, the warning on a stale tile, the info mark on
+//! a caption that explains rather than warns) and the sync stage card's tone. The Settings
+//! page's `WarningIcon` is the second phase's.
 
 use leptos::prelude::*;
 
@@ -38,4 +39,9 @@ pub fn warning_icon() -> impl IntoView {
 /// A cross in a circle: failed, critical.
 pub fn cross_icon() -> impl IntoView {
     icon("cross", CIRCLE, "M5.5 5.5l5 5M10.5 5.5l-5 5")
+}
+
+/// An i in a circle: an explanation, nothing to fix.
+pub fn info_icon() -> impl IntoView {
+    icon("info", CIRCLE, "M8 7.2V11.5M8 4.6v.3")
 }

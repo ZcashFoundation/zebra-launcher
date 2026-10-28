@@ -10,22 +10,22 @@ mod details;
 mod status_card;
 mod tiles;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
-use launcher_types::{EOS_WARNING_WINDOW, EosInfo, ExitClass, MetricsSnapshot, Phase, eos_within};
+use launcher_types::{EOS_WARNING_WINDOW, EosInfo, ExitClass, NodeDetails, Phase, eos_within};
 use leptos::prelude::*;
-use wasm_bindgen::JsValue;
 
 use crate::{
     app::{AppState, Tab},
     charts::{ChartData, Range, Series, line_chart::LineChart},
     clock,
     components::{
-        icons::{check_icon, clock_icon, cross_icon, warning_icon},
+        icons::{check_icon, clock_icon, cross_icon, info_icon, warning_icon},
         updates::CheckForUpdate,
     },
-    format::{relative, thousands},
-    health::{HealthInput, Verdict, health_verdict},
+    format::{local_date_short, relative, thousands},
+    health::{HealthInput, Level, Verdict, health_verdict},
+    metrics_history::{MetricsHistory, names},
     stats_history::{Field, Sample},
 };
 
@@ -33,27 +33,15 @@ use self::{
     activity::ActivityRow, details::Details, status_card::StatusCard, tiles::RangeRow, tiles::Tiles,
 };
 
-/// The series of zebrad's metrics page the dashboard reads, by their wire names (zebrad
-/// registers them dotted; its exporter writes the dots as underscores).
-mod metric {
-    pub const DISK_BYTES: &str = "zebra_state_rocksdb_total_disk_size_bytes";
-    pub const MEMORY_BYTES: &str = "zebra_state_rocksdb_total_memory_size_bytes";
-    pub const MEMPOOL_BYTES: &str = "zcash_mempool_size_bytes";
-    pub const READY_PEERS: &str = "pool_num_ready";
-    pub const UNREADY_PEERS: &str = "pool_num_unready";
-    pub const OBSOLETE_PEERS: &str = "zcash_net_peers_version_obsolete";
-    pub const HANDSHAKE_FAILURES: &str = "zcash_net_peer_handshake_failures_total";
-    pub const CHECKPOINT_HEIGHT: &str = "checkpoint_verified_height";
-    pub const CHAIN_COUNT: &str = "state_memory_chain_count";
-}
-
-/// The icons a state is carried by, beside its word; the status colour sits on the icon.
+/// The icons a state is carried by, beside its word; the status colour sits on the icon. The
+/// info mark explains (nothing to fix) and wears no status colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Icon {
     Check,
     Clock,
     Warning,
     Cross,
+    Info,
 }
 
 impl Icon {
@@ -63,12 +51,25 @@ impl Icon {
             Icon::Clock => clock_icon().into_any(),
             Icon::Warning => warning_icon().into_any(),
             Icon::Cross => cross_icon().into_any(),
+            Icon::Info => info_icon().into_any(),
+        }
+    }
+
+    /// The class that colours the icon by what it means, as the insight cards do.
+    pub fn tone_class(self) -> &'static str {
+        match self {
+            Icon::Check => "insight-tone-good",
+            Icon::Clock => "insight-tone-neutral",
+            Icon::Warning => "insight-tone-warning",
+            Icon::Cross => "insight-tone-critical",
+            Icon::Info => "insight-tone-info",
         }
     }
 }
 
-/// The numbers the page reads from one snapshot of zebrad's metrics page. A gauge the page
-/// does not carry is `None`; a non-finite or negative value counts as absent.
+/// The numbers the page reads from the newest snapshot of zebrad's metrics page, through
+/// [`MetricsHistory`]'s accessors (a gauge the snapshot lacks, or a non-finite value, is
+/// `None`), kept while zebrad is stopped.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MetricsFacts {
     pub at: SystemTime,
@@ -78,27 +79,28 @@ pub(crate) struct MetricsFacts {
     pub ready_peers: Option<u64>,
     pub unready_peers: Option<u64>,
     pub obsolete_peers: Option<u64>,
+    pub obsolete_refused: Option<u64>,
     pub handshake_failures: Option<u64>,
     pub checkpoint_height: Option<u64>,
     pub chain_count: Option<u64>,
 }
 
 impl MetricsFacts {
-    pub fn from_snapshot(snapshot: &MetricsSnapshot) -> Self {
-        let whole = |value: f64| (value.is_finite() && value >= 0.0).then(|| value.round() as u64);
-        let gauge = |name: &str| snapshot.gauge(name).and_then(whole);
-        MetricsFacts {
-            at: snapshot.at,
-            disk_bytes: gauge(metric::DISK_BYTES),
-            memory_bytes: gauge(metric::MEMORY_BYTES),
-            mempool_bytes: gauge(metric::MEMPOOL_BYTES),
-            ready_peers: gauge(metric::READY_PEERS),
-            unready_peers: gauge(metric::UNREADY_PEERS),
-            obsolete_peers: gauge(metric::OBSOLETE_PEERS),
-            handshake_failures: snapshot.counter(metric::HANDSHAKE_FAILURES).and_then(whole),
-            checkpoint_height: gauge(metric::CHECKPOINT_HEIGHT),
-            chain_count: gauge(metric::CHAIN_COUNT),
-        }
+    /// The facts of the history's newest snapshot; `None` before the first one.
+    pub fn from_history(history: &MetricsHistory) -> Option<Self> {
+        Some(MetricsFacts {
+            at: history.latest()?.at,
+            disk_bytes: history.disk_bytes(),
+            memory_bytes: history.memory_bytes(),
+            mempool_bytes: history.mempool_bytes(),
+            ready_peers: history.ready_peers(),
+            unready_peers: history.unready_peers(),
+            obsolete_peers: history.obsolete_peers(),
+            obsolete_refused: history.obsolete_refused(),
+            handshake_failures: history.handshake_failures(),
+            checkpoint_height: history.checkpoint_height(),
+            chain_count: history.chain_count(),
+        })
     }
 }
 
@@ -118,6 +120,10 @@ pub(crate) struct Dash {
     pub verdict: Memo<Verdict>,
     /// The facts from the newest metrics snapshot, kept while zebrad is stopped.
     pub metrics: Memo<Option<MetricsFacts>>,
+    /// The details behind the statistics (the peer list, the best block, the chain's supply
+    /// and pools): the published ones, or the last ones once zebrad stopped publishing, so
+    /// the Chain card keeps its last values. The peer table reads the live `state.details`.
+    pub details: Memo<Option<NodeDetails>>,
 }
 
 impl Dash {
@@ -169,50 +175,6 @@ pub(crate) fn with_health_input<R>(
     })
 }
 
-/// A `Date` for `time`.
-fn js_date(time: SystemTime) -> js_sys::Date {
-    let millis = time
-        .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |since| since.as_millis() as f64);
-    js_sys::Date::new(&JsValue::from_f64(millis))
-}
-
-/// `Intl` options from `(key, value)` pairs.
-fn intl_options(pairs: &[(&str, &str)]) -> JsValue {
-    let options = js_sys::Object::new();
-    for (key, value) in pairs {
-        let _ = js_sys::Reflect::set(&options, &JsValue::from_str(key), &JsValue::from_str(value));
-    }
-    options.into()
-}
-
-/// `time` as a short local date and time, such as `23 Oct, 21:13` (the locale orders the
-/// day and month), beside [`clock::local_string`]'s full form.
-pub(crate) fn local_short(time: SystemTime) -> String {
-    js_date(time)
-        .to_locale_string(
-            "default",
-            &intl_options(&[
-                ("day", "numeric"),
-                ("month", "short"),
-                ("hour", "2-digit"),
-                ("minute", "2-digit"),
-                ("hourCycle", "h23"),
-            ]),
-        )
-        .into()
-}
-
-/// `time` as a short local date, such as `3 Dec 2026`.
-pub(crate) fn local_date(time: SystemTime) -> String {
-    js_date(time)
-        .to_locale_date_string(
-            "default",
-            &intl_options(&[("day", "numeric"), ("month", "short"), ("year", "numeric")]),
-        )
-        .into()
-}
-
 /// The end-of-support warning: `End of support in 12 days. zebrad 7.0.0 stops working at block
 /// 3,160,000 (about 3 Dec 2026). Update the launcher before then.`
 pub(crate) fn eos_banner_text(version: &str, eos: &EosInfo, date: &str, now: SystemTime) -> String {
@@ -225,14 +187,7 @@ pub(crate) fn eos_banner_text(version: &str, eos: &EosInfo, date: &str, now: Sys
 
 /// The Blocks behind the tip chart: zebrad's estimate of the tip minus the verified height.
 pub(crate) fn behind_chart(window: &[Sample]) -> ChartData {
-    ChartData {
-        times: window.iter().map(|s| s.at).collect(),
-        series: vec![Series {
-            name: "Behind",
-            class: "chart-series-1",
-            values: window.iter().map(|s| s.remaining() as f64).collect(),
-        }],
-    }
+    ChartData::from_samples(window, &[("Behind", "chart-series-1", Field::Behind)])
 }
 
 /// The same chart's table: Behind, then the height and the estimated tip it comes from.
@@ -251,9 +206,51 @@ pub(crate) fn behind_table(window: &[Sample]) -> ChartData {
     data
 }
 
-/// The Peers chart: connected peers, one series until the peer list lands.
-pub(crate) fn peers_chart(window: &[Sample]) -> ChartData {
-    ChartData::from_samples(window, &[("Peers", "chart-series-1", Field::Peers)])
+/// The Peers chart: connected peers by direction, Outbound and Inbound, once a peer list has
+/// landed in the window (`split`); one series of the total until then.
+pub(crate) fn peers_chart(window: &[Sample], split: bool) -> ChartData {
+    if split {
+        ChartData::from_samples(
+            window,
+            &[
+                ("Outbound", "chart-series-1", Field::PeersOutbound),
+                ("Inbound", "chart-series-2", Field::PeersInbound),
+            ],
+        )
+    } else {
+        ChartData::from_samples(window, &[("Peers", "chart-series-1", Field::Peers)])
+    }
+}
+
+/// The Peers chart's table: the plotted series, their total when they are two, then the peer
+/// set's ready and unready counts from the metrics page (the newest reading at or before
+/// each sample, a dash before the first) while the history has any.
+pub(crate) fn peers_table(window: &[Sample], split: bool, metrics: &MetricsHistory) -> ChartData {
+    let mut data = peers_chart(window, split);
+    if split {
+        data.series.push(Series {
+            name: "Total",
+            class: "chart-series-muted",
+            values: window.iter().map(|s| f64::from(s.peers)).collect(),
+        });
+    }
+    for (name, metric) in [
+        ("Ready", names::READY_PEERS),
+        ("Unready", names::UNREADY_PEERS),
+    ] {
+        let values: Vec<f64> = window
+            .iter()
+            .map(|s| metrics.value_at(metric, s.at).unwrap_or(f64::NAN))
+            .collect();
+        if values.iter().any(|v| v.is_finite()) {
+            data.series.push(Series {
+                name,
+                class: "chart-series-muted",
+                values,
+            });
+        }
+    }
+    data
 }
 
 /// Every sample of a drawable window is at the tip: the Behind chart says so in words instead
@@ -303,7 +300,7 @@ pub fn Dashboard() -> impl IntoView {
     });
     let eos_text = move || {
         eos.get().map(|(version, eos)| {
-            let date = local_date(eos.estimated_time);
+            let date = local_date_short(eos.estimated_time);
             move || eos_banner_text(&version, &eos, &date, state.now.get())
         })
     };
@@ -347,30 +344,31 @@ pub fn Dashboard() -> impl IntoView {
             .with(|history| history.window(span, now).to_vec())
     });
     let latest = Memo::new(move |_| {
-        state
-            .stats
-            .with(|stats| stats.as_ref().map(Sample::from_stats))
-            .or_else(|| state.history.with(|history| history.latest().copied()))
+        state.stats.with(|stats| {
+            state
+                .history
+                .with(|history| history.sample_for(stats.as_ref()))
+        })
     });
-    let metrics = Memo::new(move |_| {
-        state
-            .metrics
-            .with(|snapshot| snapshot.as_ref().map(MetricsFacts::from_snapshot))
-            .or_else(|| {
-                state
-                    .metrics_history
-                    .with(|history| history.latest().map(MetricsFacts::from_snapshot))
-            })
+    let metrics = Memo::new(move |_| state.metrics_history.with(MetricsFacts::from_history));
+    let details = Memo::new(move |previous: Option<&Option<NodeDetails>>| {
+        state.details.get().or_else(|| previous.cloned().flatten())
     });
+    // Until the first status the launcher is still connecting; the rules need a status.
     let verdict = Memo::new(move |_| {
+        if !state.status_loaded.get() {
+            return Verdict::connecting();
+        }
         let now = state.now.get();
         let phase_since = state.phase_since.get();
         with_health_input(state, now, phase_since, health_verdict)
     });
-    // "for N min" counts from the moment the verdict's rule or level last changed.
-    Effect::new(move |previous: Option<(u8, crate::health::Level)>| {
+    // "for N min" counts from the moment the verdict's rule or level last changed: the one
+    // writer of `phase_since` after the first status seeded it (see `AppState::phase_since`).
+    // The step from connecting to the first real verdict keeps the seed.
+    Effect::new(move |previous: Option<(u8, Level)>| {
         let key = verdict.with(|verdict| (verdict.rule, verdict.level));
-        if previous.is_some_and(|previous| previous != key) {
+        if previous.is_some_and(|previous| previous != key && previous.0 != 0) {
             state.phase_since.set(clock::now());
         }
         key
@@ -382,11 +380,23 @@ pub fn Dashboard() -> impl IntoView {
         latest,
         verdict,
         metrics,
+        details,
     };
 
     let behind = Memo::new(move |_| window.with(|window| behind_chart(window)));
     let behind_rows = Memo::new(move |_| window.with(|window| behind_table(window)));
-    let peers = Memo::new(move |_| window.with(|window| peers_chart(window)));
+    let peer_split = Memo::new(move |_| {
+        let now = state.now.get();
+        state
+            .history
+            .with(|history| history.has_peer_split(range.get().span(), now))
+    });
+    let peers = Memo::new(move |_| window.with(|window| peers_chart(window, peer_split.get())));
+    let peers_rows = Memo::new(move |_| {
+        state
+            .metrics_history
+            .with(|metrics| window.with(|window| peers_table(window, peer_split.get(), metrics)))
+    });
     let empty = Signal::derive(move || {
         let has_history = state.history.with(|history| !history.is_empty());
         chart_empty_text(has_history, window.with(Vec::is_empty), range.get())
@@ -424,8 +434,9 @@ pub fn Dashboard() -> impl IntoView {
                 />
                 <LineChart
                     title="Peers"
-                    subtitle="Connected peers"
+                    subtitle="Connected peers, by who opened the connection"
                     data=peers
+                    table_data=peers_rows
                     empty=empty
                     from_zero=true
                     area=true
@@ -445,7 +456,9 @@ pub fn Dashboard() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use launcher_types::{MetricFamily, MetricKind, MetricSample};
+    use std::time::UNIX_EPOCH;
+
+    use launcher_types::{MetricFamily, MetricKind, MetricSample, MetricsSnapshot};
 
     use super::*;
 
@@ -481,20 +494,23 @@ mod tests {
 
     #[test]
     fn metrics_facts_read_the_named_series() {
+        assert_eq!(MetricsFacts::from_history(&MetricsHistory::default()), None);
         let snapshot = MetricsSnapshot {
             at: at(100),
             families: vec![
-                family(metric::DISK_BYTES, MetricKind::Gauge, 248_300_000_000.0),
-                family(metric::MEMPOOL_BYTES, MetricKind::Gauge, 44_400.4),
-                family(metric::READY_PEERS, MetricKind::Gauge, 11.0),
-                family(metric::UNREADY_PEERS, MetricKind::Gauge, 1.0),
-                family(metric::OBSOLETE_PEERS, MetricKind::Gauge, 1.0),
-                family(metric::HANDSHAKE_FAILURES, MetricKind::Counter, 3.0),
-                family(metric::CHECKPOINT_HEIGHT, MetricKind::Gauge, 2_500_000.0),
-                family(metric::CHAIN_COUNT, MetricKind::Gauge, f64::NAN),
+                family(names::DISK_BYTES, MetricKind::Gauge, 248_300_000_000.0),
+                family(names::MEMPOOL_BYTES, MetricKind::Gauge, 44_400.4),
+                family(names::READY_PEERS, MetricKind::Gauge, 11.0),
+                family(names::UNREADY_PEERS, MetricKind::Gauge, 1.0),
+                family(names::OBSOLETE_PEERS, MetricKind::Gauge, 1.0),
+                family(names::HANDSHAKE_FAILURES, MetricKind::Counter, 3.0),
+                family(names::CHECKPOINT_HEIGHT, MetricKind::Gauge, 2_500_000.0),
+                family(names::CHAIN_COUNT, MetricKind::Gauge, f64::NAN),
             ],
         };
-        let facts = MetricsFacts::from_snapshot(&snapshot);
+        let mut history = MetricsHistory::default();
+        history.push(&snapshot);
+        let facts = MetricsFacts::from_history(&history).unwrap();
         assert_eq!(facts.at, at(100));
         assert_eq!(facts.disk_bytes, Some(248_300_000_000));
         assert_eq!(facts.memory_bytes, None, "not on this page");
@@ -502,20 +518,10 @@ mod tests {
         assert_eq!(facts.ready_peers, Some(11));
         assert_eq!(facts.unready_peers, Some(1));
         assert_eq!(facts.obsolete_peers, Some(1));
+        assert_eq!(facts.obsolete_refused, None, "no counter in the page");
         assert_eq!(facts.handshake_failures, Some(3));
         assert_eq!(facts.checkpoint_height, Some(2_500_000));
         assert_eq!(facts.chain_count, None, "NaN reads as absent");
-        // A counter is not read as a gauge and the other way round.
-        let wrong_kinds = MetricsSnapshot {
-            at: at(0),
-            families: vec![
-                family(metric::DISK_BYTES, MetricKind::Counter, 1.0),
-                family(metric::HANDSHAKE_FAILURES, MetricKind::Gauge, 1.0),
-            ],
-        };
-        let facts = MetricsFacts::from_snapshot(&wrong_kinds);
-        assert_eq!(facts.disk_bytes, None);
-        assert_eq!(facts.handshake_failures, None);
     }
 
     #[test]
@@ -547,9 +553,56 @@ mod tests {
         assert_eq!(names, vec!["Behind", "Height", "Estimated tip"]);
         assert_eq!(table.series[1].values, vec![2_950_000.0, 2_950_100.0]);
         assert_eq!(table.series[2].values, vec![3_120_000.0, 3_120_000.0]);
-        let peers = peers_chart(&window);
-        assert_eq!(peers.series[0].values, vec![8.0, 9.0]);
         assert_eq!(behind_chart(&[]).len(), 0);
+    }
+
+    #[test]
+    fn peers_chart_splits_by_direction_once_a_list_landed() {
+        let mut window = [
+            sample(0, 2_950_000, 3_120_000, 8),
+            sample(5, 2_950_100, 3_120_000, 9),
+        ];
+        let total = peers_chart(&window, false);
+        assert_eq!(total.series.len(), 1);
+        assert_eq!(total.series[0].name, "Peers");
+        assert_eq!(total.series[0].values, vec![8.0, 9.0]);
+        window[1].peers_inbound = Some(3);
+        window[1].peers_outbound = Some(6);
+        let split = peers_chart(&window, true);
+        let names: Vec<_> = split.series.iter().map(|s| (s.name, s.class)).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("Outbound", "chart-series-1"),
+                ("Inbound", "chart-series-2")
+            ]
+        );
+        // A sample without a list reads 0 for both, as `Sample::get` does.
+        assert_eq!(split.series[0].values, vec![0.0, 6.0]);
+        assert_eq!(split.series[1].values, vec![0.0, 3.0]);
+        // The table adds the total and, with metrics, the peer set's readiness per sample:
+        // the newest reading at or before the sample, none before the first.
+        let plain = peers_table(&window, false, &MetricsHistory::default());
+        let names: Vec<_> = plain.series.iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["Peers"]);
+        let mut metrics = MetricsHistory::default();
+        metrics.push(&MetricsSnapshot {
+            at: at(3),
+            families: vec![
+                family(names::READY_PEERS, MetricKind::Gauge, 7.0),
+                family(names::UNREADY_PEERS, MetricKind::Gauge, 1.0),
+            ],
+        });
+        let table = peers_table(&window, true, &metrics);
+        let names: Vec<_> = table.series.iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            vec!["Outbound", "Inbound", "Total", "Ready", "Unready"]
+        );
+        assert_eq!(table.series[2].values, vec![8.0, 9.0]);
+        assert!(table.series[3].values[0].is_nan());
+        assert_eq!(table.series[3].values[1], 7.0);
+        assert_eq!(table.series[4].values[1], 1.0);
     }
 
     #[test]

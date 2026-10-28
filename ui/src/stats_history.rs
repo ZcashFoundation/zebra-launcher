@@ -3,7 +3,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::{NodeDetails, NodeStats};
+use launcher_types::{NodeDetails, NodeStats, PeerInfo};
 
 /// How many samples are kept: four hours of the monitor's 5-second polls.
 pub const MAX_SAMPLES: usize = 4 * 60 * 60 / 5;
@@ -87,11 +87,8 @@ pub enum Field {
     Peers,
     Mempool,
     /// The estimated tip minus the verified height ([`Sample::remaining`]).
-    #[allow(dead_code, reason = "wired by the dashboard's view workstream")]
     Behind,
-    #[allow(dead_code, reason = "wired by the dashboard's view workstream")]
     PeersInbound,
-    #[allow(dead_code, reason = "wired by the dashboard's view workstream")]
     PeersOutbound,
 }
 
@@ -103,26 +100,27 @@ struct PeerSplit {
     at: SystemTime,
 }
 
+/// Whether zebrad is connected to a listed peer: one without a state, or in a connected one.
+/// A peer the node merely knows (`failed`, pending) is not a connection.
+pub fn is_connected(peer: &PeerInfo) -> bool {
+    peer.state.as_deref().is_none_or(|state| {
+        state.eq_ignore_ascii_case("connected") || state.eq_ignore_ascii_case("responded")
+    })
+}
+
 impl PeerSplit {
-    /// Counts the peers zebrad is connected to: a listed peer without a state, or in a
-    /// connected one. A peer the node merely knows (`failed`, pending) is not a connection.
+    /// Counts the connected peers ([`is_connected`]) by direction.
     fn of(details: &NodeDetails) -> Self {
-        let connected = |state: &Option<String>| {
-            state.as_deref().is_none_or(|state| {
-                state.eq_ignore_ascii_case("connected") || state.eq_ignore_ascii_case("responded")
-            })
-        };
-        let (inbound, outbound) = details
-            .peers
-            .iter()
-            .filter(|peer| connected(&peer.state))
-            .fold((0, 0), |(inbound, outbound), peer| {
+        let (inbound, outbound) = details.peers.iter().filter(|peer| is_connected(peer)).fold(
+            (0, 0),
+            |(inbound, outbound), peer| {
                 if peer.inbound {
                     (inbound + 1, outbound)
                 } else {
                     (inbound, outbound + 1)
                 }
-            });
+            },
+        );
         PeerSplit {
             inbound,
             outbound,
@@ -182,10 +180,6 @@ impl StatsHistory {
 
     /// Records the peer list of a poll: its inbound and outbound counts go onto the sample of
     /// the same poll (the closest within [`PEER_SPLIT_FRESH`], already filed or still to come).
-    #[allow(
-        dead_code,
-        reason = "called by the app shell once the peer list is wired"
-    )]
     pub fn record_peers(&mut self, details: &NodeDetails) {
         let split = PeerSplit::of(details);
         self.peer_split = Some(split);
@@ -215,6 +209,22 @@ impl StatsHistory {
     /// The newest sample.
     pub fn latest(&self) -> Option<&Sample> {
         self.samples.last()
+    }
+
+    /// The newest numbers: the sample of the published `stats`, with the peer list's split
+    /// when one landed for the same poll, or the newest sample once zebrad stopped
+    /// publishing (`None` stats). The published value wins when the history has not filed
+    /// it yet.
+    pub fn sample_for(&self, stats: Option<&NodeStats>) -> Option<Sample> {
+        match stats {
+            Some(stats) => Some(
+                self.latest()
+                    .filter(|sample| sample.at == stats.updated_at)
+                    .copied()
+                    .unwrap_or_else(|| Sample::from_stats(stats)),
+            ),
+            None => self.latest().copied(),
+        }
     }
 
     /// The oldest sample at or after `from` (the oldest of all for `None`).
@@ -313,7 +323,6 @@ impl StatsHistory {
 
     /// Whether any sample of the window carries a peer list's split, so the direction series
     /// mean something.
-    #[allow(dead_code, reason = "wired by the dashboard's view workstream")]
     pub fn has_peer_split(&self, span: Option<Duration>, now: SystemTime) -> bool {
         self.window(span, now)
             .iter()
@@ -321,7 +330,6 @@ impl StatsHistory {
     }
 
     /// Whether every peer list of the window counted no inbound peer (and there was one).
-    #[allow(dead_code, reason = "wired by the dashboard's view workstream")]
     pub fn no_inbound_over(&self, span: Option<Duration>, now: SystemTime) -> bool {
         let mut known = false;
         for sample in self.window(span, now) {
@@ -338,8 +346,6 @@ impl StatsHistory {
 #[cfg(test)]
 mod tests {
     use std::time::UNIX_EPOCH;
-
-    use launcher_types::PeerInfo;
 
     use super::*;
 
@@ -654,6 +660,13 @@ mod tests {
             Some((2, 2)),
             "failed peers not counted"
         );
+        // The published stats of that poll read with the split; newer stats, not filed yet,
+        // without it; no stats at all gives the newest sample.
+        assert_eq!(history.sample_for(Some(&stats(5, 110))), Some(newest));
+        let unfiled = history.sample_for(Some(&stats(7, 111))).unwrap();
+        assert_eq!((unfiled.height, unfiled.peer_split()), (111, None));
+        assert_eq!(history.sample_for(None), Some(newest));
+        assert_eq!(StatsHistory::default().sample_for(None), None);
         assert_eq!(newest.get(Field::PeersInbound), 2);
         assert_eq!(newest.get(Field::PeersOutbound), 2);
         assert_eq!(history.window(None, at(6))[0].peer_split(), None);

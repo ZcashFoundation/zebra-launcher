@@ -14,17 +14,13 @@ use crate::{
     charts::{hhmm, phase_note, sync_summary, tz_offset_min_at, widgets::Meter},
     clipboard::copy_to_clipboard,
     components::{reset_config::ResetConfigButton, transient::Transient, updates::CheckForUpdate},
-    format::{relative, thousands},
-    health::{Action, Level, summary_text},
+    format::{relative, rough_duration, thousands},
+    health::{Action, Level, humantime_secs, summary_text},
     insights::SyncStage,
-    stats_history::Sample,
+    stats_history::HERO_RATE_WINDOW,
 };
 
 use super::{Dash, Icon, with_health_input};
-
-/// The hero's rate and ETA come from this fixed window, whatever the range control says, so
-/// the ETA does not change when the reader switches the range.
-pub const HERO_WINDOW: Duration = Duration::from_secs(15 * 60);
 
 /// The checkpoint verifier is still at work while its height is within this many blocks of
 /// the verified height; further behind, it has finished and full validation runs.
@@ -33,15 +29,10 @@ pub const CHECKPOINT_NEAR_BLOCKS: u64 = 5_000;
 /// How long "Copied" stays beside the Copy summary button.
 const COPIED_FOR: Duration = Duration::from_secs(2);
 
-/// The class that colours the card's edge and the chip's icon.
-pub fn level_class(level: Level) -> &'static str {
-    match level {
-        Level::Healthy => "dash-level-good",
-        Level::Neutral => "dash-level-neutral",
-        Level::Attention => "dash-level-warning",
-        Level::Urgent => "dash-level-serious",
-        Level::Problem => "dash-level-critical",
-    }
+/// The class that colours the card's edge and the chip's icon: `dash-level-` plus the
+/// level's tone (`good`, `neutral`, `warning`, `serious`, `critical`).
+pub fn level_class(level: Level) -> String {
+    format!("dash-level-{}", level.tone())
 }
 
 pub fn level_icon(level: Level) -> Icon {
@@ -53,25 +44,17 @@ pub fn level_icon(level: Level) -> Icon {
     }
 }
 
-/// The chip's word: `Healthy`, `Attention`, `Problem`; a neutral verdict's chip is its own
-/// headline (`Syncing`, `Stopped`), so it has no word of its own.
-pub fn level_word(level: Level) -> Option<&'static str> {
-    match level {
-        Level::Healthy => Some("Healthy"),
-        Level::Neutral => None,
-        Level::Attention | Level::Urgent => Some("Attention"),
-        Level::Problem => Some("Problem"),
-    }
-}
-
-/// What the chip says.
+/// What the chip says: the level's word (`Healthy`, `Attention`, `Problem`), or the headline
+/// itself for a neutral verdict (`Syncing`, `Stopped`), which has no word of its own.
 pub fn chip_word(level: Level, headline: &str) -> String {
-    level_word(level).map_or_else(|| headline.to_owned(), str::to_owned)
+    level
+        .word()
+        .map_or_else(|| headline.to_owned(), str::to_owned)
 }
 
 /// What follows the chip: the headline, unless the chip already is the headline.
 pub fn chip_rest(level: Level, headline: &str) -> Option<String> {
-    level_word(level).map(|_| headline.to_owned())
+    level.word().map(|_| headline.to_owned())
 }
 
 /// The verb in "Could not …" when an action fails.
@@ -80,7 +63,6 @@ pub fn action_verb(action: &Action) -> &'static str {
         Action::Start | Action::StartNow => "start zebrad",
         Action::StartKillingStale => "stop the earlier zebrad and start",
         Action::Restart => "restart zebrad",
-        Action::Stop => "stop zebrad",
         Action::Install => "install the update",
         Action::CancelUpdate => "cancel the update",
         Action::OpenLogsFolder => "open the logs folder",
@@ -92,28 +74,21 @@ pub fn action_verb(action: &Action) -> &'static str {
     }
 }
 
-/// When the height last rose: the `at` of the newest sample whose height exceeds its
-/// predecessor's (5 s resolution). `None` while no rise was seen.
-pub fn last_height_change_at(samples: &[Sample]) -> Option<SystemTime> {
-    samples
-        .windows(2)
-        .rev()
-        .find(|pair| pair[1].height > pair[0].height)
-        .map(|pair| pair[1].at)
-}
-
-/// `last block 5 s ago`: from the sample history, or from zebrad's own words in its progress
-/// log (`5s`, `1m 2s`) while the history saw no rise.
+/// `last block 5 s ago`: from the sample history, or, while the history saw no rise, from
+/// zebrad's own words in its progress log (`5s`, `1m 2s`, stamped when it said so) aged to
+/// now and written in the page's units.
 pub fn last_block_text(
     change_at: Option<SystemTime>,
-    zebrad_words: Option<&str>,
+    zebrad: Option<(&str, SystemTime)>,
     now: SystemTime,
 ) -> Option<String> {
-    match (change_at, zebrad_words) {
-        (Some(at), _) => Some(format!("last block {}", relative(at, now))),
-        (None, Some(words)) => Some(format!("last block {words} ago")),
-        (None, None) => None,
+    if let Some(at) = change_at {
+        return Some(format!("last block {}", relative(at, now)));
     }
+    let (words, said_at) = zebrad?;
+    let said = Duration::from_secs(humantime_secs(words)?);
+    let since = said + now.duration_since(said_at).unwrap_or(Duration::ZERO);
+    Some(format!("last block {} ago", rough_duration(since)))
 }
 
 /// The stage words zebrad's progress log adds to the hero line, when the report belongs to
@@ -148,11 +123,9 @@ pub fn hero_line(
     if waiting {
         return line.to_owned();
     }
-    // The summary's own words, in the page's copy.
-    let line = line.replacen("At chain tip", "At the chain tip", 1);
     let mut parts = Vec::with_capacity(3);
     parts.extend(stage);
-    parts.push(line.as_str());
+    parts.push(line);
     parts.extend(last_block);
     parts.join(" · ")
 }
@@ -196,7 +169,6 @@ fn run_action(dash: Dash, action: Action, busy: RwSignal<bool>, failure: Transie
             Action::Start | Action::StartNow => api::start_zebrad().await,
             Action::StartKillingStale => api::start_zebrad_killing_stale().await,
             Action::Restart => api::restart_zebrad().await,
-            Action::Stop => api::stop_zebrad().await,
             Action::Install => api::install_update().await,
             Action::CancelUpdate => api::cancel_update().await,
             Action::OpenLogsFolder => api::open_path(OpenTarget::LogDir).await,
@@ -275,20 +247,21 @@ pub(super) fn StatusCard(dash: Dash) -> impl IntoView {
         });
     };
 
-    // The sync hero: a fixed 15 min window for the pace, the last block's age from the sample
-    // history (zebrad's own words as the fallback), stage words from this run's progress log
-    // and the checkpoint or full-validation note from the metrics and the log.
+    // The sync hero: the fixed `HERO_RATE_WINDOW` for the pace (the verdict's rule 17 reads
+    // the same figures), the last block's age from the sample history (zebrad's own words as
+    // the fallback), stage words from this run's progress log and the checkpoint or
+    // full-validation note from the metrics and the log.
     let rate = Memo::new(move |_| {
         let now = state.now.get();
         state
             .history
-            .with(|history| history.block_rate(Some(HERO_WINDOW), now))
+            .with(|history| history.block_rate(Some(HERO_RATE_WINDOW), now))
     });
     let eta = Memo::new(move |_| {
         let now = state.now.get();
         state
             .history
-            .with(|history| history.eta_to_tip(Some(HERO_WINDOW), now))
+            .with(|history| history.eta_to_tip(Some(HERO_RATE_WINDOW), now))
     });
     let hero = Memo::new(move |_| {
         let note = state.status.with(|status| phase_note(&status.phase));
@@ -298,13 +271,17 @@ pub(super) fn StatusCard(dash: Dash) -> impl IntoView {
         let now = state.now.get();
         let change_at = state
             .history
-            .with(|history| last_height_change_at(history.window(None, now)));
+            .with(|history| history.last_height_change_at());
         let words = state.insights.with(|insights| {
             insights
                 .sync()
-                .and_then(|sync| sync.since_last_block.clone())
+                .and_then(|sync| Some((sync.since_last_block.clone()?, sync.at)))
         });
-        last_block_text(change_at, words.as_deref(), now)
+        last_block_text(
+            change_at,
+            words.as_ref().map(|(words, at)| (words.as_str(), *at)),
+            now,
+        )
     });
     let stage = Memo::new(move |_| {
         let started = state.status.with(|status| status.started_at);
@@ -414,19 +391,6 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(secs)
     }
 
-    fn sample(secs: u64, height: u64) -> Sample {
-        Sample {
-            at: at(secs),
-            height,
-            estimated_height: 3_120_000,
-            peers: 8,
-            mempool_transactions: 0,
-            verification_progress: height as f64 / 3_120_000.0,
-            peers_inbound: None,
-            peers_outbound: None,
-        }
-    }
-
     #[test]
     fn chip_words_and_classes() {
         assert_eq!(chip_word(Level::Healthy, "At the chain tip"), "Healthy");
@@ -466,35 +430,22 @@ mod tests {
     }
 
     #[test]
-    fn last_height_change_is_the_newest_rise() {
-        assert_eq!(last_height_change_at(&[]), None);
-        assert_eq!(last_height_change_at(&[sample(0, 100)]), None);
-        let flat = [sample(0, 100), sample(5, 100), sample(10, 100)];
-        assert_eq!(last_height_change_at(&flat), None);
-        let rising = [
-            sample(0, 100),
-            sample(5, 110),
-            sample(10, 110),
-            sample(15, 112),
-            sample(20, 112),
-        ];
-        assert_eq!(last_height_change_at(&rising), Some(at(15)));
-        // A reorg down is not a rise.
-        let dip = [sample(0, 100), sample(5, 110), sample(10, 105)];
-        assert_eq!(last_height_change_at(&dip), Some(at(5)));
-    }
-
-    #[test]
     fn last_block_words() {
         let now = at(100);
         assert_eq!(
-            last_block_text(Some(at(95)), Some("1m"), now),
+            last_block_text(Some(at(95)), Some(("1m", at(90))), now),
             Some("last block 5 s ago".into())
         );
+        // zebrad said "1m 20s" ten seconds ago: a minute and a half, in the page's units.
         assert_eq!(
-            last_block_text(None, Some("1m 2s"), now),
-            Some("last block 1m 2s ago".into())
+            last_block_text(None, Some(("1m 20s", at(90))), now),
+            Some("last block 1 min ago".into())
         );
+        assert_eq!(
+            last_block_text(None, Some(("5s", at(100))), now),
+            Some("last block 5 s ago".into())
+        );
+        assert_eq!(last_block_text(None, Some(("soon", at(100))), now), None);
         assert_eq!(last_block_text(None, None, now), None);
     }
 
@@ -541,7 +492,7 @@ mod tests {
         );
         assert_eq!(
             hero_line(
-                "At chain tip · height 3,120,012",
+                "At the chain tip · height 3,120,012",
                 false,
                 None,
                 Some("last block 48 s ago")

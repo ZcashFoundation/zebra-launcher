@@ -5,23 +5,30 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::{EosInfo, ExitInfo, NodeStats, OpenTarget, Phase, Status};
+use launcher_types::{
+    EosInfo, ExitInfo, NodeDetails, NodeStats, OpenTarget, Phase, Status, ValuePool,
+};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
     api,
-    charts::{hhmm, tz_offset_min_at, uptime_text},
+    charts::{byte_rate, compact, hhmm, tz_offset_min_at, uptime_text},
+    clipboard::copy_to_clipboard,
     components::{
         rows::{Row, Rows},
         transient::Transient,
     },
-    format::{bytes, exit_class_text, relative, rough_duration, thousands},
+    format::{
+        bytes, exit_class_text, local_date_short, local_datetime_short, relative, rough_duration,
+        thousands,
+    },
     stats_history::Sample,
 };
 
-use super::{
-    Dash, Icon, MetricsFacts, local_date, local_short, status_card::CHECKPOINT_NEAR_BLOCKS,
-};
+/// How long "Copied" stays beside the best block's Copy button.
+const COPIED_FOR: Duration = Duration::from_secs(2);
+
+use super::{Dash, Icon, MetricsFacts, status_card::CHECKPOINT_NEAR_BLOCKS};
 
 /// The Phase row: `Running for 2 d 4 h, since 23 Oct, 21:13`, `Restarting in 25 s (crash 2)`,
 /// `Failed · zebrad crashed`.
@@ -84,12 +91,84 @@ pub fn data_folder_text(data_dir: Option<&str>) -> String {
 
 /// The Network row: `1.2 MB/s in · 300.0 kB/s out`, from bytes per second.
 pub fn network_text(in_bps: f64, out_bps: f64) -> String {
-    let per_second = |rate: f64| bytes(rate.max(0.0).round() as u64);
+    format!("{} in · {} out", byte_rate(in_bps), byte_rate(out_bps))
+}
+
+/// The zebrad row: `7.0.0 · /Zebra:7.0.0/`, the version with the P2P user agent when the
+/// details carry one.
+pub fn zebrad_text(version: &str, subversion: Option<&str>) -> String {
+    match subversion {
+        Some(subversion) if subversion != version => format!("{version} · {subversion}"),
+        _ => version.to_owned(),
+    }
+}
+
+/// A block hash cut to its ends: `0000…a3f1`.
+pub fn short_hash(hash: &str) -> String {
+    const ENDS: usize = 4;
+    let count = hash.chars().count();
+    if count <= 2 * ENDS + 1 {
+        return hash.to_owned();
+    }
+    let start: String = hash.chars().take(ENDS).collect();
+    let end: String = hash.chars().skip(count - ENDS).collect();
+    format!("{start}…{end}")
+}
+
+/// The network difficulty: whole with separators from a thousand up, two decimals below
+/// (a test network's difficulty is about one).
+pub fn difficulty_text(difficulty: f64) -> String {
+    if !difficulty.is_finite() || difficulty < 0.0 {
+        return "0".to_owned();
+    }
+    if difficulty >= 1000.0 {
+        thousands(difficulty.round() as u64)
+    } else {
+        format!("{difficulty:.2}")
+    }
+}
+
+/// An amount in ZEC with separators and two decimals: `21,234,567.89 ZEC`.
+pub fn zec_text(zec: f64) -> String {
+    let zec = if zec.is_finite() { zec.max(0.0) } else { 0.0 };
+    let hundredths = (zec * 100.0).round() as u64;
     format!(
-        "{}/s in · {}/s out",
-        per_second(in_bps),
-        per_second(out_bps)
+        "{}.{:02} ZEC",
+        thousands(hundredths / 100),
+        hundredths % 100
     )
+}
+
+/// The value pools as text, in zebrad's order: `transparent 14.0M · sapling 512K · orchard
+/// 1.65M ZEC`.
+pub fn pools_text(pools: &[ValuePool]) -> Option<String> {
+    if pools.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = pools
+        .iter()
+        .map(|pool| {
+            let zec = if pool.zec.is_finite() {
+                pool.zec.max(0.0).round() as u64
+            } else {
+                0
+            };
+            format!("{} {}", pool.id, compact(zec))
+        })
+        .collect();
+    Some(format!("{} ZEC", parts.join(" · ")))
+}
+
+/// The Mempool row: `24 transactions, 1.2 MB`; the size only when the details carry it.
+pub fn mempool_text(transactions: u64, size: Option<u64>) -> String {
+    let count = match transactions {
+        1 => "1 transaction".to_owned(),
+        n => format!("{} transactions", thousands(n)),
+    };
+    match size {
+        Some(size) => format!("{count}, {}", bytes(size)),
+        None => count,
+    }
 }
 
 /// The newest minute of snapshots gives the Network row its rate.
@@ -100,6 +179,9 @@ pub const NETWORK_RATE_WINDOW: Duration = Duration::from_secs(60);
 pub struct ChainRow {
     pub label: &'static str,
     pub text: String,
+    /// The full text behind a shortened one (the whole block hash), as the cell's title and
+    /// what the Copy button copies.
+    pub full: Option<String>,
     /// A fork is being resolved: the row gets a warning icon.
     pub warning: bool,
 }
@@ -108,6 +190,7 @@ fn chain_row(label: &'static str, text: String) -> ChainRow {
     ChainRow {
         label,
         text,
+        full: None,
         warning: false,
     }
 }
@@ -129,24 +212,49 @@ pub fn verification_text(
 }
 
 /// The Chain card's rows from the published stats, or from the last sample once zebrad
-/// stopped (no chain name then); empty without either.
+/// stopped (no chain name then); empty without either. The details behind the stats add the
+/// headers, the best block, the difficulty, the size on disk, the mempool's bytes, the
+/// supply and the pools, each left out while absent.
 pub fn chain_rows(
     stats: Option<&NodeStats>,
     latest: Option<&Sample>,
+    details: Option<&NodeDetails>,
     facts: Option<&MetricsFacts>,
     full_since: Option<&str>,
 ) -> Vec<ChainRow> {
     let mut rows = Vec::new();
-    let (height, estimated) = match (stats, latest) {
+    let (height, estimated, mempool) = match (stats, latest) {
         (Some(stats), _) => {
             rows.push(chain_row("Chain", stats.chain.clone()));
-            (stats.height, stats.estimated_height)
+            (
+                stats.height,
+                stats.estimated_height,
+                stats.mempool_transactions,
+            )
         }
-        (None, Some(sample)) => (sample.height, sample.estimated_height),
+        (None, Some(sample)) => (
+            sample.height,
+            sample.estimated_height,
+            sample.mempool_transactions,
+        ),
         (None, None) => return rows,
     };
     rows.push(chain_row("Height", thousands(height)));
     rows.push(chain_row("Estimated tip", thousands(estimated)));
+    if let Some(headers) = details.and_then(|details| details.headers) {
+        rows.push(chain_row("Headers", thousands(headers)));
+    }
+    if let Some(hash) = details.and_then(|details| details.best_block_hash.as_deref()) {
+        rows.push(ChainRow {
+            label: "Best block",
+            text: short_hash(hash),
+            full: Some(hash.to_owned()),
+            warning: false,
+        });
+    }
+    if let Some(difficulty) = details.and_then(|details| details.difficulty) {
+        rows.push(chain_row("Difficulty", difficulty_text(difficulty)));
+    }
     let checkpoint = facts.and_then(|facts| facts.checkpoint_height);
     if let Some(text) = verification_text(checkpoint, height, full_since) {
         rows.push(chain_row("Verification", text));
@@ -157,9 +265,23 @@ pub fn chain_rows(
             n => ChainRow {
                 label: "Chains in memory",
                 text: format!("{n} · a fork is being resolved"),
+                full: None,
                 warning: true,
             },
         });
+    }
+    if let Some(size) = details.and_then(|details| details.size_on_disk) {
+        rows.push(chain_row("Size on disk", bytes(size)));
+    }
+    rows.push(chain_row(
+        "Mempool",
+        mempool_text(mempool, details.and_then(|details| details.mempool_bytes)),
+    ));
+    if let Some(supply) = details.and_then(|details| details.chain_supply_zec) {
+        rows.push(chain_row("Chain supply", zec_text(supply)));
+    }
+    if let Some(text) = details.and_then(|details| pools_text(&details.value_pools)) {
+        rows.push(chain_row("Value pools", text));
     }
     rows
 }
@@ -185,6 +307,16 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
             }
         });
     };
+    // The best block's Copy button: "Copied" for a moment, or the failure in its place.
+    let copied = Transient::<Result<(), String>>::new();
+    let copy = move |text: String| {
+        spawn_local(async move {
+            match copy_to_clipboard(&text).await {
+                Ok(()) => copied.show_for(Ok(()), COPIED_FOR),
+                Err(error) => copied.hold(Err(format!("Could not copy: {error}"))),
+            }
+        });
+    };
 
     // Rebuilt when the status, stats, settings, metrics facts or log facts change; the cells
     // that show a time follow the clock on their own.
@@ -194,7 +326,7 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
             status.phase,
             Phase::Running | Phase::Starting | Phase::Stopping
         );
-        let since = status.started_at.map(local_short);
+        let since = status.started_at.map(local_datetime_short);
         let mut rows: Vec<Row> = Vec::new();
         {
             let status = status.clone();
@@ -219,14 +351,32 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
             if let Some(addr) = status.metrics_addr {
                 rows.push(("Metrics", text_cell(addr.to_string())));
             }
-            if let Some(version) = version.or(last_version) {
-                rows.push(("zebrad", text_cell(version)));
-            }
-            let upgrade = state.insights.with(|insights| {
-                insights
-                    .sync()
-                    .and_then(|sync| sync.network_upgrade.clone())
+            let subversion = dash.details.with(|details| {
+                details
+                    .as_ref()
+                    .and_then(|details| details.subversion.clone())
             });
+            if let Some(version) = version.or(last_version) {
+                rows.push((
+                    "zebrad",
+                    text_cell(zebrad_text(&version, subversion.as_deref())),
+                ));
+            }
+            // The active upgrade from the RPC, else the one zebrad's progress log names.
+            let upgrade = dash
+                .details
+                .with(|details| {
+                    details
+                        .as_ref()
+                        .and_then(|details| details.active_upgrade.clone())
+                })
+                .or_else(|| {
+                    state.insights.with(|insights| {
+                        insights
+                            .sync()
+                            .and_then(|sync| sync.network_upgrade.clone())
+                    })
+                });
             if let Some(upgrade) = upgrade {
                 rows.push(("Network upgrade", text_cell(upgrade)));
             }
@@ -234,7 +384,7 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
                 .stats
                 .with(|stats| stats.as_ref().and_then(|stats| stats.eos.clone()));
             if let Some(eos) = eos {
-                let date = local_date(eos.estimated_time);
+                let date = local_date_short(eos.estimated_time);
                 rows.push((
                     "End of support",
                     (move || eos_text(&eos, &date, state.now.get())).into_any(),
@@ -304,12 +454,15 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
             .with(|insights| insights.checkpoints().final_reached.map(local_hhmm));
         let facts = dash.metrics.get();
         state.stats.with(|stats| {
-            chain_rows(
-                stats.as_ref(),
-                dash.latest.get().as_ref(),
-                facts.as_ref(),
-                full_since.as_deref(),
-            )
+            dash.details.with(|details| {
+                chain_rows(
+                    stats.as_ref(),
+                    dash.latest.get().as_ref(),
+                    details.as_ref(),
+                    facts.as_ref(),
+                    full_since.as_deref(),
+                )
+            })
         })
     });
     let chain_view = move || {
@@ -322,6 +475,25 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
                         <span class="dash-row-warning">
                             {Icon::Warning.view()}
                             <span>{row.text}</span>
+                        </span>
+                    }
+                    .into_any()
+                } else if let Some(full) = row.full {
+                    let to_copy = full.clone();
+                    view! {
+                        <span class="dash-row-copy">
+                            <span class="dash-hash" title=full>{row.text}</span>
+                            <button class="link" type="button" on:click=move |_| copy(to_copy.clone())>
+                                "Copy"
+                            </button>
+                            <span class="dash-copy-note" role="status">
+                                {move || {
+                                    copied.get().map(|outcome| match outcome {
+                                        Ok(()) => view! { <span>"Copied"</span> }.into_any(),
+                                        Err(error) => view! { <span class="error">{error}</span> }.into_any(),
+                                    })
+                                }}
+                            </span>
                         </span>
                     }
                     .into_any()
@@ -400,6 +572,7 @@ mod tests {
             ready_peers: None,
             unready_peers: None,
             obsolete_peers: None,
+            obsolete_refused: None,
             handshake_failures: None,
             checkpoint_height: checkpoint,
             chain_count: chains,
@@ -514,10 +687,70 @@ mod tests {
         assert_eq!(verification_text(None, 10, None), None);
     }
 
+    fn details() -> NodeDetails {
+        NodeDetails {
+            peers: Vec::new(),
+            best_block_hash: Some(
+                "00000000012d1f2a7b4e7a0d0ffb3a2b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0a3f1".into(),
+            ),
+            headers: Some(2_952_681),
+            difficulty: Some(118_462_377.5),
+            size_on_disk: Some(248_300_000_000),
+            chain_supply_zec: Some(21_234_567.891),
+            value_pools: vec![
+                ValuePool {
+                    id: "transparent".into(),
+                    zec: 13_980_123.45,
+                },
+                ValuePool {
+                    id: "sapling".into(),
+                    zec: 512_345.67,
+                },
+                ValuePool {
+                    id: "orchard".into(),
+                    zec: 1_654_321.0,
+                },
+            ],
+            active_upgrade: Some("NU6.1".into()),
+            subversion: Some("/Zebra:7.0.0/".into()),
+            protocol_version: Some(170_120),
+            mempool_bytes: Some(44_400),
+            mempool_usage: None,
+            updated_at: at(0),
+        }
+    }
+
+    #[test]
+    fn detail_sentences() {
+        assert_eq!(
+            zebrad_text("7.0.0", Some("/Zebra:7.0.0/")),
+            "7.0.0 · /Zebra:7.0.0/"
+        );
+        assert_eq!(zebrad_text("7.0.0", None), "7.0.0");
+        assert_eq!(zebrad_text("7.0.0", Some("7.0.0")), "7.0.0");
+        assert_eq!(short_hash("00000000abcd1234a3f1"), "0000…a3f1");
+        assert_eq!(short_hash("abcdef"), "abcdef", "too short to cut");
+        assert_eq!(difficulty_text(118_462_377.5), "118,462,378");
+        assert_eq!(difficulty_text(1.0), "1.00");
+        assert_eq!(difficulty_text(f64::NAN), "0");
+        assert_eq!(zec_text(21_234_567.891), "21,234,567.89 ZEC");
+        assert_eq!(zec_text(0.5), "0.50 ZEC");
+        assert_eq!(zec_text(-1.0), "0.00 ZEC");
+        assert_eq!(
+            pools_text(&details().value_pools),
+            Some("transparent 14.0M · sapling 512K · orchard 1.65M ZEC".into())
+        );
+        assert_eq!(pools_text(&[]), None);
+        assert_eq!(mempool_text(24, Some(1_234_000)), "24 transactions, 1.2 MB");
+        assert_eq!(mempool_text(1, None), "1 transaction");
+        assert_eq!(mempool_text(1_200, None), "1,200 transactions");
+    }
+
     #[test]
     fn chain_rows_from_stats_or_the_last_sample() {
         let rows = chain_rows(
             Some(&stats(2_952_680)),
+            None,
             None,
             Some(&facts(Some(2_500_000), Some(1))),
             Some("14:02"),
@@ -531,18 +764,49 @@ mod tests {
                 ("Estimated tip", "3,120,000"),
                 ("Verification", "full validation since 14:02"),
                 ("Chains in memory", "1"),
+                ("Mempool", "24 transactions"),
             ]
         );
-        assert!(rows.iter().all(|r| !r.warning));
-        let fork = chain_rows(Some(&stats(10)), None, Some(&facts(None, Some(2))), None);
-        let last = fork.last().unwrap();
-        assert_eq!(last.text, "2 · a fork is being resolved");
-        assert!(last.warning);
+        assert!(rows.iter().all(|r| !r.warning && r.full.is_none()));
+        let fork = chain_rows(
+            Some(&stats(10)),
+            None,
+            None,
+            Some(&facts(None, Some(2))),
+            None,
+        );
+        let forked = fork.iter().find(|r| r.label == "Chains in memory").unwrap();
+        assert_eq!(forked.text, "2 · a fork is being resolved");
+        assert!(forked.warning);
+        // With the details: the whole card, in the specification's order.
+        let details = details();
+        let rows = chain_rows(Some(&stats(2_952_680)), None, Some(&details), None, None);
+        let texts: Vec<_> = rows.iter().map(|r| (r.label, r.text.as_str())).collect();
+        assert_eq!(
+            texts,
+            vec![
+                ("Chain", "main"),
+                ("Height", "2,952,680"),
+                ("Estimated tip", "3,120,000"),
+                ("Headers", "2,952,681"),
+                ("Best block", "0000…a3f1"),
+                ("Difficulty", "118,462,378"),
+                ("Size on disk", "248.3 GB"),
+                ("Mempool", "24 transactions, 44.4 kB"),
+                ("Chain supply", "21,234,567.89 ZEC"),
+                (
+                    "Value pools",
+                    "transparent 14.0M · sapling 512K · orchard 1.65M ZEC"
+                ),
+            ]
+        );
+        let best = rows.iter().find(|r| r.label == "Best block").unwrap();
+        assert_eq!(best.full.as_deref(), details.best_block_hash.as_deref());
         // Stopped: the last sample, without a chain name.
         let sample = Sample::from_stats(&stats(2_952_680));
-        let rows = chain_rows(None, Some(&sample), None, None);
+        let rows = chain_rows(None, Some(&sample), None, None, None);
         let labels: Vec<_> = rows.iter().map(|r| r.label).collect();
-        assert_eq!(labels, vec!["Height", "Estimated tip"]);
-        assert!(chain_rows(None, None, None, None).is_empty());
+        assert_eq!(labels, vec!["Height", "Estimated tip", "Mempool"]);
+        assert!(chain_rows(None, None, None, None, None).is_empty());
     }
 }
