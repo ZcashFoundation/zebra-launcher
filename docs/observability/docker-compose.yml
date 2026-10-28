@@ -1,19 +1,22 @@
-# Prometheus + Grafana for a zebrad run by Zebra Launcher.
+# Prometheus + Grafana for a zebrad run by Zebra Launcher. README.md in this directory
+# is the guide (start, stop, update, checks, where the data lives, dashboards, known
+# gaps); the launcher's Grafana tab is described in docs/GRAFANA.md and problems in
+# docs/TROUBLESHOOTING.md.
 #
 # The launcher binds zebrad's metrics to 127.0.0.1:9999. A container on the Docker
 # bridge cannot reach a host port bound to 127.0.0.1, so:
 #   - Docker Desktop (macOS, Windows): use this file as is. Prometheus scrapes
 #     host.docker.internal:9999 (not yet verified to reach a 127.0.0.1-bound port on
-#     those systems; see docs/GRAFANA.md).
+#     those systems; see README.md).
 #   - Linux (Docker Engine): add docker-compose.linux.yml, which puts Prometheus and
 #     Grafana on the host network.
 #
 #   docker compose -f docs/observability/docker-compose.yml up -d
 #   docker compose -f docs/observability/docker-compose.yml -f docs/observability/docker-compose.linux.yml up -d
 #
-# Grafana: http://127.0.0.1:3000 (anonymous Viewer; admin/admin to edit)
-# In the launcher, set http://127.0.0.1:3000 as the Grafana URL (Grafana tab or
-# Settings); the launcher builds the dashboard URLs itself.
+# Grafana: http://127.0.0.1:3000 (anonymous Viewer; admin/admin to edit), which is also
+# the URL to set in the launcher (Grafana tab or Settings); the launcher builds the
+# dashboard URLs itself. Prometheus: http://127.0.0.1:9090.
 #
 # Both services carry a health check, and Grafana waits for Prometheus to pass its
 # check before it starts, so the datasource is reachable when the dashboards are
@@ -60,11 +63,14 @@ services:
       PROMETHEUS_URL: http://prometheus:9090
       # The launcher embeds the dashboards in an iframe.
       GF_SECURITY_ALLOW_EMBEDDING: "true"
-      # Viewing needs no login; editing still does (admin/admin on first login,
-      # or set GF_SECURITY_ADMIN_PASSWORD in a .env file next to this file).
+      # Viewing needs no login; editing still does. The admin password comes from
+      # GF_SECURITY_ADMIN_PASSWORD in a .env file next to this file (git-ignored), read
+      # by Compose for the ${...} below; without one it is admin. Grafana applies it
+      # when its database is created, so it only counts at the first start.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/zebra_overview.json
       # A local desktop stack has no reason to phone home.
       GF_ANALYTICS_REPORTING_ENABLED: "false"
