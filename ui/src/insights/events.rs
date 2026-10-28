@@ -109,7 +109,7 @@ fn code_words(code: Option<i32>) -> String {
 }
 
 /// `clean exit (code 0)`, `crash (code 101)`, `exit (no exit code)`.
-fn ending_words(class: Option<ExitClass>, code: Option<i32>) -> String {
+pub fn ending_words(class: Option<ExitClass>, code: Option<i32>) -> String {
     match class {
         Some(class) => format!("{} ({})", exit_words(class), code_words(code)),
         None => format!("exit ({})", code_words(code)),
