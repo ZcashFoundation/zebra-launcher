@@ -126,7 +126,7 @@ pub struct MinuteBucket {
     pub warn: u32,
     /// ERROR lines and stderr lines.
     pub error: u32,
-    /// TRACE, DEBUG, continuation and launcher lines.
+    /// TRACE, DEBUG and continuation lines, and launcher notes without a level.
     pub other: u32,
 }
 
@@ -164,11 +164,13 @@ impl ProblemLevel {
         }
     }
 
+    /// The level of a problem line: stderr, or a leveled WARN or ERROR line from zebrad or the
+    /// launcher alike, so the problems agree with the level totals.
     fn of(line: &LogLine) -> Option<Self> {
         match (line.stream, line.level) {
             (LogStream::Stderr, _) => Some(ProblemLevel::Stderr),
-            (LogStream::Stdout, Some(LogLevel::Error)) => Some(ProblemLevel::Error),
-            (LogStream::Stdout, Some(LogLevel::Warn)) => Some(ProblemLevel::Warn),
+            (_, Some(LogLevel::Error)) => Some(ProblemLevel::Error),
+            (_, Some(LogLevel::Warn)) => Some(ProblemLevel::Warn),
             _ => None,
         }
     }
@@ -448,11 +450,9 @@ impl Insights {
             return;
         };
         match (line.stream, line.level) {
-            (LogStream::Stderr, _) | (LogStream::Stdout, Some(LogLevel::Error)) => {
-                bucket.error += 1
-            }
-            (LogStream::Stdout, Some(LogLevel::Warn)) => bucket.warn += 1,
-            (LogStream::Stdout, Some(LogLevel::Info)) => bucket.info += 1,
+            (LogStream::Stderr, _) | (_, Some(LogLevel::Error)) => bucket.error += 1,
+            (_, Some(LogLevel::Warn)) => bucket.warn += 1,
+            (_, Some(LogLevel::Info)) => bucket.info += 1,
             _ => bucket.other += 1,
         }
     }
@@ -1238,6 +1238,62 @@ mod tests {
         );
         assert_eq!(insights.buckets, before.buckets);
         assert_eq!(insights.lines_total(), before.lines_total() + 1);
+    }
+
+    #[test]
+    fn leveled_launcher_lines_count_like_zebrad_lines() {
+        // The launcher's own WARN (a pid file it could not write) counts in the totals, the
+        // minute bucket and the problems alike; its INFO note in the totals and the bucket.
+        let mut insights = Insights::default();
+        let now = at("2026-10-23T18:36:00Z");
+        let warn = LogLine {
+            level: Some(LogLevel::Warn),
+            ..launcher_at(
+                0,
+                "2026-10-23T18:35:10Z",
+                "could not write the zebrad pid file err=denied",
+            )
+        };
+        insights.ingest(
+            &[
+                warn,
+                launcher_at(1, "2026-10-23T18:35:11Z", "zebrad started (pid 1)"),
+            ],
+            now,
+        );
+        let totals = insights.totals();
+        assert_eq!((totals.info, totals.warn, totals.error), (1, 1, 0));
+        let minute = insights
+            .activity(now)
+            .into_iter()
+            .find(|b| b.minute_start == at("2026-10-23T18:35:00Z"))
+            .unwrap();
+        assert_eq!(
+            (minute.info, minute.warn, minute.error, minute.other),
+            (1, 1, 0, 0),
+            "the buckets agree with the totals"
+        );
+        let problems = insights.problems(5);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].level, ProblemLevel::Warn);
+        assert_eq!(
+            problems[0].target.as_deref(),
+            Some("launcher_core::supervisor")
+        );
+        // A launcher line without a level is one of the other lines, not a problem.
+        let plain = LogLine {
+            level: None,
+            timestamp: None,
+            ..launcher_at(2, T0, "7 lines dropped")
+        };
+        insights.ingest(&[plain], now);
+        let minute = insights
+            .activity(now)
+            .into_iter()
+            .find(|b| b.minute_start == at("2026-10-23T18:35:00Z"))
+            .unwrap();
+        assert_eq!(minute.other, 1);
+        assert_eq!(insights.problems(5).len(), 1);
     }
 
     #[test]
