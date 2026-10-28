@@ -1,0 +1,728 @@
+# Signed release for a `v*` tag. Produces a DRAFT GitHub release; a maintainer
+# smoke-tests the assets and publishes it by hand (docs/RELEASING.md).
+# Publishing is what makes latest.json, and so the in-app updater, live.
+#
+#   verify       tag == [workspace.package] version, tool version checks, and
+#                whether updater artifacts are required (require_updater)
+#   sidecars     zebrad-sidecars.yml: verified/attested zebrad per target; also
+#                resolves and validates ZEBRAD_VERSION (its `version` output)
+#   draft        creates the draft release once; the matrix jobs upload to it
+#   build        UNPRIVILEGED, no secrets: compiles the app (`--no-bundle`)
+#   bundle_sign  environment `release` (required reviewer), NO caches:
+#                `cargo tauri bundle` packages the compiled app and does the
+#                platform signing; a separate step, the only one with the
+#                updater key, writes the updater .sig files; uploads to the
+#                draft
+#   manifest     latest.json (all five platform keys), SHA256SUMS, keyless
+#                cosign bundle, build provenance attestations
+#   summary      smoke-test checklist from docs/RELEASING.md in the run summary
+#
+# Untrusted dependency code (build scripts, proc macros) runs only in `build`,
+# which has no secrets and read-only contents. No job restores a cache: the
+# signed bundle is made from binaries compiled from scratch in this run.
+#
+# Downloads in bundle_sign. tauri-cli is sha256-pinned in
+# .github/tool-versions.env, but tauri-cli's bundler (tauri-bundler 2.10.4 for
+# tauri-cli 2.12.4) also fetches helper tools itself while it bundles:
+#   - Linux AppImage: AppRun and linuxdeploy from tauri-apps/binary-releases,
+#     and linuxdeploy-plugin-appimage from the moving `continuous` release of
+#     linuxdeploy/linuxdeploy-plugin-appimage. tauri-bundler checks NO hash
+#     for any of them, and runs them.
+#   - Windows NSIS: nsis-3.13.zip and the nsis_tauri_utils.dll plugin, each
+#     checked against a SHA-1 hard-coded in tauri-bundler.
+#   - WebView2: nothing at bundle time (the default downloadBootstrapper mode
+#     makes the installer fetch Microsoft's bootstrapper on the user's machine).
+#   - macOS: nothing.
+# So the updater key (TAURI_SIGNING_PRIVATE_KEY) is never in the bundler's
+# environment, on any OS. tauri-cli signs updater artifacts itself and fails
+# without a key, so `cargo tauri bundle` gets a throwaway key generated in the
+# job; the "Sign the updater artifacts" step then replaces those .sig files
+# with real ones (scripts/sign-updater-artifacts.sh, `cargo tauri signer sign
+# --app-version`) and is the only step that sees the key. The platform
+# signing stays inside `cargo tauri bundle`: macOS codesign and notarization
+# (macOS downloads nothing) and the Windows signCommand (the NSIS downloads
+# are SHA-1 checked), so the Apple and Azure credentials do share the
+# bundler's environment. See docs/SECURITY.md#release-pipeline-downloads.
+#
+# Secrets and variables live in the `release` environment; see
+# docs/RELEASING.md#secrets-inventory.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CI: true
+  TAG: ${{ github.ref_name }}
+# Tool pins, APP_BIN, GLIBC_FLOOR and LINUX_PACKAGES come from
+# .github/tool-versions.env (loaded by the setup-tauri action); the target
+# matrix from .github/targets.json, read once by `verify`. bundle.yml uses the
+# same two files.
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # verify: the tag names the workspace version.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Verify the tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
+      prerelease: ${{ steps.versions.outputs.prerelease }}
+      require_updater: ${{ steps.updater.outputs.require_updater }}
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The one launcher-version grammar check. zebrad's version is checked
+      # by zebrad-sidecars.yml.
+      - id: versions
+        name: Check the tag against Cargo.toml
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(scripts/workspace-version.sh)"
+          if [ "${TAG}" != "v${version}" ]; then
+            echo "::error::tag ${TAG} does not match [workspace.package] version ${version} (expected v${version})"
+            exit 1
+          fi
+          if ! printf '%s\n' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'; then
+            echo "::error::${version} is not X.Y.Z or X.Y.Z-rc.N"
+            exit 1
+          fi
+          case "${version}" in
+            *-*) prerelease=true ;;
+            *) prerelease=false ;;
+          esac
+          {
+            echo "version=${version}"
+            echo "prerelease=${prerelease}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Zebra Launcher ${version}, prerelease: ${prerelease}" >> "${GITHUB_STEP_SUMMARY}"
+
+      # The five-target matrix, from .github/targets.json through the same
+      # script as bundle.yml (no `targets` input here: a release builds all).
+      - id: targets
+        name: Read the target matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          matrix="$(scripts/select-targets.sh)"
+          echo "${matrix}"
+          echo "matrix=${matrix}" >> "${GITHUB_OUTPUT}"
+
+      # The one place that decides whether this release must ship updater
+      # artifacts (.sig files and latest.json): tauri.conf.json's
+      # bundle.createUpdaterArtifacts, unless the UPDATER_ENABLED repository
+      # variable overrides it (docs/RELEASING.md#secrets-inventory).
+      # bundle_sign, collect-bundles.sh and manifest all use this output.
+      - id: updater
+        name: Decide whether updater artifacts are required
+        shell: bash
+        env:
+          UPDATER_ENABLED: ${{ vars.UPDATER_ENABLED }}
+        run: |
+          set -euo pipefail
+          conf=src-tauri/tauri.conf.json
+          jq empty "${conf}"
+          if jq -e '.bundle.createUpdaterArtifacts == true' "${conf}" > /dev/null; then
+            configured=true
+          else
+            configured=false
+          fi
+          case "${UPDATER_ENABLED}" in
+            "")
+              require="${configured}"
+              ;;
+            false)
+              require=false
+              if [ "${configured}" = true ]; then
+                echo "::warning::UPDATER_ENABLED=false overrides ${conf}: no latest.json, updater signatures not required"
+              fi
+              ;;
+            true)
+              if [ "${configured}" != true ]; then
+                echo "::error::UPDATER_ENABLED=true, but ${conf} does not set bundle.createUpdaterArtifacts to true"
+                exit 1
+              fi
+              require=true
+              ;;
+            *)
+              echo "::error::UPDATER_ENABLED is '${UPDATER_ENABLED}'; use true, false or leave it unset"
+              exit 1
+              ;;
+          esac
+          echo "require_updater=${require}" >> "${GITHUB_OUTPUT}"
+          echo "Updater artifacts required: ${require} (createUpdaterArtifacts: ${configured}, UPDATER_ENABLED: '${UPDATER_ENABLED}')" >> "${GITHUB_STEP_SUMMARY}"
+
+      # After the updater decision, so the public-key check and the artifacts
+      # agree: the real key is required exactly when updater artifacts are.
+      - name: Check tool versions
+        shell: bash
+        env:
+          UPDATER_ENABLED: ${{ steps.updater.outputs.require_updater }}
+        run: scripts/check-versions.sh
+
+  # ---------------------------------------------------------------------------
+  # draft: one draft release, created once, so parallel jobs cannot race to
+  # create duplicates. Re-runs reuse the existing draft.
+  # ---------------------------------------------------------------------------
+  draft:
+    name: Create the draft release
+    needs: [verify, sidecars]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      upload_url: ${{ steps.release.outputs.upload_url }}
+      html_url: ${{ steps.release.outputs.html_url }}
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
+      ZEBRAD_COMMIT: ${{ needs.sidecars.outputs.commit }}
+      PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The CHANGELOG.md section for exactly this version (never another
+      # version's, e.g. 0.2.0-rc.1's for 0.2.0), or a one-line note when there
+      # is none; then how to verify the downloads.
+      - name: Write the release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/notes.md"
+          status=0
+          changes="$(scripts/changelog-section.sh "${VERSION}" CHANGELOG.md)" || status=$?
+          case "${status}" in
+            0) ;;
+            1)
+              echo "::warning::CHANGELOG.md has no section for ${VERSION}"
+              changes="No CHANGELOG.md entry for ${VERSION}."
+              ;;
+            *) exit "${status}" ;;
+          esac
+          {
+            echo "Zebra Launcher ${VERSION}, bundling zebrad ${ZEBRAD_VERSION} (Zebra commit ${ZEBRAD_COMMIT})."
+            echo
+            printf '%s\n' "${changes}"
+            echo
+            echo "## Verifying the downloads"
+            echo
+            echo "Every asset is listed in \`SHA256SUMS\`, which is signed keylessly by this"
+            echo "repository's release workflow, and has a build provenance attestation:"
+            echo
+            echo '```sh'
+            echo "sha256sum -c --ignore-missing SHA256SUMS"
+            echo "cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \\"
+            echo "  --certificate-identity https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG} \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo "gh attestation verify <file> --repo ${GITHUB_REPOSITORY}"
+            echo '```'
+            echo
+            echo "See [SECURITY.md](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/SECURITY.md#verifying-a-download)."
+          } > "${notes}"
+          cat "${notes}"
+
+      - id: release
+        name: Create or reuse the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          find_release() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq -s --arg tag "${TAG}" '[.[][] | select(.tag_name == $tag)]'
+          }
+          found="$(find_release)"
+          if [ "$(jq length <<< "${found}")" -eq 0 ]; then
+            args=(--draft --verify-tag
+              --title "Zebra Launcher ${VERSION} (zebrad ${ZEBRAD_VERSION})"
+              --notes-file "${RUNNER_TEMP}/notes.md")
+            if [ "${PRERELEASE}" = true ]; then
+              args+=(--prerelease)
+            fi
+            gh release create "${TAG}" "${args[@]}"
+            found="$(find_release)"
+          fi
+          if [ "$(jq length <<< "${found}")" -ne 1 ]; then
+            echo "::error::expected one release for ${TAG}, found $(jq length <<< "${found}")"
+            exit 1
+          fi
+          if [ "$(jq -r '.[0].draft' <<< "${found}")" != true ]; then
+            echo "::error::the release for ${TAG} is already published; refusing to modify it"
+            exit 1
+          fi
+          {
+            echo "release_id=$(jq -r '.[0].id' <<< "${found}")"
+            echo "upload_url=$(jq -r '.[0].upload_url' <<< "${found}")"
+            echo "html_url=$(jq -r '.[0].html_url' <<< "${found}")"
+          } >> "${GITHUB_OUTPUT}"
+
+  # ---------------------------------------------------------------------------
+  # sidecars: zebrad for each target (unsigned; signed later by the bundler),
+  # at ZEBRAD_VERSION/ZEBRAD_COMMIT, which it validates. After verify, so a
+  # bad tag fails before the long zebrad builds.
+  # ---------------------------------------------------------------------------
+  sidecars:
+    name: zebrad sidecars
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write # sidecar build provenance
+      attestations: write # sidecar build provenance
+    uses: ./.github/workflows/zebrad-sidecars.yml
+
+  # ---------------------------------------------------------------------------
+  # build: UNPRIVILEGED compile. No secrets, read-only token, no caches.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.target }})
+    needs: [verify, sidecars]
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.verify.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      EXE_SUFFIX: ${{ matrix.exe_suffix }}
+    steps:
+      # git must exist before checkout, or checkout falls back to a tarball.
+      # The rest of LINUX_PACKAGES comes from setup-tauri, which needs the
+      # checkout for .github/tool-versions.env.
+      - name: Install git (Linux container)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-tauri
+
+      # tauri-build needs the sidecar file to exist at compile time.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zebrad-${{ matrix.target }}
+          path: src-tauri/binaries
+      - run: chmod +x "src-tauri/binaries/zebra-launcher-zebrad-${TARGET}${EXE_SUFFIX}"
+
+      - name: Check Cargo.lock is up to date
+        run: cargo fetch --locked
+
+      - name: Compile (no bundle)
+        run: cargo tauri build --target "${TARGET}" --ci --no-bundle
+
+      - name: Check the glibc floor
+        if: runner.os == 'Linux'
+        run: |
+          scripts/check-glibc.sh --floor "${GLIBC_FLOOR}" \
+            "target/${TARGET}/release/${APP_BIN}" \
+            "src-tauri/binaries/zebra-launcher-zebrad-${TARGET}"
+
+      - name: Stage the compiled app
+        run: |
+          set -euo pipefail
+          mkdir -p staged/bin staged/ui-dist
+          cp "target/${TARGET}/release/${APP_BIN}${EXE_SUFFIX}" staged/bin/
+          cp -R ui/dist/. staged/ui-dist/
+          find staged -type f | head -n 50
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: build-${{ matrix.target }}
+          path: staged/
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # bundle_sign: PRIVILEGED. Environment `release` (required reviewer, self-
+  # review blocked). No caches. Packages the compiled app with
+  # `cargo tauri bundle`, which also does the platform signing: Windows
+  # signCommand (Azure Artifact Signing) for the app, the sidecar and the
+  # installer; macOS codesign of the app and sidecar plus notarization. The
+  # updater .sig files are made afterwards by "Sign the updater artifacts",
+  # the only step with the minisign key (see the header). If `cargo tauri
+  # bundle` cannot consume the `build` job's binaries for a target, see
+  # docs/RELEASING.md#if-bundling-the-prebuilt-binaries-fails.
+  # ---------------------------------------------------------------------------
+  bundle_sign:
+    name: Bundle and sign (${{ matrix.target }})
+    needs: [verify, draft, build]
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    environment: release
+    timeout-minutes: 90
+    permissions:
+      contents: write # upload to the draft release
+      id-token: write # azure/login OIDC (Windows)
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.verify.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      EXE_SUFFIX: ${{ matrix.exe_suffix }}
+      APPIMAGE_EXTRACT_AND_RUN: 1
+      REQUIRE_UPDATER: ${{ needs.verify.outputs.require_updater }}
+    steps:
+      # git must exist before checkout, or checkout falls back to a tarball.
+      # The rest of LINUX_PACKAGES comes from setup-tauri, which needs the
+      # checkout for .github/tool-versions.env.
+      - name: Install git (Linux container)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No trunk: the frontend is already embedded in the compiled binary.
+      - uses: ./.github/actions/setup-tauri
+        with:
+          compile: "false"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zebrad-${{ matrix.target }}
+          path: src-tauri/binaries
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-${{ matrix.target }}
+          path: ${{ runner.temp }}/build
+
+      # Puts the compiled binary where `cargo tauri bundle --target` looks for
+      # it, and restores the executable bits that artifacts drop.
+      - name: Place the compiled app
+        run: |
+          set -euo pipefail
+          chmod +x "src-tauri/binaries/zebra-launcher-zebrad-${TARGET}${EXE_SUFFIX}"
+          out="target/${TARGET}/release"
+          mkdir -p "${out}" ui/dist
+          cp "${RUNNER_TEMP}/build/bin/${APP_BIN}${EXE_SUFFIX}" "${out}/"
+          chmod +x "${out}/${APP_BIN}${EXE_SUFFIX}"
+          cp -R "${RUNNER_TEMP}/build/ui-dist/." ui/dist/
+
+      # --- macOS: App Store Connect API key for notarization ------------------
+      - name: Write the App Store Connect API key
+        if: runner.os == 'macOS'
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          key="${RUNNER_TEMP}/AuthKey.p8"
+          (umask 077 && printf '%s\n' "${APPLE_API_PRIVATE_KEY}" > "${key}")
+          echo "APPLE_API_KEY_PATH=${key}" >> "${GITHUB_ENV}"
+
+      # --- Windows: Azure Artifact Signing via OIDC ----------------------------
+      # signtool with Microsoft's Artifact Signing dlib, authenticated by the
+      # Azure CLI session from azure/login (no client secret exists). Not
+      # artifact-signing-cli: it requires AZURE_CLIENT_SECRET and runs its own
+      # `az login --service-principal`, which OIDC cannot provide.
+      - name: Azure login (OIDC)
+        if: runner.os == 'Windows'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Artifact Signing for the Tauri signCommand
+        if: runner.os == 'Windows'
+        env:
+          SIGNING_CLIENT_VERSION: 1.0.146
+          SIGNING_CLIENT_SHA256: 7761e5d8f31e54b764da21d33cd8b0a2940e1b05526c7dfcb5e94b0431426f70
+          SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          SIGNING_ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          SIGNING_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          set -euo pipefail
+          for v in SIGNING_ENDPOINT SIGNING_ACCOUNT SIGNING_PROFILE; do
+            [ -n "${!v}" ] || { echo "::error::release environment variable for ${v} is not set"; exit 1; }
+          done
+          dir="${RUNNER_TEMP}/artifact-signing"
+          mkdir -p "${dir}"
+          curl --proto '=https' --tlsv1.2 -sSfL -o "${dir}/client.nupkg" \
+            "https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/${SIGNING_CLIENT_VERSION}/microsoft.artifactsigning.client.${SIGNING_CLIENT_VERSION}.nupkg"
+          # Compare hashes directly: `sha256sum -c` mishandles Windows paths with backslashes.
+          got="$(sha256sum < "${dir}/client.nupkg" | cut -d' ' -f1)"
+          [ "${got}" = "${SIGNING_CLIENT_SHA256}" ] || { echo "::error::client.nupkg has sha256 ${got}, expected ${SIGNING_CLIENT_SHA256}"; exit 1; }
+          7z x -y -o"${dir}/client" "${dir}/client.nupkg" > /dev/null
+          dlib="$(cygpath -w "${dir}/client/bin/x64/Azure.CodeSigning.Dlib.dll")"
+          shopt -s nullglob
+          signtools=("/c/Program Files (x86)/Windows Kits/10/bin/"10.*/x64/signtool.exe)
+          shopt -u nullglob
+          [ "${#signtools[@]}" -gt 0 ] || { echo "::error::signtool.exe not found"; exit 1; }
+          signtool="$(printf '%s\n' "${signtools[@]}" | sort -V | tail -n 1)"
+          echo "Using ${signtool}"
+          signtool="$(cygpath -w "${signtool}")"
+          # Only the Azure CLI credential from azure/login.
+          jq -n --arg endpoint "${SIGNING_ENDPOINT}" --arg account "${SIGNING_ACCOUNT}" \
+            --arg profile "${SIGNING_PROFILE}" '{
+              Endpoint: $endpoint, CodeSigningAccountName: $account,
+              CertificateProfileName: $profile,
+              ExcludeCredentials: ["EnvironmentCredential", "WorkloadIdentityCredential",
+                "ManagedIdentityCredential", "SharedTokenCacheCredential",
+                "VisualStudioCredential", "VisualStudioCodeCredential",
+                "AzurePowerShellCredential", "AzureDeveloperCliCredential",
+                "InteractiveBrowserCredential"]
+            }' > "${dir}/metadata.json"
+          metadata="$(cygpath -w "${dir}/metadata.json")"
+          config="${RUNNER_TEMP}/tauri.windows-sign.json"
+          jq -n --arg signtool "${signtool}" --arg dlib "${dlib}" --arg metadata "${metadata}" '{
+            bundle: { windows: { signCommand: {
+              cmd: $signtool,
+              args: ["sign", "/v", "/fd", "SHA256",
+                     "/tr", "http://timestamp.acs.microsoft.com", "/td", "SHA256",
+                     "/d", "Zebra Launcher",
+                     "/dlib", $dlib, "/dmdf", $metadata, "%1"]
+            } } }
+          }' > "${config}"
+          cat "${config}"
+
+      # --- Throwaway updater key -----------------------------------------------
+      # With bundle.createUpdaterArtifacts, `cargo tauri bundle` signs the
+      # updater artifacts itself and fails without TAURI_SIGNING_PRIVATE_KEY.
+      # It gets this key instead of the real one (as a path, which tauri-cli
+      # reads as a key file). Its .sig files only record which files to sign;
+      # "Sign the updater artifacts" replaces them.
+      - name: Generate a throwaway updater key
+        run: cargo tauri signer generate --ci -w "${RUNNER_TEMP}/throwaway-updater.key"
+
+      # --- Bundle and platform signing -----------------------------------------
+      # One step per OS, so each sees only the secrets it uses. None of them
+      # sees the updater key.
+      - name: Bundle and sign (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          cargo tauri bundle --target "${TARGET}" --ci
+
+      - name: Bundle and sign (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          # APPLE_API_KEY_PATH comes from GITHUB_ENV (step above).
+        run: |
+          set -euo pipefail
+          export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          cargo tauri bundle --target "${TARGET}" --ci
+
+      - name: Bundle and sign (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          export TAURI_SIGNING_PRIVATE_KEY="${RUNNER_TEMP}/throwaway-updater.key" TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          cargo tauri bundle --target "${TARGET}" --ci --config "${RUNNER_TEMP}/tauri.windows-sign.json"
+
+      - name: Remove the App Store Connect API key
+        if: always() && runner.os == 'macOS'
+        run: rm -f "${RUNNER_TEMP}/AuthKey.p8"
+
+      # --- Updater signatures --------------------------------------------------
+      # The ONLY step with the updater key. It runs nothing the bundler
+      # downloaded, just the sha256-pinned cargo-tauri: `cargo tauri signer
+      # sign --private-key-path <0600 temp file> --app-version ${VERSION}` for
+      # each file the bundler signed with the throwaway key (Linux AppImage and
+      # .deb, macOS .app.tar.gz, Windows NSIS -setup.exe). --app-version writes
+      # the trusted comment the bundler writes (`version:` field), which
+      # plugins.updater.requireSignedVersion needs. Every new signature is
+      # checked against plugins.updater.pubkey.
+      - id: sign-updater-artifacts
+        name: Sign the updater artifacts
+        if: env.REQUIRE_UPDATER == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          pubkey="$(jq -r '.plugins.updater.pubkey // empty' src-tauri/tauri.conf.json)"
+          if [ -z "${pubkey}" ]; then
+            echo "::error::src-tauri/tauri.conf.json has no plugins.updater.pubkey"
+            exit 1
+          fi
+          scripts/sign-updater-artifacts.sh --dir "target/${TARGET}/release/bundle" \
+            --version "${VERSION}" --pubkey "${pubkey}"
+
+      # Updater artifacts not required (UPDATER_ENABLED=false): ship no .sig
+      # files rather than the throwaway ones.
+      - name: Discard the throwaway updater signatures
+        if: env.REQUIRE_UPDATER != 'true'
+        run: find "target/${TARGET}/release/bundle" -type f -name '*.sig' -print -delete
+
+      # --- Upload to the draft -------------------------------------------------
+      - name: Collect bundles
+        run: |
+          set -euo pipefail
+          args=(--target "${TARGET}" --version "${VERSION}" --out dist)
+          if [ "${REQUIRE_UPDATER}" = true ]; then
+            args+=(--require-updater-sigs)
+          fi
+          scripts/collect-bundles.sh "${args[@]}"
+
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.draft.outputs.release_id }}
+          UPLOAD_URL: ${{ needs.draft.outputs.upload_url }}
+        run: |
+          set -euo pipefail
+          scripts/upload-release-assets.sh --release-id "${RELEASE_ID}" --upload-url "${UPLOAD_URL}" dist/*
+
+  # ---------------------------------------------------------------------------
+  # manifest: latest.json, SHA256SUMS + keyless cosign, attestations.
+  # ---------------------------------------------------------------------------
+  manifest:
+    name: Manifest, checksums and attestations
+    needs: [verify, sidecars, draft, bundle_sign]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write # read the draft's assets, upload the manifest
+      id-token: write # keyless cosign signature and attestations
+      attestations: write # store the attestations
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
+      RELEASE_ID: ${{ needs.draft.outputs.release_id }}
+      UPLOAD_URL: ${{ needs.draft.outputs.upload_url }}
+      REQUIRE_UPDATER: ${{ needs.verify.outputs.require_updater }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # From the draft itself, so the checksums cover the exact bytes users
+      # download. Skips this job's own outputs from an earlier attempt.
+      - name: Download the draft's assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" \
+            | jq -r '.[] | [.id, .name] | @tsv' \
+            | while IFS=$'\t' read -r id name; do
+                case "${name}" in
+                  latest.json | SHA256SUMS | SHA256SUMS.sigstore.json) continue ;;
+                esac
+                echo "Downloading ${name}"
+                gh api -H "Accept: application/octet-stream" \
+                  "repos/${GITHUB_REPOSITORY}/releases/assets/${id}" > "assets/${name}"
+              done
+          ls -l assets
+
+      - name: Assemble latest.json
+        if: env.REQUIRE_UPDATER == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/assemble-latest-json.sh --dir assets --version "${VERSION}" --tag "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" --out assets/latest.json \
+            --notes "Zebra Launcher ${VERSION} (zebrad ${ZEBRAD_VERSION}). Release notes: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+
+      - name: Write and sign SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd assets && sha256sum -- * > ../SHA256SUMS)
+          cat SHA256SUMS
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            assets/*
+            SHA256SUMS
+
+      - name: Upload the manifest to the draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(SHA256SUMS SHA256SUMS.sigstore.json)
+          if [ -f assets/latest.json ]; then
+            files+=(assets/latest.json)
+          fi
+          scripts/upload-release-assets.sh --release-id "${RELEASE_ID}" --upload-url "${UPLOAD_URL}" "${files[@]}"
+
+  # ---------------------------------------------------------------------------
+  # summary: what the human does next.
+  # ---------------------------------------------------------------------------
+  summary:
+    name: Smoke-test checklist
+    needs: [verify, draft, manifest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Write the checklist
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          HTML_URL: ${{ needs.draft.outputs.html_url }}
+        run: |
+          set -euo pipefail
+          checklist="$(sed -n '/<!-- smoke-checklist:start -->/,/<!-- smoke-checklist:end -->/p' docs/RELEASING.md)"
+          if [ -z "${checklist}" ]; then
+            echo "::error::no smoke-checklist markers in docs/RELEASING.md"
+            exit 1
+          fi
+          {
+            echo "## Draft release ${TAG} is ready"
+            echo
+            echo "Draft: ${HTML_URL}"
+            echo
+            echo "Smoke-test the draft assets, then publish (docs/RELEASING.md)."
+            echo
+            printf '%s\n' "${checklist}"
+          } >> "${GITHUB_STEP_SUMMARY}"

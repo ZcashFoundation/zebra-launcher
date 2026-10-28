@@ -1,0 +1,594 @@
+/* The zebrad configuration editor on the Configure page (ui/src/pages/configure.rs and
+   ui/src/components/config_form.rs) and its tooltips (ui/src/components/tooltip.rs). Class
+   prefixes: cfg-, help-. The page's base classes (.configure, .page-head, .path, .config-edit,
+   .toml-*) are in styles.css. Tokens only: both themes come from styles.css. */
+
+/* Page head */
+
+.cfg-page .page-head h2 {
+  margin-bottom: 4px;
+}
+
+.cfg-page .path {
+  overflow-wrap: anywhere;
+}
+
+.cfg-page .path:empty {
+  display: none;
+}
+
+.cfg-lead {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+/* Two panes: the form on the left, the file on the right. The file pane sticks to the top of
+   the page while the form scrolls past it, and scrolls inside when the file is long. Below
+   900px one column, the file after the form. */
+
+.cfg-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 55fr) minmax(0, 45fr);
+  gap: 16px 20px;
+  align-items: start;
+}
+
+.cfg-pane-form {
+  min-width: 0;
+  /* The sections' grid follows the pane's width, not the window's. */
+  container-type: inline-size;
+}
+
+.cfg-pane-file {
+  position: sticky;
+  /* The sticky area is inset by the scrolling page's padding; this puts the pane on the page's
+     top edge. */
+  top: calc(-1 * var(--page-pad));
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  /* What the app header, the page's padding and the sticky footer leave: measured in
+     configure.rs (--cfg-room), since both grow with their banners; the calc stands in until
+     the first measurement. */
+  --cfg-pane-max: var(--cfg-room, calc(100vh - 190px));
+  max-height: var(--cfg-pane-max);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+@media (max-width: 900px) {
+  .cfg-panes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cfg-pane-file {
+    position: static;
+    --cfg-pane-max: 60vh;
+  }
+}
+
+.cfg-file-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cfg-file-title {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.cfg-file-summary {
+  flex: 1 1 auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cfg-text-toggle {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.cfg-file-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The file as lines: a number gutter, a mark column and the text. */
+
+.cfg-lines {
+  padding: 8px 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.cfg-line {
+  display: grid;
+  grid-template-columns: 3ch 1ch minmax(0, 1fr);
+  gap: 0 8px;
+  padding: 0 12px 0 8px;
+  border-left: 2px solid transparent;
+}
+
+.cfg-line-no {
+  color: var(--muted);
+  text-align: right;
+  user-select: none;
+}
+
+.cfg-line-mark {
+  color: var(--accent-text);
+  font-weight: 600;
+  user-select: none;
+}
+
+.cfg-line-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A line the saved file does not have: a bar, a tint and a "+" in the gutter. */
+.cfg-line-changed {
+  border-left-color: var(--accent);
+  background: var(--banner-accent-bg);
+}
+
+/* The line last edited in the form: a stronger tint and an outline that fade into the mark.
+   Under reduced motion the fade is dropped, not the highlight: the tint stays while the class
+   does (FLASH_FOR in configure.rs), since the guard in styles.css would end the animation at
+   once and leave no cue. */
+@keyframes cfg-flash {
+  from {
+    background: var(--banner-warn-bg);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+}
+
+.cfg-line-flash {
+  animation: cfg-flash 1.2s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cfg-line-flash {
+    animation: none;
+    background: var(--banner-warn-bg);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+}
+
+/* The file as text, filling the pane: as tall as the pane may be, shrunk to what is left. */
+.cfg-text {
+  flex: 1 1 auto;
+  width: 100%;
+  height: var(--cfg-pane-max);
+  min-height: 240px;
+  border: 0;
+  border-radius: 0;
+  background: var(--panel);
+  resize: none;
+}
+
+.cfg-text:focus-visible {
+  outline-offset: -2px;
+}
+
+.cfg-text[aria-invalid="true"] {
+  box-shadow: inset 0 0 0 2px var(--error);
+}
+
+/* The parse error, where the typing happens; the form pane carries the same error. */
+.cfg-text-error {
+  flex: none;
+  max-height: 30vh;
+  margin: 0;
+  padding: 6px 12px;
+  overflow: auto;
+  border-top: 1px solid var(--error);
+  color: var(--error);
+  white-space: pre-wrap;
+}
+
+/* Form pane */
+
+.cfg-form {
+  min-width: 0;
+}
+
+.cfg-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.cfg-filter {
+  width: 220px;
+  max-width: 100%;
+}
+
+.cfg-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.cfg-notes {
+  margin: 0 0 8px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* The TOML parse error can be long; the form pane must not be all error. */
+.cfg-invalid pre {
+  max-height: 30vh;
+  overflow: auto;
+}
+
+/* The fieldset only exists to disable every control while a save runs or the draft is not
+   TOML. */
+.cfg-fields {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.cfg-fields:disabled {
+  opacity: 0.6;
+}
+
+/* Sections */
+
+.cfg-section {
+  margin: 0 0 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  /* Tooltips reach past the card. */
+  overflow: visible;
+}
+
+.cfg-section > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  padding: 10px 16px;
+  cursor: pointer;
+  list-style: none;
+  border-radius: 8px;
+}
+
+.cfg-section > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* A chevron in place of the default marker: right when closed, down when open. */
+.cfg-section > summary::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-right: 2px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: translateY(-2px) rotate(-45deg);
+}
+
+.cfg-section[open] > summary::before {
+  transform: translateY(-3px) rotate(45deg);
+}
+
+.cfg-section-title {
+  font-weight: 600;
+}
+
+.cfg-section-count {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cfg-section-count:empty {
+  display: none;
+}
+
+.cfg-section-doc {
+  flex-basis: 100%;
+  font-size: 12px;
+  padding-left: 18px;
+}
+
+.cfg-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 24px;
+  padding: 6px 16px 14px;
+  border-top: 1px solid var(--border);
+}
+
+/* One column of fields while the form pane is narrow (the two-pane layout at the default
+   1000px window). */
+@container (max-width: 720px) {
+  .cfg-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Fields */
+
+.cfg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 6px 0 6px 10px;
+  margin-left: -12px;
+  border-left: 2px solid transparent;
+}
+
+/* The field differs from the file: a bar on the left, and the "edited" badge says so. */
+.cfg-field.cfg-edited {
+  border-left-color: var(--accent);
+}
+
+.cfg-field-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+}
+
+.cfg-field-head > label {
+  font-weight: 600;
+}
+
+.cfg-key {
+  margin-left: auto;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.cfg-badge {
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.cfg-badge-edited {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.cfg-field input[type="text"],
+.cfg-field select,
+.cfg-field textarea {
+  width: 100%;
+  max-width: 420px;
+}
+
+.cfg-field textarea {
+  padding: 5px 8px;
+  resize: vertical;
+}
+
+.cfg-mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.cfg-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 29px;
+}
+
+.cfg-check input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.cfg-locked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.cfg-locked input {
+  flex: 1 1 200px;
+  color: var(--text-secondary);
+  background: var(--bg);
+}
+
+.cfg-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  font-size: 12px;
+}
+
+.cfg-meta .cfg-reset {
+  font-size: 12px;
+  color: var(--accent-text);
+}
+
+.cfg-error {
+  flex-basis: 100%;
+}
+
+.cfg-empty {
+  padding: 24px 0;
+  text-align: center;
+}
+
+/* The footer (the failure banner and the action bar) sticks to the bottom of the page under
+   both panes, so a failed save is seen from wherever Save was pressed. Its containing block is
+   the page's content, so it moves within it and ends above the reset section. */
+
+.cfg-footer {
+  position: sticky;
+  /* The sticky area is inset by the scrolling page's padding; this puts the footer on the
+     page's bottom edge instead of above it with content showing under. */
+  bottom: calc(-1 * var(--page-pad));
+  z-index: 2;
+  /* `pane_room` in configure.rs leaves the same gap when it sizes the file pane. */
+  margin-top: var(--cfg-footer-gap);
+  padding-top: 8px;
+  background: var(--bg);
+}
+
+.cfg-footer .banner {
+  margin: 0 0 8px;
+}
+
+/* zebrad's error can be long; the stuck footer must not take the whole viewport. */
+.cfg-footer .error-panel pre {
+  max-height: 30vh;
+  overflow: auto;
+}
+
+.cfg-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  margin: 0;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.cfg-changes {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.cfg-changed-list {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.cfg-changed-list:empty {
+  display: none;
+}
+
+/* Never hidden while empty: a live region is announced only when text changes inside a region
+   that is already in the accessibility tree. Empty, it has no height in the row. */
+.cfg-status {
+  margin: 0;
+  flex: 1 1 auto;
+}
+
+.cfg-bar .buttons {
+  margin-left: auto;
+}
+
+/* Help icons and their tooltips */
+
+.help {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.help .help-icon {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--muted);
+  border-radius: 50%;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+  cursor: help;
+}
+
+.help .help-icon:hover,
+.help .help-icon:focus-visible,
+.help .help-icon.help-pinned {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+/* Above the icon, centred, until the measurement in tooltip.rs says otherwise; the gap is
+   `--help-gap`, which tooltip.rs allows for too. */
+.help-tip {
+  display: none;
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + var(--help-gap));
+  z-index: 5;
+  width: max-content;
+  max-width: 320px;
+  padding: 6px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 2px 8px var(--shadow);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: normal;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  transform: translateX(calc(-50% + var(--help-shift, 0px)));
+  visibility: hidden;
+}
+
+.help-tip.help-open {
+  display: block;
+}
+
+.help-tip.help-placed {
+  visibility: visible;
+}
+
+.help-tip.help-below {
+  bottom: auto;
+  top: calc(100% + var(--help-gap));
+}
+
+/* A transparent strip over the gap keeps the pointer inside .help while it moves onto the
+   box, so the box can be read and its text selected (WCAG 1.4.13). As a part of the box it is
+   only there while the box is shown. */
+.help-tip::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: var(--help-gap);
+}
+
+.help-tip.help-below::before {
+  top: auto;
+  bottom: 100%;
+}
+
+/* The Settings page's pointer to the Configure tab, under the Node fieldset's rows. */
+.cfg-settings-pointer {
+  margin: 6px 0 0;
+  font-size: 12px;
+}

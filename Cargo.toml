@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/launcher-types", "crates/launcher-core", "ui", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/ZcashFoundation/zebra-launcher"
+publish = false
+
+[workspace.dependencies]
+launcher-types = { path = "crates/launcher-types" }
+launcher-core = { path = "crates/launcher-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", default-features = false }
+tracing = "0.1"
+tempfile = "3"
+nix = { version = "0.31", default-features = false }
+windows-sys = "0.61"
+libc = "0.2"
+toml_edit = "0.25"
+# Loopback JSON-RPC only: plain HTTP, no TLS stack.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+base64 = "0.22"
+# Platform directories, for zebrad's default cache dir (alpha.4 leftovers).
+dirs = "7"
+
+[workspace.lints.clippy]
+# Shared state uses channels, `watch`, atomics or semaphores. See clippy.toml.
+disallowed_types = "deny"
+
+# The UI's release build (`trunk build --release`, selected in `ui/index.html`): a small wasm
+# matters more than speed there. Other release builds are unaffected.
+[profile.release-wasm]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

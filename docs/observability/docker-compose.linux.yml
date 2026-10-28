@@ -1,0 +1,31 @@
+# Linux (Docker Engine) override: run Prometheus and Grafana on the host network so
+# Prometheus can scrape zebrad on 127.0.0.1:9999. Both services bind to 127.0.0.1
+# only, because published ports do not apply to host networking. See README.md in this
+# directory for the whole stack.
+#
+#   docker compose -f docs/observability/docker-compose.yml -f docs/observability/docker-compose.linux.yml up -d
+#
+# `!reset` drops the published ports and extra_hosts of the base file (checked with
+# Docker Compose 2.23.3). The health checks and the startup order come from the base
+# file unchanged: they probe 127.0.0.1:9090 and 127.0.0.1:3000, which is where the
+# services listen here.
+
+services:
+  prometheus:
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.listen-address=127.0.0.1:9090
+    volumes:
+      - ./prometheus.linux.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts: !reset []
+    ports: !reset []
+
+  grafana:
+    network_mode: host
+    environment:
+      PROMETHEUS_URL: http://127.0.0.1:9090
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3000"
+    ports: !reset []

@@ -1,0 +1,9 @@
+[toolchain]
+# The one toolchain everything builds with: `cargo` here, ci.yml (through
+# actions-rust-lang/setup-rust-toolchain, which reads this file), and the bundle and
+# release workflows (setup-tauri installs this channel). It must be at least 1.90 for
+# Tauri 2.12 and 1.88 for Leptos 0.8. The crates declare no `rust-version`: the workspace
+# is never published, and this channel is the only toolchain that is tested.
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

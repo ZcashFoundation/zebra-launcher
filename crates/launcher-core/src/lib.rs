@@ -1,0 +1,24 @@
+//! Zebra Launcher logic that does not depend on Tauri.
+//!
+//! The Tauri app is a thin bridge over this crate: it maps commands and events to
+//! the handles exposed here, so everything in this crate is testable with plain
+//! `cargo test` against the `fake-zebrad` binary.
+
+pub mod apply;
+pub mod clock;
+pub mod config;
+pub mod diagnostics;
+pub mod firstrun;
+mod fsutil;
+pub mod logfile;
+pub mod logs;
+pub mod metrics;
+pub mod monitor;
+pub mod paths;
+pub mod pidfile;
+pub mod policy;
+pub mod process;
+pub mod rpc;
+pub mod settings;
+pub mod supervisor;
+pub mod updates;

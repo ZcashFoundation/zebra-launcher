@@ -1,0 +1,301 @@
+# Backstop for the 14-day zebrad bump SLA (docs/RELEASING.md). Once a day it
+# compares Zebra's latest stable release with ZEBRAD_VERSION and, when Zebra is
+# ahead, opens (or updates) a bump pull request on branch bump/zebrad-<ver>.
+# The Zebra release checklist is the primary trigger; this only catches a
+# missed bump.
+#
+# "Latest stable release" is the highest tag matching vX.Y.Z (sort -V) among
+# non-draft releases that carry SHA256SUMS.sigstore.json. Neither the
+# releases/latest endpoint nor the prerelease flag is used: Zebra published
+# v7.0.0-rc.0 with `prerelease: false`, and a release without its signed
+# binaries cannot be bundled.
+#
+# The pull request is pushed with a GitHub App installation token, because
+# pushes and pull requests made with GITHUB_TOKEN do not trigger other
+# workflows, so CI would never run on the bump PR. Secrets:
+#   ZEBRA_LAUNCHER_APP_ID           the App's ID
+#   ZEBRA_LAUNCHER_APP_PRIVATE_KEY  a PEM private key of the App
+# The App must be installed on this repository with Contents and Pull
+# requests read/write. Without these secrets the workflow falls back to an
+# issue "Bump zebrad to <ver>" labelled release-blocker, opened with
+# GITHUB_TOKEN.
+#
+# Run it by hand (Actions → zebrad watch → Run workflow) with `dry_run` to
+# print the diff it would make without pushing anything or needing secrets;
+# set `version` to a release other than ZEBRAD_VERSION (an older one works)
+# to see a non-empty diff.
+#
+# GitHub disables scheduled workflows after 60 days without repository
+# activity; re-enable it from the Actions tab if that happens.
+name: zebrad watch
+
+on:
+  schedule:
+    # Daily at 05:17 UTC, off the top of the hour when scheduled runs pile up.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Zebra release to bump to, without a leading "v" (empty picks the latest stable release)
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: Only print the diff the bump would make; push nothing, open nothing
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  ZEBRA_REPO: ZcashFoundation/zebra
+
+jobs:
+  check:
+    name: Compare Zebra's latest release with ZEBRAD_VERSION
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      newer: ${{ steps.resolve.outputs.newer }}
+      version: ${{ steps.resolve.outputs.version }}
+      commit: ${{ steps.resolve.outputs.commit }}
+      release_url: ${{ steps.resolve.outputs.release_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+          # shellcheck disable=SC1091 # the version grammars live in scripts/lib.sh
+          . scripts/lib.sh
+          current="$(read_zebrad_version .)"
+
+          # Prints the tag of every release that can be bundled.
+          bundlable_tags() {
+            gh api "repos/${ZEBRA_REPO}/releases" --paginate --jq '
+              .[]
+              | select(.draft | not)
+              | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+              | select(any(.assets[]; .name == "SHA256SUMS.sigstore.json"))
+              | .tag_name'
+          }
+
+          if [ -n "${INPUT_VERSION}" ]; then
+            # Only a stable release can be pinned (the grammar of ZEBRAD_VERSION).
+            is_stable_version "${INPUT_VERSION}" \
+              || die "version input '${INPUT_VERSION}' is not X.Y.Z without a leading v"
+            tag="v${INPUT_VERSION}"
+            if ! bundlable_tags | grep -Fxq "${tag}"; then
+              echo "::error::${ZEBRA_REPO} has no published release ${tag} with SHA256SUMS.sigstore.json"
+              exit 1
+            fi
+          else
+            tag="$(bundlable_tags | sort -V | tail -n 1)"
+            if [ -z "${tag}" ]; then
+              echo "::error::no ${ZEBRA_REPO} release matches vX.Y.Z with SHA256SUMS.sigstore.json"
+              exit 1
+            fi
+          fi
+          version="${tag#v}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+          # A forced version may be older (useful with dry_run); the latest
+          # release must be strictly newer to bump.
+          if [ "${version}" = "${current}" ]; then
+            echo "::notice::ZEBRAD_VERSION ${current} is already Zebra ${tag}; nothing to do"
+            echo "newer=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          highest="$(printf '%s\n%s\n' "${current}" "${version}" | sort -V | tail -n 1)"
+          if [ -z "${INPUT_VERSION}" ] && [ "${highest}" = "${current}" ]; then
+            echo "::notice::ZEBRAD_VERSION ${current} is newer than Zebra's latest release ${tag}; nothing to do"
+            echo "newer=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # Resolve the tag to its commit. Zebra's tags are annotated, so the
+          # ref points at a tag object that has to be dereferenced.
+          read -r type sha < <(gh api "repos/${ZEBRA_REPO}/git/ref/tags/${tag}" --jq '.object.type + " " + .object.sha')
+          for _ in 1 2 3 4 5; do
+            [ "${type}" = tag ] || break
+            read -r type sha < <(gh api "repos/${ZEBRA_REPO}/git/tags/${sha}" --jq '.object.type + " " + .object.sha')
+          done
+          if [ "${type}" != commit ] || ! is_full_sha "${sha}"; then
+            die "could not resolve ${tag} to a commit (got ${type} ${sha})"
+          fi
+
+          echo "::notice::Zebra ${tag} (${sha}) differs from ZEBRAD_VERSION ${current}"
+          {
+            echo "newer=true"
+            echo "commit=${sha}"
+            echo "release_url=https://github.com/${ZEBRA_REPO}/releases/tag/${tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+  # Manual dry run: shows the bump without secrets or write access.
+  preview:
+    name: Show the bump diff (dry run)
+    needs: check
+    if: github.event_name == 'workflow_dispatch' && inputs.dry_run && needs.check.outputs.newer == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          VERSION: ${{ needs.check.outputs.version }}
+          COMMIT: ${{ needs.check.outputs.commit }}
+        run: |
+          set -euo pipefail
+          scripts/bump-zebrad.sh "${VERSION}" "${COMMIT}"
+          git --no-pager diff --stat
+          git --no-pager diff
+
+  bump:
+    name: Open the bump pull request
+    needs: check
+    if: needs.check.outputs.newer == 'true' && !inputs.dry_run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      COMMIT: ${{ needs.check.outputs.commit }}
+      RELEASE_URL: ${{ needs.check.outputs.release_url }}
+      BRANCH: bump/zebrad-${{ needs.check.outputs.version }}
+    steps:
+      # `secrets` cannot appear in a step's `if`, so test them through env.
+      - id: secrets
+        env:
+          APP_ID: ${{ secrets.ZEBRA_LAUNCHER_APP_ID }}
+          APP_KEY: ${{ secrets.ZEBRA_LAUNCHER_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "${APP_ID}" ] && [ -n "${APP_KEY}" ]; then
+            echo "app=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "app=false" >> "${GITHUB_OUTPUT}"
+            echo "::warning::ZEBRA_LAUNCHER_APP_ID / ZEBRA_LAUNCHER_APP_PRIVATE_KEY are not set; opening an issue instead of a pull request"
+          fi
+
+      - id: app-token
+        if: steps.secrets.outputs.app == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.ZEBRA_LAUNCHER_APP_ID }}
+          private-key: ${{ secrets.ZEBRA_LAUNCHER_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The App token makes the push trigger CI on the pull request.
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          persist-credentials: ${{ steps.secrets.outputs.app == 'true' }}
+
+      - name: Apply the bump
+        run: |
+          set -euo pipefail
+          scripts/bump-zebrad.sh "${VERSION}" "${COMMIT}"
+          git --no-pager diff --stat
+
+      - name: Write the pull request body
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/body.md" <<EOF
+          Zebra released [v${VERSION}](${RELEASE_URL}) at commit
+          [\`${COMMIT}\`](https://github.com/${ZEBRA_REPO}/commit/${COMMIT}).
+          Opened by \`zebrad-watch.yml\`; the launcher must ship it within 14 days
+          ([zebrad bump SLA](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/RELEASING.md#zebrad-bump-sla)).
+
+          This changes \`ZEBRAD_VERSION\` and \`ZEBRAD_COMMIT\` together (the fake zebrad
+          reads \`ZEBRAD_VERSION\` when it is built); \`scripts/check-versions.sh\` passes.
+
+          Checklist ([docs/SIDECARS.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/SIDECARS.md#bumping-zebrad_version)):
+
+          - [ ] The commit matches the one on the [release page](${RELEASE_URL}).
+          - [ ] \`scripts/fetch-zebrad-linux.sh --out /tmp/zebrad-check/zebrad\` passes (cosign and attestation checks against \`ZEBRAD_COMMIT\`).
+          - [ ] The **zebrad sidecars** workflow passes on all five targets from this branch (empty \`version\` input).
+          - [ ] Zebra's changelog checked for config or CLI changes the launcher depends on (config schema, log lines the status parser reads).
+          - [ ] The previous release's generated config validates against the new zebrad.
+          - [ ] Log fixtures re-captured if zebrad's wording changed.
+          - [ ] Grafana dashboards re-vendored with \`docs/observability/sync-dashboards.sh\`.
+          EOF
+
+      - name: Push the branch and open or update the pull request
+        if: steps.secrets.outputs.app == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          title="build: bump zebrad to ${VERSION}"
+
+          # Never overwrite an existing branch: a maintainer may have pushed
+          # fixes to it. Only the first run for a version creates it.
+          if git ls-remote --exit-code --heads origin "refs/heads/${BRANCH}" > /dev/null; then
+            echo "::notice::${BRANCH} already exists; leaving its commits alone"
+          else
+            bot_id="$(gh api "users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+            git config user.name "${APP_SLUG}[bot]"
+            git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+            git switch -c "${BRANCH}"
+            git commit -am "${title}" -m "Zebra v${VERSION} is commit ${COMMIT}. Opened by zebrad-watch.yml."
+            git push origin "${BRANCH}"
+          fi
+
+          pr="$(gh pr list --head "${BRANCH}" --state all --json number,state \
+            --jq 'map(select(.state == "OPEN")) + map(select(.state != "OPEN")) | .[0] // empty | "\(.number) \(.state)"')"
+          if [ -z "${pr}" ]; then
+            gh pr create --base "${GITHUB_REF_NAME}" --head "${BRANCH}" --title "${title}" --body-file "${RUNNER_TEMP}/body.md"
+          elif [ "${pr#* }" = OPEN ]; then
+            gh pr edit "${pr%% *}" --title "${title}" --body-file "${RUNNER_TEMP}/body.md"
+            echo "::notice::updated pull request #${pr%% *}"
+          else
+            # Closed or merged without ZEBRAD_VERSION moving: a maintainer
+            # decided against it. Say so every day rather than reopening.
+            echo "::warning::pull request #${pr%% *} for ${BRANCH} is ${pr#* }; not reopening it. ZEBRAD_VERSION is still behind Zebra v${VERSION}."
+          fi
+
+      - name: Open or update the fallback issue
+        if: steps.secrets.outputs.app != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title="Bump zebrad to ${VERSION}"
+          label=release-blocker
+          if ! gh api "repos/${GITHUB_REPOSITORY}/labels/${label}" --silent 2> /dev/null; then
+            gh label create "${label}" --color B60205 --description "Must be fixed before the next release"
+          fi
+          {
+            echo
+            echo "_No bump pull request was opened: the \`ZEBRA_LAUNCHER_APP_ID\` and \`ZEBRA_LAUNCHER_APP_PRIVATE_KEY\` secrets are not set (see docs/SIDECARS.md). Run \`scripts/bump-zebrad.sh ${VERSION} ${COMMIT}\` and open the PR by hand._"
+          } >> "${RUNNER_TEMP}/body.md"
+          # Lists by label (no search index), so a re-run right after the
+          # first one still finds the issue.
+          # The title is "Bump zebrad to X.Y.Z", safe to splice into jq.
+          issue="$(gh issue list --label "${label}" --state open --limit 200 --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          if [ -n "${issue}" ]; then
+            gh issue edit "${issue}" --body-file "${RUNNER_TEMP}/body.md"
+            echo "::notice::updated issue #${issue}"
+          else
+            gh issue create --title "${title}" --label "${label}" --body-file "${RUNNER_TEMP}/body.md"
+          fi

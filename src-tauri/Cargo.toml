@@ -1,23 +1,57 @@
 [package]
-name = "zebra-app"
-version = "0.0.0-alpha.4"
-description = "Zebra App"
-authors = ["you"]
-edition = "2021"
+name = "zebra-launcher"
+description = "Zebra Launcher: a desktop app that runs and supervises zebrad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+default-run = "zebra-launcher"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "zebra_launcher"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zebra-launcher"
+path = "src/main.rs"
 
 [build-dependencies]
-tauri-build = { version = "2.0.0-beta", features = [] }
+tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-tauri = { version = "2.0.0-beta.6", features = ["devtools"] }
-tauri-plugin-shell = "2.0.0-beta"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1.36.0", features = ["full", "tracing", "test-util"] }
-tracing = "0.1.40"
+launcher-core = { workspace = true }
+launcher-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri = { version = "2.12", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
+# >= 2.12 for CVE-2026-95625; 2.14 for `requireSignedVersion` and `Update::verify`.
+# No `zip` feature: it only unpacks `.nsis.zip` and `.AppImage.tar.gz` updates,
+# and we ship the raw NSIS installer and AppImage (macOS `.app.tar.gz` support
+# is unconditional). It also pulls `zip` 4 (RUSTSEC-2026-0367/0368/0369).
+tauri-plugin-updater = { version = "2.14", default-features = false, features = [
+    "rustls-tls",
+    "system-proxy",
+] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
+tracing = { workspace = true }
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "env-filter",
+    "fmt",
+    "ansi",
+    "std",
+] }
 
-[features]
-# This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!
-custom-protocol = ["tauri/custom-protocol"]
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+
+[lints]
+workspace = true

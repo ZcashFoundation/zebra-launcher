@@ -1,0 +1,1565 @@
+//! Types shared by the Zebra Launcher backend and its UI.
+//!
+//! This crate is compiled both natively and to WebAssembly, so it stays free of
+//! async runtimes, Tauri, and platform-specific code.
+
+#![forbid(unsafe_code)]
+
+use std::{
+    fmt,
+    net::SocketAddr,
+    ops::RangeInclusive,
+    str::FromStr,
+    time::{Duration, SystemTime},
+};
+
+use serde::{Deserialize, Serialize};
+
+/// The names of the events the backend emits and the UI listens to. Logs do
+/// not go through an event: they take a `tauri::ipc::Channel` of
+/// `Vec<LogLine>` batches, set up by the `subscribe_logs` command.
+pub mod events {
+    /// Every [`Status`](crate::Status) change.
+    pub const STATUS: &str = "status";
+    /// Every `Option<NodeStats>` change ([`NodeStats`](crate::NodeStats)).
+    pub const NODE_STATS: &str = "node_stats";
+    /// Every `Option<NodeDetails>` change
+    /// ([`NodeDetails`](crate::NodeDetails)): the details behind the node
+    /// statistics, from the same RPC poll.
+    pub const NODE_DETAILS: &str = "node_details";
+    /// zebrad was to start at launch, but a zebrad from an earlier launcher
+    /// run is still alive: a [`StaleProcessInfo`](crate::StaleProcessInfo).
+    /// The UI offers `start_zebrad_killing_stale`.
+    pub const STALE_PROCESS: &str = "stale_process";
+    /// Every [`UpdateState`](crate::UpdateState) change.
+    pub const UPDATE_STATE: &str = "update_state";
+    /// Every [`UpdateInfo`](crate::UpdateInfo) change.
+    pub const UPDATE_INFO: &str = "update_info";
+    /// The launcher did not come back healthy after an update: an
+    /// [`UpdateHealthFailure`](crate::UpdateHealthFailure).
+    pub const UPDATE_HEALTH_FAILED: &str = "update_health_failed";
+    /// Every `Option<MetricsSnapshot>` change
+    /// ([`MetricsSnapshot`](crate::MetricsSnapshot)): zebrad's Prometheus
+    /// metrics, read every 10 s while it runs.
+    pub const METRICS: &str = "metrics";
+}
+
+/// A location the `open_path` command opens with the system's default
+/// handler. On the wire it is the snake_case name (`config_dir`, ...).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenTarget {
+    /// The launcher's configuration directory, with `zebrad.toml`.
+    ConfigDir,
+    /// The chosen chain data directory, or the launcher's data directory
+    /// when none was chosen.
+    DataDir,
+    /// The directory with the launcher and zebrad logs.
+    LogDir,
+    /// The launcher's releases page, in the browser.
+    ReleasesPage,
+    /// The launcher's source repository, in the browser.
+    Repo,
+    /// The Grafana URL from the settings, in the browser. Fails when none is
+    /// set.
+    Grafana,
+    /// zebrad's Prometheus metrics page, `http://<metrics_addr>/metrics`, in
+    /// the browser. Fails while zebrad is not running.
+    MetricsEndpoint,
+}
+
+/// Where a log line came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogStream {
+    /// zebrad's stdout.
+    Stdout,
+    /// zebrad's stderr.
+    Stderr,
+    /// A note added by the launcher itself, such as "zebrad exited".
+    Launcher,
+}
+
+/// A `tracing` log level as zebrad prints it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    /// The upper-case name zebrad prints.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LogLevel::Trace => "TRACE",
+            LogLevel::Debug => "DEBUG",
+            LogLevel::Info => "INFO",
+            LogLevel::Warn => "WARN",
+            LogLevel::Error => "ERROR",
+        }
+    }
+}
+
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The error returned when a string is not one of the five `tracing` levels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnknownLogLevel(pub String);
+
+impl fmt::Display for UnknownLogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown log level {:?}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownLogLevel {}
+
+impl FromStr for LogLevel {
+    type Err = UnknownLogLevel;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "TRACE" => Ok(LogLevel::Trace),
+            "DEBUG" => Ok(LogLevel::Debug),
+            "INFO" => Ok(LogLevel::Info),
+            "WARN" => Ok(LogLevel::Warn),
+            "ERROR" => Ok(LogLevel::Error),
+            other => Err(UnknownLogLevel(other.to_string())),
+        }
+    }
+}
+
+/// One line of zebrad output, parsed where possible.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogLine {
+    /// Sequence number assigned by the supervisor. A gap means lines were dropped.
+    pub seq: u64,
+    /// The pipe the line was read from.
+    pub stream: LogStream,
+    /// The RFC 3339 UTC timestamp as zebrad printed it, if the line had one.
+    pub timestamp: Option<String>,
+    /// The log level, if the line had one.
+    pub level: Option<LogLevel>,
+    /// The `tracing` span context, such as `sig{kind=SignalKind(15) name="SIGTERM"}`, if any.
+    pub spans: Option<String>,
+    /// The `tracing` target, such as `zebrad::signal`, if any.
+    pub target: Option<String>,
+    /// The message and its fields. For lines without a timestamp and level,
+    /// such as continuation lines of a multi-line message, this is the whole line.
+    pub message: String,
+    /// Set on a gap marker only (see [`LogLine::gap_marker`]): how many lines
+    /// the receiver fell behind on. Absent from the wire for every other line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped: Option<u64>,
+}
+
+impl LogLine {
+    /// The launcher's stand-in for `dropped` lines a slow receiver missed.
+    ///
+    /// It takes `seq`, the sequence number of the last dropped line, so the
+    /// sequence the receiver sees stays contiguous; the dropped lines can be
+    /// fetched with `log_history` while they are still retained. The message
+    /// says the same for display, but [`LogLine::dropped`] is what marks the
+    /// line as a gap: a launcher note that happens to use the same words is
+    /// not one.
+    pub fn gap_marker(dropped: u64, seq: u64) -> Self {
+        LogLine {
+            seq,
+            stream: LogStream::Launcher,
+            timestamp: None,
+            level: Some(LogLevel::Warn),
+            spans: None,
+            target: None,
+            message: format!("{dropped} lines dropped"),
+            dropped: Some(dropped),
+        }
+    }
+
+    /// Whether this line stands in for dropped lines (see [`LogLine::gap_marker`]).
+    pub fn is_gap_marker(&self) -> bool {
+        self.dropped.is_some()
+    }
+}
+
+/// A notable event detected in zebrad output.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LogEvent {
+    /// zebrad's tracing component is up: the first line of every run.
+    TracingStarted,
+    /// The Prometheus metrics listener is bound.
+    MetricsOpened { addr: SocketAddr },
+    /// The Zcash P2P listener is bound.
+    P2pOpened { addr: SocketAddr },
+    /// The RPC auth cookie file has been written.
+    RpcCookieWritten,
+    /// The JSON-RPC listener is bound.
+    RpcOpened { addr: SocketAddr },
+    /// `Starting zebrad`: the configuration loaded and the components initialised.
+    StartingZebrad,
+    /// A shutdown was requested; `reason` is `SIGTERM`, `SIGINT`, `Ctrl-C`, or similar.
+    ShutdownRequested { reason: String },
+    /// Tasks are being shut down.
+    ShuttingDown,
+    /// `stopping zebrad`: the last line of a graceful shutdown.
+    Stopped,
+    /// End-of-support warning: this release halts soon.
+    EosWarn { message: String },
+    /// End-of-support halt: this release is too old and refuses to run.
+    EosHalt { message: String },
+    /// The configuration file or environment could not be loaded.
+    ConfigError,
+    /// `zebrad fatal error: ...`, with the detail that follows it.
+    FatalError { message: String },
+    /// Another process holds the state database lock.
+    DbLocked { message: String },
+    /// A listener address is already in use.
+    PortInUse { message: String },
+    /// Any other panic.
+    Panic { message: String },
+}
+
+/// Why a zebrad run ended, derived from its exit status and the detected events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitClass {
+    /// Exit code 0, or a kill by the launcher after the stop grace period. A non-zero exit
+    /// or a panic during a requested stop keeps its own class.
+    Clean,
+    /// The configuration could not be loaded.
+    ConfigError,
+    /// The release is past its end of support.
+    EosHalt,
+    /// Another process holds the state database lock.
+    DbLocked,
+    /// A listener address is already in use.
+    PortInUse,
+    /// The process could not be started at all, for example because the binary is missing.
+    SpawnFailed,
+    /// An unexpected exit: a non-zero code, a signal, or a panic with no known cause.
+    Crash,
+}
+
+impl ExitClass {
+    /// Returns true when restarting without a change cannot help.
+    pub fn is_deterministic(self) -> bool {
+        matches!(
+            self,
+            ExitClass::ConfigError
+                | ExitClass::EosHalt
+                | ExitClass::DbLocked
+                | ExitClass::PortInUse
+                | ExitClass::SpawnFailed
+        )
+    }
+}
+
+/// What the supervisor is doing with zebrad.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum Phase {
+    /// No zebrad is running and none is scheduled.
+    #[default]
+    Stopped,
+    /// zebrad was spawned and is loading its configuration.
+    Starting,
+    /// zebrad accepted its configuration and is running.
+    Running,
+    /// A stop was requested; waiting for zebrad to exit.
+    Stopping,
+    /// zebrad crashed; a restart is scheduled.
+    Backoff {
+        /// When the restart happens.
+        until: SystemTime,
+        /// How many crashes happened in the current window.
+        crashes: u32,
+    },
+    /// zebrad will not be restarted until the user intervenes.
+    Failed {
+        /// Why.
+        class: ExitClass,
+    },
+}
+
+impl Phase {
+    /// zebrad runs, or will without the user doing anything: it was spawned
+    /// ([`Phase::Starting`]), accepted its configuration ([`Phase::Running`])
+    /// or crashed and is scheduled to restart ([`Phase::Backoff`]). Such a
+    /// node is restarted by a configuration change and brought back after a
+    /// launcher update; a [`Phase::Stopping`] node is left stopped.
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Phase::Starting | Phase::Running | Phase::Backoff { .. }
+        )
+    }
+
+    /// No zebrad runs and none is scheduled: [`Phase::Stopped`], or
+    /// [`Phase::Failed`], which waits for the user. Only then may the node
+    /// data change. [`Phase::Stopping`] is neither active nor settled.
+    pub fn is_settled(&self) -> bool {
+        matches!(self, Phase::Stopped | Phase::Failed { .. })
+    }
+}
+
+/// How the last zebrad run ended.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitInfo {
+    /// The exit code, or `None` when zebrad was killed by a signal.
+    pub code: Option<i32>,
+    /// The classification derived from the exit code and the logged events.
+    pub class: ExitClass,
+    /// zebrad's own description of a fatal error or panic, if it logged one.
+    pub detail: Option<String>,
+    /// When the exit was observed.
+    pub at: SystemTime,
+    /// Whether the launcher asked zebrad to stop.
+    pub requested: bool,
+}
+
+/// A zebrad process left behind by an earlier launcher run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StaleProcessInfo {
+    /// Its process id.
+    pub pid: u32,
+    /// The zebrad binary it was started from, for display.
+    pub binary: String,
+}
+
+/// The supervisor's view of zebrad, published on a `watch` channel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Status {
+    /// The current phase.
+    pub phase: Phase,
+    /// The pid of the running zebrad, while there is one.
+    pub pid: Option<u32>,
+    /// When the current run was spawned.
+    pub started_at: Option<SystemTime>,
+    /// The RPC address zebrad reported as opened in this run.
+    pub rpc_addr: Option<SocketAddr>,
+    /// The metrics address zebrad reported as opened in this run.
+    pub metrics_addr: Option<SocketAddr>,
+    /// How the previous run ended.
+    pub last_exit: Option<ExitInfo>,
+    /// A zebrad from an earlier launcher run that is still alive, if detected.
+    pub stale: Option<StaleProcessInfo>,
+    /// Whether a requested stop lets zebrad run its shutdown: the supervisor
+    /// closes its stdin (zebrad started with `--shutdown-on-stdin-close`) or
+    /// sends `SIGTERM`. False when a stop terminates the process instead,
+    /// which is the case on Windows while the bundled zebrad lacks the
+    /// stdin-close flag: a hard stop, with no `stopping zebrad` lines. Fixed
+    /// for the supervisor's lifetime, set from its configuration. A status
+    /// from a backend without the field reads as graceful.
+    #[serde(default = "stop_is_graceful_default")]
+    pub stop_is_graceful: bool,
+    /// Automatic restarts after a crash since the launcher started: every
+    /// scheduled restart that was carried out. Starts the user asked for and
+    /// configuration changes do not count. A status from a backend without
+    /// the field reads as zero.
+    #[serde(default)]
+    pub restarts: u32,
+    /// How the last requested stop went, once one has finished: how long
+    /// zebrad took to exit and whether the launcher had to kill it. A stop
+    /// requested after zebrad had already exited is not one.
+    #[serde(default)]
+    pub last_stop: Option<StopReport>,
+}
+
+fn stop_is_graceful_default() -> bool {
+    true
+}
+
+/// How a requested stop went ([`Status::last_stop`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopReport {
+    /// When the stop was requested.
+    pub requested_at: SystemTime,
+    /// When zebrad's exit was recorded.
+    pub exited_at: SystemTime,
+    /// The launcher killed zebrad: the graceful stop did not finish within
+    /// the grace period, or this platform cannot stop it gracefully
+    /// ([`Status::stop_is_graceful`]).
+    pub forced: bool,
+}
+
+impl Default for Status {
+    /// Stopped, with nothing recorded and a graceful stop.
+    fn default() -> Self {
+        Self {
+            phase: Phase::Stopped,
+            pid: None,
+            started_at: None,
+            rpc_addr: None,
+            metrics_addr: None,
+            last_exit: None,
+            stale: None,
+            stop_is_graceful: true,
+            restarts: 0,
+            last_stop: None,
+        }
+    }
+}
+
+/// The Zcash network zebrad runs on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Network {
+    /// The main network.
+    #[default]
+    Mainnet,
+    /// The public test network.
+    Testnet,
+}
+
+impl Network {
+    /// The name zebrad uses in `network.network`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Network::Mainnet => "Mainnet",
+            Network::Testnet => "Testnet",
+        }
+    }
+}
+
+impl fmt::Display for Network {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How the launcher handles its own updates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateMode {
+    /// Never check for updates.
+    #[default]
+    Off,
+    /// Check and tell the user, but do not install.
+    Notify,
+    /// Check, download and install.
+    Auto,
+}
+
+/// The launcher's appearance: which of its light and dark looks the UI uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    /// Follow the operating system's light or dark preference, and change with it.
+    #[default]
+    System,
+    /// Always the light look.
+    Light,
+    /// Always the dark look.
+    Dark,
+}
+
+impl Theme {
+    /// The name on the wire and in `launcher.json`, as serde writes it:
+    /// `system`, `light` or `dark`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Theme::System => "system",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        }
+    }
+}
+
+/// The launcher's own settings, stored in `launcher.json`.
+///
+/// Missing fields take their default, so older files keep loading.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// The file format version. Files older than version 2 predate
+    /// `first_run_done` and are migrated when loaded (see
+    /// [`Settings::first_run_done`]).
+    pub schema_version: u32,
+    /// How launcher updates are handled.
+    pub update_mode: UpdateMode,
+    /// Closing the window hides it to the tray instead of quitting.
+    pub close_to_tray: bool,
+    /// Start zebrad when the launcher starts.
+    pub start_node_on_launch: bool,
+    /// The Grafana dashboard URL to embed: `http://127.0.0.1` or
+    /// `http://localhost` with any port and path, see [`is_loopback_http_url`].
+    pub grafana_url: Option<String>,
+    /// The directory chosen for the chain state, if not the default.
+    pub data_dir: Option<String>,
+    /// The network zebrad runs on.
+    pub network: Network,
+    /// How long a graceful stop may take before zebrad is killed, in seconds.
+    pub stop_grace_secs: u64,
+    /// The first-run flow was completed (`complete_first_run`). Until then
+    /// the UI shows it and zebrad is not started.
+    ///
+    /// New installs start with `false`. A `launcher.json` written before
+    /// schema version 2 belongs to a user who already ran the launcher, so
+    /// loading it sets this to `true`.
+    pub first_run_done: bool,
+    /// The light or dark look, or following the operating system. Files
+    /// without it follow the system.
+    pub theme: Theme,
+}
+
+impl Settings {
+    /// The current [`Settings::schema_version`].
+    pub const SCHEMA_VERSION: u32 = 2;
+}
+
+/// The shortest stop grace period that can be saved, in seconds
+/// ([`Settings::stop_grace_secs`]). The backend validates against these
+/// bounds and the settings form applies them to its field.
+pub const MIN_STOP_GRACE_SECS: u64 = 5;
+/// The longest stop grace period that can be saved, in seconds.
+pub const MAX_STOP_GRACE_SECS: u64 = 3600;
+/// The stop grace periods that can be saved, in seconds:
+/// [`MIN_STOP_GRACE_SECS`]`..=`[`MAX_STOP_GRACE_SECS`].
+pub const STOP_GRACE_SECS: RangeInclusive<u64> = MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS;
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            update_mode: UpdateMode::Off,
+            close_to_tray: true,
+            start_node_on_launch: true,
+            grafana_url: None,
+            data_dir: None,
+            network: Network::Mainnet,
+            stop_grace_secs: 60,
+            first_run_done: false,
+            theme: Theme::System,
+        }
+    }
+}
+
+/// Returns true when `url` is an `http://` URL whose host is exactly
+/// `127.0.0.1` or `localhost`, with an optional port (1 to 65535) and any
+/// path, query or fragment. Scheme and host are compared ignoring case.
+///
+/// This is the one rule for [`Settings::grafana_url`], shared by the backend
+/// and the UI: the app's content security policy allows exactly
+/// `frame-src http://127.0.0.1:* http://localhost:*`, so `https`, `[::1]` and
+/// other loopback addresses would be refused by the webview anyway. User
+/// info, backslashes and whitespace are refused because browsers parse them
+/// in surprising ways.
+pub fn is_loopback_http_url(url: &str) -> bool {
+    let Some(rest) = url
+        .get(..7)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("http://"))
+        .map(|_| &url[7..])
+    else {
+        return false;
+    };
+    if rest.contains(['\\', '@']) || rest.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    let port_ok = port.is_none_or(|digits| {
+        digits.bytes().all(|b| b.is_ascii_digit()) && matches!(digits.parse::<u16>(), Ok(1..))
+    });
+    port_ok && (host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost"))
+}
+
+/// Node statistics polled from zebrad's JSON-RPC interface.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeStats {
+    /// The height of the best verified block.
+    pub height: u64,
+    /// zebrad's estimate of the network chain tip height.
+    pub estimated_height: u64,
+    /// Sync progress from 0.0 to 1.0.
+    pub verification_progress: f64,
+    /// Connected peers.
+    pub peers: u32,
+    /// Transactions in the mempool.
+    pub mempool_transactions: u64,
+    /// The chain name zebrad reports, such as `main` or `test`.
+    pub chain: String,
+    /// The zebrad version, from `getinfo`.
+    pub zebrad_version: String,
+    /// The last warning or error: the RPC error that prevented the last poll,
+    /// or else zebrad's own `getinfo.errors` when it is not empty.
+    pub last_error: Option<String>,
+    /// When this release stops running, on Mainnet.
+    pub eos: Option<EosInfo>,
+    /// When these stats were last refreshed.
+    pub updated_at: SystemTime,
+}
+
+/// When the running zebrad release reaches its end of support and halts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EosInfo {
+    /// The block height at which zebrad halts.
+    pub block_height: u64,
+    /// zebrad's estimate of when that block is reached.
+    pub estimated_time: SystemTime,
+}
+
+/// The details behind [`NodeStats`], polled from zebrad's JSON-RPC interface
+/// by the same poll: the `node_details` event and `get_node_details`. `None`
+/// on the wire while zebrad is not running. Every field but `updated_at` is
+/// optional, so a field a zebrad release does not report cannot fail the poll.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NodeDetails {
+    /// The peers zebrad is connected to or knows, from `getpeerinfo`.
+    #[serde(default)]
+    pub peers: Vec<PeerInfo>,
+    /// The hash of the best block, hex.
+    #[serde(default)]
+    pub best_block_hash: Option<String>,
+    /// The height of the best chain's headers.
+    #[serde(default)]
+    pub headers: Option<u64>,
+    /// The network difficulty at the tip.
+    #[serde(default)]
+    pub difficulty: Option<f64>,
+    /// zebrad's estimate of the chain state's size on disk, in bytes.
+    #[serde(default)]
+    pub size_on_disk: Option<u64>,
+    /// The issued supply in ZEC: the sum of the value pools.
+    #[serde(default)]
+    pub chain_supply_zec: Option<f64>,
+    /// The value pools and their balances, in zebrad's order.
+    #[serde(default)]
+    pub value_pools: Vec<ValuePool>,
+    /// The active network upgrade, such as `NU6`: the `active` entry of
+    /// `getblockchaininfo.upgrades` with the highest activation height.
+    #[serde(default)]
+    pub active_upgrade: Option<String>,
+    /// zebrad's P2P user agent, such as `/Zebra:7.0.0/`.
+    #[serde(default)]
+    pub subversion: Option<String>,
+    /// The P2P protocol version zebrad speaks.
+    #[serde(default)]
+    pub protocol_version: Option<u32>,
+    /// The size of the mempool's transactions, in bytes.
+    #[serde(default)]
+    pub mempool_bytes: Option<u64>,
+    /// The memory the mempool uses, in bytes.
+    #[serde(default)]
+    pub mempool_usage: Option<u64>,
+    /// When these details were last refreshed.
+    pub updated_at: SystemTime,
+}
+
+/// One peer, from `getpeerinfo`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PeerInfo {
+    /// The peer's address, `ip:port`.
+    pub addr: String,
+    /// The peer connected to us (true) or we to it (false).
+    pub inbound: bool,
+    /// The peer's user agent, such as `/Zebra:7.0.0/` or `/MagicBean:6.2.0/`.
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    /// The negotiated protocol version.
+    #[serde(default)]
+    pub protocol_version: Option<u32>,
+    /// The connection state zebrad reports, such as `connected` or `failed`.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// When a message was last exchanged with the peer.
+    #[serde(default)]
+    pub last_seen: Option<SystemTime>,
+    /// The round-trip ping time, in seconds.
+    #[serde(default)]
+    pub ping_secs: Option<f64>,
+}
+
+/// A value pool's balance.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ValuePool {
+    /// The pool: `transparent`, `sprout`, `sapling`, `orchard`, `lockbox` or
+    /// `ironwood`.
+    pub id: String,
+    /// The balance in ZEC.
+    pub zec: f64,
+}
+
+/// zebrad's end-of-support warning: this close to the estimated halt, Auto mode installs a
+/// downloaded update (after a countdown) and the dashboard offers "Check for updates".
+pub const EOS_WARNING_WINDOW: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+
+/// The estimated end of support is at most `window` after `now` (or already past).
+pub fn eos_within(estimated_time: SystemTime, now: SystemTime, window: Duration) -> bool {
+    match now.checked_add(window) {
+        Some(limit) => estimated_time <= limit,
+        None => true,
+    }
+}
+
+/// One read of zebrad's Prometheus metrics endpoint (`/metrics`), parsed from
+/// the text exposition format: the `metrics` event and `get_metrics`. `None`
+/// on the wire while zebrad is not running or its endpoint stopped answering.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetricsSnapshot {
+    /// When the page was read.
+    pub at: SystemTime,
+    /// The metric families, in the order of the page.
+    pub families: Vec<MetricFamily>,
+}
+
+impl MetricsSnapshot {
+    /// The family called `name` (the base name, such as `zcash_net_peers`).
+    pub fn family(&self, name: &str) -> Option<&MetricFamily> {
+        self.families.iter().find(|family| family.name == name)
+    }
+
+    /// The value of the gauge `name`: its unlabelled sample, or its only
+    /// sample ([`MetricFamily::single`]). `None` for a family of another kind
+    /// (an untyped family counts as a gauge) or with several labelled
+    /// samples; use [`MetricsSnapshot::total`] for those.
+    pub fn gauge(&self, name: &str) -> Option<f64> {
+        self.family(name)
+            .filter(|family| matches!(family.kind, MetricKind::Gauge | MetricKind::Untyped))?
+            .single()
+    }
+
+    /// The value of the counter `name`, like [`MetricsSnapshot::gauge`].
+    pub fn counter(&self, name: &str) -> Option<f64> {
+        self.family(name)
+            .filter(|family| matches!(family.kind, MetricKind::Counter | MetricKind::Untyped))?
+            .single()
+    }
+
+    /// The sum over every sample of the counter or gauge `name`
+    /// ([`MetricFamily::total`]), such as `state_requests` over its `type`
+    /// labels.
+    pub fn total(&self, name: &str) -> Option<f64> {
+        self.family(name)?.total()
+    }
+}
+
+/// A metric and its samples: one per label set, plus the `_bucket`, `_sum`
+/// and `_count` samples of a histogram or summary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetricFamily {
+    /// The base name as exported, such as `zcash_net_peers`. zebrad registers
+    /// dotted names (`zcash.net.peers`); its exporter writes dots as
+    /// underscores.
+    pub name: String,
+    /// The `# TYPE`, or [`MetricKind::Untyped`] without one.
+    pub kind: MetricKind,
+    /// The `# HELP` text, if the page had one.
+    pub help: Option<String>,
+    /// The samples, in the order of the page.
+    pub samples: Vec<MetricSample>,
+}
+
+impl MetricFamily {
+    /// The family's one value: the sample without labels, or the only sample
+    /// when there is just one (zebrad labels some gauges with `network`).
+    /// `None` for several labelled samples, for the parts of a histogram or
+    /// summary, and for an empty family.
+    pub fn single(&self) -> Option<f64> {
+        let own = self
+            .samples
+            .iter()
+            .filter(|sample| sample.name == self.name);
+        if let Some(sample) = own.clone().find(|sample| sample.labels.is_empty()) {
+            return Some(sample.value);
+        }
+        match self.samples.as_slice() {
+            [only] if only.name == self.name => Some(only.value),
+            _ => None,
+        }
+    }
+
+    /// The sum over every sample, for a counter, gauge or untyped family.
+    /// `None` for a histogram or summary, whose samples are not one quantity,
+    /// and for an empty family.
+    pub fn total(&self) -> Option<f64> {
+        if matches!(self.kind, MetricKind::Histogram | MetricKind::Summary)
+            || self.samples.is_empty()
+        {
+            return None;
+        }
+        Some(self.samples.iter().map(|sample| sample.value).sum())
+    }
+}
+
+/// A metric family's `# TYPE`. On the wire it is the snake_case name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricKind {
+    /// Only goes up, such as `zcash_net_in_bytes_total`.
+    Counter,
+    /// Goes up and down, such as `zcash_net_peers`.
+    Gauge,
+    /// `_bucket{le="..."}` counts, `_sum` and `_count`.
+    Histogram,
+    /// `{quantile="..."}` values, `_sum` and `_count`.
+    Summary,
+    /// No `# TYPE` line.
+    Untyped,
+}
+
+/// One sample of a metric family.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetricSample {
+    /// The full sample name, such as `sync_block_verify_duration_seconds_bucket`.
+    pub name: String,
+    /// The label pairs in page order, such as `("le", "0.5")`.
+    pub labels: Vec<(String, String)>,
+    /// The value. `NaN` and the infinities travel as the strings `"NaN"`,
+    /// `"+Inf"` and `"-Inf"`, because JSON has no such numbers.
+    #[serde(with = "metric_value")]
+    pub value: f64,
+}
+
+/// Serde for [`MetricSample::value`]: finite values are numbers; `NaN`,
+/// `+Inf` and `-Inf` are those strings; and a `null`, which is what
+/// serde_json writes for a bare non-finite float, reads as `NaN`.
+mod metric_value {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+
+    pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        if value.is_finite() {
+            serializer.serialize_f64(*value)
+        } else if value.is_nan() {
+            serializer.serialize_str("NaN")
+        } else if value.is_sign_positive() {
+            serializer.serialize_str("+Inf")
+        } else {
+            serializer.serialize_str("-Inf")
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Number(Option<f64>),
+        Text(String),
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Number(Some(value)) => value,
+            Wire::Number(None) => f64::NAN,
+            Wire::Text(text) => match text.as_str() {
+                "NaN" => f64::NAN,
+                "+Inf" | "Inf" => f64::INFINITY,
+                "-Inf" => f64::NEG_INFINITY,
+                other => {
+                    return Err(D::Error::custom(format!("invalid metric value {other:?}")));
+                }
+            },
+        })
+    }
+}
+
+/// The launcher-managed `zebrad.toml`, as shown in the editor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigDocument {
+    /// The file content.
+    pub text: String,
+    /// A compare-and-swap token: pass it back when saving, so an edit made by
+    /// someone else in the meantime is detected instead of overwritten.
+    pub token: String,
+    /// The file's path, for display.
+    pub path: String,
+}
+
+/// The result of saving an edited `zebrad.toml` (`apply_config`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApplyOutcome {
+    /// zebrad started with the new file, which is now kept.
+    Applied,
+    /// zebrad refused the new file: the previous file was restored and
+    /// zebrad restarted with it.
+    RolledBack {
+        /// zebrad's description of what is wrong with the new file.
+        error: String,
+    },
+}
+
+/// Why an edited `zebrad.toml` was not saved at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyErrorKind {
+    /// The text is not valid TOML.
+    InvalidToml,
+    /// A key has a value the launcher does not allow, such as a non-loopback
+    /// RPC address.
+    Forbidden,
+    /// The file changed since it was read; reload it and edit again.
+    Conflict,
+    /// Another configuration change is still being applied.
+    ApplyInProgress,
+    /// Reading or writing the file failed.
+    Io,
+    /// The node data is being changed (the data directory, an import or a
+    /// deletion of the state); try again when that has finished.
+    Busy,
+    /// The launcher is shutting down, so zebrad could not be restarted.
+    Closed,
+    /// The launcher could not finish the change for a reason that is neither
+    /// the file's nor zebrad's (a task of its own failed); the launcher log
+    /// has the detail.
+    Internal,
+}
+
+/// The rejection returned by `apply_config` when the new file was not saved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyError {
+    /// What kind of problem it is.
+    pub kind: ApplyErrorKind,
+    /// A message for the user.
+    pub message: String,
+}
+
+impl fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApplyError {}
+
+/// What the first-run flow shows (`get_first_run_info`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstRunInfo {
+    /// True until the first-run flow was completed (`complete_first_run`),
+    /// so always true while there is no `launcher.json` yet.
+    pub is_first_run: bool,
+    /// The launcher's own data directory. The chain state goes into its
+    /// `state` subdirectory unless the user chooses another data directory.
+    pub default_data_dir: String,
+    /// Free space on the volume holding [`Self::default_data_dir`], if it
+    /// could be read. Mainnet state needs hundreds of GB.
+    pub free_bytes_at_default: Option<u64>,
+    /// Files left by the v0.0.0-alpha.4 prototype, if any were found.
+    pub legacy: Option<LegacyInstall>,
+}
+
+/// Files left by the v0.0.0-alpha.4 prototype.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyInstall {
+    /// A `zebrad.toml` next to the launcher executable, if present. It is
+    /// only reported; the launcher never reads it.
+    pub config_file: Option<String>,
+    /// zebrad's default cache directory (`~/.cache/zebra` on Linux,
+    /// `~/Library/Caches/zebra` on macOS, `%LOCALAPPDATA%\zebra` on Windows),
+    /// when it holds a `state` directory. A zebrad run from a terminal uses
+    /// the same directory.
+    pub state_dir: Option<String>,
+    /// The size of `<state_dir>/state` in bytes, as far as it was counted.
+    pub state_bytes: u64,
+    /// True when counting stopped early, so [`Self::state_bytes`] is a lower bound.
+    pub state_bytes_is_lower_bound: bool,
+}
+
+/// What `import_legacy_state` moved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportOutcome {
+    /// The directory that was moved.
+    pub from: String,
+    /// Where it is now.
+    pub to: String,
+}
+
+/// The result of `choose_data_dir`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataDirChoice {
+    /// The saved settings, with the new `data_dir`.
+    pub settings: Settings,
+    /// Free space on the chosen volume, if it could be read. Warning about
+    /// too little space is up to the UI.
+    pub free_bytes: Option<u64>,
+}
+
+/// What the launcher's updater is doing. Sent with every change as the
+/// `update_state` event and returned by `get_update_state`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UpdateState {
+    /// Nothing to report: no check has run yet, or updates were turned off.
+    #[default]
+    Idle,
+    /// Asking the update endpoint for the latest release.
+    Checking,
+    /// A newer release exists; `install_update` downloads and installs it.
+    Available {
+        /// The new launcher version.
+        version: String,
+        /// The release notes, if the manifest has them.
+        notes: Option<String>,
+        /// When the release was published, if the manifest says.
+        pub_date: Option<SystemTime>,
+    },
+    /// The new release is being downloaded.
+    Downloading {
+        /// The version being downloaded.
+        version: String,
+        /// Bytes received so far.
+        downloaded: u64,
+        /// The size of the download, when the server sent it.
+        total: Option<u64>,
+    },
+    /// The new release is downloaded and its signature verified.
+    ReadyToInstall {
+        /// The version that will be installed.
+        version: String,
+        /// Seconds until it installs by itself, while an automatic install
+        /// counts down (Auto mode at the end-of-support warning);
+        /// `cancel_update` stops the countdown. `None`: waits for the user.
+        countdown_secs: Option<u64>,
+    },
+    /// zebrad is being stopped and the update installed; the launcher
+    /// restarts next.
+    Installing {
+        /// The version being installed.
+        version: String,
+    },
+    /// The last check found no newer release.
+    UpToDate {
+        /// When that check finished.
+        checked_at: SystemTime,
+    },
+    /// The last check, download or install failed.
+    Error {
+        /// What went wrong, for the user.
+        message: String,
+        /// When it happened.
+        at: SystemTime,
+    },
+}
+
+/// A recovery the UI offers when the launcher did not come back healthy after
+/// an update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryAction {
+    /// Open the log directory (`open_path` with [`OpenTarget::LogDir`]).
+    OpenLogs,
+    /// Restore the default `zebrad.toml`.
+    ResetConfig,
+    /// Open the releases page, to reinstall a previous version by hand.
+    OpenReleasesPage,
+}
+
+/// The launcher did not come back healthy after an update: the
+/// `update_health_failed` event, also kept in [`UpdateInfo::health_failure`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateHealthFailure {
+    /// The version the update was installing.
+    pub expected_version: String,
+    /// The version that is running now.
+    pub running_version: String,
+    /// What went wrong, for the user.
+    pub message: String,
+    /// What the UI should offer, in order.
+    pub recovery: Vec<RecoveryAction>,
+    /// The releases page, where previous installers can be downloaded.
+    pub releases_url: String,
+}
+
+/// Everything the UI shows about launcher updates: the `update_info` event
+/// and `get_update_info`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateInfo {
+    /// What the updater is doing.
+    pub state: UpdateState,
+    /// The mode from the settings.
+    pub mode: UpdateMode,
+    /// The running launcher version.
+    pub current_version: String,
+    /// When a check last reached the update endpoint, across launches.
+    pub last_successful_check: Option<SystemTime>,
+    /// The end of support is near and no check succeeded in the last 14 days:
+    /// the UI suggests checking for an update.
+    pub stale_check_warning: bool,
+    /// False where this install cannot update itself (the `.deb` package, or
+    /// a development build): the UI links to [`UpdateInfo::releases_url`]
+    /// instead of offering to install.
+    pub can_install: bool,
+    /// The releases page.
+    pub releases_url: String,
+    /// Set when this launch followed an update that did not come back healthy.
+    pub health_failure: Option<UpdateHealthFailure>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eos_window_bounds() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let day = Duration::from_secs(86_400);
+        assert!(eos_within(now - day, now, EOS_WARNING_WINDOW), "past");
+        assert!(eos_within(
+            now + EOS_WARNING_WINDOW,
+            now,
+            EOS_WARNING_WINDOW
+        ));
+        assert!(!eos_within(
+            now + EOS_WARNING_WINDOW + day,
+            now,
+            EOS_WARNING_WINDOW
+        ));
+    }
+
+    #[test]
+    fn apply_payload_shapes() {
+        assert_eq!(
+            serde_json::to_value(ApplyOutcome::Applied).unwrap(),
+            serde_json::json!({"kind": "applied"})
+        );
+        assert_eq!(
+            serde_json::to_value(ApplyOutcome::RolledBack {
+                error: "bad key".into()
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "rolled_back", "error": "bad key"})
+        );
+        assert_eq!(
+            serde_json::to_value(ApplyError {
+                kind: ApplyErrorKind::ApplyInProgress,
+                message: "busy".into()
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "apply_in_progress", "message": "busy"})
+        );
+        for (kind, name) in [
+            (ApplyErrorKind::InvalidToml, "invalid_toml"),
+            (ApplyErrorKind::Forbidden, "forbidden"),
+            (ApplyErrorKind::Conflict, "conflict"),
+            (ApplyErrorKind::ApplyInProgress, "apply_in_progress"),
+            (ApplyErrorKind::Io, "io"),
+            (ApplyErrorKind::Busy, "busy"),
+            (ApplyErrorKind::Closed, "closed"),
+            (ApplyErrorKind::Internal, "internal"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn open_targets_are_snake_case_on_the_wire() {
+        for (target, name) in [
+            (OpenTarget::ConfigDir, "config_dir"),
+            (OpenTarget::DataDir, "data_dir"),
+            (OpenTarget::LogDir, "log_dir"),
+            (OpenTarget::ReleasesPage, "releases_page"),
+            (OpenTarget::Repo, "repo"),
+            (OpenTarget::Grafana, "grafana"),
+            (OpenTarget::MetricsEndpoint, "metrics_endpoint"),
+        ] {
+            assert_eq!(serde_json::to_value(target).unwrap(), name);
+            let parsed: OpenTarget = serde_json::from_value(serde_json::json!(name)).unwrap();
+            assert_eq!(parsed, target);
+        }
+        assert!(serde_json::from_value::<OpenTarget>(serde_json::json!("home")).is_err());
+    }
+
+    #[test]
+    fn phase_predicates_cover_every_phase() {
+        let backoff = Phase::Backoff {
+            until: SystemTime::UNIX_EPOCH,
+            crashes: 1,
+        };
+        let failed = Phase::Failed {
+            class: ExitClass::Crash,
+        };
+        for phase in [Phase::Starting, Phase::Running, backoff] {
+            assert!(phase.is_active(), "{phase:?}");
+            assert!(!phase.is_settled(), "{phase:?}");
+        }
+        for phase in [Phase::Stopped, failed] {
+            assert!(!phase.is_active(), "{phase:?}");
+            assert!(phase.is_settled(), "{phase:?}");
+        }
+        assert!(!Phase::Stopping.is_active());
+        assert!(!Phase::Stopping.is_settled());
+    }
+
+    #[test]
+    fn gap_markers_carry_a_typed_count() {
+        let marker = LogLine::gap_marker(3, 9);
+        assert!(marker.is_gap_marker());
+        assert_eq!(marker.seq, 9);
+        assert_eq!(marker.stream, LogStream::Launcher);
+        assert_eq!(marker.message, "3 lines dropped");
+        let json = serde_json::to_value(&marker).unwrap();
+        assert_eq!(json["dropped"], 3);
+        assert_eq!(json["stream"], "launcher");
+
+        // The field marks a gap, not the words: a launcher note that uses them is not one,
+        // and no other line carries the field on the wire.
+        let note = LogLine {
+            dropped: None,
+            ..LogLine::gap_marker(3, 9)
+        };
+        assert!(!note.is_gap_marker());
+        let json = serde_json::to_value(&note).unwrap();
+        assert!(json.get("dropped").is_none(), "{json}");
+
+        // A payload from a backend without the field still deserializes.
+        let old: LogLine = serde_json::from_str(
+            r#"{"seq":1,"stream":"stdout","timestamp":null,"level":null,"spans":null,"target":null,"message":"x"}"#,
+        )
+        .expect("old payload");
+        assert_eq!(old.dropped, None);
+        let round_trip: LogLine =
+            serde_json::from_value(serde_json::to_value(&marker).unwrap()).unwrap();
+        assert_eq!(round_trip, marker);
+    }
+
+    #[test]
+    fn default_status_is_stopped_and_empty() {
+        let status = Status::default();
+        assert_eq!(status.phase, Phase::Stopped);
+        assert_eq!(status.pid, None);
+        assert_eq!(status.last_exit, None);
+        assert_eq!(status.stale, None);
+        assert!(status.stop_is_graceful);
+        assert_eq!(status.restarts, 0);
+        assert_eq!(status.last_stop, None);
+    }
+
+    #[test]
+    fn stop_is_graceful_defaults_to_true_on_the_wire() {
+        // A payload from a backend without the field.
+        let old: Status = serde_json::from_str(
+            r#"{"phase":{"phase":"running"},"pid":7,"started_at":null,"rpc_addr":null,"metrics_addr":null,"last_exit":null,"stale":null}"#,
+        )
+        .expect("old payload");
+        assert!(old.stop_is_graceful);
+        assert_eq!(old.restarts, 0, "session counters default on the wire");
+        assert_eq!(old.last_stop, None);
+        let hard = Status {
+            stop_is_graceful: false,
+            restarts: 3,
+            last_stop: Some(StopReport {
+                requested_at: SystemTime::UNIX_EPOCH,
+                exited_at: SystemTime::UNIX_EPOCH + Duration::from_secs(61),
+                forced: true,
+            }),
+            ..Status::default()
+        };
+        let json = serde_json::to_value(&hard).unwrap();
+        assert_eq!(json["stop_is_graceful"], false);
+        assert_eq!(json["restarts"], 3);
+        assert_eq!(json["last_stop"]["forced"], true);
+        let round_trip: Status = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, hard);
+    }
+
+    #[test]
+    fn loopback_urls() {
+        for ok in [
+            "http://127.0.0.1:3000/d/zebra-overview?kiosk&theme=dark",
+            "http://localhost",
+            "http://localhost:3000",
+            "HTTP://LOCALHOST:3000/",
+            "http://127.0.0.1?x",
+            "http://127.0.0.1#top",
+            "http://127.0.0.1:65535/a/b?c=d#e",
+        ] {
+            assert!(is_loopback_http_url(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "http://",
+            "https://localhost",
+            "https://127.0.0.1:3000",
+            "ftp://127.0.0.1",
+            "javascript:alert(1)",
+            "//127.0.0.1",
+            "127.0.0.1:3000",
+            "http://[::1]:3000/x#y",
+            "http://[::1",
+            "http://0.0.0.0:3000",
+            "http://127.0.0.2:3000",
+            "http://10.0.0.1:3000",
+            "http://example.com",
+            "http://127.0.0.1.example.com",
+            "http://localhost.example.com:3000",
+            "http://127.0.0.1@example.com",
+            "http://example.com@127.0.0.1",
+            "http://localhost:",
+            "http://localhost:0",
+            "http://localhost:99999",
+            "http://localhost:+80",
+            "http://localhost:3000x",
+            "http://localhost:30:00",
+            "http://127.0.0.1\\@example.com",
+            "http://127.0.0.1 /",
+            "http://127.0.0.1/a b",
+            " http://127.0.0.1",
+            "h\u{e9}://127.0.0.1",
+        ] {
+            assert!(!is_loopback_http_url(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn update_state_shapes() {
+        assert_eq!(
+            serde_json::to_value(UpdateState::Idle).unwrap(),
+            serde_json::json!({"state": "idle"})
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateState::ReadyToInstall {
+                version: "0.2.0".into(),
+                countdown_secs: Some(42)
+            })
+            .unwrap(),
+            serde_json::json!({"state": "ready_to_install", "version": "0.2.0", "countdown_secs": 42})
+        );
+        assert_eq!(
+            serde_json::to_value(UpdateState::Downloading {
+                version: "0.2.0".into(),
+                downloaded: 10,
+                total: None
+            })
+            .unwrap(),
+            serde_json::json!({"state": "downloading", "version": "0.2.0", "downloaded": 10, "total": null})
+        );
+        assert_eq!(
+            serde_json::to_value(RecoveryAction::OpenReleasesPage).unwrap(),
+            "open_releases_page"
+        );
+    }
+
+    #[test]
+    fn settings_defaults_fill_missing_fields() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"network":"testnet"}"#).expect("partial settings parse");
+        assert_eq!(
+            settings,
+            Settings {
+                network: Network::Testnet,
+                ..Settings::default()
+            }
+        );
+        assert_eq!(settings.theme, Theme::System);
+    }
+
+    #[test]
+    fn stop_grace_bounds_hold_the_default() {
+        assert_eq!(STOP_GRACE_SECS, MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS);
+        assert!(STOP_GRACE_SECS.contains(&Settings::default().stop_grace_secs));
+        assert!(!STOP_GRACE_SECS.contains(&(MIN_STOP_GRACE_SECS - 1)));
+        assert!(!STOP_GRACE_SECS.contains(&(MAX_STOP_GRACE_SECS + 1)));
+    }
+
+    #[test]
+    fn theme_is_snake_case_on_the_wire() {
+        assert_eq!(serde_json::to_value(Theme::System).unwrap(), "system");
+        assert_eq!(serde_json::to_value(Theme::Light).unwrap(), "light");
+        let settings: Settings =
+            serde_json::from_str(r#"{"theme":"dark"}"#).expect("settings with a theme parse");
+        assert_eq!(settings.theme, Theme::Dark);
+    }
+
+    #[test]
+    fn theme_as_str_is_the_serde_name() {
+        for theme in [Theme::System, Theme::Light, Theme::Dark] {
+            assert_eq!(serde_json::to_value(theme).unwrap(), theme.as_str());
+            let parsed: Theme = serde_json::from_value(serde_json::json!(theme.as_str())).unwrap();
+            assert_eq!(parsed, theme);
+        }
+    }
+
+    #[test]
+    fn node_details_tolerate_a_sparse_payload() {
+        let details: NodeDetails =
+            serde_json::from_str(r#"{"updated_at":{"secs_since_epoch":1,"nanos_since_epoch":0}}"#)
+                .expect("details with the time only");
+        assert!(details.peers.is_empty());
+        assert_eq!(details.best_block_hash, None);
+        assert_eq!(details.chain_supply_zec, None);
+        assert!(details.value_pools.is_empty());
+        assert_eq!(details.active_upgrade, None);
+        assert_eq!(details.mempool_usage, None);
+        assert_eq!(
+            details.updated_at,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1)
+        );
+        let peer: PeerInfo = serde_json::from_str(r#"{"addr":"192.0.2.1:8233","inbound":true}"#)
+            .expect("a peer with the address only");
+        assert_eq!(peer.addr, "192.0.2.1:8233");
+        assert!(peer.inbound);
+        assert_eq!(peer.user_agent, None);
+        assert_eq!(peer.last_seen, None);
+        assert_eq!(peer.ping_secs, None);
+        let full = NodeDetails {
+            peers: vec![peer],
+            value_pools: vec![ValuePool {
+                id: "sapling".into(),
+                zec: 0.5,
+            }],
+            active_upgrade: Some("NU6".into()),
+            ..details
+        };
+        let round_trip: NodeDetails =
+            serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
+        assert_eq!(round_trip, full);
+    }
+
+    fn sample(name: &str, labels: &[(&str, &str)], value: f64) -> MetricSample {
+        MetricSample {
+            name: name.into(),
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            value,
+        }
+    }
+
+    fn family(name: &str, kind: MetricKind, samples: Vec<MetricSample>) -> MetricFamily {
+        MetricFamily {
+            name: name.into(),
+            kind,
+            help: None,
+            samples,
+        }
+    }
+
+    #[test]
+    fn metric_values_survive_json() {
+        for (value, json) in [
+            (1.5, serde_json::json!(1.5)),
+            (0.0, serde_json::json!(0.0)),
+            (f64::INFINITY, serde_json::json!("+Inf")),
+            (f64::NEG_INFINITY, serde_json::json!("-Inf")),
+        ] {
+            let encoded = serde_json::to_value(sample("m", &[("le", "+Inf")], value)).unwrap();
+            assert_eq!(encoded["value"], json);
+            assert_eq!(encoded["labels"], serde_json::json!([["le", "+Inf"]]));
+            let decoded: MetricSample = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded.value, value);
+        }
+        let encoded = serde_json::to_value(sample("m", &[], f64::NAN)).unwrap();
+        assert_eq!(encoded["value"], "NaN");
+        let decoded: MetricSample = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.value.is_nan());
+        // A bare non-finite float is `null` in JSON; that reads as NaN too.
+        let decoded: MetricSample =
+            serde_json::from_str(r#"{"name":"m","labels":[],"value":null}"#).unwrap();
+        assert!(decoded.value.is_nan());
+        assert!(
+            serde_json::from_str::<MetricSample>(r#"{"name":"m","labels":[],"value":"lots"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn metric_kinds_are_snake_case_on_the_wire() {
+        for (kind, name) in [
+            (MetricKind::Counter, "counter"),
+            (MetricKind::Gauge, "gauge"),
+            (MetricKind::Histogram, "histogram"),
+            (MetricKind::Summary, "summary"),
+            (MetricKind::Untyped, "untyped"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
+            let parsed: MetricKind = serde_json::from_value(serde_json::json!(name)).unwrap();
+            assert_eq!(parsed, kind);
+        }
+        let snapshot = MetricsSnapshot {
+            at: SystemTime::UNIX_EPOCH,
+            families: vec![family(
+                "zcash_net_peers",
+                MetricKind::Gauge,
+                vec![sample("zcash_net_peers", &[("network", "main")], 8.0)],
+            )],
+        };
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(json["families"][0]["kind"], "gauge");
+        assert_eq!(json["families"][0]["help"], serde_json::Value::Null);
+        let round_trip: MetricsSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, snapshot);
+    }
+
+    #[test]
+    fn snapshot_lookups() {
+        let snapshot = MetricsSnapshot {
+            at: SystemTime::UNIX_EPOCH,
+            families: vec![
+                family(
+                    "zcash_net_peers",
+                    MetricKind::Gauge,
+                    vec![sample("zcash_net_peers", &[("network", "main")], 8.0)],
+                ),
+                MetricFamily {
+                    help: Some("Requests".into()),
+                    ..family(
+                        "state_requests",
+                        MetricKind::Counter,
+                        vec![
+                            sample("state_requests", &[("type", "tip")], 2.0),
+                            sample("state_requests", &[("type", "block")], 3.0),
+                        ],
+                    )
+                },
+                family(
+                    "mixed",
+                    MetricKind::Gauge,
+                    vec![
+                        sample("mixed", &[("a", "1")], 1.0),
+                        sample("mixed", &[], 5.0),
+                    ],
+                ),
+                family(
+                    "h",
+                    MetricKind::Histogram,
+                    vec![
+                        sample("h_bucket", &[("le", "+Inf")], 2.0),
+                        sample("h_sum", &[], 1.0),
+                        sample("h_count", &[], 2.0),
+                    ],
+                ),
+                family("u", MetricKind::Untyped, vec![sample("u", &[], 7.0)]),
+                family("empty", MetricKind::Gauge, Vec::new()),
+            ],
+        };
+        // A gauge with one labelled sample is still a single value.
+        assert_eq!(snapshot.gauge("zcash_net_peers"), Some(8.0));
+        assert_eq!(snapshot.counter("zcash_net_peers"), None);
+        assert_eq!(snapshot.total("zcash_net_peers"), Some(8.0));
+        // Several labelled samples: only the total.
+        assert_eq!(snapshot.counter("state_requests"), None);
+        assert_eq!(snapshot.gauge("state_requests"), None);
+        assert_eq!(snapshot.total("state_requests"), Some(5.0));
+        // The unlabelled sample wins over labelled ones.
+        assert_eq!(snapshot.gauge("mixed"), Some(5.0));
+        assert_eq!(snapshot.total("mixed"), Some(6.0));
+        // Histograms have parts, not a value.
+        assert_eq!(snapshot.gauge("h"), None);
+        assert_eq!(snapshot.total("h"), None);
+        assert_eq!(snapshot.family("h").map(|f| f.samples.len()), Some(3));
+        assert_eq!(snapshot.family("h_sum"), None);
+        // Untyped families answer as either.
+        assert_eq!(snapshot.gauge("u"), Some(7.0));
+        assert_eq!(snapshot.counter("u"), Some(7.0));
+        assert_eq!(snapshot.gauge("empty"), None);
+        assert_eq!(snapshot.total("empty"), None);
+        assert_eq!(snapshot.gauge("missing"), None);
+        assert_eq!(
+            snapshot
+                .family("state_requests")
+                .and_then(|f| f.help.as_deref()),
+            Some("Requests")
+        );
+    }
+}

@@ -1,0 +1,27 @@
+# Development build of the Windows launcher with zebrad compiled from Zebra's
+# `main`. Runs only when `.github/dev-build-request` changes on the `rebuild`
+# branch: bundle.yml cannot be dispatched by hand while it is absent from the
+# repository's default branch. Never signed, never released.
+name: Dev build (Windows, zebrad main)
+
+on:
+  push:
+    branches: [rebuild]
+    paths: [".github/dev-build-request"]
+
+permissions: {}
+
+concurrency:
+  group: dev-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    uses: ./.github/workflows/bundle.yml
+    with:
+      zebrad_ref: main
+      targets: x86_64-pc-windows-msvc
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write

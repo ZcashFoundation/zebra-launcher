@@ -1,0 +1,31 @@
+# Prometheus scrape config for the zebrad started by Zebra Launcher, mounted by
+# docker-compose.linux.yml: the Linux (Docker Engine) layout, where Prometheus runs on
+# the host network.
+#
+# Target host: 127.0.0.1. The launcher binds zebrad's metrics to 127.0.0.1:9999 on the
+# host, and with network_mode: host the container shares the host's network stack, so
+# 127.0.0.1 is the host itself and the target is reached directly. (On Docker Desktop
+# the container sits on the bridge network, where its 127.0.0.1 is the container; that
+# layout uses prometheus.yml with host.docker.internal instead.)
+#
+# Timing: every 10 s with a 5 s timeout, the cadence the launcher itself polls zebrad
+# at, and well inside the rate(...[1m]) windows Zebra's dashboards use, which need at
+# least two samples per window (a scrape interval of 30 s or less).
+#
+# The launcher never moves the metrics port (it is read-only in Configure), so this
+# target always matches its zebrad.toml. Keep prometheus.yml in step with this file:
+# only the target host differs.
+
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  # `zebrad` becomes the job label on every series. Zebra's dashboards list the jobs
+  # Prometheus has in their "job" picker, so the name is free to choose.
+  - job_name: zebrad
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:9999"]
