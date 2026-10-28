@@ -1,13 +1,17 @@
-//! The zebrad configuration form in Settings: every key of `zebrad.toml` with a tooltip, read
-//! from and written back to the file through `read_config` and `apply_config`.
+//! The zebrad configuration editor: one draft of `zebrad.toml` with two views on the Configure
+//! page, the form on the left and the file on the right. [`ConfigEditor`] holds the draft and
+//! the form's typing state and does the reads, saves and reloads; [`ZebradConfigForm`] is the
+//! form pane (the filter, "Show only changed" and the sections with a row and a tooltip per
+//! key); `pages/configure.rs` lays out the panes, the file view and the action bar.
 //!
-//! The file's values (`loaded`) and the user's edits (`edits`) are two [`FormState`]s. The
-//! edits hold the text as typed, where a text that is empty once normalised the way the file
-//! is written (blank, or a list of blank lines) means "use the default"; [`normalised`] strips
-//! those, and the result is what Save writes and what counts as a change against the file.
-//! Saving renders the edits into the loaded text (`render_config`, so comments and unknown keys
-//! stay) and applies it; the outcomes follow the Configure page's handling, with the pending
-//! edits kept across a rollback or a conflict.
+//! The draft text is what the file pane shows and what Save writes. The form's edits (`edits`)
+//! hold every field's text as typed, where a text that is empty once normalised the way the
+//! file is written (blank, or a list of blank lines) means "use the default"; [`normalised`]
+//! strips those. Each form edit is rendered into the draft at once (`render_config`, so comments
+//! and unknown keys stay), a field whose text is invalid keeping its last valid value in the
+//! file; a text edit replaces the draft and the form reads its values from it again. Changes are
+//! counted against the saved file, so an edit made as text counts too. The outcomes of a save
+//! follow the backend's: a rollback or a conflict keeps the draft.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,72 +26,63 @@ use crate::{
     app::{AppState, Tab},
     components::tooltip::Help,
     config_form::{
-        Control, FIELDS, Field, FieldId, FormState, Kind, SECTIONS, Section, display_default,
-        fields_of, matches_filter, normalize, parse_config, render_config, validate,
+        Control, FIELDS, Field, FieldId, FormState, Kind, ParsedConfig, SECTIONS, Section,
+        display_default, field_named, fields_of, matches_filter, normalize, parse_config,
+        render_config, validate,
     },
 };
 
 /// How long the "Saved" message stays.
 const SAVED_FOR: Duration = Duration::from_secs(6);
 
-/// Whether the file is shown.
+/// Whether the file was read.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Load {
+pub enum Load {
     Loading,
     Ready,
-    /// The file could not be read, or is not TOML.
+    /// The file could not be read. An earlier read may still be shown.
     Failed(String),
 }
 
-/// The message after a save.
+/// The message after a save, or after the file changed under the draft.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Notice {
-    Saved { restarted: bool },
+pub enum Notice {
+    Saved {
+        restarted: bool,
+    },
     RolledBack(String),
-    Conflict,
+    /// The file was re-read because it changed on disk; `kept` says whether the draft was kept
+    /// as it was (it is edited as text, or holds more than form values) or its field edits were
+    /// put back on top of the fresh file.
+    Conflict {
+        kept: bool,
+    },
     Failed(String),
 }
 
-/// What `parse_config` could not put in the form.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Notes {
-    unknown: Vec<String>,
-    unreadable: Vec<String>,
-}
-
-/// What a reload does with the user's edits.
+/// What a reload does with the draft.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reload {
-    /// The fresh values replace the edits.
+    /// The fresh file replaces the draft.
     Replace,
-    /// The edits stay as they are (after a rollback: the file was restored).
-    KeepEdits,
-    /// The changed fields are set again on top of the fresh values (after a conflict, or when
-    /// the file is re-read while there are edits).
+    /// The draft stays as it is; only the saved file (and its token) is refreshed: after a
+    /// rollback, or when the draft holds anything a field edit cannot put back (it is edited as
+    /// text, or carries a comment, an unknown key or other text edit).
+    KeepDraft,
+    /// The changed fields are set again on top of the fresh file: after a conflict, or when the
+    /// file is re-read while the draft is the saved file with the form's edits and nothing more.
     ReapplyPending,
 }
 
-/// The signals the field rows read and write.
-#[derive(Clone, Copy)]
-struct Form {
-    /// The values in the file as last read, [`normalised`] like `values` so that padding in the
-    /// file does not count as a change.
-    loaded: RwSignal<FormState>,
-    /// The values as edited, text as typed.
-    edits: RwSignal<FormState>,
-    /// `edits` [`normalised`]: what Save writes and what counts as a change.
-    values: Memo<FormState>,
-    /// The message of every field whose text [`validate`] rejects.
-    errors: Memo<BTreeMap<FieldId, String>>,
-}
-
-/// Everything a reload touches.
-#[derive(Clone, Copy)]
-struct Doc {
-    document: RwSignal<Option<ConfigDocument>>,
-    load: RwSignal<Load>,
-    notes: RwSignal<Notes>,
-    form: Form,
+impl Reload {
+    /// The reload of an edited draft: kept as it is, or its field edits put back.
+    fn of_edited(kept: bool) -> Self {
+        if kept {
+            Self::KeepDraft
+        } else {
+            Self::ReapplyPending
+        }
+    }
 }
 
 /// `edits` with every text [`normalize`]d as the file is written, and the texts that are then
@@ -147,6 +142,17 @@ fn shown_fields<'a>(
         .collect()
 }
 
+/// The user-editable fields whose value differs between two states. Locked fields are left
+/// out: the draft never writes them, and the forbidden keys it drops are [`removed_on_save`].
+fn user_diff(a: &FormState, b: &FormState) -> Vec<FieldId> {
+    a.diff(b)
+        .into_iter()
+        .filter(|(section, key)| {
+            field_named(section, key).is_some_and(|field| field.control == Control::User)
+        })
+        .collect()
+}
+
 /// The changed fields with their edited text (`None`: reset to the default), to set again on
 /// fresh values.
 fn pending_edits(changes: &[FieldId], edits: &FormState) -> Vec<(FieldId, Option<String>)> {
@@ -178,9 +184,24 @@ fn removed_on_save<'a>(
         .collect()
 }
 
+/// The values to render into the draft: `values`, with every field whose text is invalid
+/// holding the value the draft has (`current`) instead, so the file keeps the last valid one
+/// while the user types.
+fn render_values(
+    values: &FormState,
+    errors: &BTreeMap<FieldId, String>,
+    current: &FormState,
+) -> FormState {
+    let mut values = values.clone();
+    for id in errors.keys() {
+        values.set(*id, current.get(*id).map(str::to_owned));
+    }
+    values
+}
+
 /// The list under the change count: the `section.key` paths of the edited fields, then the
 /// keys a save removes.
-fn changed_list(changes: &[FieldId], removals: &[FieldId]) -> String {
+pub fn changed_list(changes: &[FieldId], removals: &[FieldId]) -> String {
     changes
         .iter()
         .map(|(section, key)| format!("{section}.{key}"))
@@ -238,13 +259,22 @@ fn counts_text(set: usize, edited: usize) -> String {
     parts.join(", ")
 }
 
-/// `No changes`, `1 change`, `3 changes`.
-fn changes_text(count: usize) -> String {
+/// `No changes`, `1 change`, `3 changes`; `No setting changes` when only the text differs
+/// from the saved file (a comment, or formatting).
+pub fn changes_text(count: usize, text_differs: bool) -> String {
     match count {
+        0 if text_differs => "No setting changes".to_owned(),
         0 => "No changes".to_owned(),
         1 => "1 change".to_owned(),
         count => format!("{count} changes"),
     }
+}
+
+/// The note under the count when the text differs from the saved file without a setting
+/// changing.
+pub fn text_only_note(count: usize, text_differs: bool) -> Option<&'static str> {
+    (count == 0 && text_differs)
+        .then_some("The text differs from the saved file: comments or formatting.")
 }
 
 /// True while saving restarts zebrad: it is starting, running, or about to be restarted after a
@@ -257,7 +287,7 @@ fn restarts_zebrad(phase: &Phase) -> bool {
     )
 }
 
-fn save_label(restarts: bool) -> &'static str {
+pub fn save_label(restarts: bool) -> &'static str {
     if restarts {
         "Save and restart zebrad"
     } else {
@@ -265,11 +295,21 @@ fn save_label(restarts: bool) -> &'static str {
     }
 }
 
-fn saved_text(restarted: bool) -> &'static str {
+pub fn saved_text(restarted: bool) -> &'static str {
     if restarted {
         "Saved. zebrad restarted with the new configuration."
     } else {
         "Saved."
+    }
+}
+
+/// The banner over a disabled form while the draft is not TOML, pointing at the control that
+/// is on screen: the text editor while it is open, else the switch that opens it or Discard.
+fn invalid_toml_text(text_mode: bool) -> &'static str {
+    if text_mode {
+        "The file is not valid TOML. Fix it in the text editor."
+    } else {
+        "The file is not valid TOML. Open it with \"Edit as text\" to fix it, or Discard."
     }
 }
 
@@ -303,373 +343,552 @@ fn unreadable_note(keys: &[String]) -> Option<String> {
     }
 }
 
-/// Reads the file again and updates the form as `mode` says. A failure leaves the values as
-/// they are and shows the error in place of the fields.
-async fn reload(doc: Doc, mode: Reload) {
-    let form = doc.form;
-    // The fields stay enabled while the file is read (a reload is not a save), so an edit made
-    // meanwhile must not be replaced by the fresh values: it is put back on top of them.
-    let edits_before = form.edits.get_untracked();
-    let fresh = match api::read_config().await {
-        Ok(fresh) => fresh,
-        Err(error) => {
-            doc.load
-                .set(Load::Failed(format!("Could not read zebrad.toml: {error}")));
-            return;
+/// The values of a config text, [`normalised`]; empty when the text is not TOML.
+fn values_of(text: &str) -> FormState {
+    parse_config(text)
+        .map(|parsed| normalised(FIELDS.iter(), &parsed.form))
+        .unwrap_or_default()
+}
+
+/// The draft `reset_draft` makes of a saved text: the text with its forbidden keys dropped, or
+/// the text itself when it is not TOML or cannot be rendered.
+fn pristine_text(text: &str) -> String {
+    render_config(text, &values_of(text)).unwrap_or_else(|_| text.to_owned())
+}
+
+/// True when `draft` is `saved` with `values` written in and nothing more (no comment, unknown
+/// key or other text edit), so writing those values into a fresh file loses nothing.
+fn draft_is_form_only(saved: &str, draft: &str, values: &FormState) -> bool {
+    render_config(saved, values).is_ok_and(|rendered| rendered == draft)
+}
+
+/// The first forbidden key `current` (the draft's values) sets and `saved` (the file's) does
+/// not: one typed as text, which the draft keeps and names rather than drops quietly.
+fn typed_forbidden<'a>(
+    fields: impl Iterator<Item = &'a Field>,
+    saved: &FormState,
+    current: &FormState,
+) -> Option<FieldId> {
+    removed_on_save(fields, current)
+        .into_iter()
+        .find(|id| saved.get(*id).is_none())
+}
+
+/// The draft of `zebrad.toml` and everything that reads or writes it. Every field is a signal
+/// or a memo, so the struct is `Copy` and is shared by the form pane, the file pane and the
+/// action bar.
+#[derive(Clone, Copy)]
+pub struct ConfigEditor {
+    state: AppState,
+    /// The file as last read, `None` until the first read succeeds.
+    pub document: RwSignal<Option<ConfigDocument>>,
+    pub load: RwSignal<Load>,
+    /// The draft: the saved text with the form's edits rendered in, or the text as typed.
+    pub draft: RwSignal<String>,
+    /// The form's texts as typed.
+    edits: RwSignal<FormState>,
+    /// The draft read as a config, `Err` while it is not TOML.
+    pub parsed: Memo<Result<ParsedConfig, String>>,
+    /// The values the draft sets, normalised; those of the saved file while the draft is not
+    /// TOML, so nothing counts as changed then.
+    current: Memo<FormState>,
+    /// The values the saved file sets, normalised like `values`, so that padding in the file
+    /// does not count as a change.
+    saved: Memo<FormState>,
+    /// `edits` [`normalised`]: what the rows compare and what is rendered into the draft.
+    values: Memo<FormState>,
+    /// The message of every field whose text [`validate`] rejects.
+    errors: Memo<BTreeMap<FieldId, String>>,
+    /// The user fields whose value in the draft differs from the saved file.
+    pub changes: Memo<Vec<FieldId>>,
+    /// The forbidden keys in the saved file, which the draft drops.
+    pub removals: Memo<Vec<FieldId>>,
+    /// The draft differs from the saved file as text (a comment edit counts): there is
+    /// something to save.
+    pub dirty: Memo<bool>,
+    /// The draft holds something a reload or a reset would lose: it differs from what Discard
+    /// gives. A forbidden key the draft drops is not an edit, so it does not count here.
+    pub edited: Memo<bool>,
+    /// Why the last form edit could not be written into the draft, if it could not.
+    pub render_error: RwSignal<Option<String>>,
+    pub saving: RwSignal<bool>,
+    pub notice: RwSignal<Option<Notice>>,
+    /// The file pane shows the draft as a text editor; the form follows the text.
+    pub text_mode: RwSignal<bool>,
+    /// The field last edited in the form, set on every edit, for the file pane to show its
+    /// line.
+    pub last_edited: RwSignal<Option<FieldId>>,
+    /// Bumped by every notice, so the timer of an earlier "Saved" does not clear a newer one.
+    notice_generation: StoredValue<u64>,
+}
+
+impl ConfigEditor {
+    /// Creates the editor, reads the file, and keeps it re-read: when the file is replaced
+    /// elsewhere (a reset, which bumps `config_changed`) and when the Configure tab is opened
+    /// without pending changes.
+    pub fn new() -> Self {
+        let state = AppState::get();
+        let document = RwSignal::new(None::<ConfigDocument>);
+        let draft = RwSignal::new(String::new());
+        let edits = RwSignal::new(FormState::default());
+        let parsed = Memo::new(move |_| draft.with(|draft| parse_config(draft)));
+        let saved = Memo::new(move |_| {
+            document.with(|document| {
+                document
+                    .as_ref()
+                    .map(|document| values_of(&document.text))
+                    .unwrap_or_default()
+            })
+        });
+        let current = Memo::new(move |_| {
+            parsed.with(|parsed| match parsed {
+                Ok(parsed) => normalised(FIELDS.iter(), &parsed.form),
+                Err(_) => saved.get(),
+            })
+        });
+        let values = Memo::new(move |_| edits.with(|edits| normalised(FIELDS.iter(), edits)));
+        let errors =
+            Memo::new(move |_| edits.with(|edits| validation_errors(FIELDS.iter(), edits)));
+        let changes = Memo::new(move |_| {
+            current.with(|current| saved.with(|saved| user_diff(current, saved)))
+        });
+        let removals =
+            Memo::new(move |_| saved.with(|saved| removed_on_save(FIELDS.iter(), saved)));
+        let dirty = Memo::new(move |_| {
+            document.with(|document| {
+                document
+                    .as_ref()
+                    .is_some_and(|document| draft.with(|draft| *draft != document.text))
+            })
+        });
+        let pristine = Memo::new(move |_| {
+            document.with(|document| {
+                document
+                    .as_ref()
+                    .map(|document| pristine_text(&document.text))
+                    .unwrap_or_default()
+            })
+        });
+        let edited = Memo::new(move |_| {
+            document.with(Option::is_some)
+                && draft.with(|draft| pristine.with(|pristine| *draft != *pristine))
+        });
+        let editor = Self {
+            state,
+            document,
+            load: RwSignal::new(Load::Loading),
+            draft,
+            edits,
+            parsed,
+            current,
+            saved,
+            values,
+            errors,
+            changes,
+            removals,
+            dirty,
+            edited,
+            render_error: RwSignal::new(None),
+            saving: RwSignal::new(false),
+            notice: RwSignal::new(None),
+            text_mode: RwSignal::new(false),
+            last_edited: RwSignal::new(None),
+            notice_generation: StoredValue::new(0),
+        };
+
+        spawn_local(editor.reload(Reload::Replace));
+
+        // The file was replaced elsewhere (a reset from the update recovery panel, or the one
+        // below the panes): re-read it, keeping a pending draft.
+        Effect::new(move |previous: Option<u64>| {
+            let changed = state.config_changed.get();
+            if previous.is_some_and(|previous| previous != changed) {
+                spawn_local(editor.reload_pending());
+            }
+            changed
+        });
+        // Opening the page re-reads the file while there is nothing to lose.
+        Effect::new(move |previous: Option<Tab>| {
+            let tab = state.tab.get();
+            if tab == Tab::Configure
+                && previous.is_some_and(|previous| previous != tab)
+                && !editor.saving.get_untracked()
+                && !editor.edited.get_untracked()
+                && editor.load.with_untracked(|load| *load == Load::Ready)
+            {
+                spawn_local(editor.reload(Reload::Replace));
+            }
+            tab
+        });
+        editor
+    }
+
+    /// How to re-read the file around the current draft, and what to tell the user: a draft
+    /// that holds more than the form's values is kept as it is, one that is the file with the
+    /// form's edits is put back on top of the fresh file, and no draft is replaced quietly.
+    fn pending_reload(self) -> (Reload, Option<Notice>) {
+        if !self.edited.get_untracked() {
+            return (Reload::Replace, None);
         }
-    };
-    let parsed = match parse_config(&fresh.text) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            doc.load.set(Load::Failed(format!(
-                "zebrad.toml is not valid TOML ({error}). Edit it as text on the Configure page."
-            )));
-            return;
+        let kept = self.keeps_draft();
+        (Reload::of_edited(kept), Some(Notice::Conflict { kept }))
+    }
+
+    /// True when a re-read must keep the draft as it is: it is edited as text, or it is more than
+    /// the saved file with the form's values written in (a comment, an unknown key, a forbidden
+    /// key or text that is not TOML), which setting the changed fields again cannot put back.
+    fn keeps_draft(self) -> bool {
+        if self.text_mode.get_untracked() {
+            return true;
         }
-    };
-    // Normalised like `values`, so that the file's values compare equal to edits of them.
-    let fresh_form = normalised(FIELDS.iter(), &parsed.form);
-    let mode =
-        if mode == Reload::Replace && form.edits.with_untracked(|edits| *edits != edits_before) {
-            Reload::ReapplyPending
+        let Some(current) = self.parsed.with_untracked(|parsed| {
+            parsed
+                .as_ref()
+                .ok()
+                .map(|parsed| normalised(FIELDS.iter(), &parsed.form))
+        }) else {
+            return true;
+        };
+        let saved = self
+            .document
+            .with_untracked(|document| document.as_ref().map(|document| document.text.clone()))
+            .unwrap_or_default();
+        // What `sync_draft` rendered: an invalid text keeps the draft's own value.
+        let values = self.values.with_untracked(|values| {
+            self.errors
+                .with_untracked(|errors| render_values(values, errors, &current))
+        });
+        !self
+            .draft
+            .with_untracked(|draft| draft_is_form_only(&saved, draft, &values))
+    }
+
+    /// Re-reads the file around the draft as [`Self::pending_reload`] says and, when the file
+    /// differs from the one the draft was edited against, says how the draft was treated. A
+    /// failed read leaves the draft and shows the error instead.
+    async fn reload_pending(self) {
+        let (mode, notice) = self.pending_reload();
+        let text = move || {
+            self.document
+                .with_untracked(|document| document.as_ref().map(|document| document.text.clone()))
+        };
+        let before = text();
+        self.reload(mode).await;
+        if let Some(notice) = notice
+            && text() != before
+            && self.load.with_untracked(|load| *load == Load::Ready)
+        {
+            self.show_notice(notice);
+        }
+    }
+
+    /// Reads the file again and updates the draft as `mode` says. A failure leaves the draft
+    /// as it is and shows the error.
+    async fn reload(self, mode: Reload) {
+        // The panes stay enabled while the file is read (a reload is not a save), so an edit
+        // made meanwhile must not be replaced by the fresh file.
+        let draft_before = self.draft.get_untracked();
+        let fresh = match api::read_config().await {
+            Ok(fresh) => fresh,
+            Err(error) => {
+                self.load
+                    .set(Load::Failed(format!("Could not read zebrad.toml: {error}")));
+                return;
+            }
+        };
+        let edited_meanwhile = self.draft.with_untracked(|draft| *draft != draft_before);
+        let mode = if mode == Reload::Replace && edited_meanwhile {
+            self.pending_reload().0
         } else {
             mode
         };
-    match mode {
-        Reload::Replace => form.edits.set(fresh_form.clone()),
-        Reload::KeepEdits => {}
-        Reload::ReapplyPending => {
-            let pending = form.values.with_untracked(|values| {
-                form.loaded.with_untracked(|loaded| {
-                    form.edits
-                        .with_untracked(|edits| pending_edits(&values.diff(loaded), edits))
-                })
-            });
-            form.edits.set(reapply(fresh_form.clone(), pending));
+        match mode {
+            Reload::Replace => {
+                self.document.set(Some(fresh));
+                self.reset_draft();
+            }
+            Reload::KeepDraft => self.document.set(Some(fresh)),
+            Reload::ReapplyPending => {
+                let pending = self.values.with_untracked(|values| {
+                    self.saved.with_untracked(|saved| {
+                        self.edits
+                            .with_untracked(|edits| pending_edits(&user_diff(values, saved), edits))
+                    })
+                });
+                self.document.set(Some(fresh));
+                self.reset_draft();
+                self.edits
+                    .update(|edits| *edits = reapply(edits.clone(), pending));
+                self.sync_draft();
+            }
+        }
+        self.load.set(Load::Ready);
+    }
+
+    /// Makes the draft the saved file again, the form reading its values from it.
+    fn reset_draft(self) {
+        let text = self
+            .document
+            .with_untracked(|document| document.as_ref().map(|document| document.text.clone()))
+            .unwrap_or_default();
+        self.edits.set(values_of(&text));
+        self.draft.set(text);
+        self.render_error.set(None);
+        // A forbidden key in the file is dropped at once, so the draft shows (and a save makes)
+        // the file the launcher accepts.
+        self.sync_draft();
+    }
+
+    /// Writes the form's values into the draft. Nothing happens while the draft is not TOML (the
+    /// text is then authoritative); a field whose text is invalid keeps the draft's value. A
+    /// forbidden key typed as text is kept and named, not dropped quietly: only the saved file's
+    /// forbidden keys are removed on save (`removals`), and Save is refused until it is removed.
+    fn sync_draft(self) {
+        let current = match self.parsed.get_untracked() {
+            Ok(parsed) => normalised(FIELDS.iter(), &parsed.form),
+            Err(_) => return,
+        };
+        let typed = self
+            .saved
+            .with_untracked(|saved| typed_forbidden(FIELDS.iter(), saved, &current));
+        if let Some((section, key)) = typed {
+            self.render_error.set(Some(format!(
+                "`{section}.{key}` is not allowed by the launcher; remove it from the file."
+            )));
+            return;
+        }
+        let values = self.values.with_untracked(|values| {
+            self.errors
+                .with_untracked(|errors| render_values(values, errors, &current))
+        });
+        match self
+            .draft
+            .with_untracked(|draft| render_config(draft, &values))
+        {
+            Ok(text) => {
+                if self.draft.with_untracked(|draft| *draft != text) {
+                    self.draft.set(text);
+                }
+                self.render_error.set(None);
+            }
+            Err(error) => self.render_error.set(Some(error)),
         }
     }
-    form.loaded.set(fresh_form);
-    doc.notes.set(Notes {
-        unknown: parsed.unknown,
-        unreadable: parsed.unreadable,
-    });
-    doc.document.set(Some(fresh));
-    doc.load.set(Load::Ready);
+
+    /// A form edit: `None` resets the field to its default.
+    fn set_field(self, id: FieldId, text: Option<String>) {
+        self.edits.update(|edits| edits.set(id, text));
+        self.sync_draft();
+        self.last_edited.set(Some(id));
+    }
+
+    /// A text edit: the text replaces the draft and the form follows it, where it is TOML.
+    pub fn set_text(self, text: String) {
+        self.draft.set(text);
+        if let Ok(parsed) = self.parsed.get_untracked() {
+            self.edits.set(normalised(FIELDS.iter(), &parsed.form));
+            self.render_error.set(None);
+        }
+    }
+
+    /// Shows the draft as text, or as marked lines again. Both ways the form's values are
+    /// written in first; a forbidden key typed as text stays in the draft and is named in the
+    /// form pane until it is removed.
+    pub fn set_text_mode(self, on: bool) {
+        self.sync_draft();
+        self.text_mode.set(on);
+    }
+
+    /// True while saving restarts zebrad.
+    pub fn restarts(self) -> bool {
+        self.state
+            .status
+            .with(|status| restarts_zebrad(&status.phase))
+    }
+
+    pub fn can_save(self) -> bool {
+        self.load.with(|load| *load == Load::Ready)
+            && !self.saving.get()
+            && self.dirty.get()
+            && self.parsed.with(Result::is_ok)
+            && self.errors.with(BTreeMap::is_empty)
+            && self.render_error.with(Option::is_none)
+    }
+
+    /// Applies the draft. Applied: the file is re-read and becomes the draft. Rolled back: the
+    /// draft stays, against the restored file. Conflict: the file is re-read and the draft kept
+    /// as it is, or, when it is the file with the form's edits and nothing more, its edits put
+    /// back on top of the fresh file.
+    pub fn save(self) {
+        if !untrack(|| self.can_save()) {
+            return;
+        }
+        self.sync_draft();
+        let Some(token) = self
+            .document
+            .with_untracked(|document| document.as_ref().map(|document| document.token.clone()))
+        else {
+            return;
+        };
+        let text = self.draft.get_untracked();
+        let restarted = untrack(|| self.restarts());
+        self.saving.set(true);
+        self.notice.set(None);
+        spawn_local(async move {
+            let next = match api::apply_config(text, token).await {
+                Ok(ApplyOutcome::Applied) => {
+                    self.reload(Reload::Replace).await;
+                    Notice::Saved { restarted }
+                }
+                Ok(ApplyOutcome::RolledBack { error }) => {
+                    self.reload(Reload::KeepDraft).await;
+                    Notice::RolledBack(error)
+                }
+                Err(error) if error.kind == ApplyErrorKind::Conflict => {
+                    let kept = self.keeps_draft();
+                    self.reload(Reload::of_edited(kept)).await;
+                    Notice::Conflict { kept }
+                }
+                Err(error) => Notice::Failed(error.message),
+            };
+            self.saving.set(false);
+            self.show_notice(next);
+        });
+    }
+
+    /// Drops the draft for the saved file.
+    pub fn discard(self) {
+        self.reset_draft();
+        self.notice.set(None);
+    }
+
+    /// Reads the file again after a failed read. The draft is kept across the failure (after a
+    /// rollback or a conflict it was to be kept), so it is kept or put back on top of the fresh
+    /// file as a re-read does, and the user is told when that file differs.
+    pub fn retry(self) {
+        if self.document.with_untracked(Option::is_none) {
+            self.load.set(Load::Loading);
+        }
+        spawn_local(self.reload_pending());
+    }
+
+    fn show_notice(self, next: Notice) {
+        self.notice_generation
+            .update_value(|generation| *generation += 1);
+        let mine = self.notice_generation.get_value();
+        let transient = matches!(next, Notice::Saved { .. });
+        self.notice.set(Some(next));
+        if transient {
+            set_timeout(
+                move || {
+                    if self.notice_generation.get_value() == mine {
+                        self.notice.set(None);
+                    }
+                },
+                SAVED_FOR,
+            );
+        }
+    }
 }
 
+/// The form pane: the filter and "Show only changed", the notes on keys the form cannot show,
+/// and every section with a row per key. Disabled while a save runs or the draft is not TOML.
 #[component]
-pub fn ZebradConfigForm() -> impl IntoView {
-    let state = AppState::get();
-    let document = RwSignal::new(None::<ConfigDocument>);
-    let load = RwSignal::new(Load::Loading);
-    let notes = RwSignal::new(Notes::default());
-    let loaded = RwSignal::new(FormState::default());
-    let edits = RwSignal::new(FormState::default());
-    let values = Memo::new(move |_| edits.with(|edits| normalised(FIELDS.iter(), edits)));
-    let errors = Memo::new(move |_| edits.with(|edits| validation_errors(FIELDS.iter(), edits)));
-    let form = Form {
-        loaded,
-        edits,
-        values,
-        errors,
-    };
-    let doc = Doc {
-        document,
-        load,
-        notes,
-        form,
-    };
-    let changes =
-        Memo::new(move |_| values.with(|values| loaded.with(|loaded| values.diff(loaded))));
-    let removals = Memo::new(move |_| loaded.with(|loaded| removed_on_save(FIELDS.iter(), loaded)));
+pub fn ZebradConfigForm(editor: ConfigEditor) -> impl IntoView {
     let filter = RwSignal::new(String::new());
     let only_changed = RwSignal::new(false);
     let shown = Memo::new(move |_| {
         filter.with(|filter| {
-            loaded.with(|loaded| {
-                values.with(|values| {
-                    shown_fields(FIELDS.iter(), filter, only_changed.get(), loaded, values)
+            editor.saved.with(|saved| {
+                editor.values.with(|values| {
+                    shown_fields(FIELDS.iter(), filter, only_changed.get(), saved, values)
                 })
             })
         })
     });
     // The sections folded by the user; every section starts open.
     let closed = RwSignal::new(BTreeSet::<&'static str>::new());
-    let saving = RwSignal::new(false);
-    let notice = RwSignal::new(None::<Notice>);
-    // Bumped by every notice, so the timer of an earlier "Saved" does not clear a newer one.
-    let notice_generation = StoredValue::new(0u64);
-    // The `config_changed` value this form's own save produced, which needs no second reload.
-    let own_bump = StoredValue::new(None::<u64>);
 
-    spawn_local(reload(doc, Reload::Replace));
-
-    // The file was replaced elsewhere (a reset): re-read it, keeping pending edits on top.
-    Effect::new(move |previous: Option<u64>| {
-        let changed = state.config_changed.get();
-        if previous.is_some_and(|previous| previous != changed)
-            && own_bump.get_value() != Some(changed)
-        {
-            let mode = if changes.with_untracked(Vec::is_empty) {
-                Reload::Replace
-            } else {
-                Reload::ReapplyPending
-            };
-            spawn_local(reload(doc, mode));
-        }
-        changed
-    });
-    // The Configure page's own save does not bump `config_changed`: re-read when the page is
-    // opened, while there is nothing to lose.
-    Effect::new(move |previous: Option<Tab>| {
-        let tab = state.tab.get();
-        if tab == Tab::Settings
-            && previous.is_some_and(|previous| previous != tab)
-            && !saving.get_untracked()
-            && changes.with_untracked(Vec::is_empty)
-            && load.with_untracked(|load| *load == Load::Ready)
-        {
-            spawn_local(reload(doc, Reload::Replace));
-        }
-        tab
-    });
-
-    let show_notice = move |next: Notice| {
-        notice_generation.update_value(|generation| *generation += 1);
-        let mine = notice_generation.get_value();
-        let transient = matches!(next, Notice::Saved { .. });
-        notice.set(Some(next));
-        if transient {
-            set_timeout(
-                move || {
-                    if notice_generation.get_value() == mine {
-                        notice.set(None);
-                    }
-                },
-                SAVED_FOR,
-            );
-        }
-    };
-    let restarts = move || state.status.with(|status| restarts_zebrad(&status.phase));
-    let can_save = move || {
-        load.with(|load| *load == Load::Ready)
-            && !saving.get()
-            && (changes.with(|changes| !changes.is_empty())
-                || removals.with(|removals| !removals.is_empty()))
-            && errors.with(BTreeMap::is_empty)
-    };
-    let save = move || {
-        if !untrack(can_save) {
-            return;
-        }
-        let Some((original, token)) = document.with_untracked(|document| {
-            document
-                .as_ref()
-                .map(|document| (document.text.clone(), document.token.clone()))
-        }) else {
-            return;
-        };
-        let text = match values.with_untracked(|values| render_config(&original, values)) {
-            Ok(text) => text,
-            Err(error) => {
-                show_notice(Notice::Failed(format!(
-                    "Could not write the configuration: {error}"
-                )));
-                return;
-            }
-        };
-        let restarted = untrack(restarts);
-        saving.set(true);
-        notice.set(None);
-        spawn_local(async move {
-            let next = match api::apply_config(text, token).await {
-                Ok(ApplyOutcome::Applied) => {
-                    reload(doc, Reload::Replace).await;
-                    let bump = state.config_changed.get_untracked() + 1;
-                    own_bump.set_value(Some(bump));
-                    state.config_changed.set(bump);
-                    Notice::Saved { restarted }
-                }
-                Ok(ApplyOutcome::RolledBack { error }) => {
-                    reload(doc, Reload::KeepEdits).await;
-                    Notice::RolledBack(error)
-                }
-                Err(error) if error.kind == ApplyErrorKind::Conflict => {
-                    reload(doc, Reload::ReapplyPending).await;
-                    Notice::Conflict
-                }
-                Err(error) => Notice::Failed(error.message),
-            };
-            saving.set(false);
-            show_notice(next);
-        });
-    };
-    let discard = move |_| {
-        edits.set(loaded.get_untracked());
-        notice.set(None);
-    };
-    // A failed reload leaves the edits in memory (after a rollback or a conflict they were to be
-    // kept), so a retry puts them back on top of the fresh file instead of replacing them.
-    let retry = move |_| {
-        if document.with_untracked(Option::is_none) {
-            load.set(Load::Loading);
-        }
-        let mode = if changes.with_untracked(Vec::is_empty) {
-            Reload::Replace
-        } else {
-            Reload::ReapplyPending
-        };
-        spawn_local(reload(doc, mode));
-    };
-    // Ctrl (or Cmd) + S saves, from anywhere inside the form.
-    let on_key = move |event: web_sys::KeyboardEvent| {
-        if (event.ctrl_key() || event.meta_key())
-            && !event.alt_key()
-            && event.key().eq_ignore_ascii_case("s")
-        {
-            event.prevent_default();
-            save();
-        }
-    };
-
-    let ready = move || load.with(|load| *load == Load::Ready);
-    let path =
-        move || document.with(|document| document.as_ref().map(|document| document.path.clone()));
     let notes_view = move || {
-        notes.with(|notes| {
-            [
-                unknown_note(&notes.unknown),
-                unreadable_note(&notes.unreadable),
-            ]
-            .into_iter()
-            .flatten()
-            .map(|note| view! { <p class="muted cfg-notes">{note}</p> })
-            .collect_view()
+        editor.parsed.with(|parsed| {
+            parsed.as_ref().ok().map(|parsed| {
+                [
+                    unknown_note(&parsed.unknown),
+                    unreadable_note(&parsed.unreadable),
+                ]
+                .into_iter()
+                .flatten()
+                .map(|note| view! { <p class="muted cfg-notes">{note}</p> })
+                .collect_view()
+            })
         })
     };
-    let load_view = move || match load.get() {
-        Load::Loading => view! { <p class="muted">"Loading zebrad.toml…"</p> }.into_any(),
-        Load::Failed(message) => view! {
-            <div class="banner banner-error" role="alert">
-                <span>{message}</span>
-                " "
-                <button type="button" class="link" on:click=retry>
-                    "Retry"
-                </button>
-            </div>
-        }
-        .into_any(),
-        Load::Ready => ().into_any(),
+    // The remedy names the visible control: the text editor while it is open, else the switch
+    // that opens it (a file on disk that is not TOML opens in the lines view).
+    let invalid_view = move || {
+        editor.parsed.with(|parsed| {
+            parsed.as_ref().err().map(|error| {
+                view! {
+                    <div class="banner banner-error error-panel cfg-invalid" role="alert">
+                        <strong>{move || invalid_toml_text(editor.text_mode.get())}</strong>
+                        <pre>{error.clone()}</pre>
+                    </div>
+                }
+            })
+        })
     };
+    // A field's own error shows on its row; this is for the rest (a section that is not a
+    // table, say).
+    let render_error_view = move || {
+        editor
+            .render_error
+            .get()
+            .filter(|_| editor.errors.with(BTreeMap::is_empty))
+            .map(|error| {
+                view! {
+                    <div class="banner banner-error" role="alert">
+                        "Could not write the setting into the file: "
+                        {error}
+                    </div>
+                }
+            })
+    };
+    let disabled = move || editor.saving.get() || editor.parsed.with(Result::is_err);
     let sections = SECTIONS
         .iter()
-        .map(|section| section_view(section, form, shown, changes, closed))
+        .map(|section| section_view(section, editor, shown, closed))
         .collect_view();
     let nothing_shown = move || shown.with(BTreeSet::is_empty) && !FIELDS.is_empty();
-    let notice_view = move || {
-        notice.get().and_then(|notice| match notice {
-            Notice::Saved { .. } => None,
-            Notice::RolledBack(error) => Some(
-                view! {
-                    <div class="banner banner-error error-panel" role="alert">
-                        <strong>
-                            "zebrad rejected the new configuration and was restarted with the previous one."
-                        </strong>
-                        <p>"Your edits are kept below. zebrad said:"</p>
-                        <pre>{error}</pre>
-                    </div>
-                }
-                .into_any(),
-            ),
-            Notice::Conflict => Some(
-                view! {
-                    <div class="banner banner-warn" role="alert">
-                        "The file changed outside this form (for example on the Configure page). Your edits were kept; check them and save again."
-                    </div>
-                }
-                .into_any(),
-            ),
-            Notice::Failed(message) => {
-                Some(view! { <div class="banner banner-error" role="alert">{message}</div> }.into_any())
-            }
-        })
-    };
-    let saved_view = move || {
-        notice.get().and_then(|notice| match notice {
-            Notice::Saved { restarted } => Some(saved_text(restarted)),
-            _ => None,
-        })
-    };
-    let change_count = move || changes.with(Vec::len) + removals.with(Vec::len);
-    let changed_paths =
-        move || changes.with(|changes| removals.with(|removals| changed_list(changes, removals)));
 
     view! {
-        <section class="cfg-form" aria-labelledby="cfg-heading" on:keydown=on_key>
-            <div class="cfg-head">
-                <div class="cfg-intro">
-                    <h2 id="cfg-heading">"zebrad configuration"</h2>
-                    <p class="muted">
-                        "Settings for the node itself, written to zebrad.toml. Saving restarts a running zebrad. "
-                        {move || path().map(|path| view! { <code>{path}</code> })}
-                    </p>
-                </div>
-                <div class="cfg-tools">
+        <section class="cfg-form" aria-label="zebrad settings form">
+            <div class="cfg-tools">
+                <input
+                    type="search"
+                    class="cfg-filter"
+                    aria-label="Filter settings"
+                    placeholder="Filter settings"
+                    prop:value=move || filter.get()
+                    on:input=move |event| filter.set(event_target_value(&event))
+                />
+                <label class="cfg-toggle">
                     <input
-                        type="search"
-                        class="cfg-filter"
-                        aria-label="Filter settings"
-                        placeholder="Filter settings"
-                        prop:value=move || filter.get()
-                        on:input=move |event| filter.set(event_target_value(&event))
+                        type="checkbox"
+                        prop:checked=move || only_changed.get()
+                        on:change=move |event| only_changed.set(event_target_checked(&event))
                     />
-                    <label class="cfg-toggle">
-                        <input
-                            type="checkbox"
-                            prop:checked=move || only_changed.get()
-                            on:change=move |event| only_changed.set(event_target_checked(&event))
-                        />
-                        "Show only changed"
-                    </label>
-                </div>
+                    "Show only changed"
+                </label>
             </div>
             {notes_view}
-            {load_view}
-            <fieldset class="cfg-fields" disabled=move || saving.get() hidden=move || !ready()>
+            {invalid_view}
+            {render_error_view}
+            <fieldset class="cfg-fields" disabled=disabled>
                 {sections}
                 <p class="muted cfg-empty" hidden=move || !nothing_shown()>
                     "No setting matches"
                 </p>
             </fieldset>
-            // Shown with the fields, and while a read failed after a save, so the outcome of
-            // that save (zebrad's rejection, a conflict) is seen next to the read error.
-            <div class="cfg-footer" hidden=move || !ready() && notice.with(Option::is_none)>
-                {notice_view}
-                <div class="cfg-bar">
-                    <div class="cfg-changes">
-                        <span>{move || changes_text(change_count())}</span>
-                        <span class="muted cfg-changed-list">{changed_paths}</span>
-                    </div>
-                    <p class="cfg-status ok" role="status">{saved_view}</p>
-                    <div class="buttons">
-                        <button
-                            type="button"
-                            disabled=move || saving.get() || changes.with(Vec::is_empty)
-                            on:click=discard
-                        >
-                            "Discard"
-                        </button>
-                        <button
-                            type="button"
-                            class="primary"
-                            disabled=move || !can_save()
-                            on:click=move |_| save()
-                        >
-                            {move || if saving.get() { "Saving…" } else { save_label(restarts()) }}
-                        </button>
-                    </div>
-                </div>
-            </div>
         </section>
     }
 }
@@ -678,19 +897,20 @@ pub fn ZebradConfigForm() -> impl IntoView {
 /// them visible.
 fn section_view(
     section: &'static Section,
-    form: Form,
+    editor: ConfigEditor,
     shown: Memo<BTreeSet<FieldId>>,
-    changes: Memo<Vec<FieldId>>,
     closed: RwSignal<BTreeSet<&'static str>>,
 ) -> impl IntoView {
     let key = section.key;
     let counts = move || {
-        let set = form.loaded.with(|loaded| {
+        let set = editor.saved.with(|saved| {
             fields_of(key)
-                .filter(|field| loaded.get(field.id()).is_some())
+                .filter(|field| saved.get(field.id()).is_some())
                 .count()
         });
-        let edited = changes.with(|changes| changes.iter().filter(|id| id.0 == key).count());
+        let edited = editor
+            .changes
+            .with(|changes| changes.iter().filter(|id| id.0 == key).count());
         counts_text(set, edited)
     };
     let on_toggle = move |event: web_sys::Event| {
@@ -704,7 +924,7 @@ fn section_view(
         });
     };
     let rows = fields_of(key)
-        .map(|field| field_row(field, form, shown))
+        .map(|field| field_row(field, editor, shown))
         .collect_view();
     view! {
         <details
@@ -724,22 +944,32 @@ fn section_view(
 }
 
 /// One field: label, key, help, the control and its default, reset and validation line.
-fn field_row(field: &'static Field, form: Form, shown: Memo<BTreeSet<FieldId>>) -> impl IntoView {
+fn field_row(
+    field: &'static Field,
+    editor: ConfigEditor,
+    shown: Memo<BTreeSet<FieldId>>,
+) -> impl IntoView {
     let id = field.id();
     let input_id = format!("cfg-{}-{}", field.section, field.key);
     let hint_id = format!("{input_id}-hint");
-    let raw = Signal::derive(move || form.edits.with(|edits| edits.get(id).map(str::to_owned)));
+    let raw = Signal::derive(move || editor.edits.with(|edits| edits.get(id).map(str::to_owned)));
     let in_file =
-        Signal::derive(move || form.loaded.with(|loaded| loaded.get(id).map(str::to_owned)));
-    let value =
-        Signal::derive(move || form.values.with(|values| values.get(id).map(str::to_owned)));
-    // A forbidden key set in the file is removed on save, so its row counts as changed.
+        Signal::derive(move || editor.saved.with(|saved| saved.get(id).map(str::to_owned)));
+    let value = Signal::derive(move || {
+        editor
+            .values
+            .with(|values| values.get(id).map(str::to_owned))
+    });
+    // The row is marked when the draft differs from the file; a forbidden key set in the file is
+    // removed on save, so its row counts as changed.
     let edited = Signal::derive(move || match field.control {
         Control::Forbidden { .. } => in_file.get().is_some(),
-        _ => value.get() != in_file.get(),
+        _ => editor
+            .current
+            .with(|current| current.get(id).map(str::to_owned) != in_file.get()),
     });
-    let error = Signal::derive(move || form.errors.with(|errors| errors.get(&id).cloned()));
-    let set = move |text: Option<String>| form.edits.update(|edits| edits.set(id, text));
+    let error = Signal::derive(move || editor.errors.with(|errors| errors.get(&id).cloned()));
+    let set = move |text: Option<String>| editor.set_field(id, text);
     let user = matches!(field.control, Control::User);
     let control = match field.control {
         Control::User => user_control(
@@ -1201,6 +1431,114 @@ mod tests {
     }
 
     #[test]
+    fn user_diff_leaves_locked_fields_out() {
+        let saved = with(&[
+            (ADDR.id(), "127.0.0.1:8232"),
+            (BARS.id(), "summary"),
+            (PORT.id(), "4"),
+        ]);
+        // The draft drops the forbidden key, and a managed address differs: neither is the
+        // user's change.
+        let current = with(&[
+            (ADDR.id(), "127.0.0.1:1"),
+            (PORT.id(), "8"),
+            (PEERS.id(), "a:1"),
+        ]);
+        assert_eq!(user_diff(&current, &saved), vec![PEERS.id(), PORT.id()]);
+        assert!(user_diff(&saved, &saved).is_empty());
+    }
+
+    #[test]
+    fn invalid_texts_keep_the_drafts_value() {
+        let values = with(&[(PORT.id(), "abc"), (PEERS.id(), "a:1")]);
+        let errors = validation_errors([PORT, PEERS].iter(), &values);
+        assert_eq!(errors.keys().collect::<Vec<_>>(), vec![&PORT.id()]);
+        let current = with(&[(PORT.id(), "4")]);
+        let rendered = render_values(&values, &errors, &current);
+        assert_eq!(rendered.get(PORT.id()), Some("4"));
+        assert_eq!(rendered.get(PEERS.id()), Some("a:1"));
+        // A field the draft does not set stays unset while its text is invalid.
+        let rendered = render_values(&values, &errors, &FormState::default());
+        assert_eq!(rendered.get(PORT.id()), None);
+        assert_eq!(rendered.get(PEERS.id()), Some("a:1"));
+    }
+
+    #[test]
+    fn values_of_a_text_are_normalised_or_empty() {
+        let values = values_of("[rpc]\nparallel_cpu_threads = 4\n[network]\n");
+        assert_eq!(values.get(PORT.id()), Some("4"));
+        assert_eq!(values.get(PEERS.id()), None);
+        assert_eq!(values_of("not = [toml"), FormState::default());
+    }
+
+    #[test]
+    fn the_pristine_text_drops_the_files_forbidden_keys_only() {
+        // The real schema: `rpc.parallel_cpu_threads` is a user field, `tracing.progress_bar`
+        // a forbidden one.
+        let plain = "# mine\n\n[rpc]\nparallel_cpu_threads = 4\n";
+        assert_eq!(pristine_text(plain), plain);
+        let with_forbidden = format!("{plain}\n[tracing]\nprogress_bar = \"summary\"\n");
+        assert_eq!(pristine_text(&with_forbidden), plain);
+        // Not TOML: the text itself, so a broken file does not count as edited.
+        assert_eq!(pristine_text("not = [toml"), "not = [toml");
+    }
+
+    #[test]
+    fn a_draft_is_form_only_when_it_is_the_file_with_the_values_written_in() {
+        let saved = "# Managed\n\n[rpc]\nparallel_cpu_threads = 4\n";
+        let mut values = values_of(saved);
+        assert!(draft_is_form_only(saved, saved, &values));
+        values.set(PORT.id(), Some("8".to_owned()));
+        let draft = render_config(saved, &values).expect("renders");
+        assert!(draft.contains("parallel_cpu_threads = 8"), "{draft}");
+        assert!(draft_is_form_only(saved, &draft, &values));
+        // A comment, an unknown key or a forbidden key typed as text is more than the form's
+        // values, which setting the changed fields again cannot put back.
+        assert!(!draft_is_form_only(
+            saved,
+            &format!("# tuned for my box\n{draft}"),
+            &values
+        ));
+        assert!(!draft_is_form_only(
+            saved,
+            &format!("{draft}\n[mining]\nminer_address = \"t1\"\n"),
+            &values
+        ));
+        assert!(!draft_is_form_only(
+            saved,
+            &format!("{draft}\n[tracing]\nprogress_bar = \"summary\"\n"),
+            &values
+        ));
+        // A forbidden key in the saved file is dropped by the draft and the rendering alike.
+        let with_forbidden = format!("{saved}\n[tracing]\nprogress_bar = \"summary\"\n");
+        assert!(draft_is_form_only(
+            &with_forbidden,
+            &pristine_text(&with_forbidden),
+            &values_of(&with_forbidden)
+        ));
+        // A draft that is not TOML is never form-only.
+        assert!(!draft_is_form_only(
+            "not = [toml",
+            "not = [toml",
+            &FormState::default()
+        ));
+    }
+
+    #[test]
+    fn a_forbidden_key_typed_as_text_is_found() {
+        let fields = [PORT, ADDR, PEERS, BARS];
+        let saved = with(&[(PORT.id(), "4")]);
+        let typed = with(&[(PORT.id(), "4"), (BARS.id(), "summary")]);
+        assert_eq!(
+            typed_forbidden(fields.iter(), &saved, &typed),
+            Some(BARS.id())
+        );
+        // One the file already holds is removed on save, not typed.
+        assert_eq!(typed_forbidden(fields.iter(), &typed, &typed), None);
+        assert_eq!(typed_forbidden(fields.iter(), &saved, &saved), None);
+    }
+
+    #[test]
     fn controls_show_the_default_when_unset() {
         assert_eq!(shown_text(None, Some("0")), "0");
         assert_eq!(shown_text(Some(""), Some("0")), "");
@@ -1246,13 +1584,19 @@ mod tests {
         assert_eq!(counts_text(3, 0), "3 set");
         assert_eq!(counts_text(0, 2), "2 edited");
         assert_eq!(counts_text(3, 2), "3 set, 2 edited");
-        assert_eq!(changes_text(0), "No changes");
-        assert_eq!(changes_text(1), "1 change");
-        assert_eq!(changes_text(3), "3 changes");
+        assert_eq!(changes_text(0, false), "No changes");
+        assert_eq!(changes_text(0, true), "No setting changes");
+        assert_eq!(changes_text(1, false), "1 change");
+        assert_eq!(changes_text(3, true), "3 changes");
+        assert!(text_only_note(0, true).is_some_and(|note| note.contains("comments")));
+        assert_eq!(text_only_note(0, false), None);
+        assert_eq!(text_only_note(2, true), None);
         assert_eq!(save_label(true), "Save and restart zebrad");
         assert_eq!(save_label(false), "Save");
         assert!(saved_text(true).contains("restarted"));
         assert_eq!(saved_text(false), "Saved.");
+        assert!(invalid_toml_text(true).ends_with("Fix it in the text editor."));
+        assert!(invalid_toml_text(false).contains("\"Edit as text\""));
     }
 
     #[test]

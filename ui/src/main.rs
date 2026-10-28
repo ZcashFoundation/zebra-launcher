@@ -15,6 +15,7 @@ mod charts;
 mod clipboard;
 mod clock;
 mod config_form;
+mod config_view;
 mod format;
 mod grafana_url;
 mod insights;

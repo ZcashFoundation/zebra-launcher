@@ -38,8 +38,9 @@
   --backdrop: rgba(0, 0, 0, 0.65);
   /* Drop shadows under raised panels (popovers, floating cards). */
   --shadow: rgba(0, 0, 0, 0.35);
-  /* TOML highlighting in the read-only config view, on --panel. */
-  --toml-comment: #6a9955;
+  /* TOML highlighting in the config view, on --panel and on the changed-line tints
+     --banner-accent-bg and --banner-warn-bg (4.5:1 on each, in both sets). */
+  --toml-comment: #6e9d59;
   --toml-section: #97bee5;
   --toml-key: #9cdcfe;
   --toml-string: #e18f76;
@@ -90,7 +91,7 @@
   --toml-section: #0451a5;
   --toml-key: #001080;
   --toml-string: #a31515;
-  --toml-literal: #098658;
+  --toml-literal: #087a50;
   --series-1: #2a78d6;
   --series-2: #eb6834;
   --series-3: #1baf7a;
