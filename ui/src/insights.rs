@@ -11,6 +11,7 @@ pub mod fields;
 pub mod text;
 
 use std::{
+    cmp::Reverse,
     collections::VecDeque,
     time::{Duration, SystemTime},
 };
@@ -927,6 +928,22 @@ impl Insights {
     }
 }
 
+/// Orders problems newest first by the minute they were last seen, errors and stderr ahead of
+/// warnings within a minute, then by the exact time.
+pub fn order_problems(problems: &mut [Problem]) {
+    let rank = |level: ProblemLevel| match level {
+        ProblemLevel::Error | ProblemLevel::Stderr => 0,
+        ProblemLevel::Warn => 1,
+    };
+    problems.sort_by_key(|problem| {
+        (
+            Reverse(epoch_minute(problem.last)),
+            rank(problem.level),
+            Reverse((problem.last, problem.last_seq)),
+        )
+    });
+}
+
 /// `+0.08 s`, `+1.2 s`, `+45 s`, `+3 min`: a step's time since the run started.
 pub fn elapsed_text(elapsed: Duration) -> String {
     let secs = elapsed.as_secs_f64();
@@ -1277,6 +1294,37 @@ mod tests {
             ..problems[2].clone()
         };
         assert_eq!(pick_filter(&fields_only), "height=Height(0) hash=x");
+    }
+
+    fn problem(level: ProblemLevel, last_secs: u64, seq: u64) -> Problem {
+        let at = |secs| std::time::UNIX_EPOCH + Duration::from_secs(secs);
+        Problem {
+            level,
+            target: None,
+            pattern: format!("p{seq}"),
+            sample: String::new(),
+            count: 1,
+            first: at(0),
+            last: at(last_secs),
+            last_seq: seq,
+        }
+    }
+
+    #[test]
+    fn problems_order_errors_first_within_a_minute() {
+        let mut problems = vec![
+            problem(ProblemLevel::Warn, 125, 1),
+            problem(ProblemLevel::Error, 121, 2),
+            problem(ProblemLevel::Warn, 59, 3),
+            problem(ProblemLevel::Stderr, 122, 4),
+            problem(ProblemLevel::Warn, 123, 5),
+            problem(ProblemLevel::Error, 180, 6),
+        ];
+        order_problems(&mut problems);
+        let order: Vec<u64> = problems.iter().map(|p| p.last_seq).collect();
+        // Minute 3 first; in minute 2 the stderr (122) and error (121) ahead of the warnings,
+        // newest first within each group; minute 0 last.
+        assert_eq!(order, vec![6, 4, 2, 1, 5, 3]);
     }
 
     #[test]
