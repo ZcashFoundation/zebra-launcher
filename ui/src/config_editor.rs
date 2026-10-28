@@ -15,7 +15,7 @@
 //! counted against the saved file, so an edit made as text counts too. The outcomes of a save
 //! follow the backend's: a rollback or a conflict keeps the draft.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use launcher_types::{ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, Phase};
 use leptos::{prelude::*, task::spawn_local};
@@ -23,14 +23,12 @@ use leptos::{prelude::*, task::spawn_local};
 use crate::{
     api,
     app::{AppState, Tab},
+    components::transient::Transient,
     config_form::{
         Control, FIELDS, Field, FieldId, FormState, ParsedConfig, field_named, normalize,
         parse_config, render_config, validate,
     },
 };
-
-/// How long the "Saved" message stays.
-const SAVED_FOR: Duration = Duration::from_secs(6);
 
 /// Whether the file was read.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,13 +209,11 @@ pub fn text_only_note(count: usize, text_differs: bool) -> Option<&'static str> 
 }
 
 /// True while saving restarts zebrad: it is starting, running, or about to be restarted after a
-/// crash. Otherwise (stopped, stopping, failed) the backend only writes the file, and a stopping
-/// zebrad is left stopped; this mirrors `was_running` in the `apply_config` command.
+/// crash ([`Phase::is_active`]). Otherwise (stopped, stopping, failed) the backend only writes
+/// the file, and a stopping zebrad is left stopped; this mirrors `was_running` in the
+/// `apply_config` command.
 fn restarts_zebrad(phase: &Phase) -> bool {
-    matches!(
-        phase,
-        Phase::Starting | Phase::Running | Phase::Backoff { .. }
-    )
+    phase.is_active()
 }
 
 pub fn save_label(restarts: bool) -> &'static str {
@@ -377,14 +373,14 @@ pub struct ConfigEditor {
     /// Why the last form edit could not be written into the draft, if it could not.
     pub render_error: RwSignal<Option<String>>,
     pub saving: RwSignal<bool>,
-    pub notice: RwSignal<Option<Notice>>,
+    /// The outcome of the last save or re-read: a "Saved" for a while, the rest until the next
+    /// outcome or Discard.
+    pub notice: Transient<Notice>,
     /// The file pane shows the draft as a text editor; the form follows the text.
     pub text_mode: RwSignal<bool>,
     /// The field last edited in the form, set on every edit, for the file pane to show its
     /// line.
     pub last_edited: RwSignal<Option<FieldId>>,
-    /// Bumped by every notice, so the timer of an earlier "Saved" does not clear a newer one.
-    notice_generation: StoredValue<u64>,
 }
 
 impl ConfigEditor {
@@ -455,10 +451,9 @@ impl ConfigEditor {
             edited,
             render_error: RwSignal::new(None),
             saving: RwSignal::new(false),
-            notice: RwSignal::new(None),
+            notice: Transient::new(),
             text_mode: RwSignal::new(false),
             last_edited: RwSignal::new(None),
-            notice_generation: StoredValue::new(0),
         };
 
         spawn_local(editor.reload(Reload::Replace));
@@ -698,7 +693,7 @@ impl ConfigEditor {
         let text = self.draft.get_untracked();
         let restarted = untrack(|| self.restarts());
         self.saving.set(true);
-        self.notice.set(None);
+        self.notice.clear();
         spawn_local(async move {
             let result = api::apply_config(text, token).await;
             let (reload, notice) = after_apply(result, restarted, || self.keeps_draft());
@@ -713,7 +708,7 @@ impl ConfigEditor {
     /// Drops the draft for the saved file.
     pub fn discard(self) {
         self.reset_draft();
-        self.notice.set(None);
+        self.notice.clear();
     }
 
     /// Reads the file again after a failed read. The draft is kept across the failure (after a
@@ -726,21 +721,13 @@ impl ConfigEditor {
         spawn_local(self.reload_pending());
     }
 
+    /// A "Saved" stays for a while; a rollback, a conflict or a failure must be read, so it
+    /// stays until the next outcome or Discard.
     fn show_notice(self, next: Notice) {
-        self.notice_generation
-            .update_value(|generation| *generation += 1);
-        let mine = self.notice_generation.get_value();
-        let transient = matches!(next, Notice::Saved { .. });
-        self.notice.set(Some(next));
-        if transient {
-            set_timeout(
-                move || {
-                    if self.notice_generation.get_value() == mine {
-                        self.notice.set(None);
-                    }
-                },
-                SAVED_FOR,
-            );
+        if matches!(next, Notice::Saved { .. }) {
+            self.notice.show(next);
+        } else {
+            self.notice.hold(next);
         }
     }
 }

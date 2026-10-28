@@ -5,10 +5,9 @@
 //! rule once. The value and its generation live in one signal, so a page disposed while a
 //! timer runs is no trouble: the timer finds the signal gone and does nothing.
 //!
-//! Used by the copy notes on the Logs and Grafana pages. The second phase moves the config
-//! editor's notices (`show` for `Notice::Saved`, `hold` for the rest, in place of
-//! `show_notice` and `SAVED_FOR`), the Configure page's line flash (`show_for(number,
-//! FLASH_FOR)`) and the Settings outcomes (`report`) onto it.
+//! Used by the copy notes on the Logs and Grafana pages, the config editor's notices (`show`
+//! for `Notice::Saved`, `hold` for the rest) and the Settings outcomes (`report`). The
+//! Configure page's line flash toggles a class on an element instead, a different pattern.
 
 use std::time::Duration;
 
@@ -60,8 +59,8 @@ impl<T: Send + Sync + 'static> Transient<T> {
         self.replace(Some(value));
     }
 
-    /// Clears the value now: the Settings form drops its "Saved" on the next edit.
-    #[expect(dead_code, reason = "adopted by the Settings page in the second phase")]
+    /// Clears the value now: the Settings form drops its "Saved" on the next edit, the config
+    /// editor its notice on Discard.
     pub fn clear(self) {
         self.replace(None);
     }

@@ -2,7 +2,7 @@
 //! startup timeline. Backed by [`crate::insights::Insights`].
 //!
 //! The chart geometry ([`crate::charts::activity`]) and the sentences
-//! ([`crate::insight_text`]) are pure functions, tested natively; the components only wire
+//! ([`crate::insights::text`]) are pure functions, tested natively; the components only wire
 //! them to signals.
 
 use std::time::SystemTime;
@@ -23,11 +23,12 @@ use crate::{
         rows::{Rows, text_rows},
     },
     format::{percent, relative, thousands},
-    insight_text::{
-        checkpoints_line, earlier_runs_line, mempool_line, peers_line, run_head, shutdown_line,
-    },
     insights::{
-        ACTIVITY_MINUTES, Problem, ProblemLevel, Run, SyncSnapshot, Tone, elapsed_text, pick_filter,
+        ACTIVITY_MINUTES, Problem, ProblemLevel, Run, SyncSnapshot, Tone, elapsed_text,
+        pick_filter,
+        text::{
+            checkpoints_line, earlier_runs_line, mempool_line, peers_line, run_head, shutdown_line,
+        },
     },
 };
 

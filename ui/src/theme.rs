@@ -22,15 +22,6 @@ pub fn theme_text(theme: Theme) -> (&'static str, &'static str) {
     }
 }
 
-/// The `value` of an appearance radio, the same word as on the wire.
-pub fn theme_value(theme: Theme) -> &'static str {
-    match theme {
-        Theme::System => "system",
-        Theme::Light => "light",
-        Theme::Dark => "dark",
-    }
-}
-
 /// Whether the appearance is dark for a setting and the system's preference.
 pub fn resolve(theme: Theme, system_prefers_light: bool) -> bool {
     match theme {
@@ -112,9 +103,8 @@ mod tests {
     #[test]
     fn theme_words() {
         assert_eq!(theme_text(Theme::System).0, "System");
-        assert_eq!(theme_value(Theme::System), "system");
-        assert_eq!(theme_value(Theme::Light), "light");
-        assert_eq!(theme_value(Theme::Dark), "dark");
+        assert_eq!(theme_text(Theme::Light).0, "Light");
+        assert_eq!(theme_text(Theme::Dark).0, "Dark");
     }
 
     #[test]

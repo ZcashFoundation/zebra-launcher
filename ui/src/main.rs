@@ -19,7 +19,6 @@ mod config_form;
 mod config_view;
 mod format;
 mod grafana_url;
-mod insight_text;
 mod insights;
 mod log_view;
 mod mock;
@@ -34,12 +33,6 @@ mod components {
     pub mod log_insights;
     pub mod nav;
     pub mod outcome_note;
-    // Built for the Settings and first-run pages, which adopt it in the second phase; until
-    // then nothing renders it. (`expect` is not fulfilled by the macro-generated props.)
-    #[allow(
-        dead_code,
-        reason = "adopted by the Settings and first-run pages in the second phase"
-    )]
     pub mod radio_choice;
     pub mod reset_config;
     pub mod rows;
@@ -47,11 +40,6 @@ mod components {
     pub mod status_strip;
     pub mod tooltip;
     pub mod transient;
-    // As `radio_choice`: adopted in the second phase.
-    #[allow(
-        dead_code,
-        reason = "adopted by the Settings and first-run pages in the second phase"
-    )]
     pub mod typed_confirm;
     pub mod update_mode_choice;
     pub mod updates;

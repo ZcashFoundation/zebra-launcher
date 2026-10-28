@@ -7,6 +7,7 @@
 //! ingest `now` stands in only until one has been seen).
 
 pub mod fields;
+pub mod text;
 
 use std::{
     collections::VecDeque,
