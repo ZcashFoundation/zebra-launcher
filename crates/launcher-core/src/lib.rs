@@ -11,6 +11,7 @@ pub mod firstrun;
 mod fsutil;
 pub mod logfile;
 pub mod logs;
+pub mod metrics;
 pub mod monitor;
 pub mod paths;
 pub mod pidfile;

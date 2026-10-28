@@ -28,6 +28,8 @@ const COMMANDS: &[&str] = &[
     "get_settings",
     "set_settings",
     "get_node_stats",
+    "get_node_details",
+    "get_metrics",
     "open_path",
     "get_first_run_info",
     "pick_data_dir",

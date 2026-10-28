@@ -21,6 +21,8 @@
     "allow-get-settings",
     "allow-set-settings",
     "allow-get-node-stats",
+    "allow-get-node-details",
+    "allow-get-metrics",
     "allow-open-path",
     "allow-get-first-run-info",
     "allow-pick-data-dir",

@@ -1,0 +1,250 @@
+# TYPE zcash_chain_verified_block_total counter
+zcash_chain_verified_block_total 1
+
+# TYPE state_checkpoint_finalized_block_count counter
+state_checkpoint_finalized_block_count 1
+
+# TYPE state_finalized_cumulative_transactions counter
+state_finalized_cumulative_transactions 1
+
+# TYPE state_finalized_cumulative_orchard_nullifiers counter
+state_finalized_cumulative_orchard_nullifiers 0
+
+# TYPE state_memory_sent_block_count counter
+state_memory_sent_block_count 1
+
+# TYPE zebrad_build_info counter
+zebrad_build_info{version="7.0.0-rc.0"} 1
+
+# TYPE state_finalized_cumulative_sapling_nullifiers counter
+state_finalized_cumulative_sapling_nullifiers 0
+
+# TYPE state_finalized_cumulative_sprout_nullifiers counter
+state_finalized_cumulative_sprout_nullifiers 0
+
+# TYPE state_requests counter
+state_requests{service="state",type="best_chain_block_hash"} 1
+state_requests{service="state",type="commit_checkpoint_verified_block"} 1
+state_requests{service="state",type="block_locator"} 1
+state_requests{service="read_state",type="block_locator"} 1
+state_requests{service="read_state",type="best_chain_block_hash"} 1
+state_requests{service="state",type="known_block"} 2
+state_requests{service="read_state",type="tip"} 1
+state_requests{service="state",type="tip"} 1
+
+# TYPE state_finalized_block_count counter
+state_finalized_block_count 1
+
+# TYPE checkpoint_verified_block_count counter
+checkpoint_verified_block_count 1
+
+# TYPE checkpoint_processing_next_height gauge
+checkpoint_processing_next_height 0
+
+# TYPE pool_num_ready gauge
+pool_num_ready{network="regtest"} 0
+
+# TYPE candidate_set_recently_live gauge
+candidate_set_recently_live{network="regtest"} 0
+
+# TYPE checkpoint_queued_slots gauge
+checkpoint_queued_slots 0
+
+# TYPE state_finalized_value_pool_orchard gauge
+state_finalized_value_pool_orchard 0
+
+# TYPE state_memory_sent_cache_max_height gauge
+state_memory_sent_cache_max_height 0
+
+# TYPE zebra_state_rocksdb_block_cache_usage_bytes gauge
+zebra_state_rocksdb_block_cache_usage_bytes 87
+
+# TYPE state_memory_sent_block_height gauge
+state_memory_sent_block_height 0
+
+# TYPE state_finalized_value_pool_sprout gauge
+state_finalized_value_pool_sprout 0
+
+# TYPE pool_num_unready gauge
+pool_num_unready{network="regtest"} 0
+
+# TYPE sync_estimated_distance_to_tip gauge
+sync_estimated_distance_to_tip 6620287
+
+# TYPE checkpoint_verified_height gauge
+checkpoint_verified_height 0
+
+# TYPE zcash_net_peers gauge
+zcash_net_peers{network="regtest"} 0
+
+# TYPE candidate_set_responded gauge
+candidate_set_responded{network="regtest"} 0
+
+# TYPE state_memory_sent_cache_min_height gauge
+state_memory_sent_cache_min_height 0
+
+# TYPE state_finalized_value_pool_deferred gauge
+state_finalized_value_pool_deferred 0
+
+# TYPE state_checkpoint_queued_block_count gauge
+state_checkpoint_queued_block_count 0
+
+# TYPE zebra_state_rocksdb_compaction_running gauge
+zebra_state_rocksdb_compaction_running 0
+
+# TYPE checkpoint_queued_max_height gauge
+checkpoint_queued_max_height NaN
+
+# TYPE sync_estimated_network_tip_height gauge
+sync_estimated_network_tip_height 6620287
+
+# TYPE state_finalized_chain_supply_total gauge
+state_finalized_chain_supply_total 0
+
+# TYPE zebra_state_rocksdb_compaction_pending_bytes gauge
+zebra_state_rocksdb_compaction_pending_bytes 0
+
+# TYPE state_finalized_value_pool_transparent gauge
+state_finalized_value_pool_transparent 0
+
+# TYPE zebra_state_rocksdb_live_data_size_bytes gauge
+zebra_state_rocksdb_live_data_size_bytes 0
+
+# TYPE zebra_state_rocksdb_cf_disk_size_bytes gauge
+zebra_state_rocksdb_cf_disk_size_bytes{cf="sprout_anchors"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="tx_loc_by_transparent_addr_loc"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="default"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="orchard_note_commitment_tree"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="sapling_anchors"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="tx_by_loc"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="ironwood_note_commitment_tree"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="tip_chain_value_pool"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="block_info"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="sapling_note_commitment_tree"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="sapling_nullifiers"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="height_by_hash"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="orchard_note_commitment_subtree"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="history_tree"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="ironwood_note_commitment_subtree"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="balance_by_transparent_addr"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="tx_loc_by_hash"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="sprout_nullifiers"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="hash_by_height"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="ironwood_anchors"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="utxo_loc_by_transparent_addr_loc"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="ironwood_nullifiers"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="sapling_note_commitment_subtree"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="sprout_note_commitment_tree"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="orchard_anchors"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="block_header_by_height"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="tx_loc_by_spent_out_loc"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="orchard_nullifiers"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="hash_by_tx_loc"} 0
+zebra_state_rocksdb_cf_disk_size_bytes{cf="utxo_by_out_loc"} 0
+
+# TYPE state_memory_sent_cache_block_count gauge
+state_memory_sent_cache_block_count 1
+
+# TYPE state_checkpoint_sent_block_height gauge
+state_checkpoint_sent_block_height 0
+
+# TYPE zcash_chain_verified_block_height gauge
+zcash_chain_verified_block_height 0
+
+# TYPE zebra_state_rocksdb_num_files_at_level gauge
+zebra_state_rocksdb_num_files_at_level{level="2"} 0
+zebra_state_rocksdb_num_files_at_level{level="5"} 0
+zebra_state_rocksdb_num_files_at_level{level="4"} 0
+zebra_state_rocksdb_num_files_at_level{level="1"} 0
+zebra_state_rocksdb_num_files_at_level{level="3"} 0
+zebra_state_rocksdb_num_files_at_level{level="6"} 0
+zebra_state_rocksdb_num_files_at_level{level="0"} 0
+
+# TYPE zebra_state_rocksdb_total_disk_size_bytes gauge
+zebra_state_rocksdb_total_disk_size_bytes 0
+
+# TYPE state_checkpoint_finalized_block_height gauge
+state_checkpoint_finalized_block_height 0
+
+# TYPE checkpoint_verified_count gauge
+checkpoint_verified_count 0
+
+# TYPE candidate_set_disconnected gauge
+candidate_set_disconnected{network="regtest"} 0
+
+# TYPE state_finalized_block_height gauge
+state_finalized_block_height 0
+
+# TYPE state_finalized_value_pool_sapling gauge
+state_finalized_value_pool_sapling 0
+
+# TYPE state_checkpoint_queued_max_height gauge
+state_checkpoint_queued_max_height NaN
+
+# TYPE candidate_set_gossiped gauge
+candidate_set_gossiped{network="regtest"} 0
+
+# TYPE zebra_state_rocksdb_cf_memory_size_bytes gauge
+zebra_state_rocksdb_cf_memory_size_bytes{cf="orchard_note_commitment_subtree"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="tx_loc_by_hash"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="tx_loc_by_transparent_addr_loc"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="orchard_anchors"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="hash_by_tx_loc"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="ironwood_note_commitment_subtree"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="hash_by_height"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="sapling_nullifiers"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="orchard_nullifiers"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="history_tree"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="block_header_by_height"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="ironwood_note_commitment_tree"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="tx_loc_by_spent_out_loc"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="sapling_anchors"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="sapling_note_commitment_subtree"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="block_info"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="ironwood_nullifiers"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="tx_by_loc"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="sapling_note_commitment_tree"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="sprout_nullifiers"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="utxo_loc_by_transparent_addr_loc"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="ironwood_anchors"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="sprout_note_commitment_tree"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="utxo_by_out_loc"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="sprout_anchors"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="orchard_note_commitment_tree"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="height_by_hash"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="balance_by_transparent_addr"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="tip_chain_value_pool"} 2048
+zebra_state_rocksdb_cf_memory_size_bytes{cf="default"} 2048
+
+# TYPE crawler_in_flight_handshakes gauge
+crawler_in_flight_handshakes{network="regtest"} 0
+
+# TYPE candidate_set_failed gauge
+candidate_set_failed{network="regtest"} 0
+
+# TYPE checkpoint_queued_continuous_height gauge
+checkpoint_queued_continuous_height 0
+
+# TYPE zebra_state_rocksdb_total_memory_size_bytes gauge
+zebra_state_rocksdb_total_memory_size_bytes 61440
+
+# TYPE candidate_set_pending gauge
+candidate_set_pending{network="regtest"} 0
+
+# TYPE state_finalized_value_pool_ironwood gauge
+state_finalized_value_pool_ironwood 0
+
+# TYPE state_memory_sent_cache_batch_count gauge
+state_memory_sent_cache_batch_count 1
+
+# TYPE zebra_state_rocksdb_batch_commit_duration_seconds summary
+zebra_state_rocksdb_batch_commit_duration_seconds{quantile="0"} 0.000058148
+zebra_state_rocksdb_batch_commit_duration_seconds{quantile="0.5"} 0.0000581491069095754
+zebra_state_rocksdb_batch_commit_duration_seconds{quantile="0.9"} 0.0000581491069095754
+zebra_state_rocksdb_batch_commit_duration_seconds{quantile="0.95"} 0.0000581491069095754
+zebra_state_rocksdb_batch_commit_duration_seconds{quantile="0.99"} 0.0000581491069095754
+zebra_state_rocksdb_batch_commit_duration_seconds{quantile="0.999"} 0.0000581491069095754
+zebra_state_rocksdb_batch_commit_duration_seconds{quantile="1"} 0.000058148
+zebra_state_rocksdb_batch_commit_duration_seconds_sum 0.000058148
+zebra_state_rocksdb_batch_commit_duration_seconds_count 1
+
