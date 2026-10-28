@@ -470,7 +470,17 @@ pub fn render_config(original: &str, form: &FormState) -> Result<String, String>
             None => remove_value(&mut doc, field),
         }
     }
-    Ok(doc.to_string())
+    Ok(restore_line_endings(original, doc.to_string()))
+}
+
+/// Keeps the file's line endings: `toml_edit` writes `\n`, so a file that uses `\r\n` (common
+/// on Windows) gets them back, and the file pane marks only the lines that really changed.
+fn restore_line_endings(original: &str, rendered: String) -> String {
+    if original.contains("\r\n") {
+        rendered.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        rendered
+    }
 }
 
 fn set_value(doc: &mut DocumentMut, field: &Field, text: &str) -> Result<(), String> {
@@ -1245,6 +1255,22 @@ enabled = false
     }
 
     // Rendering.
+
+    #[test]
+    fn a_file_with_crlf_line_endings_keeps_them() {
+        let crlf = FIXTURE.replace("\r\n", "\n").replace('\n', "\r\n");
+        let parsed = parse_config(&crlf).expect("parses");
+        assert_eq!(render_config(&crlf, &parsed.form).expect("renders"), crlf);
+        let mut form = parsed.form;
+        form.set(("sync", "download_concurrency_limit"), Some("60".into()));
+        let rendered = render_config(&crlf, &form).expect("renders");
+        assert!(rendered.contains("download_concurrency_limit = 60\r\n"));
+        assert!(!rendered.contains("\n\n[") || rendered.contains("\r\n\r\n["));
+        assert_eq!(
+            rendered.matches('\n').count(),
+            rendered.matches("\r\n").count()
+        );
+    }
 
     #[test]
     fn round_trip_of_the_fixture_is_identical() {

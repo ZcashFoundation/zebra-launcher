@@ -1,0 +1,7 @@
+# One line ending everywhere: tests compare fixtures byte for byte and the
+# scripts run under bash on Windows runners too.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+*.webp binary
