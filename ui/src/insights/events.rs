@@ -12,14 +12,15 @@ use std::{
 
 use launcher_types::{ApplyOutcome, ExitClass, ExitInfo, Phase, Status, UpdateInfo, UpdateState};
 
-use crate::format::{exit_class_text, rough_duration};
+use crate::format::{exit_class_text, exit_code_words, rough_duration};
 
 use super::{EventKind, Problem, ProblemLevel, RunEvent, Tone, fields::message_text};
 
 /// A session event and a log event of the same kind this close together describe one
-/// happening. Launcher notes carry no timestamp and take the time of the stamped line before
-/// them, which can be a minute old when zebrad hung before it was killed.
-pub const DEDUPE_WINDOW: Duration = Duration::from_secs(120);
+/// happening. The supervisor stamps its notes, so the two differ by the exit drain and the
+/// status delivery, seconds at most; the window stays well under the shortest restart backoff,
+/// so a replayed restart decision is not mistaken for the next crash's.
+pub const DEDUPE_WINDOW: Duration = Duration::from_secs(10);
 
 /// Milestones this close together share one row.
 pub const COLLAPSE_WINDOW: Duration = Duration::from_secs(2);
@@ -101,18 +102,12 @@ pub fn exit_words(class: ExitClass) -> &'static str {
     }
 }
 
-fn code_words(code: Option<i32>) -> String {
-    match code {
-        Some(code) => format!("code {code}"),
-        None => "no exit code".to_owned(),
-    }
-}
-
-/// `clean exit (code 0)`, `crash (code 101)`, `exit (no exit code)`.
+/// `clean exit (code 0)`, `crash (code 101)`, `crash (killed by a signal)`, `exit (code 1)`.
 pub fn ending_words(class: Option<ExitClass>, code: Option<i32>) -> String {
+    let code = exit_code_words(code, class);
     match class {
-        Some(class) => format!("{} ({})", exit_words(class), code_words(code)),
-        None => format!("exit ({})", code_words(code)),
+        Some(class) => format!("{} ({code})", exit_words(class)),
+        None => format!("exit ({code})"),
     }
 }
 
@@ -465,7 +460,8 @@ pub fn config_outcome_event(outcome: &ApplyOutcome, now: SystemTime) -> RunEvent
     }
 }
 
-/// A problem's first appearance as a timeline row: `ERROR: block download failed ×3`.
+/// A problem's first appearance in the current run as a timeline row:
+/// `ERROR: block download failed ×3`.
 pub fn problem_event(problem: &Problem) -> RunEvent {
     let text = message_text(&problem.sample);
     let text = if text.is_empty() {
@@ -473,8 +469,10 @@ pub fn problem_event(problem: &Problem) -> RunEvent {
     } else {
         text
     };
+    // Only a cut message gets the ellipsis; the fields left off are not a cut.
+    let truncated = text.chars().count() > PROBLEM_CHARS;
     let mut text: String = text.chars().take(PROBLEM_CHARS).collect();
-    if text.len() < problem.sample.len() && problem.sample.chars().count() > PROBLEM_CHARS {
+    if truncated {
         text.push('…');
     }
     let mut text = format!("{}: {}", problem.level.label(), text.trim());
@@ -485,7 +483,7 @@ pub fn problem_event(problem: &Problem) -> RunEvent {
         ProblemLevel::Warn => Tone::Warning,
         ProblemLevel::Error | ProblemLevel::Stderr => Tone::Critical,
     };
-    event(problem.first, EventKind::Problem, text, tone)
+    event(problem.run_first, EventKind::Problem, text, tone)
 }
 
 /// `Metrics opened` as `metrics opened` for the middle of a row; an acronym such as `RPC
@@ -702,7 +700,7 @@ mod tests {
             (
                 "zebrad exited (no exit code, Crash, stop requested)",
                 EventKind::Exited,
-                "zebrad exited: crash (no exit code)",
+                "zebrad exited: crash (killed by a signal)",
                 Tone::Warning,
             ),
             (
@@ -1072,7 +1070,8 @@ mod tests {
             pattern: "block download failed hash=_".into(),
             sample: "block download failed hash=block::Hash(\"abc\")".into(),
             count: 3,
-            first: at(50),
+            first: at(20),
+            run_first: at(50),
             last: at(90),
             last_seq: 9,
         };
@@ -1080,7 +1079,23 @@ mod tests {
         assert_eq!(event.kind, EventKind::Problem);
         assert_eq!(event.text, "ERROR: block download failed ×3");
         assert_eq!(event.tone, Tone::Critical);
-        assert_eq!(event.at, at(50), "dated at the first appearance");
+        assert_eq!(
+            event.at,
+            at(50),
+            "dated at the first appearance in this run"
+        );
+        // A short message with long fields is whole: no ellipsis for the fields left off.
+        let long_fields = Problem {
+            sample: format!(
+                "block download failed hash=block::Hash(\"{}\") height=Height(2950000) error=timeout",
+                "0".repeat(64)
+            ),
+            ..problem.clone()
+        };
+        assert_eq!(
+            problem_event(&long_fields).text,
+            "ERROR: block download failed ×3"
+        );
         let stderr = Problem {
             level: ProblemLevel::Stderr,
             sample: "thread 'main' panicked at x.rs:1:1:".into(),
@@ -1224,5 +1239,14 @@ mod tests {
         assert_eq!(merge_events(Vec::new(), &session, 10).len(), 6);
         let only_log = vec![ev(1, EventKind::Exited, "zebrad exited: crash (code 101)")];
         assert_eq!(merge_events(only_log, &[], 10).len(), 1);
+        // A restart decision only the log knows (a replayed history) is not the next crash's
+        // restart: the window is shorter than the shortest backoff.
+        let replayed = vec![ev(300, EventKind::Restarting, "Restarting in 10 s")];
+        let next = vec![ev(
+            325,
+            EventKind::Restarting,
+            "Restarting in 20 s (crash 3)",
+        )];
+        assert_eq!(merge_events(replayed, &next, 10).len(), 2);
     }
 }

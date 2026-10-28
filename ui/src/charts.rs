@@ -449,9 +449,10 @@ pub fn sync_summary(
     note: Option<&str>,
 ) -> SyncSummary {
     let Some(sample) = latest else {
+        // A phase note says why there is nothing: zebrad is not running, not slow to answer.
         return SyncSummary {
             figure: "—".to_owned(),
-            line: "Waiting for zebrad's RPC…".to_owned(),
+            line: note.map_or_else(|| "Waiting for zebrad's RPC…".to_owned(), str::to_owned),
             fraction: 0.0,
             at_tip: false,
             waiting: true,
@@ -471,6 +472,8 @@ pub fn sync_summary(
             thousands(sample.estimated_height)
         ));
         match rate {
+            // A phase note means zebrad is not running: nothing is being estimated.
+            None if note.is_some() => {}
             None => parts.push("estimating…".to_owned()),
             Some(rate) => {
                 parts.push(format!(
@@ -946,6 +949,13 @@ mod tests {
         assert_eq!(waiting.figure, "—");
         assert_eq!(waiting.line, "Waiting for zebrad's RPC…");
         assert!(waiting.waiting && !waiting.at_tip);
+        // No sample and not running: the phase says why, not the RPC.
+        let stopped = sync_summary(None, None, None, Some("zebrad is stopped"));
+        assert_eq!(
+            (stopped.figure.as_str(), stopped.line.as_str()),
+            ("—", "zebrad is stopped")
+        );
+        assert!(stopped.waiting);
 
         let syncing = sample(0, 2_950_120, 8);
         let estimating = sync_summary(Some(&syncing), None, None, None);
@@ -955,6 +965,12 @@ mod tests {
             "2,950,120 of 3,120,000 blocks · estimating…"
         );
         assert!((estimating.fraction - 0.9455).abs() < 1e-3);
+        // Nothing is estimated for a node that is not running.
+        let idle = sync_summary(Some(&syncing), None, None, Some("zebrad is stopped"));
+        assert_eq!(
+            idle.line,
+            "2,950,120 of 3,120,000 blocks · zebrad is stopped"
+        );
 
         let known = sync_summary(
             Some(&syncing),

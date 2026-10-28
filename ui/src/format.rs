@@ -6,7 +6,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use launcher_types::{ExitClass, Phase};
+use launcher_types::{ExitClass, ExitInfo, Phase};
 
 /// A short label for a phase, for the badge.
 pub fn phase_label(phase: &Phase) -> &'static str {
@@ -41,6 +41,21 @@ pub fn exit_class_text(class: ExitClass) -> &'static str {
         ExitClass::PortInUse => "a port zebrad needs is already in use",
         ExitClass::SpawnFailed => "zebrad could not be started",
         ExitClass::Crash => "zebrad crashed",
+    }
+}
+
+/// `code 101`, `killed by a signal`, or `no exit code` when zebrad never ran.
+pub fn exit_code_text(exit: &ExitInfo) -> String {
+    exit_code_words(exit.code, Some(exit.class))
+}
+
+/// [`exit_code_text`] from what a log note gives: the code and, when the note named it, the
+/// class. Without a class, a missing code reads `no exit code`: nothing says a signal did it.
+pub fn exit_code_words(code: Option<i32>, class: Option<ExitClass>) -> String {
+    match (code, class) {
+        (Some(code), _) => format!("code {code}"),
+        (None, Some(ExitClass::SpawnFailed) | None) => "no exit code".to_owned(),
+        (None, Some(_)) => "killed by a signal".to_owned(),
     }
 }
 
@@ -290,6 +305,36 @@ mod tests {
                 "{phase:?}"
             );
         }
+    }
+
+    #[test]
+    fn exit_code_words_by_class() {
+        let exit = |code, class| ExitInfo {
+            code,
+            class,
+            detail: None,
+            at: SystemTime::UNIX_EPOCH,
+            requested: false,
+        };
+        assert_eq!(
+            exit_code_text(&exit(Some(101), ExitClass::Crash)),
+            "code 101"
+        );
+        assert_eq!(
+            exit_code_text(&exit(None, ExitClass::Crash)),
+            "killed by a signal"
+        );
+        // zebrad never ran: nothing was killed.
+        assert_eq!(
+            exit_code_text(&exit(None, ExitClass::SpawnFailed)),
+            "no exit code"
+        );
+        assert_eq!(exit_code_words(Some(0), None), "code 0");
+        assert_eq!(exit_code_words(None, None), "no exit code");
+        assert_eq!(
+            exit_code_words(None, Some(ExitClass::Clean)),
+            "killed by a signal"
+        );
     }
 
     #[test]

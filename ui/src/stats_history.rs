@@ -15,9 +15,6 @@ pub const MIN_RATE_SPAN: Duration = Duration::from_secs(30);
 /// range control (the whole history while it is shorter).
 pub const HERO_RATE_WINDOW: Duration = Duration::from_secs(15 * 60);
 
-/// A peer list is attached to the sample of the same poll: one within this much of its time.
-pub const PEER_SPLIT_FRESH: Duration = Duration::from_secs(15);
-
 /// One published statistics value, reduced to the fields the dashboard plots.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sample {
@@ -92,7 +89,9 @@ pub enum Field {
     PeersOutbound,
 }
 
-/// The newest peer list's counts, stamped with the list's time.
+/// The newest peer list's counts, stamped with the list's time. A list belongs to the sample
+/// with its time: the monitor stamps a poll's statistics and details with one `now`, whichever
+/// of the two lands first.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PeerSplit {
     inbound: u32,
@@ -128,13 +127,9 @@ impl PeerSplit {
         }
     }
 
-    /// Whether the list belongs to the poll of a sample taken at `at`.
+    /// Whether the list belongs to the poll of a sample taken at `at`: the two share one stamp.
     fn fits(&self, at: SystemTime) -> bool {
-        let gap = match at.duration_since(self.at) {
-            Ok(gap) => gap,
-            Err(earlier) => earlier.duration(),
-        };
-        gap <= PEER_SPLIT_FRESH
+        self.at == at
     }
 
     fn apply(&self, sample: &mut Sample) {
@@ -178,27 +173,14 @@ impl StatsHistory {
         }
     }
 
-    /// Records the peer list of a poll: its inbound and outbound counts go onto the sample of
-    /// the same poll (the closest within [`PEER_SPLIT_FRESH`], already filed or still to come).
+    /// Records the peer list of a poll: its inbound and outbound counts go onto the sample with
+    /// its time, already filed or still to come. A neighbouring poll's sample is left alone.
     pub fn record_peers(&mut self, details: &NodeDetails) {
         let split = PeerSplit::of(details);
         self.peer_split = Some(split);
-        let after = self.samples.partition_point(|s| s.at < split.at);
-        let candidates = [after.checked_sub(1), Some(after)];
-        let closest = candidates
-            .into_iter()
-            .flatten()
-            .filter_map(|index| {
-                let sample = self.samples.get(index)?;
-                let gap = match sample.at.duration_since(split.at) {
-                    Ok(gap) => gap,
-                    Err(earlier) => earlier.duration(),
-                };
-                (gap <= PEER_SPLIT_FRESH).then_some((gap, index))
-            })
-            .min_by_key(|(gap, _)| *gap);
-        if let Some((_, index)) = closest {
-            split.apply(&mut self.samples[index]);
+        let index = self.samples.partition_point(|s| s.at < split.at);
+        if let Some(sample) = self.samples.get_mut(index).filter(|s| split.fits(s.at)) {
+            split.apply(sample);
         }
     }
 
@@ -245,10 +227,34 @@ impl StatsHistory {
         &self.samples[start..]
     }
 
+    /// The window's samples at or after `from`: this run's, for the run start; the whole
+    /// window for `None`.
+    pub fn window_from(
+        &self,
+        span: Option<Duration>,
+        from: Option<SystemTime>,
+        now: SystemTime,
+    ) -> &[Sample] {
+        let window = self.window(span, now);
+        let start = from.map_or(0, |from| window.partition_point(|s| s.at < from));
+        &window[start..]
+    }
+
     /// Blocks verified per minute between the first and last sample of the window. `None`
     /// until the window spans [`MIN_RATE_SPAN`].
     pub fn block_rate(&self, span: Option<Duration>, now: SystemTime) -> Option<f64> {
-        let window = self.window(span, now);
+        self.block_rate_from(span, None, now)
+    }
+
+    /// [`StatsHistory::block_rate`] over the window's samples at or after `from`: a run's
+    /// pace, not diluted by the downtime before it, when `from` is the run start.
+    pub fn block_rate_from(
+        &self,
+        span: Option<Duration>,
+        from: Option<SystemTime>,
+        now: SystemTime,
+    ) -> Option<f64> {
+        let window = self.window_from(span, from, now);
         let (first, last) = (window.first()?, window.last()?);
         let elapsed = last.at.duration_since(first.at).ok()?;
         if elapsed < MIN_RATE_SPAN {
@@ -261,11 +267,21 @@ impl StatsHistory {
     /// How long the newest sample's remaining blocks take at the window's rate. `Some(ZERO)`
     /// at the tip; `None` while the rate is unknown or not positive.
     pub fn eta_to_tip(&self, span: Option<Duration>, now: SystemTime) -> Option<Duration> {
+        self.eta_to_tip_from(span, None, now)
+    }
+
+    /// [`StatsHistory::eta_to_tip`] at the rate of [`StatsHistory::block_rate_from`].
+    pub fn eta_to_tip_from(
+        &self,
+        span: Option<Duration>,
+        from: Option<SystemTime>,
+        now: SystemTime,
+    ) -> Option<Duration> {
         let newest = self.latest()?;
         if newest.at_tip() {
             return Some(Duration::ZERO);
         }
-        let rate = self.block_rate(span, now)?;
+        let rate = self.block_rate_from(span, from, now)?;
         if rate <= 0.0 {
             return None;
         }
@@ -506,6 +522,37 @@ mod tests {
     }
 
     #[test]
+    fn rate_from_a_run_start_skips_the_downtime() {
+        // A minute at 100 blocks/min, five minutes down, then a minute at 3,000 blocks/min.
+        let mut history = history(&[(0, 0), (30, 50), (60, 100)]);
+        for (secs, height) in [(360, 100), (390, 1600), (420, 3100)] {
+            history.push(&stats(secs, height));
+        }
+        let now = at(420);
+        let span = Some(Duration::from_secs(900));
+        let diluted = history.block_rate(span, now).unwrap();
+        assert!((diluted - 3100.0 / 7.0).abs() < 1e-9, "{diluted}");
+        let run = history.block_rate_from(span, Some(at(360)), now).unwrap();
+        assert!((run - 3000.0).abs() < 1e-9, "{run}");
+        assert_eq!(history.window_from(span, Some(at(360)), now).len(), 3);
+        assert_eq!(history.window_from(span, None, now).len(), 6);
+        // The span still bounds the window.
+        assert_eq!(
+            history
+                .window_from(Some(Duration::from_secs(30)), Some(at(360)), now)
+                .len(),
+            2
+        );
+        // Too little of the run yet: no rate, rather than the earlier run's.
+        assert_eq!(history.block_rate_from(span, Some(at(400)), now), None);
+        // The ETA follows the run's rate.
+        let eta = history.eta_to_tip_from(span, Some(at(360)), now).unwrap();
+        let expected = (3_120_000.0 - 3100.0) / 3000.0 * 60.0;
+        assert!((eta.as_secs_f64() - expected).abs() < 1.0, "{eta:?}");
+        assert!(history.eta_to_tip(span, now).unwrap() > eta);
+    }
+
+    #[test]
     fn eta_from_rate_and_remaining() {
         let now = at(60);
         // 90 blocks in a minute, 3_120_000 - 190 remaining.
@@ -645,7 +692,7 @@ mod tests {
         assert_eq!(history.latest().unwrap().peer_split(), None);
         assert!(!history.has_peer_split(None, at(5)));
         assert!(!history.no_inbound_over(None, at(5)));
-        // The list of the same poll, landing after the stats: the newest sample takes it.
+        // The list of the same poll, landing after the stats: the sample of its time takes it.
         let list = vec![
             peer(true, None),
             peer(false, None),
@@ -653,7 +700,7 @@ mod tests {
             peer(false, Some("failed")),
             peer(true, Some("Responded")),
         ];
-        history.record_peers(&details(6, list.clone()));
+        history.record_peers(&details(5, list.clone()));
         let newest = *history.latest().unwrap();
         assert_eq!(
             newest.peer_split(),
@@ -675,12 +722,18 @@ mod tests {
         history.record_peers(&details(10, vec![peer(false, None)]));
         history.push(&stats(10, 120));
         assert_eq!(history.latest().unwrap().peer_split(), Some((0, 1)));
-        // A stale list is not attached to a much later sample.
+        // The previous poll's list is not attached to the next poll's sample.
         history.push(&stats(40, 130));
         assert_eq!(history.latest().unwrap().peer_split(), None);
-        // The list goes to the closest sample within the freshness, not just the newest.
+        // The list goes to the sample of its time, not the newest one.
         history.push(&stats(45, 131));
-        history.record_peers(&details(41, vec![peer(true, None)]));
+        history.record_peers(&details(40, vec![peer(true, None)]));
+        let samples = history.window(None, at(45));
+        assert_eq!(samples[samples.len() - 2].peer_split(), Some((1, 0)));
+        assert_eq!(samples[samples.len() - 1].peer_split(), None);
+        // A list of a poll whose sample landed first, a neighbouring poll's sample already
+        // filed: neither neighbour takes it.
+        history.record_peers(&details(43, vec![peer(true, None), peer(true, None)]));
         let samples = history.window(None, at(45));
         assert_eq!(samples[samples.len() - 2].peer_split(), Some((1, 0)));
         assert_eq!(samples[samples.len() - 1].peer_split(), None);

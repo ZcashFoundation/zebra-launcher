@@ -15,16 +15,12 @@ use crate::{
     clipboard::copy_to_clipboard,
     components::{reset_config::ResetConfigButton, transient::Transient, updates::CheckForUpdate},
     format::{relative, rough_duration, thousands},
-    health::{Action, Level, humantime_secs, summary_text},
+    health::{Action, CHECKPOINT_NEAR_BLOCKS, Level, humantime_secs, summary_text},
     insights::SyncStage,
     stats_history::HERO_RATE_WINDOW,
 };
 
 use super::{Dash, Icon, with_health_input};
-
-/// The checkpoint verifier is still at work while its height is within this many blocks of
-/// the verified height; further behind, it has finished and full validation runs.
-pub const CHECKPOINT_NEAR_BLOCKS: u64 = 5_000;
 
 /// How long "Copied" stays beside the Copy summary button.
 const COPIED_FOR: Duration = Duration::from_secs(2);

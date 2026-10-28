@@ -5,7 +5,7 @@
 //! ([`crate::insights::text`] and the helpers here) are pure functions, tested natively; the
 //! components only wire them to signals.
 
-use std::{cmp::Reverse, time::SystemTime};
+use std::time::SystemTime;
 
 use leptos::prelude::*;
 
@@ -25,8 +25,7 @@ use crate::{
     format::{percent, relative, thousands},
     insights::{
         ACTIVITY_MINUTES, Problem, ProblemLevel, Run, RunEvent, SyncSnapshot, Tone, elapsed_text,
-        fields::epoch_minute,
-        pick_filter,
+        order_problems, pick_filter,
         text::{
             checkpoints_line, earlier_runs_line, mempool_line, peers_line, run_head, shutdown_line,
         },
@@ -55,22 +54,6 @@ pub fn problem_counts_text(warn: u32, error: u32) -> Option<String> {
         parts.push(format!("{error} ERROR"));
     }
     (!parts.is_empty()).then(|| format!("last hour: {}", parts.join(", ")))
-}
-
-/// Orders problems newest first by the minute they were last seen, errors and stderr ahead of
-/// warnings within a minute, then by the exact time.
-pub fn order_problems(problems: &mut [Problem]) {
-    let rank = |level: ProblemLevel| match level {
-        ProblemLevel::Error | ProblemLevel::Stderr => 0,
-        ProblemLevel::Warn => 1,
-    };
-    problems.sort_by_key(|problem| {
-        (
-            Reverse(epoch_minute(problem.last)),
-            rank(problem.level),
-            Reverse((problem.last, problem.last_seq)),
-        )
-    });
 }
 
 /// The class of a This run row: problem rows carry their tone's colour on the icon.
@@ -705,26 +688,7 @@ pub fn LogInsightsPanel(on_pick: Callback<String>) -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, UNIX_EPOCH};
-
     use super::*;
-
-    fn at(secs: u64) -> SystemTime {
-        UNIX_EPOCH + Duration::from_secs(secs)
-    }
-
-    fn problem(level: ProblemLevel, last_secs: u64, seq: u64) -> Problem {
-        Problem {
-            level,
-            target: None,
-            pattern: format!("p{seq}"),
-            sample: String::new(),
-            count: 1,
-            first: at(0),
-            last: at(last_secs),
-            last_seq: seq,
-        }
-    }
 
     #[test]
     fn head_counts() {
@@ -735,23 +699,6 @@ mod tests {
             problem_counts_text(3, 1),
             Some("last hour: 3 WARN, 1 ERROR".into())
         );
-    }
-
-    #[test]
-    fn problems_order_errors_first_within_a_minute() {
-        let mut problems = vec![
-            problem(ProblemLevel::Warn, 125, 1),
-            problem(ProblemLevel::Error, 121, 2),
-            problem(ProblemLevel::Warn, 59, 3),
-            problem(ProblemLevel::Stderr, 122, 4),
-            problem(ProblemLevel::Warn, 123, 5),
-            problem(ProblemLevel::Error, 180, 6),
-        ];
-        order_problems(&mut problems);
-        let order: Vec<u64> = problems.iter().map(|p| p.last_seq).collect();
-        // Minute 3 first; in minute 2 the stderr (122) and error (121) ahead of the warnings,
-        // newest first within each group; minute 0 last.
-        assert_eq!(order, vec![6, 4, 2, 1, 5, 3]);
     }
 
     #[test]

@@ -9,17 +9,17 @@
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
-    EOS_WARNING_WINDOW, EosInfo, ExitClass, ExitInfo, MetricsSnapshot, NodeStats, Phase,
-    RecoveryAction, StaleProcessInfo, Status, UpdateInfo, UpdateState, eos_within,
+    EOS_WARNING_WINDOW, EosInfo, ExitClass, MetricsSnapshot, NodeStats, Phase, RecoveryAction,
+    StaleProcessInfo, Status, UpdateInfo, UpdateState, eos_within,
 };
 
 use crate::{
     charts::{eta_text, percent_1},
     format::{
-        bytes, exit_class_text, local_date_short, local_datetime_short, relative, rough_duration,
-        thousands,
+        bytes, exit_class_text, exit_code_text, local_date_short, local_datetime_short, relative,
+        rough_duration, thousands,
     },
-    insights::{Insights, ProblemLevel, Run, SyncSnapshot, SyncStage, pick_filter},
+    insights::{Insights, ProblemLevel, Run, SyncSnapshot, SyncStage, order_problems, pick_filter},
     metrics_history::{MetricsHistory, names},
     stats_history::{Field, HERO_RATE_WINDOW, Sample, StatsHistory},
 };
@@ -41,7 +41,9 @@ pub const FEW_PEERS_FOR: Duration = Duration::from_secs(5 * 60);
 /// [`STALL_PROBLEM`].
 pub const STALL_ATTENTION: Duration = Duration::from_secs(2 * 60);
 pub const STALL_PROBLEM: Duration = Duration::from_secs(10 * 60);
-/// No new block at the tip, with the tip estimate frozen too, this long wants a look.
+/// No new block at the tip this long wants a look. zebrad's tip estimate keeps creeping a
+/// block per 75 s meanwhile: a frozen height under a moving estimate is what a tip stall
+/// looks like.
 pub const STALL_AT_TIP: Duration = Duration::from_secs(10 * 60);
 /// Errors in the log newer than this want a look.
 pub const RECENT_ERRORS: Duration = Duration::from_secs(10 * 60);
@@ -51,6 +53,9 @@ pub const RECENT_CRASH: Duration = Duration::from_secs(60 * 60);
 pub const CRASH_LOOP: u32 = 3;
 /// The end of support this close is urgent.
 pub const EOS_URGENT: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+/// The checkpoint verifier is still at work while its height is within this many blocks of
+/// the verified height; further behind, it has finished and full validation runs.
+pub const CHECKPOINT_NEAR_BLOCKS: u64 = 5_000;
 
 /// A log timestamp may run a little ahead of the supervisor's spawn time; a line this close
 /// to the start still belongs to the run.
@@ -307,11 +312,9 @@ impl<'a> Facts<'a> {
         self.ago(self.started_at().unwrap_or(self.input.phase_since))
     }
 
-    /// Whether a time belongs to the current run: not before it started, give or take
-    /// [`RUN_SLACK`] for zebrad's own clock stamps. Everything counts without a start time.
+    /// [`this_run`] for the current run.
     fn this_run(&self, at: SystemTime) -> bool {
-        self.started_at()
-            .is_none_or(|started| at.checked_add(RUN_SLACK).is_none_or(|at| at >= started))
+        this_run(self.started_at(), at)
     }
 
     /// The log's current run, when it is this run.
@@ -381,13 +384,20 @@ impl<'a> Facts<'a> {
         }
     }
 
-    /// A metric from the newest snapshot (the published one, or the history's).
+    /// A metric from the newest snapshot: the published one, or the history's when it is this
+    /// run's. A snapshot withdrawn from an earlier process says nothing about this one.
     fn metric(&self, name: &str) -> Option<f64> {
         self.input
             .metrics
             .and_then(|snapshot| snapshot.family(name)?.single())
             .filter(|value| value.is_finite())
-            .or_else(|| self.input.metrics_history.newest_value(name))
+            .or_else(|| {
+                let history = self.input.metrics_history;
+                history
+                    .latest()
+                    .filter(|newest| self.this_run(newest.at))
+                    .and_then(|_| history.newest_value(name))
+            })
     }
 
     fn metric_count(&self, name: &str) -> Option<u64> {
@@ -403,15 +413,19 @@ impl<'a> Facts<'a> {
     }
 
     /// The sync hero's figures: `94.6 % · 3,747 blocks/min · about 44 min left`, on the fixed
-    /// [`HERO_RATE_WINDOW`].
+    /// [`HERO_RATE_WINDOW`] over this run's samples, so the downtime before a restart does not
+    /// dilute the pace.
     fn sync_line(&self) -> String {
         let Some(latest) = self.latest else {
             return "Waiting for zebrad's RPC".to_owned();
         };
         let history = self.input.history;
+        let (started, now) = (self.started_at(), self.now());
         let mut parts = vec![percent_1(latest.verification_progress)];
-        match history.block_rate(Some(HERO_RATE_WINDOW), self.now()) {
-            None => parts.push("estimating…".to_owned()),
+        match history.block_rate_from(Some(HERO_RATE_WINDOW), started, now) {
+            // Only a running node is estimating anything.
+            None if self.status().phase == Phase::Running => parts.push("estimating…".to_owned()),
+            None => {}
             Some(rate) => {
                 parts.push(format!(
                     "{} blocks/min",
@@ -419,7 +433,7 @@ impl<'a> Facts<'a> {
                 ));
                 parts.push(
                     history
-                        .eta_to_tip(Some(HERO_RATE_WINDOW), self.now())
+                        .eta_to_tip_from(Some(HERO_RATE_WINDOW), started, now)
                         .map_or_else(|| "not catching up".to_owned(), eta_text),
                 );
             }
@@ -427,13 +441,14 @@ impl<'a> Facts<'a> {
         parts.join(" · ")
     }
 
-    /// `last block 48 s ago`, from the samples or zebrad's own words.
+    /// [`last_block_text`] for this run.
     fn last_block_text(&self) -> Option<String> {
-        if let Some(at) = self.last_block_at() {
-            return Some(format!("last block {}", relative(at, self.now())));
-        }
-        let words = self.sync_snapshot()?.since_last_block.as_deref()?;
-        Some(format!("last block {words} ago"))
+        last_block_text(
+            self.input.history,
+            self.input.insights.sync(),
+            self.started_at(),
+            self.now(),
+        )
     }
 
     /// The running release's end of support and the sentence about it.
@@ -527,7 +542,12 @@ impl<'a> Facts<'a> {
             .last_exit
             .as_ref()
             .and_then(|exit| exit.detail.as_deref());
-        let mut parts = vec![format!("{} in a row", crashes_text(crashes)), restart];
+        // The headline already says it crashed; a streak is worth a mention from the second.
+        let mut parts = Vec::new();
+        if crashes > 1 {
+            parts.push(format!("{} in a row", crashes_text(crashes)));
+        }
+        parts.push(restart);
         if let Some(detail) = detail {
             parts.push(first_line(detail).to_owned());
         }
@@ -719,22 +739,29 @@ impl<'a> Facts<'a> {
         }
     }
 
-    // Rule 10.
+    // Rule 10. zebrad's own stall line counts too, since rule 9 leaves the tip to this rule.
     fn quiet_at_tip(&self) -> Option<Verdict> {
         let latest = self.latest?;
         if !latest.at_tip() || latest.peers == 0 {
             return None;
         }
         let quiet = self.quiet_for()?;
-        let estimate_quiet = self.ago(self.unchanged_since(Field::EstimatedHeight)?);
-        if quiet < STALL_AT_TIP || estimate_quiet < STALL_AT_TIP {
+        let stage_stalled = self.stage() == Some(SyncStage::Stalled);
+        if quiet < STALL_AT_TIP && !stage_stalled {
             return None;
         }
+        let reason = match latest.remaining() {
+            0 | 1 => "Blocks usually arrive every 75 s · the tip estimate has not moved".to_owned(),
+            behind => format!(
+                "Blocks usually arrive every 75 s · the tip estimate is {} blocks ahead",
+                thousands(behind)
+            ),
+        };
         Some(Verdict::new(
             Level::Attention,
             10,
             format!("No new block {}", for_text(quiet)),
-            "Blocks usually arrive every 75 s · the tip estimate has not moved",
+            reason,
             vec![Action::ShowInLogs("sync".to_owned())],
         ))
     }
@@ -757,12 +784,14 @@ impl<'a> Facts<'a> {
             countdown_secs: Some(secs),
         }) = self.input.update.map(|update| &update.state)
         {
+            // The seconds go in the reason: the headline is in the live region, which would
+            // otherwise re-announce the countdown every second.
             return Some(Verdict::new(
                 Level::Urgent,
                 11,
-                format!("Update installs in {secs} s"),
+                "Update installs automatically",
                 format!(
-                    "Launcher {version} is ready · the launcher restarts and brings zebrad back"
+                    "Launcher {version} installs in {secs} s · the launcher restarts and brings zebrad back"
                 ),
                 vec![Action::Install, Action::CancelUpdate],
             ));
@@ -818,7 +847,9 @@ impl<'a> Facts<'a> {
             })
             .collect();
         let newest = recent.first()?;
-        let headline = match recent.len() {
+        // Lines, not distinct patterns: the count the Recent problems rows show as ×N.
+        let total: u64 = recent.iter().map(|problem| u64::from(problem.count)).sum();
+        let headline = match total {
             1 => "1 error in the log".to_owned(),
             n => format!("{n} errors in the log"),
         };
@@ -902,6 +933,36 @@ impl<'a> Facts<'a> {
     }
 }
 
+/// Whether a time belongs to the run started at `started_at`: not before it, give or take
+/// [`RUN_SLACK`] for zebrad's own clock stamps. Everything counts without a start time. The
+/// verdict's facts and the page's latest sample are filtered with it, so they agree on which
+/// run a figure belongs to.
+pub fn this_run(started_at: Option<SystemTime>, at: SystemTime) -> bool {
+    started_at.is_none_or(|started| at.checked_add(RUN_SLACK).is_none_or(|at| at >= started))
+}
+
+/// `last block 48 s ago`: the newest height rise among this run's samples or, while they show
+/// none, zebrad's own words in its progress line (`5s`, `1m 2s`, stamped when it said so) aged
+/// to `now` and written in the page's units. The hero line and the verdict both read it, so
+/// they never disagree.
+pub fn last_block_text(
+    history: &StatsHistory,
+    sync: Option<&SyncSnapshot>,
+    started_at: Option<SystemTime>,
+    now: SystemTime,
+) -> Option<String> {
+    if let Some(at) = history
+        .last_height_change_at()
+        .filter(|at| this_run(started_at, *at))
+    {
+        return Some(format!("last block {}", relative(at, now)));
+    }
+    let sync = sync.filter(|sync| this_run(started_at, sync.at))?;
+    let said = Duration::from_secs(humantime_secs(sync.since_last_block.as_deref()?)?);
+    let since = said + now.duration_since(sync.at).unwrap_or(Duration::ZERO);
+    Some(format!("last block {} ago", rough_duration(since)))
+}
+
 /// `for 12 min`.
 fn for_text(duration: Duration) -> String {
     format!("for {}", rough_duration(duration))
@@ -921,14 +982,6 @@ fn crashes_text(crashes: u32) -> String {
         1 => "1 crash".to_owned(),
         n => format!("{n} crashes"),
     }
-}
-
-/// `code 101`, or `killed by a signal`.
-fn exit_code_text(exit: &ExitInfo) -> String {
-    exit.code.map_or_else(
-        || "killed by a signal".to_owned(),
-        |code| format!("code {code}"),
-    )
 }
 
 /// `pid 4242, /opt/zebrad, from an earlier launcher run`.
@@ -1096,8 +1149,22 @@ pub fn summary_text(input: &HealthInput<'_>, verdict: &Verdict) -> String {
             if let Some(at) = facts.last_block_at() {
                 parts.push(format!("last block {}", local_datetime_short(at)));
             }
-            if let Some(height) = facts.metric_count(names::CHECKPOINT_HEIGHT) {
-                parts.push(format!("checkpoints verified to {}", thousands(height)));
+            // The page's rule: the checkpoint verifier is at work while its height is near
+            // the verified height; further behind, full validation has taken over.
+            match facts.metric_count(names::CHECKPOINT_HEIGHT) {
+                Some(checkpoint)
+                    if sample.height.saturating_sub(checkpoint) <= CHECKPOINT_NEAR_BLOCKS =>
+                {
+                    parts.push(format!("checkpoints verified to {}", thousands(checkpoint)));
+                }
+                _ => {
+                    if let Some(since) = input.insights.checkpoints().final_reached {
+                        parts.push(format!(
+                            "full validation since {}",
+                            local_datetime_short(since)
+                        ));
+                    }
+                }
             }
             parts.push(format!("RPC answered {}", local_datetime_short(sample.at)));
             lines.push(format!("Sync: {}", parts.join(" · ")));
@@ -1147,7 +1214,10 @@ pub fn summary_text(input: &HealthInput<'_>, verdict: &Verdict) -> String {
         lines.push(format!("Last RPC error: {error}"));
     }
 
-    let problems = input.insights.problems(SUMMARY_PROBLEMS);
+    // The newest problems in the Recent problems card's order: errors ahead of warnings
+    // within a minute, so the pasted list reads as the card does.
+    let mut problems = input.insights.problems(SUMMARY_PROBLEMS);
+    order_problems(&mut problems);
     if problems.is_empty() {
         lines.push("Recent problems: none in this session".to_owned());
     } else {
@@ -1200,7 +1270,7 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     use launcher_types::{
-        EosInfo, LogLevel, LogLine, LogStream, MetricFamily, MetricKind, MetricSample,
+        EosInfo, ExitInfo, LogLevel, LogLine, LogStream, MetricFamily, MetricKind, MetricSample,
         UpdateHealthFailure, UpdateMode,
     };
 
@@ -1587,7 +1657,7 @@ mod tests {
         });
         let verdict = scene.verdict();
         assert_eq!(verdict.headline, "zebrad could not be started");
-        assert_eq!(verdict.reason, "exited 10 s ago (killed by a signal)");
+        assert_eq!(verdict.reason, "exited 10 s ago (no exit code)");
         assert_eq!(
             verdict.actions,
             vec![Action::Start, Action::ShowInLogs("zebrad".into())]
@@ -1628,7 +1698,8 @@ mod tests {
         assert_eq!(verdict.headline, "zebrad crashed");
         assert_eq!(
             verdict.reason,
-            "1 crash in a row · restarting in 25 s · thread 'tokio-rt-worker' panicked at zebrad/src/x.rs:38:27:"
+            "restarting in 25 s · thread 'tokio-rt-worker' panicked at zebrad/src/x.rs:38:27:",
+            "the first crash is no streak"
         );
         assert_eq!(
             verdict.actions,
@@ -1835,9 +1906,19 @@ mod tests {
             verdict.actions,
             vec![Action::ShowInLogs("peer".into()), Action::OpenConfigure]
         );
-        // Without the gauge the ready count is left out.
+        // Without the gauge the ready count is left out, even while an earlier run's snapshot
+        // is still in the history.
         scene.metrics = None;
+        scene.metrics_history.push(&MetricsSnapshot {
+            at: t(0) - Duration::from_secs(30),
+            ..metrics(0, &[(names::READY_PEERS, 11.0)])
+        });
         assert!(scene.verdict().reason.ends_with("5 initial peers failed"));
+        // This run's newest snapshot in the history stands in for a missing publication.
+        scene
+            .metrics_history
+            .push(&metrics(590, &[(names::READY_PEERS, 3.0)]));
+        assert!(scene.verdict().reason.ends_with("ready peers 3"));
         // No peers before a stalled sync: the cause first.
         scene.frozen_from(0);
         assert_eq!(scene.verdict().rule, 8);
@@ -1922,37 +2003,75 @@ mod tests {
     fn rule_10_quiet_at_tip() {
         let mut scene = Scene::at_tip(1200);
         assert_eq!(scene.verdict().rule, 18);
-        // Height and estimate frozen for ten minutes with peers: attention.
+        // The shape of a tip stall: the height freezes at 3,120,008 after ten minutes while
+        // zebrad's time-based estimate keeps rising a block every 75 s, so the node stays
+        // "at the tip" (99.99 % or more) for hours. Attention after ten quiet minutes.
         let frozen = Scene::at_tip(600);
         scene.history = frozen.history.clone();
-        for secs in (605..=1200).step_by(5) {
-            scene.history.push(&NodeStats {
-                estimated_height: 3_120_008,
-                verification_progress: 1.0,
+        let creeping = |secs: u64| {
+            let estimate = 3_120_008 + (secs - 600) / 75;
+            NodeStats {
+                estimated_height: estimate,
+                verification_progress: 3_120_008.0 / estimate as f64,
                 ..stats(secs, 3_120_008, 12)
-            });
+            }
+        };
+        for secs in (605..=1200).step_by(5) {
+            scene.history.push(&creeping(secs));
         }
-        scene.stats = Some(NodeStats {
-            estimated_height: 3_120_008,
-            verification_progress: 1.0,
-            ..stats(1200, 3_120_008, 12)
-        });
+        scene.stats = Some(creeping(1200));
+        assert!(scene.stats.as_ref().unwrap().verification_progress < 1.0);
         let verdict = scene.verdict();
         assert_eq!((verdict.rule, verdict.level), (10, Level::Attention));
         assert_eq!(verdict.headline, "No new block for 10 min");
         assert_eq!(
             verdict.reason,
-            "Blocks usually arrive every 75 s · the tip estimate has not moved"
+            "Blocks usually arrive every 75 s · the tip estimate is 8 blocks ahead"
         );
         assert_eq!(verdict.actions, vec![Action::ShowInLogs("sync".into())]);
-        // The estimate moving on means the network has blocks we lack: not this rule.
-        scene.history.push(&NodeStats {
-            estimated_height: 3_120_020,
+        // A minute short of the threshold: still healthy.
+        scene.now = t(1140);
+        scene.stats = Some(creeping(1140));
+        assert_eq!(scene.verdict().rule, 18);
+        // An estimate that stands still with the height reads as "has not moved".
+        let mut still = Scene::at_tip(600);
+        for secs in (605..=1200).step_by(5) {
+            still.history.push(&NodeStats {
+                estimated_height: 3_120_008,
+                verification_progress: 1.0,
+                ..stats(secs, 3_120_008, 12)
+            });
+        }
+        still.stats = Some(NodeStats {
+            estimated_height: 3_120_008,
             verification_progress: 1.0,
-            ..stats(1205, 3_120_008, 12)
+            ..stats(1200, 3_120_008, 12)
         });
-        scene.now = t(1205);
-        assert_ne!(scene.verdict().rule, 10);
+        still.now = t(1200);
+        let verdict = still.verdict();
+        assert_eq!(verdict.rule, 10);
+        assert_eq!(
+            verdict.reason,
+            "Blocks usually arrive every 75 s · the tip estimate has not moved"
+        );
+        // zebrad's own stall line fires the rule before the ten minutes are up, since rule 9
+        // leaves the tip alone; its time wins when longer than ours.
+        let mut stalled = Scene::at_tip(600);
+        stalled.frozen_from(300);
+        stalled.insights = insights(&[
+            tracing_started(0, 1),
+            progress(
+                1,
+                590,
+                "chain updates have stalled, state height has not increased for 5 minutes. Hint: check your network connection sync_percent=99.999% current_height=Height(3120003) time_since_last_state_block=5m 0s",
+            ),
+        ]);
+        let verdict = stalled.verdict();
+        assert_eq!((verdict.rule, verdict.level), (10, Level::Attention));
+        assert_eq!(verdict.headline, "No new block for 5 min");
+        // Without peers the stall is rule 8's, not this one's.
+        stalled.peers_from(0, 0);
+        assert_eq!(stalled.verdict().rule, 8);
     }
 
     #[test]
@@ -1986,10 +2105,10 @@ mod tests {
         }));
         let verdict = scene.verdict();
         assert_eq!((verdict.rule, verdict.level), (11, Level::Urgent));
-        assert_eq!(verdict.headline, "Update installs in 42 s");
+        assert_eq!(verdict.headline, "Update installs automatically");
         assert_eq!(
             verdict.reason,
-            "Launcher 0.3.0 is ready · the launcher restarts and brings zebrad back"
+            "Launcher 0.3.0 installs in 42 s · the launcher restarts and brings zebrad back"
         );
         assert_eq!(verdict.actions, vec![Action::Install, Action::CancelUpdate]);
         // Ready without a countdown waits for the user: the shell's banner, not the verdict.
@@ -2080,6 +2199,18 @@ mod tests {
             verdict.actions,
             vec![Action::ShowInLogs("thread 'main' panicked at x.rs".into())]
         );
+        // A repeat of a pattern is another error line, as the ×N on its row says.
+        scene.insights.ingest(
+            &[line(
+                4,
+                570,
+                LogLevel::Error,
+                "zebrad::components::sync",
+                "block download failed hash=block::Hash(\"def\")",
+            )],
+            t(0),
+        );
+        assert_eq!(scene.verdict().headline, "3 errors in the log");
         // Older than ten minutes: nothing.
         scene.now = t(1200);
         scene.stats = Some(stats(1200, 2_951_000, 12));
@@ -2173,6 +2304,29 @@ mod tests {
         let mut scene = Scene::syncing(20);
         scene.status.started_at = Some(t(0));
         assert_eq!(scene.verdict().reason, "94.5 % · estimating…");
+        // After five minutes down, a run syncing at 3,000 blocks/min for a minute reads its
+        // own pace, not one diluted by the downtime still inside the hero's window.
+        let mut scene = Scene::syncing(60);
+        for secs in (360..=420).step_by(5) {
+            scene
+                .history
+                .push(&stats(secs, 2_950_088 + (secs - 360) / 5 * 250, 12));
+        }
+        scene.stats = scene
+            .history
+            .latest()
+            .map(|s| stats(420, s.height, s.peers));
+        scene.status.started_at = Some(t(355));
+        scene.now = t(420);
+        let verdict = scene.verdict();
+        assert_eq!(verdict.rule, 17);
+        assert_eq!(
+            verdict.reason,
+            "94.6 % · 3,000 blocks/min · about 55 min left"
+        );
+        // Too little of the run for a rate: estimating, not the earlier run's pace.
+        scene.status.started_at = Some(t(400));
+        assert_eq!(scene.verdict().reason, "94.6 % · estimating…");
     }
 
     #[test]
@@ -2189,6 +2343,35 @@ mod tests {
         assert_eq!(Level::Healthy.tone(), "good");
         assert_eq!(Level::Problem.tone(), "critical");
         assert_eq!(Level::Urgent.tone(), "serious");
+        // No height rise sampled yet (the launcher just opened at the tip): zebrad's own words
+        // from its progress line, aged to now and in the page's units, as the hero shows them.
+        let at_tip_line = |secs, since| {
+            progress(
+                1,
+                secs,
+                &format!(
+                    "finished initial sync to chain tip, using gossiped blocks sync_percent=100.000% current_height=Height(3120000) time_since_last_state_block={since}"
+                ),
+            )
+        };
+        let mut scene = Scene::at_tip(630);
+        scene.history = history(300, 630, 3_120_000, 0, 12);
+        scene.stats = Some(stats(630, 3_120_000, 12));
+        scene.insights = insights(&[tracing_started(0, 1), at_tip_line(590, "1m 20s")]);
+        let verdict = scene.verdict();
+        assert_eq!(verdict.rule, 18);
+        assert_eq!(
+            verdict.reason,
+            "12 peers · last block 2 min ago · RPC answered just now"
+        );
+        scene.insights = insights(&[tracing_started(0, 1), at_tip_line(580, "5s")]);
+        assert_eq!(
+            scene.verdict().reason,
+            "12 peers · last block 55 s ago · RPC answered just now"
+        );
+        // A progress line from before this run says nothing about it.
+        scene.status.started_at = Some(t(600));
+        assert_eq!(scene.verdict().reason, "12 peers · RPC answered just now");
     }
 
     #[test]
@@ -2253,6 +2436,11 @@ mod tests {
         assert_eq!(log_filter(Some(&"x".repeat(80)), ""), "x".repeat(60));
         assert_eq!(peers_text(1), "1 peer");
         assert_eq!(crashes_text(2), "2 crashes");
+        // A run's time: everything without a start, else from the start less the slack.
+        assert!(this_run(None, t(0)));
+        assert!(this_run(Some(t(10)), t(10)));
+        assert!(this_run(Some(t(10)), t(8)), "within the slack");
+        assert!(!this_run(Some(t(10)), t(7)));
         assert_eq!(Level::Neutral.word(), None);
         assert_eq!(Level::Attention.word(), Some("Attention"));
         assert_eq!(Action::StartKillingStale.label(), "Stop it and start");
@@ -2273,7 +2461,7 @@ mod tests {
             1200,
             &[
                 (names::READY_PEERS, 11.0),
-                (names::CHECKPOINT_HEIGHT, 2_500_000.0),
+                (names::CHECKPOINT_HEIGHT, 2_950_000.0),
                 (names::MEMPOOL_BYTES, 44_400.0),
                 (names::DISK_BYTES, 312_400_000_000.0),
             ],
@@ -2301,6 +2489,14 @@ mod tests {
                 "zebrad::components::sync",
                 "block download failed hash=block::Hash(\"abc\")",
             ),
+            // A newer WARN in the same minute: listed after the ERROR, as the card does.
+            line(
+                4,
+                515,
+                LogLevel::Warn,
+                "zebra_network::peer_set::set",
+                "dropping stalled peer addr=203.0.113.5:8233",
+            ),
         ]);
         let summary = scene.summary();
         let expected = "\
@@ -2310,7 +2506,7 @@ Verdict: Attention · Restarted after a crash
 Versions: launcher 0.2.0 · zebrad 7.0.0 · chain main
 Phase: Running since 23 Oct, 19:00 (pid 4242)
 Last exit: zebrad crashed (code 101), 23 Oct, 18:59 · thread 'tokio-rt-worker' panicked at zebrad/src/x.rs:38:27:
-Sync: 2,951,912 of 3,120,000 · 94.6 % · 96 blocks/min · about 29 h left · last block 23 Oct, 19:20 · checkpoints verified to 2,500,000 · RPC answered 23 Oct, 19:20
+Sync: 2,951,912 of 3,120,000 · 94.6 % · 96 blocks/min · about 29 h left · last block 23 Oct, 19:20 · checkpoints verified to 2,950,000 · RPC answered 23 Oct, 19:20
 Peers: 12 peers · 11 ready
 Mempool: 24 transactions · 44.4 kB
 State on disk: 312.4 GB
@@ -2318,11 +2514,36 @@ Ports: RPC 127.0.0.1:8232 · metrics 127.0.0.1:9999
 End of support: block 3,160,000, about 2 Dec 2026 (in 40 days)
 Recent problems:
   23 Oct, 19:08 ERROR zebrad::components::sync · block download failed hash=block::Hash(\"abc\") ×2
+  23 Oct, 19:08 WARN zebra_network::peer_set::set · dropping stalled peer addr=203.0.113.5:8233
 This run:
   23 Oct, 19:08 ERROR: block download failed ×2
   23 Oct, 19:00 zebrad started
 ";
         assert_eq!(summary, expected);
+        // The checkpoint gauge far behind the height, with the final checkpoint logged: full
+        // validation, as the hero and the Chain card say, not a verifier still at work.
+        scene.metrics = Some(metrics(1200, &[(names::CHECKPOINT_HEIGHT, 2_500_000.0)]));
+        scene.insights.ingest(
+            &[line(
+                5,
+                60,
+                LogLevel::Info,
+                "zebra_consensus::checkpoint",
+                "verified final checkpoint: starting full validation final_checkpoint_height=Height(2500000)",
+            )],
+            t(0),
+        );
+        let sync_line = scene
+            .summary()
+            .lines()
+            .find(|line| line.starts_with("Sync: "))
+            .map(str::to_owned)
+            .unwrap();
+        assert!(
+            sync_line.contains(" · full validation since 23 Oct, 19:01 · "),
+            "{sync_line}"
+        );
+        assert!(!sync_line.contains("checkpoints verified"));
         // Stopped before any answer: the shorter report.
         let mut scene = Scene::syncing(1200);
         scene.status = Status::default();
@@ -2335,6 +2556,22 @@ This run:
         assert_eq!(
             summary,
             "Zebra Launcher · 23 Oct, 19:20\nVerdict: Stopped\n  Not started yet\nPhase: Stopped\nSync: no answer from zebrad's RPC yet\nRecent problems: none in this session\n"
+        );
+        // Stopped after a short run: the last numbers, with nothing being estimated.
+        let mut scene = Scene::syncing(20);
+        scene.status = Status::default();
+        scene.stats = None;
+        scene.metrics = None;
+        scene.now = t(1200);
+        let sync_line = scene
+            .summary()
+            .lines()
+            .find(|line| line.starts_with("Sync: "))
+            .map(str::to_owned)
+            .unwrap();
+        assert_eq!(
+            sync_line,
+            "Sync: 2,950,024 of 3,120,000 · 94.5 % · last block 23 Oct, 19:00 · RPC answered 23 Oct, 19:00"
         );
     }
 }
