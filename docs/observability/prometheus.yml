@@ -1,20 +1,32 @@
-# Scrapes the zebrad started by Zebra Launcher (metrics.endpoint_addr = 127.0.0.1:9999)
-# from a container on Docker Desktop. On Linux, docker-compose.linux.yml mounts
-# prometheus.linux.yml instead.
+# Prometheus scrape config for the zebrad started by Zebra Launcher, mounted by
+# docker-compose.yml: the Docker Desktop (macOS, Windows) layout, where Prometheus runs
+# on Docker's bridge network.
 #
-# If the launcher moved the metrics port (port-in-use remediation), change the port
-# here and in prometheus.linux.yml to match the launcher's zebrad.toml.
+# Target host: host.docker.internal. The launcher binds zebrad's metrics to
+# 127.0.0.1:9999 on the host, and a bridge container's 127.0.0.1 is the container
+# itself, so the host is reached through host.docker.internal, which docker-compose.yml
+# maps to the host gateway (extra_hosts: host-gateway). On Linux,
+# docker-compose.linux.yml mounts prometheus.linux.yml instead: with host networking the
+# target is 127.0.0.1 itself.
 #
-# Zebra's dashboards use rate(...[1m]) windows, which need a scrape interval of
-# 30 s or less.
+# Timing: every 10 s with a 5 s timeout, the cadence the launcher itself polls zebrad
+# at, and well inside the rate(...[1m]) windows Zebra's dashboards use, which need at
+# least two samples per window (a scrape interval of 30 s or less).
+#
+# The launcher never moves the metrics port (it is read-only in Configure), so this
+# target always matches its zebrad.toml. Keep prometheus.linux.yml in step with this
+# file: only the target host differs.
 
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 10s
+  evaluation_interval: 10s
 
 scrape_configs:
-  - job_name: zebra
-    scrape_timeout: 10s
+  # `zebrad` becomes the job label on every series. Zebra's dashboards list the jobs
+  # Prometheus has in their "job" picker, so the name is free to choose.
+  - job_name: zebrad
+    scrape_interval: 10s
+    scrape_timeout: 5s
     metrics_path: /metrics
     static_configs:
       - targets: ["host.docker.internal:9999"]
