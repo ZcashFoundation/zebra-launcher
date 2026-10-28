@@ -423,7 +423,9 @@ impl<'a> Facts<'a> {
         let (started, now) = (self.started_at(), self.now());
         let mut parts = vec![percent_1(latest.verification_progress)];
         match history.block_rate_from(Some(HERO_RATE_WINDOW), started, now) {
-            None => parts.push("estimating…".to_owned()),
+            // Only a running node is estimating anything.
+            None if self.status().phase == Phase::Running => parts.push("estimating…".to_owned()),
+            None => {}
             Some(rate) => {
                 parts.push(format!(
                     "{} blocks/min",
@@ -2482,6 +2484,22 @@ This run:
         assert_eq!(
             summary,
             "Zebra Launcher · 23 Oct, 19:20\nVerdict: Stopped\n  Not started yet\nPhase: Stopped\nSync: no answer from zebrad's RPC yet\nRecent problems: none in this session\n"
+        );
+        // Stopped after a short run: the last numbers, with nothing being estimated.
+        let mut scene = Scene::syncing(20);
+        scene.status = Status::default();
+        scene.stats = None;
+        scene.metrics = None;
+        scene.now = t(1200);
+        let sync_line = scene
+            .summary()
+            .lines()
+            .find(|line| line.starts_with("Sync: "))
+            .map(str::to_owned)
+            .unwrap();
+        assert_eq!(
+            sync_line,
+            "Sync: 2,950,024 of 3,120,000 · 94.5 % · last block 23 Oct, 19:00 · RPC answered 23 Oct, 19:00"
         );
     }
 }
