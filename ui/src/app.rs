@@ -7,8 +7,8 @@ use std::{
 };
 
 use launcher_types::{
-    ApplyOutcome, LogLine, MetricsSnapshot, NodeStats, Phase, Settings, StaleProcessInfo, Status,
-    Theme, UpdateHealthFailure, UpdateInfo, UpdateState,
+    ApplyOutcome, LogLine, MetricsSnapshot, NodeDetails, NodeStats, Phase, Settings,
+    StaleProcessInfo, Status, Theme, UpdateHealthFailure, UpdateInfo, UpdateState,
 };
 use leptos::{ev, prelude::*, task::spawn_local};
 
@@ -170,6 +170,10 @@ pub struct AppState {
     /// (Stopped) and the dashboard is still connecting.
     pub status_loaded: RwSignal<bool>,
     pub stats: RwSignal<Option<NodeStats>>,
+    /// The details behind `stats` (the peer list, the best block, the chain's supply and
+    /// pools), from the same poll; `None` whenever `stats` is.
+    #[allow(dead_code, reason = "read by the dashboard once its model lands")]
+    pub details: RwSignal<Option<NodeDetails>>,
     /// `None` until loaded.
     pub settings: RwSignal<Option<Settings>>,
     pub logs: RwSignal<LogBuffer>,
@@ -400,6 +404,7 @@ pub fn App() -> impl IntoView {
         status: RwSignal::new(Status::default()),
         status_loaded: RwSignal::new(false),
         stats: RwSignal::new(None),
+        details: RwSignal::new(None),
         settings: RwSignal::new(None),
         logs: RwSignal::new(LogBuffer::default()),
         insights: RwSignal::new(Insights::default()),
@@ -465,6 +470,23 @@ pub fn App() -> impl IntoView {
         api::get_node_stats,
         "Reading node stats",
         move |stats| state.record_stats(stats),
+    ));
+    spawn_local(subscribe_then_fetch(
+        state,
+        async move |seen| {
+            let result = api::on_node_details(
+                move |details| {
+                    seen.mark();
+                    state.details.set(details);
+                },
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for node details", result);
+        },
+        api::get_node_details,
+        "Reading node details",
+        move |details| state.details.set(details),
     ));
     spawn_local(subscribe_then_fetch(
         state,

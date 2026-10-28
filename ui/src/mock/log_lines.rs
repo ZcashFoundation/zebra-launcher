@@ -1,7 +1,10 @@
 //! The mock's log corpus: real zebrad 7.0.0 lines from `crates/launcher-core/tests/fixtures`,
-//! as a startup sequence and a steady state generated from the line's sequence number.
+//! as a startup sequence and a steady state generated from the line's position in its run,
+//! shaped by the [`Scenario`] the page was opened with.
 
 use launcher_types::{LogLevel, LogStream};
+
+use super::Scenario;
 
 /// `(stream, level, spans, target, message)` in the shapes zebrad 7.0.0 prints.
 type SampleLine = (
@@ -229,16 +232,14 @@ const STARTUP_LINES: &[SampleLine] = &[
     ),
 ];
 
-/// The chain tip the mock's progress lines count towards.
-const MOCK_TIP_HEIGHT: u64 = 3_050_000;
+/// The chain tip the mock's progress lines count towards, as the node statistics estimate it.
+const MOCK_TIP_HEIGHT: u64 = 3_120_000;
 
-/// The height the mock has reached at `seq`.
-fn mock_height(seq: u64) -> u64 {
-    2_950_000 + seq * 2
-}
+/// The `finished connecting` line when no peer answers (`?nopeers`).
+const NO_PEERS_CONNECTED: &str = "finished connecting to initial seed and disk cache peers handshake_success_total=0 handshake_error_total=15 outbound_connections=0";
 
 /// A hex digest that is a function of `seq`, for block hashes.
-fn mock_hash(seq: u64) -> String {
+pub(super) fn mock_hash(seq: u64) -> String {
     (0..4u64)
         .map(|lane| {
             let mut x = seq
@@ -250,17 +251,29 @@ fn mock_hash(seq: u64) -> String {
         .collect()
 }
 
-/// The mock's log line at `seq`: a startup sequence, then a steady state where every 20th line
-/// reports progress, every 37th warns, every 101st comes from stderr and the rest is INFO
-/// gossip. Deterministic in `seq`, so any range can be regenerated.
-pub(super) fn sample_line(seq: u64) -> GeneratedLine {
+/// The mock's log line `seq` of a run, with the node at `height` (the node statistics' height,
+/// so the log and the RPC agree): a startup sequence, then a steady state where every 20th
+/// line reports progress, every 37th warns, every 101st comes from stderr and the rest is INFO
+/// gossip. Deterministic in its inputs. `Scenario::Stalled` reports the stall in the progress
+/// lines and waits to restart the sync; `Scenario::NoPeers` connects to no one and waits for
+/// peers. Neither commits blocks.
+pub(super) fn sample_line(seq: u64, height: u64, scenario: Scenario) -> GeneratedLine {
     if let Some(&(stream, level, spans, target, message)) =
         STARTUP_LINES.get(usize::try_from(seq).unwrap_or(usize::MAX))
     {
+        let message = if scenario == Scenario::NoPeers
+            && message.starts_with("finished connecting to initial seed")
+        {
+            NO_PEERS_CONNECTED
+        } else {
+            message
+        };
         return (stream, level, spans, target, message.to_owned());
     }
-    let height = mock_height(seq);
+    let height = height.min(MOCK_TIP_HEIGHT);
     let info = Some(LogLevel::Info);
+    // About five lines a second: how long the run has been going.
+    let run_secs = seq / 5;
     if seq.is_multiple_of(101) {
         return (
             LogStream::Stderr,
@@ -299,6 +312,22 @@ pub(super) fn sample_line(seq: u64) -> GeneratedLine {
     if seq.is_multiple_of(20) {
         let remaining = MOCK_TIP_HEIGHT.saturating_sub(height);
         let percent = height as f64 / MOCK_TIP_HEIGHT as f64 * 100.0;
+        if scenario == Scenario::Stalled {
+            // The stall is as old as the run, plus the minute zebrad waits before saying so.
+            let since = run_secs + 60;
+            return (
+                LogStream::Stdout,
+                Some(LogLevel::Warn),
+                None,
+                Some("zebrad::components::sync::progress"),
+                format!(
+                    "chain updates have stalled, state height has not increased for {} minutes. Hint: check your network connection, and your computer clock and time zone sync_percent={percent:.3}% current_height=Height({height}) network_upgrade=Nu6_1 remaining_sync_blocks={remaining} time_since_last_state_block={}m {}s target_block_spacing=75s max_block_spacing=None is_syncer_stopped=false",
+                    since / 60,
+                    since / 60,
+                    since % 60
+                ),
+            );
+        }
         return (
             LogStream::Stdout,
             info,
@@ -310,6 +339,38 @@ pub(super) fn sample_line(seq: u64) -> GeneratedLine {
             ),
         );
     }
+    // Without peers there is nothing to crawl, fetch or gossip: the node keeps looking.
+    if scenario == Scenario::NoPeers && seq % 6 < 5 {
+        return match seq % 6 {
+            0 => (
+                LogStream::Stdout,
+                info,
+                None,
+                Some("zebra_network::peer_set::set"),
+                "network request with no ready peers: finding more peers, waiting for 1 peers to answer requests".to_owned(),
+            ),
+            1 | 3 => (
+                LogStream::Stdout,
+                info,
+                Some("crawl_and_dial{new_peer_interval=61s}"),
+                Some("zebra_network::peer_set::initialize"),
+                format!(
+                    "failed to make outbound connection to peer error=connection timed out candidate.addr=203.0.113.{}:8233",
+                    seq % 250
+                ),
+            ),
+            _ => (
+                LogStream::Stdout,
+                info,
+                Some("crawl_and_dial{new_peer_interval=61s}"),
+                Some("zebra_network::peer_set::initialize"),
+                format!(
+                    "crawled for new peers outbound_connections=0 address_book_len={}",
+                    1_200 + seq % 97
+                ),
+            ),
+        };
+    }
     match seq % 6 {
         0 => (
             LogStream::Stdout,
@@ -317,6 +378,14 @@ pub(super) fn sample_line(seq: u64) -> GeneratedLine {
             Some("sync:try_to_sync"),
             Some("zebrad::components::sync"),
             format!("starting sync, obtaining new tips state_tip=Some(Height({height}))"),
+        ),
+        // A node that verifies nothing has no block to gossip; the syncer waits and retries.
+        1 if scenario != Scenario::Normal => (
+            LogStream::Stdout,
+            info,
+            Some("sync"),
+            Some("zebrad::components::sync"),
+            format!("waiting to restart sync timeout=67s state_tip=Some(Height({height}))"),
         ),
         1 => (
             LogStream::Stdout,
@@ -359,6 +428,14 @@ pub(super) fn sample_line(seq: u64) -> GeneratedLine {
                 1_200 + seq % 97
             ),
         ),
+        // A node that verifies nothing has no block to commit; it keeps asking for tips.
+        _ if scenario != Scenario::Normal => (
+            LogStream::Stdout,
+            info,
+            Some("sync:obtain_tips"),
+            Some("zebrad::components::sync"),
+            format!("trying to obtain new chain tips state_tip=Some(Height({height}))"),
+        ),
         _ => (
             LogStream::Stdout,
             info,
@@ -376,30 +453,113 @@ pub(super) fn sample_line(seq: u64) -> GeneratedLine {
 mod sample_line_tests {
     use super::*;
 
+    const BASE: u64 = 2_950_000;
+
+    fn line(seq: u64) -> GeneratedLine {
+        sample_line(seq, BASE, Scenario::Normal)
+    }
+
     #[test]
     fn mock_lines_follow_the_schedule() {
-        assert_eq!(
-            sample_line(0).3,
-            Some("zebrad::components::tracing::component")
-        );
-        assert_eq!(sample_line(2).4, "version: 7.0.0");
+        assert_eq!(line(0).3, Some("zebrad::components::tracing::component"));
+        assert_eq!(line(2).4, "version: 7.0.0");
         let startup = STARTUP_LINES.len() as u64;
-        assert!(sample_line(startup - 1).4.starts_with("activating mempool"));
+        assert!(line(startup - 1).4.starts_with("activating mempool"));
         // Steady state: 40 is the first progress line after the startup sequence.
-        let progress = sample_line(40);
+        let progress = line(40);
         assert_eq!(progress.3, Some("zebrad::components::sync::progress"));
         assert!(
-            progress.4.contains("current_height=Height(2950080)"),
+            progress.4.contains("current_height=Height(2950000)"),
             "{}",
             progress.4
         );
-        assert_eq!(sample_line(37).1, Some(LogLevel::Warn));
-        assert_eq!(sample_line(74).1, Some(LogLevel::Warn));
-        assert_eq!(sample_line(101).0, LogStream::Stderr);
-        assert_eq!(sample_line(202).0, LogStream::Stderr);
-        assert_eq!(sample_line(41).1, Some(LogLevel::Info));
-        assert_eq!(sample_line(41), sample_line(41), "deterministic");
+        assert!(progress.4.contains("remaining_sync_blocks=170000"));
+        // The height is the caller's: a later run continues from where the last one stopped.
+        assert!(
+            sample_line(40, 3_000_000, Scenario::Normal)
+                .4
+                .contains("current_height=Height(3000000)")
+        );
+        assert!(
+            sample_line(40, MOCK_TIP_HEIGHT, Scenario::Normal)
+                .4
+                .contains("remaining_sync_blocks=0"),
+            "the tip is the limit"
+        );
+        assert_eq!(line(37).1, Some(LogLevel::Warn));
+        assert_eq!(line(74).1, Some(LogLevel::Warn));
+        assert_eq!(line(101).0, LogStream::Stderr);
+        assert_eq!(line(202).0, LogStream::Stderr);
+        assert_eq!(line(41).1, Some(LogLevel::Info));
+        assert_eq!(line(41), line(41), "deterministic");
         assert_eq!(mock_hash(7).len(), 64);
         assert_ne!(mock_hash(7), mock_hash(8));
+    }
+
+    #[test]
+    fn scenarios_change_the_story() {
+        let stalled = sample_line(40, BASE, Scenario::Stalled);
+        assert_eq!(stalled.1, Some(LogLevel::Warn));
+        assert!(
+            stalled.4.starts_with("chain updates have stalled"),
+            "{}",
+            stalled.4
+        );
+        assert!(
+            stalled.4.contains("current_height=Height(2950000)"),
+            "no progress"
+        );
+        assert!(
+            stalled.4.contains("time_since_last_state_block=1m 8s"),
+            "{}",
+            stalled.4
+        );
+        assert!(
+            sample_line(41, BASE, Scenario::Stalled)
+                .4
+                .contains("Height(2950000)")
+        );
+        // Without peers the initial connections fail and the node keeps looking.
+        let connected = STARTUP_LINES
+            .iter()
+            .position(|line| line.4.starts_with("finished connecting"))
+            .unwrap() as u64;
+        assert_eq!(
+            sample_line(connected, BASE, Scenario::NoPeers).4,
+            NO_PEERS_CONNECTED
+        );
+        assert!(line(connected).4.contains("handshake_success_total=12"));
+        let waiting = sample_line(42, BASE, Scenario::NoPeers);
+        assert!(
+            waiting.4.starts_with("network request with no ready peers"),
+            "{}",
+            waiting.4
+        );
+        for seq in [44, 46] {
+            assert!(
+                sample_line(seq, BASE, Scenario::NoPeers)
+                    .4
+                    .contains("outbound_connections=0"),
+                "{seq}"
+            );
+        }
+        assert!(
+            sample_line(45, BASE, Scenario::NoPeers)
+                .4
+                .starts_with("failed to make outbound connection")
+        );
+        assert!(line(45).4.starts_with("fetched mempool"));
+        assert!(
+            sample_line(47, BASE, Scenario::NoPeers)
+                .4
+                .starts_with("trying to obtain")
+        );
+        assert!(line(47).4.starts_with("committed block"));
+        assert!(
+            sample_line(43, BASE, Scenario::Stalled)
+                .4
+                .starts_with("waiting to restart sync")
+        );
+        assert!(line(43).4.contains("sending committed block broadcast"));
     }
 }
