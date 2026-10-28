@@ -542,7 +542,12 @@ impl<'a> Facts<'a> {
             .last_exit
             .as_ref()
             .and_then(|exit| exit.detail.as_deref());
-        let mut parts = vec![format!("{} in a row", crashes_text(crashes)), restart];
+        // The headline already says it crashed; a streak is worth a mention from the second.
+        let mut parts = Vec::new();
+        if crashes > 1 {
+            parts.push(format!("{} in a row", crashes_text(crashes)));
+        }
+        parts.push(restart);
         if let Some(detail) = detail {
             parts.push(first_line(detail).to_owned());
         }
@@ -840,7 +845,9 @@ impl<'a> Facts<'a> {
             })
             .collect();
         let newest = recent.first()?;
-        let headline = match recent.len() {
+        // Lines, not distinct patterns: the count the Recent problems rows show as ×N.
+        let total: u64 = recent.iter().map(|problem| u64::from(problem.count)).sum();
+        let headline = match total {
             1 => "1 error in the log".to_owned(),
             n => format!("{n} errors in the log"),
         };
@@ -1672,7 +1679,8 @@ mod tests {
         assert_eq!(verdict.headline, "zebrad crashed");
         assert_eq!(
             verdict.reason,
-            "1 crash in a row · restarting in 25 s · thread 'tokio-rt-worker' panicked at zebrad/src/x.rs:38:27:"
+            "restarting in 25 s · thread 'tokio-rt-worker' panicked at zebrad/src/x.rs:38:27:",
+            "the first crash is no streak"
         );
         assert_eq!(
             verdict.actions,
@@ -2172,6 +2180,18 @@ mod tests {
             verdict.actions,
             vec![Action::ShowInLogs("thread 'main' panicked at x.rs".into())]
         );
+        // A repeat of a pattern is another error line, as the ×N on its row says.
+        scene.insights.ingest(
+            &[line(
+                4,
+                570,
+                LogLevel::Error,
+                "zebrad::components::sync",
+                "block download failed hash=block::Hash(\"def\")",
+            )],
+            t(0),
+        );
+        assert_eq!(scene.verdict().headline, "3 errors in the log");
         // Older than ten minutes: nothing.
         scene.now = t(1200);
         scene.stats = Some(stats(1200, 2_951_000, 12));
