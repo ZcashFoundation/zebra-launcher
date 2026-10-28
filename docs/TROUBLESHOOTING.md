@@ -118,43 +118,116 @@ page** instead.
 If zebrad rejects an edited config, the launcher restores the previous file, restarts
 zebrad, and shows zebrad's error. Fix the key named in the error and save again.
 
-## Grafana panel blank or "No data"
+## Observability stack (Prometheus and Grafana)
 
-**The Grafana tab is blank or says the page refused to connect.**
-First check that Grafana is running at the URL the hint under the toolbar names (the
-toolbar's "Open in browser" opens it outside the launcher). Then check that Grafana
-allows framing:
+The optional Prometheus and Grafana stack in [`observability/`](observability/README.md)
+is behind most blank Grafana tabs and empty panels. The launcher's Dashboard and Logs
+tabs work without it. The commands below use the Docker Desktop form; on Linux add
+`-f docs/observability/docker-compose.linux.yml` after the first `-f`.
 
-```sh
-curl -sI http://127.0.0.1:3000/login | grep -i x-frame-options   # should print nothing
-```
+### The stack does not start
 
-If a header is printed, `GF_SECURITY_ALLOW_EMBEDDING` did not reach the container:
-recreate it with `docker compose ... up -d --force-recreate grafana`. Also check that
-the launcher's Grafana URL starts with `http://127.0.0.1:` or `http://localhost:`.
-On macOS, whether WKWebView loads `http://127.0.0.1:3000` inside the launcher's
-`tauri://localhost` page (mixed content) has **not been verified yet**; if it is blocked,
-use "Open in browser".
+- `docker compose up` ends with "dependency failed to start" and names the Prometheus
+  container as unhealthy: Prometheus did not pass its health check, usually because
+  `prometheus.yml` (or `prometheus.linux.yml`) does not parse after an edit. Read
+  `docker compose -f docs/observability/docker-compose.yml logs prometheus`; the first
+  error line names the file and line.
+- "Bind for 127.0.0.1:3000 failed: port is already allocated" (or 9090), or on Linux a
+  service that exits at once with "address already in use": see
+  [Port 9090 or 3000 is already in use](#port-9090-or-3000-is-already-in-use).
+- A pull error: the first start downloads the two images and needs the network.
 
-**The iframe shows a login page.**
-Anonymous access is off. Check that this succeeds without credentials:
+### The Grafana tab is blank or says the page refused to connect
+
+Work down the list:
+
+1. Is the stack running? `docker compose -f docs/observability/docker-compose.yml ps`
+   should list `grafana` as `Up … (healthy)`. Nothing listed: start it (the README has
+   the commands). `(unhealthy)` or restarting: `… logs grafana`.
+2. Is the URL right? The hint under the toolbar names the URL the tab uses, and "Open in
+   browser" shows whether that Grafana answers outside the launcher. The URL must start
+   with `http://127.0.0.1:` or `http://localhost:`; the stack's port is 3000 unless you
+   moved it. Change it in Settings → Metrics.
+3. Does Grafana allow framing?
+
+   ```sh
+   curl -sI http://127.0.0.1:3000/login | grep -i x-frame-options   # should print nothing
+   ```
+
+   If a header is printed, `GF_SECURITY_ALLOW_EMBEDDING` did not reach the container:
+   `docker compose -f docs/observability/docker-compose.yml up -d --force-recreate grafana`.
+   A Grafana that is not this stack needs the settings in
+   [observability/README.md](observability/README.md#how-the-launcher-embeds-grafana).
+4. On macOS, whether WKWebView loads `http://127.0.0.1:3000` inside the launcher's
+   `tauri://localhost` page (mixed content) has not been verified yet; if it is blocked,
+   use "Open in browser".
+
+### The frame shows a login page
+
+Anonymous access is off. This should succeed without credentials:
 
 ```sh
 curl -sf http://127.0.0.1:3000/api/dashboards/uid/zebra-overview > /dev/null && echo ok
 ```
 
-Whether anonymous Viewer works inside the sandboxed iframe has **not been verified yet**
-on an installed bundle on any OS. Logging in inside the iframe may not persist, because Grafana's session cookie is
-`SameSite=Lax` and the launcher page is a different site; log in from a browser instead.
+If it does not, `GF_AUTH_ANONYMOUS_ENABLED` did not reach the container; recreate it as
+above. Whether anonymous Viewer works inside the sandboxed iframe has not been verified
+yet on an installed bundle on any OS. Logging in inside the iframe may not persist,
+because Grafana's session cookie is `SameSite=Lax` and the launcher page is a different
+site; log in from a browser instead.
 
-**Dashboards show "No data".**
+### Prometheus target DOWN, dashboards show "No data"
 
-1. Is zebrad running in the launcher, with metrics on? `curl -s http://127.0.0.1:9999/metrics | head`
-2. Is the target up? Open <http://127.0.0.1:9090/targets>.
-3. Target down on Linux: you started without `docker-compose.linux.yml`.
-4. Target down on Docker Desktop: see "Why two compose files" above.
+Open <http://127.0.0.1:9090/targets> and look at the `zebrad` job.
 
-**Port 3000 or 9090 already in use.**
-Change the host side of the `ports:` mapping in `docker-compose.yml`; on Linux change
-`GF_SERVER_HTTP_PORT`, `--web.listen-address` and `PROMETHEUS_URL` in the override
-instead. Then update the launcher's Grafana URL.
+**UP, but a panel is empty.** The panel may query a metric zebrad 7.0.0 does not export
+([known gaps](observability/README.md#known-gaps-with-zebrad-700)), or one zebrad has
+not recorded yet: checkpoint metrics exist only during the checkpoint phase of the
+initial sync, RPC metrics after the first request. If the dashboard's job picker (top
+left) shows a job other than `zebrad`, pick `All` or `zebrad`. Prometheus keeps 15 days
+of data, so a node that was off shows a gap, not an error.
+
+**DOWN.** The target's "Error" column says why:
+
+- "connection refused" and zebrad is not running: metrics are served only while zebrad
+  runs. Start it in the launcher, then check `curl -s http://127.0.0.1:9999/metrics | head`.
+  The target recovers at the next scrape (10 s).
+- "connection refused" on Linux while zebrad runs: the stack was started without
+  `docker-compose.linux.yml`. On the bridge network Prometheus scrapes
+  `host.docker.internal`, which is the host's bridge address, and zebrad listens on
+  `127.0.0.1` only. `docker compose -f docs/observability/docker-compose.yml down`, then
+  `up -d` with both `-f` files.
+- DOWN on Docker Desktop (macOS, Windows): Prometheus scrapes `host.docker.internal:9999`,
+  Docker Desktop's name for the host. Whether that reaches a service bound to `127.0.0.1`,
+  as the launcher binds zebrad's metrics, has not been verified yet; the stack has only
+  been run on Linux. If the target stays DOWN with zebrad running, try Docker Desktop's
+  host networking (Settings → Resources → Network → Enable host networking) with the Linux
+  override, and please report the result in an issue so the README can record it.
+
+### Port 9090 or 3000 is already in use
+
+`docker compose up` fails with "port is already allocated" (Docker Desktop), or on Linux
+Grafana or Prometheus exits at once with "address already in use" (see `… logs grafana`).
+Find the holder with `lsof -i :3000` (Linux, macOS) or
+`Get-NetTCPConnection -LocalPort 3000` (Windows); 3000 is a common development-server
+port, 9090 another Prometheus. Stop it, or move the stack's port:
+
+- Docker Desktop: change the host side of the `ports:` mapping in `docker-compose.yml`,
+  for example `"127.0.0.1:3001:3000"`. The container ports and the health checks stay as
+  they are.
+- Linux: in `docker-compose.linux.yml`, change `GF_SERVER_HTTP_PORT` for Grafana, or
+  `--web.listen-address` and `PROMETHEUS_URL` for Prometheus. The health checks in
+  `docker-compose.yml` probe `127.0.0.1:9090` and `127.0.0.1:3000`, which on the host
+  network are the moved ports, so add the same `healthcheck:` block with the new port to
+  that service in the override, or it stays unhealthy and Grafana does not start.
+
+Then `up -d` and, for Grafana, set the launcher's Grafana URL to the new port.
+
+### The raw metrics page
+
+zebrad serves its metrics as plain text at <http://127.0.0.1:9999/metrics> while it runs
+(the launcher sets `metrics.endpoint_addr`; loopback only, so only this machine can read
+it). Open it in a browser or run `curl -s http://127.0.0.1:9999/metrics | less`. Each
+metric has a `# TYPE name counter|gauge|histogram` line followed by its samples; the
+names are zebrad's dotted names with underscores. Use it to see whether a metric a panel
+queries exists at all, or to read a value without Prometheus and Grafana.

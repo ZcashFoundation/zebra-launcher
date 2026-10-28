@@ -5,8 +5,10 @@ countdown) comes from zebrad's RPC and works without Grafana. Grafana is optiona
 you run it, the launcher's Grafana tab embeds Zebra's dashboards in an iframe, with a
 dashboard picker, a time range and a refresh interval (see [The Grafana tab](#the-grafana-tab)).
 
-The stack in [`observability/`](observability/) runs Prometheus and Grafana in Docker,
-scrapes the zebrad the launcher started, and provisions Zebra's own dashboards.
+The Prometheus and Grafana stack in [`observability/`](observability/README.md) scrapes
+the zebrad the launcher started and provisions Zebra's own dashboards, set up so the
+tab can embed them. Its README covers starting, checking and updating it, where its
+data lives, the dashboards and their known gaps. This page covers the launcher's side.
 
 ## What the launcher configures
 
@@ -22,10 +24,6 @@ Prometheus only needs the metrics endpoint. The launcher never moves these ports
 read-only in Configure), so the targets in `observability/prometheus.yml` and
 `observability/prometheus.linux.yml` always match.
 
-## Start the stack
-
-See [observability/README.md](observability/README.md).
-
 ## The Grafana tab
 
 The launcher's **Grafana** tab embeds Grafana in an iframe once a Grafana URL is set.
@@ -33,10 +31,11 @@ The launcher's **Grafana** tab embeds Grafana in an iframe once a Grafana URL is
 Without a URL, the tab shows a setup card: what the stack in this repository provides and
 where to get it (an "Open the repository" button opens
 <https://github.com/ZcashFoundation/zebra-launcher> in the browser, since the installed app
-does not carry the compose files), the compose command above with a Copy button (and the
-Linux override), the embedding requirement, and a URL field prefilled with
-`http://127.0.0.1:3000`. "Use this Grafana" checks the URL against the rule below and saves
-it into the launcher settings; the dashboards appear as soon as it is stored.
+does not carry the compose files), the compose command from the stack's README with a
+Copy button (and the Linux override), the embedding requirement, and a URL field
+prefilled with `http://127.0.0.1:3000`. "Use this Grafana" checks the URL against the
+rule below and saves it into the launcher settings; the dashboards appear as soon as it
+is stored.
 
 With a URL set, a toolbar sits above the dashboard:
 
@@ -88,13 +87,21 @@ dropped; trailing slashes do not matter. The rules and their tests live in
   search work), with no top navigation, popups or referrer, and it gets no access to the
   launcher's IPC.
 
-The Grafana settings the iframe relies on are listed in
-[observability/README.md](observability/README.md).
+Grafana must allow being framed and show dashboards without a login. The stack's
+`docker-compose.yml` sets the options for that; they are listed, with what another
+Grafana needs, in
+[observability/README.md](observability/README.md#how-the-launcher-embeds-grafana).
 
 ## Dashboards
 
-See [observability/README.md](observability/README.md).
+The picker lists the 14 dashboards the stack provisions, by uid, with its own
+sentence-case labels (`ui/src/grafana_url.rs`). Their files, uids, Grafana titles and
+contents are in [observability/README.md](observability/README.md#dashboards), and the
+panels that stay empty with the bundled zebrad in its
+[known gaps](observability/README.md#known-gaps-with-zebrad-700). When the vendored
+dashboards change, the picker's list changes with them.
 
 ## Troubleshooting
 
-See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#grafana-panel-blank-or-no-data).
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md#observability-stack-prometheus-and-grafana).
+The status strip works without Grafana.
