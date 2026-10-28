@@ -46,27 +46,35 @@ const MEMPOOL_SERIES: Fields = &[("Mempool transactions", "chart-series-1", Fiel
 pub fn Dashboard() -> impl IntoView {
     let state = AppState::get();
 
-    let eos_text = move || {
-        let (version, eos) = state.stats.with(|stats| {
+    // The running version and its end of support. The banner's sentence is rebuilt only when
+    // they change; the relative time in it follows the clock on its own.
+    let eos = Memo::new(move |_| {
+        state.stats.with(|stats| {
             let stats = stats.as_ref()?;
             Some((stats.zebrad_version.clone(), stats.eos.clone()?))
-        })?;
-        let when = relative(eos.estimated_time, state.now.get());
-        Some(format!(
-            "zebrad {version} stops working at block {} (estimated {}, {when}). Update the launcher before then.",
-            thousands(eos.block_height),
-            clock::local_string(eos.estimated_time),
-        ))
+        })
+    });
+    let eos_text = move || {
+        eos.get().map(|(version, eos)| {
+            let at = eos.estimated_time;
+            view! {
+                {format!(
+                    "zebrad {version} stops working at block {} (estimated {}, ",
+                    thousands(eos.block_height),
+                    clock::local_string(at),
+                )}
+                {move || relative(at, state.now.get())}
+                "). Update the launcher before then."
+            }
+        })
     };
     let eos_soon = Memo::new(move |_| {
         let now = state.now.get();
-        state.stats.with(|stats| {
-            stats
-                .as_ref()
-                .and_then(|stats| stats.eos.as_ref())
+        eos.with(|eos| {
+            eos.as_ref()
                 // Inside the backend's warning window, the banner offers "Check for updates",
                 // whatever the update mode.
-                .is_some_and(|eos| eos_within(eos.estimated_time, now, EOS_WARNING_WINDOW))
+                .is_some_and(|(_, eos)| eos_within(eos.estimated_time, now, EOS_WARNING_WINDOW))
         })
     });
     let halted = Memo::new(move |_| {
@@ -77,9 +85,8 @@ pub fn Dashboard() -> impl IntoView {
                 }
         })
     });
-    // Separate from the text, which changes every second, so the button keeps its state.
     let eos_banner = view! {
-        <Show when=move || eos_text().is_some()>
+        <Show when=move || eos.with(Option::is_some)>
             <div class="banner banner-warn eos-banner" role="status">
                 <span>
                     <strong>"End of support approaching. "</strong>
