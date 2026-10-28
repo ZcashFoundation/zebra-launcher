@@ -19,7 +19,7 @@ use crate::{
         bytes, exit_class_text, exit_code_text, local_date_short, local_datetime_short, relative,
         rough_duration, thousands,
     },
-    insights::{Insights, ProblemLevel, Run, SyncSnapshot, SyncStage, pick_filter},
+    insights::{Insights, ProblemLevel, Run, SyncSnapshot, SyncStage, order_problems, pick_filter},
     metrics_history::{MetricsHistory, names},
     stats_history::{Field, HERO_RATE_WINDOW, Sample, StatsHistory},
 };
@@ -1149,8 +1149,22 @@ pub fn summary_text(input: &HealthInput<'_>, verdict: &Verdict) -> String {
             if let Some(at) = facts.last_block_at() {
                 parts.push(format!("last block {}", local_datetime_short(at)));
             }
-            if let Some(height) = facts.metric_count(names::CHECKPOINT_HEIGHT) {
-                parts.push(format!("checkpoints verified to {}", thousands(height)));
+            // The page's rule: the checkpoint verifier is at work while its height is near
+            // the verified height; further behind, full validation has taken over.
+            match facts.metric_count(names::CHECKPOINT_HEIGHT) {
+                Some(checkpoint)
+                    if sample.height.saturating_sub(checkpoint) <= CHECKPOINT_NEAR_BLOCKS =>
+                {
+                    parts.push(format!("checkpoints verified to {}", thousands(checkpoint)));
+                }
+                _ => {
+                    if let Some(since) = input.insights.checkpoints().final_reached {
+                        parts.push(format!(
+                            "full validation since {}",
+                            local_datetime_short(since)
+                        ));
+                    }
+                }
             }
             parts.push(format!("RPC answered {}", local_datetime_short(sample.at)));
             lines.push(format!("Sync: {}", parts.join(" · ")));
@@ -1200,7 +1214,10 @@ pub fn summary_text(input: &HealthInput<'_>, verdict: &Verdict) -> String {
         lines.push(format!("Last RPC error: {error}"));
     }
 
-    let problems = input.insights.problems(SUMMARY_PROBLEMS);
+    // The newest problems in the Recent problems card's order: errors ahead of warnings
+    // within a minute, so the pasted list reads as the card does.
+    let mut problems = input.insights.problems(SUMMARY_PROBLEMS);
+    order_problems(&mut problems);
     if problems.is_empty() {
         lines.push("Recent problems: none in this session".to_owned());
     } else {
@@ -2444,7 +2461,7 @@ mod tests {
             1200,
             &[
                 (names::READY_PEERS, 11.0),
-                (names::CHECKPOINT_HEIGHT, 2_500_000.0),
+                (names::CHECKPOINT_HEIGHT, 2_950_000.0),
                 (names::MEMPOOL_BYTES, 44_400.0),
                 (names::DISK_BYTES, 312_400_000_000.0),
             ],
@@ -2472,6 +2489,14 @@ mod tests {
                 "zebrad::components::sync",
                 "block download failed hash=block::Hash(\"abc\")",
             ),
+            // A newer WARN in the same minute: listed after the ERROR, as the card does.
+            line(
+                4,
+                515,
+                LogLevel::Warn,
+                "zebra_network::peer_set::set",
+                "dropping stalled peer addr=203.0.113.5:8233",
+            ),
         ]);
         let summary = scene.summary();
         let expected = "\
@@ -2481,7 +2506,7 @@ Verdict: Attention · Restarted after a crash
 Versions: launcher 0.2.0 · zebrad 7.0.0 · chain main
 Phase: Running since 23 Oct, 19:00 (pid 4242)
 Last exit: zebrad crashed (code 101), 23 Oct, 18:59 · thread 'tokio-rt-worker' panicked at zebrad/src/x.rs:38:27:
-Sync: 2,951,912 of 3,120,000 · 94.6 % · 96 blocks/min · about 29 h left · last block 23 Oct, 19:20 · checkpoints verified to 2,500,000 · RPC answered 23 Oct, 19:20
+Sync: 2,951,912 of 3,120,000 · 94.6 % · 96 blocks/min · about 29 h left · last block 23 Oct, 19:20 · checkpoints verified to 2,950,000 · RPC answered 23 Oct, 19:20
 Peers: 12 peers · 11 ready
 Mempool: 24 transactions · 44.4 kB
 State on disk: 312.4 GB
@@ -2489,11 +2514,36 @@ Ports: RPC 127.0.0.1:8232 · metrics 127.0.0.1:9999
 End of support: block 3,160,000, about 2 Dec 2026 (in 40 days)
 Recent problems:
   23 Oct, 19:08 ERROR zebrad::components::sync · block download failed hash=block::Hash(\"abc\") ×2
+  23 Oct, 19:08 WARN zebra_network::peer_set::set · dropping stalled peer addr=203.0.113.5:8233
 This run:
   23 Oct, 19:08 ERROR: block download failed ×2
   23 Oct, 19:00 zebrad started
 ";
         assert_eq!(summary, expected);
+        // The checkpoint gauge far behind the height, with the final checkpoint logged: full
+        // validation, as the hero and the Chain card say, not a verifier still at work.
+        scene.metrics = Some(metrics(1200, &[(names::CHECKPOINT_HEIGHT, 2_500_000.0)]));
+        scene.insights.ingest(
+            &[line(
+                5,
+                60,
+                LogLevel::Info,
+                "zebra_consensus::checkpoint",
+                "verified final checkpoint: starting full validation final_checkpoint_height=Height(2500000)",
+            )],
+            t(0),
+        );
+        let sync_line = scene
+            .summary()
+            .lines()
+            .find(|line| line.starts_with("Sync: "))
+            .map(str::to_owned)
+            .unwrap();
+        assert!(
+            sync_line.contains(" · full validation since 23 Oct, 19:01 · "),
+            "{sync_line}"
+        );
+        assert!(!sync_line.contains("checkpoints verified"));
         // Stopped before any answer: the shorter report.
         let mut scene = Scene::syncing(1200);
         scene.status = Status::default();
