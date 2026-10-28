@@ -22,13 +22,14 @@ use crate::{
         bytes, exit_class_text, local_date_short, local_datetime_short, relative, rough_duration,
         thousands,
     },
+    health::CHECKPOINT_NEAR_BLOCKS,
     stats_history::Sample,
 };
 
 /// How long "Copied" stays beside the best block's Copy button.
 const COPIED_FOR: Duration = Duration::from_secs(2);
 
-use super::{Dash, Icon, MetricsFacts, status_card::CHECKPOINT_NEAR_BLOCKS};
+use super::{Dash, Icon, MetricsFacts};
 
 /// The Phase row: `Running for 2 d 4 h, since 23 Oct, 21:13`, `Restarting in 25 s (crash 2)`,
 /// `Failed · zebrad crashed`.

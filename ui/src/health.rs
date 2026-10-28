@@ -51,6 +51,9 @@ pub const RECENT_CRASH: Duration = Duration::from_secs(60 * 60);
 pub const CRASH_LOOP: u32 = 3;
 /// The end of support this close is urgent.
 pub const EOS_URGENT: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+/// The checkpoint verifier is still at work while its height is within this many blocks of
+/// the verified height; further behind, it has finished and full validation runs.
+pub const CHECKPOINT_NEAR_BLOCKS: u64 = 5_000;
 
 /// A log timestamp may run a little ahead of the supervisor's spawn time; a line this close
 /// to the start still belongs to the run.
