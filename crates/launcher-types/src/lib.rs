@@ -360,10 +360,34 @@ pub struct Status {
     /// from a backend without the field reads as graceful.
     #[serde(default = "stop_is_graceful_default")]
     pub stop_is_graceful: bool,
+    /// Automatic restarts after a crash since the launcher started: every
+    /// scheduled restart that was carried out. Starts the user asked for and
+    /// configuration changes do not count. A status from a backend without
+    /// the field reads as zero.
+    #[serde(default)]
+    pub restarts: u32,
+    /// How the last requested stop went, once one has finished: how long
+    /// zebrad took to exit and whether the launcher had to kill it. A stop
+    /// requested after zebrad had already exited is not one.
+    #[serde(default)]
+    pub last_stop: Option<StopReport>,
 }
 
 fn stop_is_graceful_default() -> bool {
     true
+}
+
+/// How a requested stop went ([`Status::last_stop`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopReport {
+    /// When the stop was requested.
+    pub requested_at: SystemTime,
+    /// When zebrad's exit was recorded.
+    pub exited_at: SystemTime,
+    /// The launcher killed zebrad: the graceful stop did not finish within
+    /// the grace period, or this platform cannot stop it gracefully
+    /// ([`Status::stop_is_graceful`]).
+    pub forced: bool,
 }
 
 impl Default for Status {
@@ -378,6 +402,8 @@ impl Default for Status {
             last_exit: None,
             stale: None,
             stop_is_graceful: true,
+            restarts: 0,
+            last_stop: None,
         }
     }
 }
@@ -1204,6 +1230,8 @@ mod tests {
         assert_eq!(status.last_exit, None);
         assert_eq!(status.stale, None);
         assert!(status.stop_is_graceful);
+        assert_eq!(status.restarts, 0);
+        assert_eq!(status.last_stop, None);
     }
 
     #[test]
@@ -1214,12 +1242,22 @@ mod tests {
         )
         .expect("old payload");
         assert!(old.stop_is_graceful);
+        assert_eq!(old.restarts, 0, "session counters default on the wire");
+        assert_eq!(old.last_stop, None);
         let hard = Status {
             stop_is_graceful: false,
+            restarts: 3,
+            last_stop: Some(StopReport {
+                requested_at: SystemTime::UNIX_EPOCH,
+                exited_at: SystemTime::UNIX_EPOCH + Duration::from_secs(61),
+                forced: true,
+            }),
             ..Status::default()
         };
         let json = serde_json::to_value(&hard).unwrap();
         assert_eq!(json["stop_is_graceful"], false);
+        assert_eq!(json["restarts"], 3);
+        assert_eq!(json["last_stop"]["forced"], true);
         let round_trip: Status = serde_json::from_value(json).unwrap();
         assert_eq!(round_trip, hard);
     }

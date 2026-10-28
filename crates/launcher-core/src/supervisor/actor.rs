@@ -9,6 +9,7 @@ use std::{
 
 use launcher_types::{
     ExitClass, ExitInfo, LogEvent, LogLevel, LogLine, LogStream, Phase, StaleProcessInfo, Status,
+    StopReport,
 };
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, BufReader},
@@ -70,6 +71,8 @@ struct ExitOutcome {
 }
 
 struct StopState {
+    /// When the stop was requested, for [`Status::last_stop`].
+    requested_at: SystemTime,
     deadline: Instant,
     escalated: bool,
     forced: bool,
@@ -511,6 +514,7 @@ impl Actor {
                         }
                     };
                     run.state = RunState::Stopping(StopState {
+                        requested_at: SystemTime::now(),
                         deadline: Instant::now() + self.config.stop_grace,
                         escalated: false,
                         forced,
@@ -591,6 +595,8 @@ impl Actor {
         }
         if self.backoff_until.is_some_and(|until| now >= until) {
             self.backoff_until = None;
+            self.status
+                .send_modify(|s| s.restarts = s.restarts.saturating_add(1));
             self.spawn_run(StartOptions::default(), Vec::new()).await;
         }
     }
@@ -693,6 +699,13 @@ impl Actor {
             at: SystemTime::now(),
             requested,
         };
+        // A stop issued before the exit is reported; one issued after it did
+        // not end the run, so there is nothing to time.
+        let last_stop = stop.as_ref().map(|stop| StopReport {
+            requested_at: stop.requested_at,
+            exited_at: info.at,
+            forced: stop.forced,
+        });
 
         if let Some(path) = &self.config.pidfile
             && let Err(err) = pidfile::remove(path)
@@ -724,6 +737,9 @@ impl Actor {
             s.rpc_addr = None;
             s.metrics_addr = None;
             s.last_exit = Some(info);
+            if let Some(report) = last_stop {
+                s.last_stop = Some(report);
+            }
         });
 
         if stopped {

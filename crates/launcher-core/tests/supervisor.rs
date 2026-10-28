@@ -90,6 +90,11 @@ async fn starts_streams_logs_and_stops_cleanly() {
     assert_eq!(exit.class, ExitClass::Clean);
     assert!(exit.requested);
     assert!(!fx.config.pidfile.as_ref().unwrap().exists());
+    assert_eq!(status.restarts, 0, "nothing restarted by itself");
+    let report = status.last_stop.expect("the stop is reported");
+    assert!(!report.forced, "{report:?}");
+    assert!(report.exited_at >= report.requested_at, "{report:?}");
+    assert_eq!(report.exited_at, exit.at);
 
     let history = within(handle.history_since(0)).await.expect("history");
     if cfg!(unix) {
@@ -163,6 +168,13 @@ async fn hanging_child_is_killed_after_the_grace_period() {
     // The kill finished the stop the user asked for: not a crash.
     assert_eq!(exit.class, ExitClass::Clean, "{exit:?}");
     assert_eq!(exit.detail.as_deref(), Some("killed by the launcher"));
+    let report = handle.status().last_stop.expect("the stop is reported");
+    assert!(report.forced, "{report:?}");
+    let took = report
+        .exited_at
+        .duration_since(report.requested_at)
+        .expect("the exit follows the request");
+    assert!(took >= Duration::from_millis(500), "{took:?}");
     let history = within(handle.history_since(0)).await.expect("history");
     assert!(
         contains(&history, "did not stop within"),
@@ -199,6 +211,11 @@ async fn a_crash_during_a_graceful_stop_is_not_clean() {
     assert_eq!(exit.class, ExitClass::Crash, "{exit:?}");
     assert!(exit.requested, "{exit:?}");
     assert_eq!(exit.detail, None, "not killed by the launcher: {exit:?}");
+    let report = status.last_stop.expect("the stop is reported");
+    assert!(
+        !report.forced,
+        "a crash while stopping is not a kill: {report:?}"
+    );
     let history = within(handle.history_since(0)).await.expect("history");
     assert!(
         contains(
@@ -363,6 +380,8 @@ async fn crashes_restart_with_backoff_then_give_up() {
         .filter(|l| l.message.starts_with("restarting zebrad in"))
         .count();
     assert_eq!(restarts, 2, "{:#?}", messages(&history));
+    assert_eq!(status.restarts, 2, "both automatic restarts are counted");
+    assert_eq!(status.last_stop, None, "no stop was requested");
     let exits = history
         .iter()
         .filter(|l| l.message.starts_with("zebrad exited"))
