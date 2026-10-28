@@ -1,10 +1,14 @@
 //! The app shell: shared state, backend subscriptions, the header, the five pages and the
 //! first-run wizard.
 
-use std::time::{Duration, SystemTime};
+use std::{
+    mem::discriminant,
+    time::{Duration, SystemTime},
+};
 
 use launcher_types::{
-    LogLine, MetricsSnapshot, NodeStats, Settings, Status, Theme, UpdateHealthFailure, UpdateInfo,
+    ApplyOutcome, LogLine, MetricsSnapshot, NodeStats, Phase, Settings, StaleProcessInfo, Status,
+    Theme, UpdateHealthFailure, UpdateInfo, UpdateState,
 };
 use leptos::{ev, prelude::*, task::spawn_local};
 
@@ -16,7 +20,10 @@ use crate::{
         status_strip::StatusStrip,
         updates::{HealthFailureBanner, UpdateBanner},
     },
-    insights::{Insights, RunEvent},
+    insights::{
+        Insights, RunEvent,
+        events::{config_outcome_event, config_replaced_event, status_events, update_events},
+    },
     log_view::LogBuffer,
     metrics_history::MetricsHistory,
     pages::{
@@ -151,11 +158,17 @@ impl Tab {
     }
 }
 
+/// How many status transitions [`AppState::session_events`] keeps.
+const SESSION_EVENTS_KEPT: usize = 40;
+
 /// State shared by every page, provided as context.
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub tab: RwSignal<Tab>,
     pub status: RwSignal<Status>,
+    /// Whether a status has arrived from the backend: until then `status` is the default
+    /// (Stopped) and the dashboard is still connecting.
+    pub status_loaded: RwSignal<bool>,
     pub stats: RwSignal<Option<NodeStats>>,
     /// `None` until loaded.
     pub settings: RwSignal<Option<Settings>>,
@@ -169,10 +182,14 @@ pub struct AppState {
     pub metrics: RwSignal<Option<MetricsSnapshot>>,
     /// The metrics snapshots since the launcher opened.
     pub metrics_history: RwSignal<MetricsHistory>,
-    /// When the current phase began, for the dashboard's "for N min".
+    /// When the current phase began (the phase variant, not its fields), for the dashboard's
+    /// "for N min": set by [`AppState::record_status`].
     #[allow(dead_code, reason = "read by the dashboard once its model lands")]
     pub phase_since: RwSignal<SystemTime>,
-    /// Status transitions the UI observed this session, newest first.
+    /// The events the UI observed this session, newest first, at most
+    /// [`SESSION_EVENTS_KEPT`]: status transitions, updater steps, configuration changes.
+    /// The same events go into `insights`, whose [`Insights::events`] merges them with the
+    /// log's; this is the raw list.
     #[allow(dead_code, reason = "read by the dashboard once its model lands")]
     pub session_events: RwSignal<Vec<RunEvent>>,
     /// Whether the resolved appearance is dark (the setting, or the system preference when
@@ -212,6 +229,82 @@ impl AppState {
     /// A callback for payloads that do not deserialize: shows the message under the header.
     fn payload_error(self) -> impl Fn(String) + 'static {
         move |message| self.backend_error.set(Some(message))
+    }
+
+    /// Publishes a status, turning what changed since the last one into session events
+    /// ([`status_events`]) and dating the phase. The first status is the baseline: it says
+    /// where the node is, not that anything happened.
+    fn record_status(&self, status: Status) {
+        let now = clock::now();
+        let previous = self.status.get_untracked();
+        if self.status_loaded.get_untracked() {
+            for event in status_events(&previous, &status, now) {
+                self.record_event(event);
+            }
+            if discriminant(&previous.phase) != discriminant(&status.phase) {
+                self.phase_since.set(now);
+            }
+        } else {
+            self.status_loaded.set(true);
+            let since = match status.phase {
+                Phase::Starting | Phase::Running => status.started_at.unwrap_or(now),
+                _ => now,
+            };
+            self.phase_since.set(since);
+        }
+        self.status.set(status);
+    }
+
+    /// The backend found a zebrad from an earlier launcher run: a status change too.
+    fn record_stale(&self, stale: StaleProcessInfo) {
+        let status = Status {
+            stale: Some(stale),
+            ..self.status.get_untracked()
+        };
+        self.record_status(status);
+    }
+
+    /// Keeps an event the UI observed, for the dashboard's timeline.
+    fn record_event(&self, event: RunEvent) {
+        self.session_events.update(|events| {
+            events.insert(0, event.clone());
+            events.truncate(SESSION_EVENTS_KEPT);
+        });
+        self.insights
+            .update(|insights| insights.record_session_event(event));
+    }
+
+    /// Publishes what the updater reports, turning its steps into session events
+    /// ([`update_events`]).
+    fn record_update(&self, info: UpdateInfo) {
+        let now = clock::now();
+        self.update.with_untracked(|previous| {
+            for event in update_events(previous.as_ref(), &info, now) {
+                self.record_event(event);
+            }
+        });
+        self.update.set(Some(info));
+    }
+
+    /// An `update_state` event: the loaded info moves along; before the info is loaded the
+    /// state alone is not shown, since the info that follows carries it too.
+    fn record_update_state(&self, update_state: UpdateState) {
+        let info = self.update.with_untracked(|info| {
+            info.as_ref().map(|info| UpdateInfo {
+                state: update_state,
+                ..info.clone()
+            })
+        });
+        if let Some(info) = info {
+            self.record_update(info);
+        }
+    }
+
+    /// The Configure page saved `zebrad.toml`: the outcome joins the dashboard's timeline
+    /// ("Configuration applied", or rolled back when zebrad rejected it).
+    #[allow(dead_code, reason = "called by the Configure page after a save")]
+    pub fn record_config_outcome(&self, outcome: &ApplyOutcome) {
+        self.record_event(config_outcome_event(outcome, clock::now()));
     }
 
     /// Publishes new node statistics and keeps them in the history.
@@ -305,6 +398,7 @@ pub fn App() -> impl IntoView {
     let state = AppState {
         tab: RwSignal::new(Tab::Dashboard),
         status: RwSignal::new(Status::default()),
+        status_loaded: RwSignal::new(false),
         stats: RwSignal::new(None),
         settings: RwSignal::new(None),
         logs: RwSignal::new(LogBuffer::default()),
@@ -336,7 +430,7 @@ pub fn App() -> impl IntoView {
             let result = api::on_status(
                 move |status| {
                     seen.mark();
-                    state.status.set(status);
+                    state.record_status(status);
                 },
                 state.payload_error(),
             )
@@ -345,7 +439,7 @@ pub fn App() -> impl IntoView {
             // `stale_process` may have been emitted before this listener existed; the
             // snapshot's `stale` covers that case.
             let result = api::on_stale_process(
-                move |stale| state.status.update(|status| status.stale = Some(stale)),
+                move |stale| state.record_stale(stale),
                 state.payload_error(),
             )
             .await;
@@ -353,7 +447,7 @@ pub fn App() -> impl IntoView {
         },
         api::get_status,
         "Reading status",
-        move |status| state.status.set(status),
+        move |status| state.record_status(status),
     ));
     spawn_local(subscribe_then_fetch(
         state,
@@ -398,22 +492,14 @@ pub fn App() -> impl IntoView {
             let result = api::on_update_info(
                 move |info| {
                     seen.mark();
-                    state.update.set(Some(info));
+                    state.record_update(info);
                 },
                 state.payload_error(),
             )
             .await;
             state.report("Listening for updates", result);
             let result = api::on_update_state(
-                move |update_state| {
-                    if state.update.with_untracked(Option::is_some) {
-                        state.update.update(|info| {
-                            if let Some(info) = info {
-                                info.state = update_state;
-                            }
-                        });
-                    }
-                },
+                move |update_state| state.record_update_state(update_state),
                 state.payload_error(),
             )
             .await;
@@ -427,7 +513,7 @@ pub fn App() -> impl IntoView {
         },
         api::get_update_info,
         "Reading the update state",
-        move |info| state.update.set(Some(info)),
+        move |info| state.record_update(info),
     ));
     spawn_local(async move {
         match api::get_settings().await {
@@ -461,6 +547,15 @@ pub fn App() -> impl IntoView {
         if state.tab.get() == Tab::Logs {
             state.mark_problems_seen();
         }
+    });
+
+    // A reset of `zebrad.toml` from any page is an event of the run.
+    Effect::new(move |previous: Option<u64>| {
+        let changed = state.config_changed.get();
+        if previous.is_some_and(|previous| previous != changed) {
+            state.record_event(config_replaced_event(clock::now()));
+        }
+        changed
     });
 
     // Pages stay mounted while hidden, so a half-edited config or the log scroll position
