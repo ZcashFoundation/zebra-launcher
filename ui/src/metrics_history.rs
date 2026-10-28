@@ -17,21 +17,16 @@ pub const MAX_SNAPSHOTS: usize = 1440;
 
 /// The wire names (underscores) of the series the dashboard derives from the history.
 pub mod names {
-    pub const PEERS: &str = "zcash_net_peers";
     pub const READY_PEERS: &str = "pool_num_ready";
     pub const UNREADY_PEERS: &str = "pool_num_unready";
     pub const DOWNLOADS_IN_FLIGHT: &str = "sync_downloads_in_flight";
-    pub const DISTANCE_TO_TIP: &str = "sync_estimated_distance_to_tip";
     pub const CHECKPOINT_HEIGHT: &str = "checkpoint_verified_height";
-    pub const FINALIZED_HEIGHT: &str = "state_finalized_block_height";
     pub const CHAIN_COUNT: &str = "state_memory_chain_count";
     pub const DISK_BYTES: &str = "zebra_state_rocksdb_total_disk_size_bytes";
     pub const MEMORY_BYTES: &str = "zebra_state_rocksdb_total_memory_size_bytes";
     pub const BLOCK_CACHE_BYTES: &str = "zebra_state_rocksdb_block_cache_usage_bytes";
-    pub const MEMPOOL_TRANSACTIONS: &str = "zcash_mempool_size_transactions";
     pub const MEMPOOL_BYTES: &str = "zcash_mempool_size_bytes";
     pub const VERIFIED_BLOCKS: &str = "zcash_chain_verified_block_total";
-    pub const DOWNLOADED_BLOCKS: &str = "sync_downloaded_block_count";
     pub const NET_IN_BYTES: &str = "zcash_net_in_bytes_total";
     pub const NET_OUT_BYTES: &str = "zcash_net_out_bytes_total";
     pub const HANDSHAKE_FAILURES: &str = "zcash_net_peer_handshake_failures_total";
@@ -41,21 +36,16 @@ pub mod names {
 
 /// The families a kept snapshot holds: everything the dashboard plots or derives over time.
 pub const KEPT_FAMILIES: &[&str] = &[
-    names::PEERS,
     names::READY_PEERS,
     names::UNREADY_PEERS,
     names::DOWNLOADS_IN_FLIGHT,
-    names::DISTANCE_TO_TIP,
     names::CHECKPOINT_HEIGHT,
-    names::FINALIZED_HEIGHT,
     names::CHAIN_COUNT,
     names::DISK_BYTES,
     names::MEMORY_BYTES,
     names::BLOCK_CACHE_BYTES,
-    names::MEMPOOL_TRANSACTIONS,
     names::MEMPOOL_BYTES,
     names::VERIFIED_BLOCKS,
-    names::DOWNLOADED_BLOCKS,
     names::NET_IN_BYTES,
     names::NET_OUT_BYTES,
     names::HANDSHAKE_FAILURES,
@@ -360,10 +350,7 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(value_of(&all[1], names::DISK_BYTES), Some(2.0));
         // Kept snapshots hold the dashboard's families only; the newest is whole.
-        assert!(
-            all.iter()
-                .all(|s| s.families.len() == KEPT_FAMILIES.len() - 5)
-        );
+        assert!(all.iter().all(|s| s.families.len() == KEPT_FAMILIES.len()));
         assert!(all[0].family("rpc_active_requests").is_none());
         let newest = history.latest().unwrap();
         assert_eq!(newest.gauge("rpc_active_requests"), Some(2.0));
