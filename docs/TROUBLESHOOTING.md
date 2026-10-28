@@ -120,4 +120,41 @@ zebrad, and shows zebrad's error. Fix the key named in the error and save again.
 
 ## Grafana panel blank or "No data"
 
-See [GRAFANA.md](GRAFANA.md#troubleshooting). The status strip works without Grafana.
+**The Grafana tab is blank or says the page refused to connect.**
+First check that Grafana is running at the URL the hint under the toolbar names (the
+toolbar's "Open in browser" opens it outside the launcher). Then check that Grafana
+allows framing:
+
+```sh
+curl -sI http://127.0.0.1:3000/login | grep -i x-frame-options   # should print nothing
+```
+
+If a header is printed, `GF_SECURITY_ALLOW_EMBEDDING` did not reach the container:
+recreate it with `docker compose ... up -d --force-recreate grafana`. Also check that
+the launcher's Grafana URL starts with `http://127.0.0.1:` or `http://localhost:`.
+On macOS, whether WKWebView loads `http://127.0.0.1:3000` inside the launcher's
+`tauri://localhost` page (mixed content) has **not been verified yet**; if it is blocked,
+use "Open in browser".
+
+**The iframe shows a login page.**
+Anonymous access is off. Check that this succeeds without credentials:
+
+```sh
+curl -sf http://127.0.0.1:3000/api/dashboards/uid/zebra-overview > /dev/null && echo ok
+```
+
+Whether anonymous Viewer works inside the sandboxed iframe has **not been verified yet**
+on an installed bundle on any OS. Logging in inside the iframe may not persist, because Grafana's session cookie is
+`SameSite=Lax` and the launcher page is a different site; log in from a browser instead.
+
+**Dashboards show "No data".**
+
+1. Is zebrad running in the launcher, with metrics on? `curl -s http://127.0.0.1:9999/metrics | head`
+2. Is the target up? Open <http://127.0.0.1:9090/targets>.
+3. Target down on Linux: you started without `docker-compose.linux.yml`.
+4. Target down on Docker Desktop: see "Why two compose files" above.
+
+**Port 3000 or 9090 already in use.**
+Change the host side of the `ports:` mapping in `docker-compose.yml`; on Linux change
+`GF_SERVER_HTTP_PORT`, `--web.listen-address` and `PROMETHEUS_URL` in the override
+instead. Then update the launcher's Grafana URL.
