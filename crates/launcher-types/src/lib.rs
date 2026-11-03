@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 mod nodes;
 
-pub use nodes::{NodeId, NodeInfo, NodeKind, NodeRole};
+pub use nodes::{NodeId, NodeInfo, NodeKind, NodePort, NodeRole, PortRole, assign_ports};
 
 /// The names of the events the backend emits and the UI listens to. Logs do
 /// not go through an event: they take a `tauri::ipc::Channel` of

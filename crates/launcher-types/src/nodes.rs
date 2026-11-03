@@ -98,7 +98,8 @@ pub enum NodeKind {
     Zebrad,
     /// Valar Group and Project Tachyon's Zebra fork, with pruning and snapshots.
     Zakura,
-    /// The original C++ node, deprecated.
+    /// The Zcash Foundation's compatibility build of zcashd, following a zebrad or Zakura
+    /// node: stock zcashd stopped at its end of support.
     Zcashd,
     /// An independent node written in Bend.
     Zebend,
@@ -159,13 +160,28 @@ impl NodeKind {
         }
     }
 
-    /// The kinds a node of this kind can use, for a service: Zaino reads a full node. Empty
-    /// for kinds that stand alone.
+    /// The kinds a node of this kind needs one of: Zaino and Zallet read a zebrad, and the
+    /// zcashd compatibility build follows a zebrad or Zakura node. Empty for kinds that stand
+    /// alone.
     pub fn uses(self) -> &'static [NodeKind] {
         match self {
-            NodeKind::Zaino => &[NodeKind::Zebrad, NodeKind::Zakura, NodeKind::Zcashd],
-            NodeKind::Zallet => &[NodeKind::Zebrad, NodeKind::Zakura, NodeKind::Zaino],
+            NodeKind::Zaino | NodeKind::Zallet => &[NodeKind::Zebrad],
+            NodeKind::Zcashd => &[NodeKind::Zebrad, NodeKind::Zakura],
             _ => &[],
+        }
+    }
+
+    /// The kind's program, as its version is reported ("zakurad 1.8.0"); `None` for a
+    /// generic node, whose program is whatever the user named.
+    pub fn program(self) -> Option<&'static str> {
+        match self {
+            NodeKind::Zebrad => Some("zebrad"),
+            NodeKind::Zakura => Some("zakurad"),
+            NodeKind::Zcashd => Some("zcashd"),
+            NodeKind::Zebend => Some("zebend"),
+            NodeKind::Zaino => Some("zainod"),
+            NodeKind::Zallet => Some("zallet"),
+            NodeKind::Generic => None,
         }
     }
 
@@ -181,15 +197,65 @@ impl NodeKind {
             NodeKind::Zakura => {
                 "A Zebra fork built for scale, with block pruning and snapshots for a fast start."
             }
-            NodeKind::Zcashd => "The original Zcash node, deprecated in favour of Zebra.",
+            NodeKind::Zcashd => {
+                "zcashd's compatibility build, following one of your Zebra or Zakura nodes."
+            }
             NodeKind::Zebend => {
                 "An independent node written in Bend. Young and unaudited: not for funds."
             }
-            NodeKind::Zaino => "An indexer that serves light wallets from a full node.",
-            NodeKind::Zallet => "The wallet of the Z3 stack, replacing zcashd's wallet.",
+            NodeKind::Zaino => "An indexer that serves light wallets from a Zebra node.",
+            NodeKind::Zallet => "The Z3 wallet, replacing zcashd's. Beta.",
             NodeKind::Generic => "Any other program: you give its command line.",
         }
     }
+}
+
+impl NodeKind {
+    /// The ports a node of this kind listens on by default, before any clash is resolved:
+    /// what its own documentation uses. Services Zeal knows less about get the ports their
+    /// projects document; a generic node declares its own.
+    pub fn default_ports(self, network: Network) -> Vec<NodePort> {
+        let testnet = network == Network::Testnet;
+        let pick = |mainnet: u16, testnet_port: u16| if testnet { testnet_port } else { mainnet };
+        let port = |role, port| NodePort { role, port };
+        match self {
+            NodeKind::Zebrad | NodeKind::Zakura => vec![
+                port(PortRole::P2p, pick(8233, 18233)),
+                port(PortRole::Rpc, pick(8232, 18232)),
+                port(PortRole::Metrics, 9999),
+            ],
+            // The compatibility build opens no P2P listener: it connects to its node.
+            NodeKind::Zcashd => vec![port(PortRole::Rpc, pick(8232, 18232))],
+            NodeKind::Zebend => vec![port(PortRole::Rpc, 18233)],
+            NodeKind::Zaino => vec![port(PortRole::Grpc, 8137)],
+            NodeKind::Zallet => vec![port(PortRole::Rpc, 28232)],
+            NodeKind::Generic => Vec::new(),
+        }
+    }
+}
+
+/// `wanted` with every port that `taken` holds moved out of the way: up by 10,000 at a time
+/// (8233 becomes 18233, then 28233), which keeps a port recognisable, and up by one when that
+/// runs out of room. Ports are also kept apart from each other. The backend checks again,
+/// against the OS, when the node starts.
+pub fn assign_ports(wanted: &[NodePort], taken: &[u16]) -> Vec<NodePort> {
+    let mut used: Vec<u16> = taken.to_vec();
+    wanted
+        .iter()
+        .map(|want| {
+            let mut port = want.port;
+            while used.contains(&port) {
+                port = port
+                    .checked_add(10_000)
+                    .unwrap_or(port.wrapping_add(1).max(1024));
+            }
+            used.push(port);
+            NodePort {
+                role: want.role,
+                port,
+            }
+        })
+        .collect()
 }
 
 impl fmt::Display for NodeKind {
@@ -198,7 +264,39 @@ impl fmt::Display for NodeKind {
     }
 }
 
-/// What everyone lists about a node: who it is, not how it is doing.
+/// What a port of a node is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortRole {
+    /// Connections from other nodes.
+    P2p,
+    /// The JSON-RPC interface.
+    Rpc,
+    /// The Prometheus metrics page.
+    Metrics,
+    /// A gRPC interface, such as an indexer's lightwalletd-compatible one.
+    Grpc,
+}
+
+impl PortRole {
+    pub fn label(self) -> &'static str {
+        match self {
+            PortRole::P2p => "P2P",
+            PortRole::Rpc => "RPC",
+            PortRole::Metrics => "metrics",
+            PortRole::Grpc => "gRPC",
+        }
+    }
+}
+
+/// A port a node listens on, as assigned when the node was added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NodePort {
+    pub role: PortRole,
+    pub port: u16,
+}
+
+/// What everyone lists about a node: who it is and where it lives, not how it is doing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub id: NodeId,
@@ -208,6 +306,10 @@ pub struct NodeInfo {
     pub network: Network,
     /// For a service, the node it uses.
     pub depends_on: Option<NodeId>,
+    /// The node's data folder.
+    pub data_dir: String,
+    /// The ports it listens on.
+    pub ports: Vec<NodePort>,
 }
 
 impl NodeInfo {
@@ -267,6 +369,32 @@ mod tests {
             NodeId::suggest(NodeKind::Generic, Network::Testnet, &taken).as_str(),
             "custom-testnet"
         );
+    }
+
+    #[test]
+    fn ports_move_out_of_each_others_way() {
+        let zebrad = NodeKind::Zebrad.default_ports(Network::Mainnet);
+        assert_eq!(assign_ports(&zebrad, &[]), zebrad);
+        let taken: Vec<u16> = zebrad.iter().map(|port| port.port).collect();
+        let second = assign_ports(&NodeKind::Zakura.default_ports(Network::Mainnet), &taken);
+        let numbers: Vec<u16> = second.iter().map(|port| port.port).collect();
+        assert_eq!(numbers, [18233, 18232, 19999]);
+        // A Testnet zebrad already holds 18233 and 18232: the next step is 28233.
+        let third = assign_ports(
+            &NodeKind::Zakura.default_ports(Network::Mainnet),
+            &[8233, 8232, 18233, 18232],
+        );
+        let numbers: Vec<u16> = third.iter().map(|port| port.port).collect();
+        assert_eq!(numbers, [28233, 28232, 9999]);
+        // Near the top of the range the step is one.
+        let high = assign_ports(
+            &[NodePort {
+                role: PortRole::Rpc,
+                port: 60_000,
+            }],
+            &[60_000],
+        );
+        assert_eq!(high[0].port, 60_001);
     }
 
     #[test]
