@@ -4,7 +4,9 @@
 //! issue.
 //!
 //! The RPC cookie is a credential and is never read here. URLs in the
-//! settings lose any user info before they are printed.
+//! settings lose any user info before they are printed, and the public
+//! services lose their name and addresses ([`redact_public`]); their tokens
+//! are in the keychain and never in the settings.
 
 use std::{
     fmt::Write as _,
@@ -20,6 +22,50 @@ use crate::{paths::Paths, updates};
 
 /// The launcher version.
 pub const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A public name as diagnostics show it: the first letter of its first label
+/// and the rest of the zone, `z**.example.com`.
+pub fn mask_name(name: &str) -> String {
+    match name.split_once('.') {
+        Some((label, zone)) => format!("{}**.{zone}", label.chars().next().unwrap_or('?')),
+        None => "**".to_owned(),
+    }
+}
+
+/// The public services as diagnostics print them: the name masked
+/// ([`mask_name`]) wherever it appears, and the LAN address left out.
+pub fn redact_public(public: &launcher_types::public::PublicConfig) -> serde_json::Value {
+    let mut value = serde_json::to_value(public).unwrap_or_default();
+    let services = value
+        .get_mut("services")
+        .and_then(serde_json::Value::as_array_mut);
+    for service in services.into_iter().flatten() {
+        let Some(service) = service.as_object_mut() else {
+            continue;
+        };
+        if let Some(name) = service.get("name").and_then(|name| name.as_str()) {
+            let masked = mask_name(name);
+            service.insert("name".into(), masked.into());
+        }
+        service.remove("lan_addr");
+        let consent = service
+            .get_mut("consent")
+            .and_then(serde_json::Value::as_object_mut);
+        if let Some(consent) = consent
+            && let Some(hostname) = consent.get("hostname").and_then(|name| name.as_str())
+        {
+            let masked = mask_name(hostname);
+            consent.insert("hostname".into(), masked.into());
+        }
+        let secret = service
+            .get_mut("secret")
+            .and_then(serde_json::Value::as_object_mut);
+        if let Some(secret) = secret {
+            secret.insert("account".into(), "[redacted]".into());
+        }
+    }
+    value
+}
 
 /// The `ZEBRAD_VERSION` file at the repository root, read at build time.
 const ZEBRAD_VERSION_FILE: &str = include_str!("../../../ZEBRAD_VERSION");
@@ -186,9 +232,14 @@ pub fn bundle(
     section(&mut out, "Settings");
     let redacted = Settings {
         grafana_url: settings.grafana_url.as_deref().map(redact_url),
+        public: Default::default(),
         ..settings.clone()
     };
     out.push_str(&to_json(&redacted));
+    if !settings.public.is_empty() {
+        section(&mut out, "Public services");
+        out.push_str(&to_json(&redact_public(&settings.public)));
+    }
 
     section(&mut out, "Updater record");
     let record = updates::record_path(paths);
@@ -458,6 +509,7 @@ mod tests {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }
         assert!(!text.contains("plain launcher line"), "{text}");
+        assert!(!text.contains("Public services"), "nothing set up: {text}");
         assert!(!text.contains("supersecretcookie"));
         assert!(!text.contains("user:pw"));
         assert!(!text.contains(".cookie"), "{text}");
@@ -512,5 +564,37 @@ mod tests {
             Duration::from_secs(60),
         );
         assert!(text.contains("zebrad binary: (unknown)"), "{text}");
+    }
+
+    #[test]
+    fn public_services_lose_their_name_and_addresses() {
+        use launcher_types::{
+            Network, NodeId,
+            public::{Consent, PublicConfig, PublicHostname, PublicServiceSpec, SecretRef},
+        };
+        let mut spec = PublicServiceSpec::new_light_server(
+            NodeId::new("zebrad-mainnet").unwrap(),
+            Network::Mainnet,
+        );
+        spec.name = Some(PublicHostname::parse("zec-alice.duckdns.org").unwrap());
+        spec.lan_addr = Some("192.168.1.20".parse().unwrap());
+        spec.consent = Some(Consent {
+            version: 1,
+            at: std::time::SystemTime::UNIX_EPOCH,
+            hostname: "zec-alice.duckdns.org".into(),
+        });
+        spec.secret = Some(SecretRef {
+            provider: launcher_types::public::DnsProvider::DuckDns,
+            account: "dns:duckdns:zec-alice.duckdns.org".into(),
+        });
+        let public = PublicConfig {
+            services: vec![spec],
+        };
+        let text = redact_public(&public).to_string();
+        assert!(!text.contains("zec-alice"), "{text}");
+        assert!(!text.contains("192.168.1.20"), "{text}");
+        assert!(text.contains("z**.duckdns.org"), "{text}");
+        assert!(text.contains("\"switch_on\":true"), "{text}");
+        assert_eq!(mask_name("zec.example.com"), "z**.example.com");
     }
 }
