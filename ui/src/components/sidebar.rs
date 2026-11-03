@@ -1,12 +1,14 @@
-//! The sidebar of a launcher that runs several nodes (docs/MULTI-NODE.md): the overview, the
-//! nodes grouped by network with a status dot and one fact each, adding a node, and the pages
-//! that are not about one node. With a single node the shell keeps its tab bar instead.
+//! The sidebar of a launcher that runs several nodes (docs/MULTI-NODE.md): a Mainnet and a
+//! Testnet tab that scope the whole window to one network, the overview, that network's nodes
+//! with a status dot and one fact each, adding a node, and the pages that are not about one
+//! node. With a single node the shell keeps its tab bar instead.
 
 use launcher_types::{Network, NodeInfo};
 use leptos::prelude::*;
 
 use crate::{
     app::{AppState, Tab},
+    charts::widgets::focus_sibling,
     node_state::NodeState,
     node_summary::summarize,
 };
@@ -14,7 +16,27 @@ use crate::{
 /// The networks in the order the sidebar lists them.
 const NETWORKS: [Network; 2] = [Network::Mainnet, Network::Testnet];
 
-/// What a node is called in the sidebar, under its network's heading: a default name without
+/// The network `by` places from `network` in the sidebar's order, wrapping around: where the
+/// arrow keys move the network choice.
+fn step_network(network: Network, by: i32) -> Network {
+    let len = NETWORKS.len() as i32;
+    let index = NETWORKS
+        .iter()
+        .position(|candidate| *candidate == network)
+        .unwrap_or(0) as i32;
+    NETWORKS[(index + by).rem_euclid(len) as usize]
+}
+
+/// A network choice's name and tooltip, which the folded rail shows only as a letter:
+/// "Testnet · 1 node", "Mainnet · 4 nodes".
+fn network_label(network: Network, count: usize) -> String {
+    match count {
+        1 => format!("{} · 1 node", network.as_str()),
+        count => format!("{} · {count} nodes", network.as_str()),
+    }
+}
+
+/// What a node is called in the sidebar, under its network's tab: a default name without
 /// its network ("Zebra", "Zebra 2"), any other name as it is.
 pub fn short_name(info: &NodeInfo) -> String {
     match info
@@ -59,45 +81,75 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
             </button>
         }
     };
+    let scoped = move || state.scoped_nodes();
     let running = move || {
-        let (running, total) = state.nodes.with(|nodes| {
-            let running = nodes
-                .iter()
-                .filter(|node| node.status.with(|status| status.phase.is_active()))
-                .count();
-            (running, nodes.len())
-        });
-        format!("{running}/{total}")
+        let nodes = scoped();
+        let running = nodes
+            .iter()
+            .filter(|node| node.status.with(|status| status.phase.is_active()))
+            .count();
+        format!("{running}/{}", nodes.len())
     };
-    let groups = move || {
-        let nodes = state.nodes.get();
-        NETWORKS
-            .into_iter()
-            .filter_map(|network| {
-                let members: Vec<NodeState> = nodes
-                    .iter()
-                    .copied()
-                    .filter(|node| node.info.with(|info| info.network) == network)
-                    .collect();
-                (!members.is_empty()).then(|| {
-                    view! {
-                        <div class="side-group" role="group" aria-label=network.as_str()>
-                            <div class="side-group-title">{network.as_str()}</div>
-                            {members
-                                .into_iter()
-                                .map(|node| view! { <NodeItem node /> })
-                                .collect_view()}
-                        </div>
-                    }
-                })
-            })
-            .collect_view()
+    let list = move || {
+        let nodes = scoped();
+        if nodes.is_empty() {
+            return view! {
+                <p class="side-empty muted">
+                    {format!("No {} nodes yet.", state.network.get().as_str())}
+                </p>
+            }
+            .into_any();
+        }
+        view! {
+            <div class="side-group" role="group" aria-label=move || state.network.get().as_str()>
+                {nodes.into_iter().map(|node| view! { <NodeItem node /> }).collect_view()}
+            </div>
+        }
+        .into_any()
+    };
+    // The network choice is a radio group: it scopes the whole window rather than showing a
+    // panel of its own. Tab reaches the chosen network only; the arrow keys choose the other.
+    let network_tab = move |network: Network| {
+        let selected = move || state.network.get() == network;
+        let count = move || state.nodes_on(network).len();
+        let label = move || network_label(network, count());
+        view! {
+            <button
+                type="button"
+                role="radio"
+                class="net-tab"
+                class:net-tab-testnet=network == Network::Testnet
+                class:active=selected
+                aria-checked=move || selected().to_string()
+                tabindex=move || if selected() { "0" } else { "-1" }
+                aria-label=label
+                title=label
+                on:click=move |_| state.network.set(network)
+                on:keydown=move |event: web_sys::KeyboardEvent| {
+                    let by = match event.key().as_str() {
+                        "ArrowRight" | "ArrowDown" => 1,
+                        "ArrowLeft" | "ArrowUp" => -1,
+                        _ => return,
+                    };
+                    event.prevent_default();
+                    state.network.set(step_network(network, by));
+                    focus_sibling(&event, by);
+                }
+            >
+                <span class="net-tab-name">{network.as_str()}</span>
+                <span class="net-tab-short" aria-hidden="true">{&network.as_str()[..1]}</span>
+                <span class="net-tab-count">{count}</span>
+            </button>
+        }
     };
     view! {
         <nav class="sidebar" aria-label="Nodes and pages">
             <div class="brand sidebar-brand">
                 <img class="brand-icon" src="/64x64.png" alt="" width="64" height="64" />
                 <span class="brand-name">"Zeal"</span>
+            </div>
+            <div class="net-tabs" role="radiogroup" aria-label="Network">
+                {NETWORKS.map(network_tab).collect_view()}
             </div>
             <button
                 type="button"
@@ -111,7 +163,7 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
                 <span class="side-label">"Overview"</span>
                 <span class="side-fact" title="Nodes running">{running}</span>
             </button>
-            {groups}
+            {list}
             <button
                 type="button"
                 class="side-item side-add"
@@ -219,5 +271,22 @@ mod tests {
         assert_eq!(short_name(&info("Zebra · Mainnet")), "Zebra");
         assert_eq!(short_name(&info("Zebra · Mainnet 2")), "Zebra 2");
         assert_eq!(short_name(&info("Archive node")), "Archive node");
+    }
+
+    #[test]
+    fn the_arrow_keys_move_the_network_choice_around() {
+        use Network::{Mainnet, Testnet};
+        assert_eq!(step_network(Mainnet, 1), Testnet);
+        assert_eq!(step_network(Testnet, -1), Mainnet);
+        // Past either end, the choice wraps.
+        assert_eq!(step_network(Testnet, 1), Mainnet);
+        assert_eq!(step_network(Mainnet, -1), Testnet);
+    }
+
+    #[test]
+    fn a_network_choice_counts_its_nodes() {
+        assert_eq!(network_label(Network::Testnet, 1), "Testnet · 1 node");
+        assert_eq!(network_label(Network::Mainnet, 4), "Mainnet · 4 nodes");
+        assert_eq!(network_label(Network::Testnet, 0), "Testnet · 0 nodes");
     }
 }

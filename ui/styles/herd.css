@@ -1,7 +1,9 @@
 /* Several nodes (docs/MULTI-NODE.md): the sidebar that replaces the tab bar, the node
-   header, the overview and the add-node dialog. A single node never shows any of it. */
+   header, the overview and the add-node dialog. A single node shows none of it except the
+   Testnet band, which marks a lone Testnet node too. */
 
-/* The sidebar: brand, overview, nodes by network, add, then the launcher's own pages. */
+/* The sidebar: brand, the network choice, overview, that network's nodes, add, then the
+   launcher's own pages. */
 
 .sidebar {
   flex: none;
@@ -17,6 +19,85 @@
 
 .sidebar-brand {
   padding: 2px 8px 12px;
+}
+
+/* The network choice: Mainnet and Testnet tabs that scope the whole window to one network. */
+
+.net-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 10px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.net-tab {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0;
+  padding: 5px 6px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+}
+
+.net-tab:hover {
+  color: var(--text);
+}
+
+/* The chosen network is underlined like the tab bar's active tab. Its label stays on the
+   sidebar's --panel, where --warn reaches 4.5:1 in both sets. */
+.net-tab.active {
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--text);
+}
+
+.net-tab-testnet.active {
+  color: var(--warn);
+  box-shadow: inset 0 -2px 0 var(--warn);
+}
+
+.net-tab-count {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.net-tab-short {
+  display: none;
+}
+
+/* Testnet, wherever the window shows it, one node or several: a band in the warning tone
+   over the page. */
+.app.scope-testnet .app-header {
+  box-shadow: inset 0 3px 0 var(--warn);
+}
+
+.side-empty {
+  margin: 8px 10px;
+  font-size: 13px;
+}
+
+.overview-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.overview-empty p {
+  margin: 0;
 }
 
 .side-item {
@@ -145,8 +226,20 @@
   .sidebar .side-label,
   .sidebar .side-fact,
   .sidebar .side-group-title,
-  .sidebar .brand-name {
+  .sidebar .brand-name,
+  .sidebar .side-empty,
+  .net-tab-name,
+  .net-tab-count {
     display: none;
+  }
+
+  .net-tabs {
+    flex-direction: column;
+    padding: 2px;
+  }
+
+  .net-tab-short {
+    display: inline;
   }
 
   /* New problems stay visible as a dot on the node's item; the count is in its name. */

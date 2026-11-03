@@ -74,12 +74,13 @@ backend that makes every page demoable:
   instead of Install) and `&stalecheck` for the stale-check warning (no successful check for
   20 days). Saving the Off mode returns the updater to Idle, like the backend.
 
-- several nodes: `?herd` adds four nodes beside the mock's zebrad (Zebra on Testnet, Zakura
-  catching up from a snapshot, Zaino reading the Mainnet Zebra, and the zcashd compatibility
-  build, stopped), so the window shows the sidebar, the overview with a card per node, each
-  node's pages and the add-node dialog, whose Add creates one more simulated node. The real
-  backend runs one node until the registry lands (docs/MULTI-NODE.md), so a real window shows
-  the tab bar.
+- several nodes: `?herd` adds five nodes beside the mock's zebrad: on Mainnet, Zakura catching
+  up from a snapshot, Zaino reading the Mainnet Zebra, and the zcashd compatibility build,
+  stopped; on Testnet, a Zebra and a pruned Zakura at the tip. The window shows the sidebar
+  with its Mainnet and Testnet tabs, the overview with a card per node of the chosen network,
+  each node's pages and the add-node dialog, whose Add creates one more simulated node. The
+  real backend runs one node until the registry lands (docs/MULTI-NODE.md), so a real window
+  shows the tab bar.
 
 The flags are read from the query string once, when the page loads; the table at the top of
 [`src/mock.rs`](src/mock.rs) lists every one.

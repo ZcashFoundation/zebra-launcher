@@ -1,4 +1,4 @@
-//! `?herd`: four more nodes beside the mock's zebrad, for the overview and the node pages of a
+//! `?herd`: five more nodes beside the mock's zebrad, for the overview and the node pages of a
 //! launcher that runs several nodes (docs/MULTI-NODE.md). The real backend runs one node until
 //! the registry lands, so this exists only in the mock.
 //!
@@ -8,6 +8,7 @@
 //! | Node | State |
 //! | --- | --- |
 //! | Zebra · Testnet | running for hours, at the tip |
+//! | Zakura · Testnet | running, pruned, at the tip |
 //! | Zakura · Mainnet | running, catching up from a pruned snapshot |
 //! | Zaino · Mainnet | running, indexing the mock's Zebra · Mainnet |
 //! | zcashd · Mainnet | the compatibility build following Zebra · Mainnet, stopped two days ago |
@@ -102,7 +103,7 @@ fn info(
     }
 }
 
-/// The four nodes and their starting states.
+/// The five nodes and their starting states.
 fn herd() -> Vec<HerdNode> {
     let now = clock::now();
     let hours = |h: u64| now - Duration::from_secs(h * 3600);
@@ -122,6 +123,22 @@ fn herd() -> Vec<HerdNode> {
             TESTNET_TIP,
             hours(3) - Duration::from_secs(12 * 60),
             4300,
+        ),
+        HerdNode::running(
+            info(
+                "zakura-testnet",
+                NodeKind::Zakura,
+                Network::Testnet,
+                None,
+                &[
+                    (PortRole::P2p, 48233),
+                    (PortRole::Rpc, 48232),
+                    (PortRole::Metrics, 10_002),
+                ],
+            ),
+            TESTNET_TIP,
+            hours(26),
+            4340,
         ),
         HerdNode::running(
             info(
