@@ -31,18 +31,20 @@ pub fn TxPage(
     let tip = move || {
         nav.live.with(|live| {
             live.as_ref()
-                .and_then(|live| live.tip.map(|tip| tip.height))
+                .and_then(|live| live.tip)
+                .map_or((0, 0), |tip| (tip.epoch, tip.height))
         })
     };
-    // A waiting transaction is asked about again at every new tip, until it is mined.
+    // A waiting transaction is asked about again at every new tip, until it is mined; any
+    // transaction after a reorganisation, which may have replaced its block.
     let waiting = RwSignal::new(false);
     let answer = load(node, nav, move || {
-        let revision = if waiting.get() {
-            u64::from(tip().unwrap_or(0))
-        } else {
-            0
-        };
-        Some((ExplorerRequest::Tx { txid }, revision))
+        let (epoch, height) = tip();
+        let height = if waiting.get() { height } else { 0 };
+        Some((
+            ExplorerRequest::Tx { txid },
+            (epoch << 32) | u64::from(height),
+        ))
     });
     Effect::new(move |_| {
         let is_waiting = matches!(

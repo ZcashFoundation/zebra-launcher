@@ -34,13 +34,21 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
                 .and_then(|live| live.tip.map(|tip| tip.height))
         })
     };
-    // A height above the tip asks again at every new tip, so the countdown becomes the block.
+    let epoch = move || {
+        nav.live.with(|live| {
+            live.as_ref()
+                .and_then(|live| live.tip)
+                .map_or(0, |tip| tip.epoch)
+        })
+    };
+    // A height above the tip asks again at every new tip, so the countdown becomes the block;
+    // a height asks again after a reorganisation, which may have put another block there.
     let future = RwSignal::new(false);
     let answer = load(node.clone(), nav, move || {
-        let revision = if future.get() {
-            u64::from(tip().unwrap_or(0))
-        } else {
-            0
+        let revision = match id {
+            _ if future.get() => u64::from(tip().unwrap_or(0)),
+            BlockId::Height(_) => epoch() << 32,
+            BlockId::Hash(_) => 0,
         };
         Some((ExplorerRequest::Block { id }, revision))
     });
