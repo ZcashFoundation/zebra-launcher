@@ -263,6 +263,7 @@ mod tests {
             network: Network::Mainnet,
             depends_on: None,
             data_dir: String::new(),
+            own_folder: None,
             ports: Vec::new(),
             program: NodeProgram::Bundled,
             autostart: true,

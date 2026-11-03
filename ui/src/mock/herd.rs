@@ -30,7 +30,7 @@ use launcher_types::{
 };
 use leptos::prelude::*;
 
-use super::{FIRST_TIP, config::minimal_config, mock, nodes};
+use super::{DEFAULT_DATA_DIR, FIRST_TIP, config::minimal_config, mock, nodes};
 use crate::{clock, format};
 
 /// The block interval after NU7, for the nodes at the tip.
@@ -103,6 +103,7 @@ fn info(
         network,
         depends_on: depends_on.map(id),
         data_dir: format!("/mnt/zcash/{slug}"),
+        own_folder: Some(format!("{DEFAULT_DATA_DIR}/nodes/{slug}")),
         ports: ports(port_list),
         program: NodeProgram::Bundled,
         autostart: true,

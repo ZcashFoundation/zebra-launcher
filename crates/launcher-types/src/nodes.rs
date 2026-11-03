@@ -327,6 +327,11 @@ pub struct NodeInfo {
     pub depends_on: Option<NodeId>,
     /// The node's data folder: its chain state is in the `state` folder inside it.
     pub data_dir: String,
+    /// The node's own folder, `<app data>/nodes/<id>`, with its configuration, log and
+    /// cookie: removing the node with its data deletes it too. `None` for the first node,
+    /// whose files are the launcher's own and stay.
+    #[serde(default)]
+    pub own_folder: Option<String>,
     /// The ports it listens on.
     pub ports: Vec<NodePort>,
     /// Where its program comes from.

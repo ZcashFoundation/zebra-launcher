@@ -371,12 +371,18 @@ fn RemoveNode() -> impl IntoView {
                         {move || format!("This stops {} and deletes its chain state in ", name())}
                         <code>{move || node().info.with(|info| state_dir(&info.data_dir))}</code>
                         {move || {
-                            // The first node keeps its files in the launcher's own folders,
-                            // which stay; another node's folder is its own.
-                            if state.chosen_data_dir(node()).is_none() {
-                                "; the launcher's own files stay. The node leaves the list."
-                            } else {
-                                ", then the rest of its folder. The node leaves the list."
+                            // A node added later has a folder of its own, which goes too; the
+                            // first node keeps its files in the launcher's own folders, which
+                            // stay.
+                            match node().info.with(|info| info.own_folder.clone()) {
+                                Some(folder) => view! {
+                                    ", then its folder "
+                                    <code>{folder}</code>
+                                    ". The node leaves the list."
+                                }
+                                .into_any(),
+                                None => "; its data folder and the launcher's own files stay. The node leaves the list."
+                                    .into_any(),
                             }
                         }}
                     </p>
@@ -401,6 +407,7 @@ mod tests {
             network: Network::Testnet,
             depends_on: None,
             data_dir: "/data/nodes/zebrad-testnet".into(),
+            own_folder: Some("/data/nodes/zebrad-testnet".into()),
             ports: NodeKind::Zebrad.default_ports(Network::Testnet),
             program: NodeProgram::Bundled,
             autostart: true,

@@ -192,11 +192,14 @@ pub fn AddNode(
             .collect();
         let wanted = kind.default_ports(network);
         let ports = assign_ports(&wanted, &taken_ports);
+        let own_folder = state
+            .default_data_dir
+            .with(|base| base.as_deref().map(|base| node_folder(base, &id)));
         NodeInfo {
-            data_dir: state.default_data_dir.with(|base| match base {
-                Some(base) => node_folder(base, &id),
-                None => "a folder of its own in Zeal's data folder".to_owned(),
-            }),
+            data_dir: own_folder
+                .clone()
+                .unwrap_or_else(|| "a folder of its own in Zeal's data folder".to_owned()),
+            own_folder,
             id,
             name: name.get().trim().to_owned(),
             kind,

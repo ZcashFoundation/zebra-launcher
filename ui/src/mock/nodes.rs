@@ -326,10 +326,10 @@ pub async fn add_node(draft: NodeDraft) -> Result<NodeInfo, String> {
             &taken_ports(&nodes),
         )
     });
+    let own_folder = format!("{DEFAULT_DATA_DIR}/nodes/{id}");
     let info = NodeInfo {
-        data_dir: draft
-            .data_dir
-            .unwrap_or_else(|| format!("{DEFAULT_DATA_DIR}/nodes/{id}")),
+        data_dir: draft.data_dir.unwrap_or_else(|| own_folder.clone()),
+        own_folder: Some(own_folder),
         id,
         name,
         kind: draft.kind,
@@ -444,6 +444,7 @@ pub(super) fn first_node(data_dir: &str) -> NodeInfo {
         network,
         depends_on: None,
         data_dir: data_dir.to_owned(),
+        own_folder: None,
         ports: kind.default_ports(network),
         program: NodeProgram::Bundled,
         autostart: true,

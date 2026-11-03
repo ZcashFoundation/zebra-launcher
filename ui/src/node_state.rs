@@ -201,6 +201,7 @@ pub fn placeholder() -> NodeInfo {
         network,
         depends_on: None,
         data_dir: String::new(),
+        own_folder: None,
         ports: kind.default_ports(network),
         program: NodeProgram::Bundled,
         autostart: true,

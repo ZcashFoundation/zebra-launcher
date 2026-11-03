@@ -149,6 +149,8 @@ impl NodeSpec {
             network: self.network,
             depends_on: self.depends_on.clone(),
             data_dir: self.data_dir(launcher).display().to_string(),
+            own_folder: (self.layout == NodeLayout::Folder)
+                .then(|| self.paths(launcher).data_dir().display().to_string()),
             ports: self.ports.clone(),
             program: self.program.clone(),
             autostart: self.autostart,
@@ -546,6 +548,10 @@ mod tests {
         );
         let info = node.info(&paths);
         assert_eq!(info.data_dir, paths.data_dir().display().to_string());
+        assert_eq!(
+            info.own_folder, None,
+            "the launcher's files are not the node's"
+        );
         assert_eq!(info.port(PortRole::P2p), Some(18233));
     }
 
@@ -588,6 +594,9 @@ mod tests {
             moved.paths(&paths).zebrad_config(),
             folder.join("zebrad.toml")
         );
+        let info = moved.info(&paths);
+        assert_eq!(info.data_dir, "/big/disk");
+        assert_eq!(info.own_folder, Some(folder.display().to_string()));
     }
 
     fn draft(network: Network, name: &str) -> NodeDraft {
