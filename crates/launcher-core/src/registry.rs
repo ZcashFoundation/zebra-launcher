@@ -479,8 +479,10 @@ impl RegistryHandle {
     /// leaves the node list, which is saved; then its runtime is shut down
     /// and, when `delete_data` is set, its chain state deleted with
     /// [`firstrun::delete_node_data`]'s rules (with the rest of its folder,
-    /// for a node in a folder of its own). Kept data stays where it is, and
-    /// its id is not given to a new node while its folder exists. Refused for
+    /// for a node in a folder of its own). Kept data stays where it is; the
+    /// id is held back from a new node only while `<data>/nodes/<id>` exists
+    /// ([`nodes::plan_new_node`]), so the first node's, whose files are the
+    /// launcher's own, is free again once it is removed. Refused for
     /// the last node, while the node is starting or its data or config is
     /// being changed, and while a zebrad from an earlier launcher run holds
     /// it. Returns the bytes freed as far as they are known (0 for unknown or

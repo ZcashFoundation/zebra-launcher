@@ -40,7 +40,7 @@ A node is one supervised process and everything Zeal keeps for it:
 
 | Field | Meaning |
 | --- | --- |
-| `id` | A short, stable slug (`zebrad-mainnet`, `zakura-mainnet-2`), unique, used in paths, commands and events. Never reused while the node's data exists. |
+| `id` | A short, stable slug (`zebrad-mainnet`, `zakura-mainnet-2`), unique, used in paths, commands and events. Not given to a new node while `<app data>/nodes/<id>` exists, so a removed node's kept folder holds its id back. |
 | `name` | What the UI shows ("Zebra · Mainnet"), editable. |
 | `kind` | The implementation: `zebrad`, `zakura`, `zcashd`, `zebend`, `zaino`, `zallet` or `generic`. Decides the adapter (below). |
 | `network` | `Mainnet`, `Testnet` or, later, `Regtest`. |
@@ -441,7 +441,9 @@ Where phase 2a's code differs from the design above:
 - **No kind adapter or `LaunchSpec` yet.** With zebrad the only kind, the supervisor still
   takes zebrad's command line; the adapter comes with the second kind.
 - **`add_node` fills in the draft.** A draft may leave out the id (the first free one for the
-  kind and network, skipping removed nodes' kept folders), the ports (the kind's defaults
+  kind and network, skipping removed nodes' kept folders; the first node's files are in the
+  launcher's own folders, so its id is free again once it is removed, even with its data
+  kept), the ports (the kind's defaults
   moved around every other node's and around ports in use) and the data folder (a folder of
   its own). There is no `inspect_binary` or `suggest_ports` yet: the bundled zebrad needs no
   inspection, and the dialog shows the ports `assign_ports` gives around the known nodes,

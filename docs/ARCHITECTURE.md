@@ -108,8 +108,9 @@ from the node's spec (`NodeSpec`, `crates/launcher-core/src/nodes.rs`).
   own folder (once the supervisor has closed the log file). A quit during a long deletion
   so never leaves the node listed with part of its state gone; what cannot be deleted
   stays, named in the error (`NodeError::LeftBehind`), which the UI shows in the error
-  banner since the node has gone. Kept data stays where it is, and its id is not given to
-  a new node while its folder exists.
+  banner since the node has gone. Kept data stays where it is. A removed node's id is held
+  back only while `<app data>/nodes/<id>` exists: the first node keeps its files in the
+  launcher's own folders, so its id can go to a new node even when its data was kept.
 - **Ports at every start.** The supervisor tries binding each of the node's addresses
   (P2P on `0.0.0.0`, RPC and metrics on loopback) before it spawns zebrad: one that
   another program holds fails the start as `PortInUse`, naming the port, before zebrad
