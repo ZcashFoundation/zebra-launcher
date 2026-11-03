@@ -537,6 +537,18 @@ pub fn App() -> impl IntoView {
     // A placeholder for the first node until the backend's list arrives: the pages render it
     // while connecting, and the list fills it in.
     let node = NodeState::new(node_state::placeholder());
+    let adding = RwSignal::new(false);
+    // What had focus before the add-node dialog opened: the app turns inert under it, which
+    // takes focus away, so the opener notes it first.
+    let return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
+    let open_add = Callback::new(move |()| {
+        let active = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+        return_focus.set_value(active);
+        adding.set(true);
+    });
     let state = AppState {
         tab: RwSignal::new(Tab::Dashboard),
         nodes: RwSignal::new(vec![node]),
@@ -803,23 +815,11 @@ pub fn App() -> impl IntoView {
     let first_run_open = RwSignal::new(false);
     // Several nodes: a sidebar of nodes replaces the tab bar (docs/MULTI-NODE.md).
     let herd = Memo::new(move |_| state.herd());
-    let adding = RwSignal::new(false);
     // The launcher's own pages are tab panels of the tab bar; with several nodes the sidebar
     // opens them instead, so they are named regions without a tab.
     let panel_role = move || if herd.get() { "region" } else { "tabpanel" };
     let labelled_by = move |tab: Tab| move || (!herd.get()).then(|| tab.button_id());
     let labelled = move |tab: Tab| move || herd.get().then(|| tab.label());
-    // What had focus before the add-node dialog opened: the app turns inert under it, which
-    // takes focus away, so the opener notes it first.
-    let return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
-    let open_add = Callback::new(move |()| {
-        let active = web_sys::window()
-            .and_then(|window| window.document())
-            .and_then(|document| document.active_element())
-            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
-        return_focus.set_value(active);
-        adding.set(true);
-    });
 
     view! {
         <div
