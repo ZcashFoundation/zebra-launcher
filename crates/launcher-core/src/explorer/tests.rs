@@ -917,7 +917,15 @@ async fn a_syncing_node_is_not_followed_and_gets_fewer_reads_at_once() {
                 )
             })
             .collect();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Wait until the reads that may run have started (a slow runner takes a while), then
+        // check that no more did.
+        let started = tokio::time::Instant::now();
+        while harness.counts()[1] - before < u64::from(limit)
+            && started.elapsed() < Duration::from_secs(5)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(harness.counts()[1] - before, u64::from(limit));
         harness.gate.send_replace(true);
         for page in pages {
