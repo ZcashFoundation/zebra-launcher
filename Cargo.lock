@@ -2298,6 +2298,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "launcher-herd"
+version = "0.1.0"
+dependencies = [
+ "launcher-types",
+ "serde_json",
+]
+
+[[package]]
 name = "launcher-types"
 version = "0.1.0"
 dependencies = [
