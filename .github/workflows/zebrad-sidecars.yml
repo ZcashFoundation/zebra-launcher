@@ -465,10 +465,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # Byte for byte: with the runner's core.autocrlf=true the checkout counts as
+      # changed to `git describe --dirty`, and zebrad then reports
+      # "7.0.0-modified+git.<commit>", which fails build-zebrad.ps1's version check.
       - name: Clone Zebra ${{ needs.version.outputs.version }}
         if: needs.version.outputs.zebrad_ref == ''
         run: |
-          git -c advice.detachedHead=false clone --depth 1 --branch "v$env:VERSION" `
+          git -c advice.detachedHead=false clone --config core.autocrlf=false --depth 1 --branch "v$env:VERSION" `
             https://github.com/ZcashFoundation/zebra zebra-src
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

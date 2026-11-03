@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Install smoke test for a Linux bundle, run by bundle.yml in the ubuntu:22.04
-# container: starts the launcher under Xvfb with a fresh home directory, lets
-# it run for a while, then checks that it was still running when stopped, that
-# its log says the bundled zebrad started, and that no zebrad is left over.
+# container: starts the launcher under Xvfb with a fresh home directory whose
+# first run is complete, lets it run for a while, then checks that it was still
+# running when stopped, that its log says the bundled zebrad started, and that
+# no zebrad is left over.
 #
 #   --deb      runs the installed /usr/bin/zeal-app (install the .deb first)
 #   --appimage PATH runs the AppImage (set APPIMAGE_EXTRACT_AND_RUN=1 where
@@ -58,6 +59,13 @@ mkdir -p "${XDG_DATA_HOME}" "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}" "${XDG_STAT
 mkdir -p "${XDG_RUNTIME_DIR}"
 chmod 0700 "${XDG_RUNTIME_DIR}"
 
+# The state after the first-run wizard. A fresh install starts no zebrad until
+# the wizard is finished; from then on it starts the bundled zebrad at launch,
+# which is what this test checks. The other settings take their defaults.
+mkdir -p "${XDG_CONFIG_HOME}/${IDENTIFIER}"
+printf '{"schema_version": 2, "first_run_done": true}\n' \
+    > "${XDG_CONFIG_HOME}/${IDENTIFIER}/launcher.json"
+
 # WebKitGTK in a container: no GPU, and its bubblewrap sandbox needs user
 # namespaces the container does not grant. Smoke test only; never set for users.
 export WEBKIT_DISABLE_DMABUF_RENDERER=1
@@ -94,12 +102,27 @@ else
     failed=true
 fi
 
-# The launcher stops zebrad when it exits (PDEATHSIG / graceful stop); give it
-# a moment, then report and clean up any leftover.
-sleep 5
-if pgrep -f zeal-zebrad > /dev/null; then
-    echo "::error::a zeal-zebrad process outlived the launcher"
-    pgrep -af zeal-zebrad || true
+# The launcher stops zebrad when it exits (PDEATHSIG / graceful stop). A
+# zebrad that exited but was orphaned stays a zombie in a container whose PID 1
+# does not reap children; it no longer runs, so only live processes count.
+live_zebrad() {
+    local pid state
+    for pid in $(pgrep -f zeal-zebrad || true); do
+        state="$(ps -o stat= -p "${pid}" 2>/dev/null || true)"
+        case "${state}" in
+            "" | Z*) ;;
+            *) echo "${pid}" ;;
+        esac
+    done
+}
+for _ in $(seq 1 15); do
+    [ -z "$(live_zebrad)" ] && break
+    sleep 1
+done
+mapfile -t leftover < <(live_zebrad)
+if [ "${#leftover[@]}" -gt 0 ]; then
+    echo "::error::a zeal-zebrad process outlived the launcher by 15 s"
+    for pid in "${leftover[@]}"; do ps -o pid=,stat=,args= -p "${pid}" || true; done
     pkill -KILL -f zeal-zebrad || true
     failed=true
 fi

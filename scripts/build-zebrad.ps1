@@ -191,6 +191,8 @@ try {
             if ($head -ne $named) { throw "$SrcDir is at $head, not at $Ref ($named)" }
         } else {
             Invoke-Step git @('init', '-q', $SrcDir)
+            # Byte for byte, as in the release clone below.
+            Invoke-Step git @('-C', $SrcDir, 'config', 'core.autocrlf', 'false')
             Invoke-Step git @('-C', $SrcDir, 'remote', 'add', 'origin', $ZebraGit)
             # GitHub serves branches, tags and full commit SHAs to a shallow fetch.
             $checkoutRev = 'FETCH_HEAD'
@@ -225,7 +227,11 @@ try {
         if (Test-Path (Join-Path $SrcDir '.git')) {
             Write-Host "Using the existing checkout in $SrcDir"
         } else {
-            Invoke-Step git @('-c', 'advice.detachedHead=false', 'clone', '--depth', '1', '--branch', $tag, $ZebraGit, $SrcDir)
+            # The files are checked out byte for byte. The Windows runners set
+            # core.autocrlf=true, and the converted checkout counts as changed to
+            # `git describe --dirty`, which zebrad's build records: the binary then
+            # reports "zebrad 7.0.0-modified+git.<commit>" and fails the version check.
+            Invoke-Step git @('-c', 'advice.detachedHead=false', 'clone', '--config', 'core.autocrlf=false', '--depth', '1', '--branch', $tag, $ZebraGit, $SrcDir)
         }
         if (Test-Path (Join-Path $SrcDir '.git')) {
             $head = Invoke-Git @('rev-parse', 'HEAD') "cannot read HEAD in $SrcDir"
