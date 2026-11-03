@@ -254,6 +254,42 @@ async fn an_owned_session_serves_spawned_tasks() {
     }
 }
 
+#[tokio::test]
+async fn a_rejected_cookie_is_read_again_once() {
+    let fake = spawn_fake().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cookie_file = dir.path().join(".cookie");
+    std::fs::write(&cookie_file, "__cookie__:from-the-last-start").expect("write");
+    let client = RpcClient::new(fake.addr, cookie_file.clone()).expect("client");
+    let session = timeout(T, client.owned_session())
+        .await
+        .expect("in time")
+        .expect("session");
+
+    // The file still holds the stale cookie: one attempt, and the refusal.
+    let err = timeout(T, session.call::<Value>("getinfo", json!([])))
+        .await
+        .expect("in time")
+        .expect_err("stale cookie");
+    assert!(matches!(err, RpcError::Status(401)), "{err:?}");
+
+    // zebrad wrote a new cookie: the session reads it and carries on, and keeps it for the
+    // next calls, even once the file is gone.
+    std::fs::copy(&fake.cookie_file, &cookie_file).expect("copy cookie");
+    let info: Value = timeout(T, session.call("getinfo", json!([])))
+        .await
+        .expect("in time")
+        .expect("getinfo after a re-read");
+    assert_eq!(info["subversion"], "/Zebra:7.0.0/");
+    std::fs::remove_file(&cookie_file).expect("remove cookie");
+    let clone = session.clone();
+    let info: Value = timeout(T, clone.call("getinfo", json!([])))
+        .await
+        .expect("in time")
+        .expect("getinfo with the kept cookie");
+    assert_eq!(info["subversion"], "/Zebra:7.0.0/");
+}
+
 async fn wait_for<T: Clone>(
     output: &mut watch::Receiver<Option<T>>,
     what: &str,

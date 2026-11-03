@@ -4,7 +4,9 @@
 //! start and expects it back as HTTP Basic credentials. The cookie changes on
 //! each start, so [`RpcClient`] reads the file before every call; a batch of
 //! calls shares one read through an [`RpcSession`], and spawned tasks share one
-//! through an [`OwnedSession`].
+//! through an [`OwnedSession`]. zebrad answers a wrong cookie without a JSON
+//! error (an empty response), so a session that gets an HTTP error or an empty
+//! body reads the cookie once more and, if it changed, repeats the call with it.
 //!
 //! Only the fields the launcher shows are decoded; zebrad may add others.
 //! Beyond the handful of required fields every field is optional, so a field
@@ -22,6 +24,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use launcher_types::PeerInfo;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 /// How long one call may take, unless it names its own limit with `call_timeout`.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -47,6 +50,9 @@ pub enum RpcError {
     /// zebrad answered with an HTTP error status.
     #[error("RPC request failed with HTTP status {0}")]
     Status(u16),
+    /// zebrad answered without a body, as it does when the cookie is wrong.
+    #[error("zebrad sent an empty response; the RPC cookie may be out of date")]
+    EmptyResponse,
     /// zebrad returned a JSON-RPC error.
     #[error("RPC error {code}: {message}")]
     Rpc {
@@ -304,10 +310,12 @@ impl RpcClient {
     /// calls from spawned tasks. Clones share the HTTP client, the URL and the
     /// credentials.
     pub async fn owned_session(&self) -> Result<OwnedSession, RpcError> {
+        let authorization: Arc<str> = Arc::from(read_authorization(&self.cookie_file).await?);
         Ok(OwnedSession {
             http: self.http.clone(),
             url: self.url.clone(),
-            authorization: Arc::from(read_authorization(&self.cookie_file).await?),
+            cookie_file: Arc::from(self.cookie_file.as_path()),
+            authorization: Arc::new(watch::Sender::new(authorization)),
         })
     }
 
@@ -407,15 +415,17 @@ impl RpcSession<'_> {
         params: Value,
         timeout: Duration,
     ) -> Result<T, RpcError> {
-        exchange(
+        let (result, _) = exchange_or_reread(
             &self.client.http,
             &self.client.url,
+            &self.client.cookie_file,
             &self.authorization,
             method,
             params,
             timeout,
         )
-        .await
+        .await;
+        result
     }
 }
 
@@ -425,7 +435,9 @@ impl RpcSession<'_> {
 pub struct OwnedSession {
     http: reqwest::Client,
     url: Arc<str>,
-    authorization: Arc<str>,
+    cookie_file: Arc<Path>,
+    /// The credentials, shared by the clones: a re-read cookie replaces them for all.
+    authorization: Arc<watch::Sender<Arc<str>>>,
 }
 
 impl std::fmt::Debug for OwnedSession {
@@ -454,15 +466,21 @@ impl OwnedSession {
         params: Value,
         timeout: Duration,
     ) -> Result<T, RpcError> {
-        exchange(
+        let authorization = self.authorization.borrow().clone();
+        let (result, fresh) = exchange_or_reread(
             &self.http,
             &self.url,
-            &self.authorization,
+            &self.cookie_file,
+            &authorization,
             method,
             params,
             timeout,
         )
-        .await
+        .await;
+        if let Some(fresh) = fresh {
+            self.authorization.send_replace(Arc::from(fresh));
+        }
+        result
     }
 }
 
@@ -475,6 +493,41 @@ async fn read_authorization(cookie_file: &Path) -> Result<String, RpcError> {
             source,
         })?;
     Ok(format!("Basic {}", STANDARD.encode(cookie.trim())))
+}
+
+/// Whether `err` may come from a cookie zebrad no longer accepts: an HTTP error status, an
+/// empty body, or a connection that failed for any reason but a timeout.
+fn may_be_stale_cookie(err: &RpcError) -> bool {
+    match err {
+        RpcError::Status(_) | RpcError::EmptyResponse => true,
+        RpcError::Http(err) => !err.is_timeout(),
+        RpcError::Cookie { .. } | RpcError::Rpc { .. } | RpcError::InvalidResponse(_) => false,
+    }
+}
+
+/// [`exchange`], and once more with a re-read cookie when the answer suggests the one sent is
+/// out of date and the file now holds another. Returns the result and the new credentials, if
+/// the cookie was read again and changed.
+async fn exchange_or_reread<T: DeserializeOwned>(
+    http: &reqwest::Client,
+    url: &str,
+    cookie_file: &Path,
+    authorization: &str,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> (Result<T, RpcError>, Option<String>) {
+    let first = exchange(http, url, authorization, method, params.clone(), timeout).await;
+    match first {
+        Err(err) if may_be_stale_cookie(&err) => match read_authorization(cookie_file).await {
+            Ok(fresh) if fresh != authorization => {
+                let retried = exchange(http, url, &fresh, method, params, timeout).await;
+                (retried, Some(fresh))
+            }
+            _ => (Err(err), None),
+        },
+        other => (other, None),
+    }
 }
 
 /// One request and its decoded result. `timeout` replaces the client's own for this
@@ -500,6 +553,9 @@ async fn exchange<T: DeserializeOwned>(
         return Err(RpcError::Status(status.as_u16()));
     }
     let bytes = response.bytes().await?;
+    if bytes.is_empty() {
+        return Err(RpcError::EmptyResponse);
+    }
     decode(&bytes)
 }
 
@@ -638,7 +694,8 @@ mod tests {
         let session = OwnedSession {
             http: reqwest::Client::new(),
             url: Arc::from("http://127.0.0.1:8232/"),
-            authorization: Arc::from("Basic c2VjcmV0"),
+            cookie_file: Arc::from(Path::new("/nonexistent/.cookie")),
+            authorization: Arc::new(watch::Sender::new(Arc::from("Basic c2VjcmV0"))),
         };
         let printed = format!("{session:?}");
         assert!(printed.contains("127.0.0.1:8232"), "{printed}");
