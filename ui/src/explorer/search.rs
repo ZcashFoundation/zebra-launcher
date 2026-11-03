@@ -52,29 +52,8 @@ pub fn SearchBox(
         event.prevent_default();
         let text = query.get_untracked();
         let nav = nav.get_untracked();
-        let route = match classify_query(&text, network.get_untracked()) {
-            Classified::Height(height) => Some(ExplorerRoute::Block {
-                id: BlockId::Height(height),
-            }),
-            Classified::BelowTip(back) => Some(match tip.get_untracked() {
-                Some(tip) => ExplorerRoute::Block {
-                    id: BlockId::Height(tip.saturating_sub(back)),
-                },
-                None => ExplorerRoute::Search {
-                    query: text.trim().to_owned(),
-                },
-            }),
-            Classified::Hash(_) | Classified::Outpoint(_) => Some(ExplorerRoute::Search {
-                query: text.trim().to_owned(),
-            }),
-            Classified::Route(route) => Some(route),
-            // The hint says why there is nowhere to go.
-            Classified::Secret(_)
-            | Classified::Later(_)
-            | Classified::Empty
-            | Classified::Unrecognised => None,
-        };
-        if let Some(route) = route {
+        let classified = classify_query(&text, network.get_untracked());
+        if let Some(route) = destination(&classified, tip.get_untracked()) {
             nav.go(route);
             query.set(String::new());
             if let Some(field) = input.get_untracked() {
@@ -111,6 +90,35 @@ pub fn SearchBox(
                 {hint}
             </p>
         </form>
+    }
+}
+
+/// Where Enter goes for a query classified as `classified`, with the node at `tip`. A query
+/// that needs the node goes to the results page as the id that was found, never as the text it
+/// was found in: a pasted link may hold more than the id, and the page's query is kept in the
+/// history and sent to the node's explorer. `None` where the hint says why there is nowhere to
+/// go.
+fn destination(classified: &Classified, tip: Option<u32>) -> Option<ExplorerRoute> {
+    let search = |query: String| Some(ExplorerRoute::Search { query });
+    match classified {
+        Classified::Height(height) => Some(ExplorerRoute::Block {
+            id: BlockId::Height(*height),
+        }),
+        Classified::BelowTip(back) => match tip {
+            Some(tip) => Some(ExplorerRoute::Block {
+                id: BlockId::Height(tip.saturating_sub(*back)),
+            }),
+            None => search(format!("tip-{back}")),
+        },
+        Classified::Hash(hash) => search(hash.to_hex()),
+        Classified::Outpoint(outpoint) => {
+            search(format!("{}:{}", outpoint.txid.to_hex(), outpoint.vout))
+        }
+        Classified::Route(route) => Some(route.clone()),
+        Classified::Secret(_)
+        | Classified::Later(_)
+        | Classified::Empty
+        | Classified::Unrecognised => None,
     }
 }
 
@@ -181,5 +189,57 @@ pub fn SearchPage(node: NodeId, nav: NodeExplorer, query: String) -> impl IntoVi
                 },
             }}
         </section>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use launcher_types::explorer::Hash32;
+
+    use super::*;
+
+    const HASH: &str = "0000000000d8a9ac4e30b7a7ce2bd2b3b1b9c67b6ec23f5a3e7ba7ca1d4ab501";
+
+    fn go(query: &str, tip: Option<u32>) -> Option<ExplorerRoute> {
+        destination(&classify_query(query, Network::Mainnet), tip)
+    }
+
+    #[test]
+    fn only_the_id_found_goes_on() {
+        let hash = Hash32::parse(HASH).unwrap();
+        // The rest of a pasted link stays behind.
+        assert_eq!(
+            go(&format!("https://x.example/tx/{HASH}?ref=abc"), None),
+            Some(ExplorerRoute::Search {
+                query: hash.to_hex()
+            })
+        );
+        assert_eq!(
+            go(&format!("`{}:3`", HASH.to_uppercase()), None),
+            Some(ExplorerRoute::Search {
+                query: format!("{HASH}:3")
+            }),
+            "in lowercase, without the quotes"
+        );
+        assert_eq!(
+            go(&format!("{HASH}-3"), None),
+            Some(ExplorerRoute::Search {
+                query: format!("{HASH}:3")
+            })
+        );
+        assert_eq!(
+            go("tip - 5", None),
+            Some(ExplorerRoute::Search {
+                query: "tip-5".into()
+            })
+        );
+        assert_eq!(
+            go("tip-5", Some(100)),
+            Some(ExplorerRoute::Block {
+                id: BlockId::Height(95)
+            })
+        );
+        assert_eq!(go("uview1abc", None), None);
+        assert_eq!(go("hello", None), None);
     }
 }
