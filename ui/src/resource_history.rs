@@ -148,22 +148,28 @@ impl ResourceHistory {
         (age <= span).then_some(newest)
     }
 
-    /// The intervals of the window that lie within one run, as `(earlier, later)` pairs.
+    /// The intervals of the window within the newest run, as `(earlier, later)` pairs: after a
+    /// restart, the previous run's last minute is not this run's.
     fn intervals(
         &self,
         span: Duration,
         now: SystemTime,
     ) -> impl Iterator<Item = (&Point, &Point)> + '_ {
+        let newest = self.points.last().map(|point| point.run);
         self.window(Some(span), now)
             .windows(2)
-            .filter(|pair| pair[0].run == pair[1].run && pair[1].run_secs > pair[0].run_secs)
+            .filter(move |pair| {
+                Some(pair[1].run) == newest
+                    && pair[0].run == pair[1].run
+                    && pair[1].run_secs > pair[0].run_secs
+            })
             .map(|pair| (&pair[0], &pair[1]))
     }
 
     /// The cores the tree used over the last `span`: the CPU time's growth over the run time
-    /// between the samples, within runs. With a single sample in the window, that sample's own
-    /// rate (since the spawn, for a run's first). `None` without a recent sample, or when CPU
-    /// cannot be read.
+    /// between the newest run's samples. With a single sample of the newest run, that
+    /// sample's own rate (since the spawn, for a run's first). `None` without a recent sample,
+    /// or when CPU cannot be read.
     pub fn cpu_cores(&self, span: Duration, now: SystemTime) -> Option<f64> {
         let newest = self.fresh(span, now)?;
         newest.cpu_cores?;
@@ -424,6 +430,24 @@ mod tests {
             history.io_rates(RATE_WINDOW, at(1175)).1.unwrap(),
             10.0
         ));
+    }
+
+    #[test]
+    fn a_restart_starts_the_rates_afresh() {
+        // Run 1 burns 4 cores for 15 s, and run 2 starts within the same minute.
+        let mut history = ResourceHistory::default();
+        for secs in (0..=15).step_by(5) {
+            history.push(&sample(1, secs, 4.0 * secs as f64, 1_000_000 * secs));
+        }
+        let mut first = sample(2, 4, 3.0, 400);
+        first.at = at(1020);
+        first.cpu_cores = Some(0.75);
+        history.push(&first);
+        let now = at(1020);
+        assert!(close(history.cpu_cores(RATE_WINDOW, now).unwrap(), 0.75));
+        let (read, written) = history.io_rates(RATE_WINDOW, now);
+        assert!(close(read.unwrap(), 50.0), "{read:?}");
+        assert!(close(written.unwrap(), 100.0), "{written:?}");
     }
 
     #[test]

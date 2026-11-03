@@ -1383,6 +1383,8 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - A rate since the spawn, or since a process started, is averaged over at least 1 s,
      like the backend's first CPU rate: the first sample comes within milliseconds of the
      spawn, when the exec may already have read from disk.
+   - The one-minute rates count the newest run's samples only, so after a restart the CPU
+     and Disk tiles start from the new run, as the sparklines, the table and the totals do.
    - "syncing uses every CPU" follows zebrad's own progress lines (syncing, slow or close to
      the tip), so a stalled node shows the run's average instead.
    - The footer's busy share is the newest computer sample's (its last 5 s); one-minute
