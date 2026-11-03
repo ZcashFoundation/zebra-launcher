@@ -32,9 +32,10 @@ pub fn phase_detail(status: &Status, now: SystemTime) -> Option<String> {
 /// The error to show in the strip: zebrad's last logged error, or why it failed.
 pub fn last_error(state: &AppState) -> Option<String> {
     let from_stats = state
+        .node()
         .stats
         .with(|stats| stats.as_ref().and_then(|stats| stats.last_error.clone()));
-    let from_exit = state.status.with(|status| match status.phase {
+    let from_exit = state.node().status.with(|status| match status.phase {
         Phase::Failed { .. } | Phase::Backoff { .. } => status
             .last_exit
             .as_ref()
@@ -83,11 +84,12 @@ pub fn StatusStrip() -> impl IntoView {
             busy.set(false);
         });
     };
-    let can = move || state.status.with(|status| controls(&status.phase));
+    let can = move || state.node().status.with(|status| controls(&status.phase));
 
     let stat = move |pick: fn(&NodeStats) -> String| {
         move || {
             state
+                .node()
                 .stats
                 .with(|stats| stats.as_ref().map(pick))
                 .unwrap_or_else(|| "—".to_owned())
@@ -96,11 +98,12 @@ pub fn StatusStrip() -> impl IntoView {
 
     view! {
         <div class="status-strip">
-            <span class=move || state.status.with(|s| phase_class(&s.phase))>
-                {move || state.status.with(|s| phase_label(&s.phase))}
+            <span class=move || state.node().status.with(|s| phase_class(&s.phase))>
+                {move || state.node().status.with(|s| phase_label(&s.phase))}
             </span>
             {move || {
                 state
+                    .node()
                     .status
                     .with(|status| phase_detail(status, state.now.get()))
                     .map(|detail| view! { <span class="phase-detail">{detail}</span> })
@@ -111,6 +114,7 @@ pub fn StatusStrip() -> impl IntoView {
                     <dd>
                         {move || {
                             state
+                                .node()
                                 .status
                                 .with(|s| s.pid.map(|pid| pid.to_string()))
                                 .unwrap_or_else(|| "—".into())
@@ -161,6 +165,7 @@ pub fn StatusStrip() -> impl IntoView {
             </div>
             {move || {
                 state
+                    .node()
                     .stats
                     .with(|stats| stats.as_ref().map(|stats| stats.verification_progress))
                     .map(|progress| {

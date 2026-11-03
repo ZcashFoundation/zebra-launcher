@@ -428,6 +428,7 @@ pub fn SettingsPage() -> impl IntoView {
 fn data_change_open(state: AppState) -> impl Fn() -> bool + Copy {
     move || {
         state
+            .node()
             .status
             .with(|status| data_change_allowed(&status.phase))
     }
@@ -579,7 +580,7 @@ fn About() -> impl IntoView {
         })
     };
     let zebrad = move || {
-        state.stats.with(|stats| {
+        state.node().stats.with(|stats| {
             stats
                 .as_ref()
                 .map_or_else(|| "not running".to_owned(), |s| s.zebrad_version.clone())

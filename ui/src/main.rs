@@ -24,6 +24,7 @@ mod insights;
 mod log_view;
 mod metrics_history;
 mod mock;
+mod node_state;
 mod stats_history;
 mod tauri;
 mod theme;

@@ -102,7 +102,10 @@ pub fn LogActivityChart() -> impl IntoView {
     let state = AppState::get();
     let buckets = Memo::new(move |_| {
         let now = state.now.get();
-        state.insights.with(|insights| insights.activity(now))
+        state
+            .node()
+            .insights
+            .with(|insights| insights.activity(now))
     });
     let empty = Memo::new(move |_| buckets.with(|b| b.iter().all(|bucket| bucket.total() == 0)));
     let show_table = RwSignal::new(false);
@@ -330,9 +333,15 @@ pub fn LogActivityChart() -> impl IntoView {
 #[component]
 pub fn SyncStageCard() -> impl IntoView {
     let state = AppState::get();
-    let sync = Memo::new(move |_| state.insights.with(|insights| insights.sync().cloned()));
+    let sync = Memo::new(move |_| {
+        state
+            .node()
+            .insights
+            .with(|insights| insights.sync().cloned())
+    });
     let rate = Memo::new(move |_| {
         state
+            .node()
             .insights
             .with(|insights| insights.sync_rate_from_logs())
     });
@@ -402,13 +411,16 @@ pub fn RecentProblems(
 ) -> impl IntoView {
     let state = AppState::get();
     let problems = Memo::new(move |_| {
-        let mut problems = state.insights.with(|insights| insights.problems(limit));
+        let mut problems = state
+            .node()
+            .insights
+            .with(|insights| insights.problems(limit));
         order_problems(&mut problems);
         problems
     });
     let counts = Memo::new(move |_| {
         let now = state.now.get();
-        let (warn, error) = state.insights.with(|insights| {
+        let (warn, error) = state.node().insights.with(|insights| {
             insights
                 .activity(now)
                 .iter()
@@ -517,6 +529,7 @@ pub fn ThisRun(
     let state = AppState::get();
     let run = Memo::new(move |_| {
         state
+            .node()
             .insights
             .with(|insights| insights.current_run().cloned())
     });
@@ -594,16 +607,19 @@ pub fn StartupTimeline() -> impl IntoView {
     let state = AppState::get();
     let run = Memo::new(move |_| {
         state
+            .node()
             .insights
             .with(|insights| insights.current_run().cloned())
     });
     let facts = Memo::new(move |_| {
         state
+            .node()
             .insights
             .with(|insights| (insights.peers(), insights.checkpoints(), insights.mempool()))
     });
     let earlier_runs = Memo::new(move |_| {
         state
+            .node()
             .insights
             .with(|insights| insights.runs().len().saturating_sub(1))
     });

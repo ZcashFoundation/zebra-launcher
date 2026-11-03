@@ -122,7 +122,7 @@ pub(crate) struct Dash {
     pub metrics: Memo<Option<MetricsFacts>>,
     /// The details behind the statistics (the peer list, the best block, the chain's supply
     /// and pools): the published ones, or the last ones once zebrad stopped publishing, so
-    /// the Chain card keeps its last values. The peer table reads the live `state.details`.
+    /// the Chain card keeps its last values. The peer table reads the live `state.node().details`.
     pub details: Memo<Option<NodeDetails>>,
 }
 
@@ -130,6 +130,7 @@ impl Dash {
     /// zebrad is in [`Phase::Running`].
     pub fn running(self) -> bool {
         self.state
+            .node()
             .status
             .with(|status| status.phase == Phase::Running)
     }
@@ -148,12 +149,12 @@ pub(crate) fn with_health_input<R>(
     phase_since: SystemTime,
     f: impl FnOnce(&HealthInput<'_>) -> R,
 ) -> R {
-    state.status.with(|status| {
-        state.stats.with(|stats| {
-            state.history.with(|history| {
-                state.metrics.with(|metrics| {
-                    state.metrics_history.with(|metrics_history| {
-                        state.insights.with(|insights| {
+    state.node().status.with(|status| {
+        state.node().stats.with(|stats| {
+            state.node().history.with(|history| {
+                state.node().metrics.with(|metrics| {
+                    state.node().metrics_history.with(|metrics_history| {
+                        state.node().insights.with(|insights| {
                             state.update.with(|update| {
                                 f(&HealthInput {
                                     status,
@@ -285,7 +286,7 @@ pub fn Dashboard() -> impl IntoView {
     // The running version and its end of support. The sentence is rebuilt only when they
     // change; the relative time in it follows the clock on its own.
     let eos = Memo::new(move |_| {
-        state.stats.with(|stats| {
+        state.node().stats.with(|stats| {
             let stats = stats.as_ref()?;
             Some((stats.zebrad_version.clone(), stats.eos.clone()?))
         })
@@ -305,7 +306,7 @@ pub fn Dashboard() -> impl IntoView {
         })
     };
     let halted = Memo::new(move |_| {
-        state.status.with(|status| {
+        state.node().status.with(|status| {
             status.phase
                 == Phase::Failed {
                     class: ExitClass::EosHalt,
@@ -340,27 +341,38 @@ pub fn Dashboard() -> impl IntoView {
         let now = state.now.get();
         let span = range.get().span();
         state
+            .node()
             .history
             .with(|history| history.window(span, now).to_vec())
     });
     let latest = Memo::new(move |_| {
-        state.stats.with(|stats| {
+        state.node().stats.with(|stats| {
             state
+                .node()
                 .history
                 .with(|history| history.sample_for(stats.as_ref()))
         })
     });
-    let metrics = Memo::new(move |_| state.metrics_history.with(MetricsFacts::from_history));
+    let metrics = Memo::new(move |_| {
+        state
+            .node()
+            .metrics_history
+            .with(MetricsFacts::from_history)
+    });
     let details = Memo::new(move |previous: Option<&Option<NodeDetails>>| {
-        state.details.get().or_else(|| previous.cloned().flatten())
+        state
+            .node()
+            .details
+            .get()
+            .or_else(|| previous.cloned().flatten())
     });
     // Until the first status the launcher is still connecting; the rules need a status.
     let verdict = Memo::new(move |_| {
-        if !state.status_loaded.get() {
+        if !state.node().status_loaded.get() {
             return Verdict::connecting();
         }
         let now = state.now.get();
-        let phase_since = state.phase_since.get();
+        let phase_since = state.node().phase_since.get();
         with_health_input(state, now, phase_since, health_verdict)
     });
     // "for N min" counts from the moment the verdict's rule or level last changed: the one
@@ -369,7 +381,7 @@ pub fn Dashboard() -> impl IntoView {
     Effect::new(move |previous: Option<(u8, Level)>| {
         let key = verdict.with(|verdict| (verdict.rule, verdict.level));
         if previous.is_some_and(|previous| previous != key && previous.0 != 0) {
-            state.phase_since.set(clock::now());
+            state.node_untracked().phase_since.set(clock::now());
         }
         key
     });
@@ -388,17 +400,19 @@ pub fn Dashboard() -> impl IntoView {
     let peer_split = Memo::new(move |_| {
         let now = state.now.get();
         state
+            .node()
             .history
             .with(|history| history.has_peer_split(range.get().span(), now))
     });
     let peers = Memo::new(move |_| window.with(|window| peers_chart(window, peer_split.get())));
     let peers_rows = Memo::new(move |_| {
         state
+            .node()
             .metrics_history
             .with(|metrics| window.with(|window| peers_table(window, peer_split.get(), metrics)))
     });
     let empty = Signal::derive(move || {
-        let has_history = state.history.with(|history| !history.is_empty());
+        let has_history = state.node().history.with(|history| !history.is_empty());
         chart_empty_text(has_history, window.with(Vec::is_empty), range.get())
     });
     let at_tip_note = Signal::derive(move || {

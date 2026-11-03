@@ -15,6 +15,7 @@ pub fn ResetConfigButton(#[prop(into, optional)] disabled: Signal<bool>) -> impl
     let state = AppState::get();
     let allowed = move || {
         state
+            .node()
             .status
             .with(|status| data_change_allowed(&status.phase))
     };
@@ -33,7 +34,7 @@ pub fn ResetConfigButton(#[prop(into, optional)] disabled: Signal<bool>) -> impl
                 Ok(document) => {
                     let message =
                         format!("Reset. The previous file is kept as {}.bak.", document.path);
-                    state.config_changed.update(|n| *n += 1);
+                    state.node_untracked().config_changed.update(|n| *n += 1);
                     Ok(message)
                 }
                 Err(error) => Err(format!("Could not reset the config: {error}")),

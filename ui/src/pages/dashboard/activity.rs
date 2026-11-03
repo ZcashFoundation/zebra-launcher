@@ -248,6 +248,7 @@ pub(super) fn ActivityRow(dash: Dash) -> impl IntoView {
     // The log's events and the session's, merged by `Insights::events`.
     let events = Signal::derive(move || {
         state
+            .node()
             .insights
             .with(|insights| insights.events(EVENTS_SHOWN))
     });
@@ -256,7 +257,7 @@ pub(super) fn ActivityRow(dash: Dash) -> impl IntoView {
         let now = state.now.get();
         let latest = dash.latest.get();
         let metrics = dash.metrics.get();
-        let (no_peers_for, no_inbound) = state.history.with(|history| {
+        let (no_peers_for, no_inbound) = state.node().history.with(|history| {
             (
                 no_peers_for(history.window(None, now), now),
                 latest.is_some_and(|sample| sample.at_tip())
@@ -290,6 +291,7 @@ pub(super) fn ActivityRow(dash: Dash) -> impl IntoView {
     // under 1360 px the card is full width and collapsed to its caption behind "Show peers".
     let rows = Memo::new(move |_| {
         state
+            .node()
             .details
             .with(|details| details.as_ref().map(peer_rows).unwrap_or_default())
     });
