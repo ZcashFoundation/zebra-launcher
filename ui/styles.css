@@ -325,8 +325,15 @@ summary:focus-visible,
 
 .app {
   display: flex;
-  flex-direction: column;
   height: 100vh;
+}
+
+/* Everything but the sidebar of several nodes (herd.css): the header over the page. */
+.app-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .app-header {

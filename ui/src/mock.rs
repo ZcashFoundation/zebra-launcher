@@ -37,6 +37,8 @@ mod log_lines;
 mod metrics;
 mod updates;
 
+pub mod herd;
+
 use std::{
     sync::{
         Arc,

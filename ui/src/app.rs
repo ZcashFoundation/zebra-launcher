@@ -11,7 +11,10 @@ use leptos::{ev, prelude::*, task::spawn_local};
 use crate::{
     api, clock,
     components::{
+        add_node::AddNode,
+        herd_header::HerdHeader,
         nav::Nav,
+        sidebar::Sidebar,
         stale_banner::StaleBanner,
         status_strip::StatusStrip,
         updates::{HealthFailureBanner, UpdateBanner},
@@ -20,18 +23,20 @@ use crate::{
         RunEvent,
         events::{config_outcome_event, config_replaced_event, update_events},
     },
-    node_state::NodeState,
+    node_state::{self, NodeState},
     pages::{
         configure::Configure, dashboard::Dashboard, first_run::FirstRun, grafana::Grafana,
-        logs::Logs, settings::SettingsPage,
+        logs::Logs, overview::Overview, settings::SettingsPage,
     },
     theme,
     update_text::update_needs_attention,
 };
 
-/// The five pages.
+/// The pages: the five of the tab bar, and the overview of a launcher that runs several nodes,
+/// which the sidebar shows instead of the tab bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
+    Overview,
     Dashboard,
     Logs,
     Grafana,
@@ -76,8 +81,16 @@ impl Tab {
         Tab::Settings,
     ];
 
+    /// The pages about the selected node, as opposed to the overview and the launcher's own.
+    pub const NODE: [Tab; 3] = [Tab::Dashboard, Tab::Logs, Tab::Configure];
+
+    pub fn is_node_tab(self) -> bool {
+        Tab::NODE.contains(&self)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
+            Tab::Overview => "Overview",
             Tab::Dashboard => "Dashboard",
             Tab::Logs => "Logs",
             Tab::Grafana => "Grafana",
@@ -102,6 +115,7 @@ impl Tab {
     /// The tab's name in element ids.
     pub fn slug(self) -> &'static str {
         match self {
+            Tab::Overview => "overview",
             Tab::Dashboard => "dashboard",
             Tab::Logs => "logs",
             Tab::Grafana => "grafana",
@@ -150,7 +164,7 @@ impl Tab {
                     .with(|insights| insights.unseen_problems());
                 (unseen > 0).then_some(Badge::Count(unseen))
             }
-            Tab::Dashboard | Tab::Grafana | Tab::Configure => None,
+            Tab::Overview | Tab::Dashboard | Tab::Grafana | Tab::Configure => None,
         }
     }
 }
@@ -279,6 +293,14 @@ impl AppState {
     }
 }
 
+/// Feeds an extra node's state from its events (the mock's `?herd` nodes).
+pub fn subscribe_extra(state: AppState, extra: NodeState) {
+    let id = extra.id();
+    api::on_extra_node_status(&id, move |status| extra.record_status(status));
+    api::on_extra_node_stats(&id, move |stats| extra.record_stats(stats));
+    api::subscribe_extra_node_logs(&id, move |batch| state.record_logs(extra, batch));
+}
+
 /// Whether a subscription of [`subscribe_then_fetch`] has delivered an event yet.
 #[derive(Clone, Copy)]
 struct EventSeen(StoredValue<bool>);
@@ -315,11 +337,22 @@ async fn subscribe_then_fetch<T, F>(
 
 #[component]
 pub fn App() -> impl IntoView {
-    // The backend runs one node; every node event below is about it.
-    let node = NodeState::new();
+    // The backend's own node: every single-node event below is about it. The mock's `?herd`
+    // adds more, which come with their own subscriptions.
+    let node = NodeState::new(node_state::placeholder_primary(), true);
+    let extra: Vec<NodeState> = api::extra_nodes()
+        .into_iter()
+        .map(|info| NodeState::new(info, false))
+        .collect();
+    // Several nodes open on the overview; one node opens on its dashboard, as before.
+    let first_tab = if extra.is_empty() {
+        Tab::Dashboard
+    } else {
+        Tab::Overview
+    };
     let state = AppState {
-        tab: RwSignal::new(Tab::Dashboard),
-        nodes: RwSignal::new(vec![node]),
+        tab: RwSignal::new(first_tab),
+        nodes: RwSignal::new(std::iter::once(node).chain(extra.iter().copied()).collect()),
         selected: RwSignal::new(node),
         settings: RwSignal::new(None),
         resolved_dark: RwSignal::new(true),
@@ -480,6 +513,22 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // The backend's node is named after the network and folder in the settings.
+    Effect::new(move |_| {
+        let named = state.settings.with(|settings| {
+            settings.as_ref().map(|settings| {
+                node_state::primary_info(settings.network, settings.data_dir.as_deref())
+            })
+        });
+        if let Some(info) = named {
+            node.info.set(info);
+        }
+    });
+
+    for extra in extra {
+        subscribe_extra(state, extra);
+    }
+
     // A reset of the node's config from any page is an event of its run.
     Effect::new(move |previous: Option<u64>| {
         let changed = node.config_changed.get();
@@ -494,12 +543,20 @@ pub fn App() -> impl IntoView {
     let hidden = move |tab: Tab| move || state.tab.get() != tab;
     // While the first-run wizard is open, the app behind it takes no input.
     let first_run_open = RwSignal::new(false);
+    // Several nodes: a sidebar of nodes replaces the tab bar (docs/MULTI-NODE.md).
+    let herd = Memo::new(move |_| state.nodes.with(|nodes| nodes.len() > 1));
+    let adding = RwSignal::new(false);
+    let open_add = Callback::new(move |()| adding.set(true));
 
     view! {
-        <div class="app" inert=move || first_run_open.get()>
+        <div class="app" class:app-herd=herd inert=move || first_run_open.get() || adding.get()>
+            {move || herd.get().then(|| view! { <Sidebar on_add=open_add /> })}
+            <div class="app-body">
             <header class="app-header">
-                <Nav />
-                <StatusStrip />
+                {move || if herd.get() { view! { <HerdHeader /> }.into_any() } else { view! { <Nav /> }.into_any() }}
+                <Show when=move || !herd.get() || state.tab.get().is_node_tab()>
+                    <StatusStrip />
+                </Show>
                 <StaleBanner />
                 <UpdateBanner />
                 <HealthFailureBanner />
@@ -523,6 +580,15 @@ pub fn App() -> impl IntoView {
                 }}
             </header>
             <main class="app-main">
+                <section
+                    class="page page-overview"
+                    role="tabpanel"
+                    id=Tab::Overview.page_id()
+                    aria-label="Overview"
+                    hidden=hidden(Tab::Overview)
+                >
+                    <Overview on_add=open_add />
+                </section>
                 <section
                     class="page"
                     role="tabpanel"
@@ -569,8 +635,10 @@ pub fn App() -> impl IntoView {
                     <SettingsPage />
                 </section>
             </main>
+            </div>
         </div>
         <FirstRun open=first_run_open />
+        <AddNode open=adding />
     }
 }
 

@@ -6,7 +6,6 @@ use launcher_types::{NodeStats, Phase, Status};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
-    api,
     app::AppState,
     format::{
         self, controls, exit_class_text, is_synced, percent, phase_class, phase_label,
@@ -73,9 +72,9 @@ pub fn StatusStrip() -> impl IntoView {
         command_error.set(None);
         spawn_local(async move {
             let result = match command {
-                Command::Start => api::start_zebrad().await,
-                Command::Stop => api::stop_zebrad().await,
-                Command::Restart => api::restart_zebrad().await,
+                Command::Start => state.node_untracked().start().await,
+                Command::Stop => state.node_untracked().stop().await,
+                Command::Restart => state.node_untracked().restart().await,
             };
             if let Err(error) = result {
                 let verb = command.verb();
@@ -142,7 +141,14 @@ pub fn StatusStrip() -> impl IntoView {
                     <dd>{stat(|s| thousands(s.mempool_transactions))}</dd>
                 </div>
                 <div>
-                    <dt>"zebrad"</dt>
+                    <dt>
+                        {move || {
+                            state
+                                .node()
+                                .info
+                                .with(|info| info.kind.program().unwrap_or("version"))
+                        }}
+                    </dt>
                     <dd>{stat(|s| s.zebrad_version.clone())}</dd>
                 </div>
             </dl>

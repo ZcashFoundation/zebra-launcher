@@ -5,8 +5,8 @@ use std::{cell::Cell, fmt};
 
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
-    ImportOutcome, LogLine, MetricsSnapshot, NodeDetails, NodeStats, OpenTarget, Settings,
-    StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo, UpdateState, events,
+    ImportOutcome, LogLine, MetricsSnapshot, NodeDetails, NodeId, NodeInfo, NodeStats, OpenTarget,
+    Settings, StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo, UpdateState, events,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
@@ -111,6 +111,60 @@ pub async fn restart_zebrad() -> ApiResult<()> {
         return Ok(());
     }
     Ok(tauri::invoke0("restart_zebrad").await?)
+}
+
+/// The nodes the backend runs besides the one the commands above control. None until the
+/// backend runs several nodes (docs/MULTI-NODE.md); the mock adds four with `?herd`.
+pub fn extra_nodes() -> Vec<NodeInfo> {
+    if is_tauri() {
+        return Vec::new();
+    }
+    mock::herd::extra_nodes()
+}
+
+/// Calls `on_status` with every status change of an extra node, starting with the current one.
+pub fn on_extra_node_status(node: &NodeId, on_status: impl Fn(Status) + 'static) {
+    if !is_tauri() {
+        mock::herd::on_node_status(node, on_status);
+    }
+}
+
+/// Calls `on_stats` with every statistics change of an extra node.
+pub fn on_extra_node_stats(node: &NodeId, on_stats: impl Fn(Option<NodeStats>) + 'static) {
+    if !is_tauri() {
+        mock::herd::on_node_stats(node, on_stats);
+    }
+}
+
+/// Streams an extra node's log lines in batches.
+pub fn subscribe_extra_node_logs(node: &NodeId, on_batch: impl Fn(Vec<LogLine>) + 'static) {
+    if !is_tauri() {
+        mock::herd::subscribe_node_logs(node, on_batch);
+    }
+}
+
+/// Adds a node, stopped. Only the mock can until the backend runs several nodes.
+pub async fn add_node(info: NodeInfo) -> ApiResult<()> {
+    if is_tauri() {
+        return Err(ApiError("Adding nodes needs a newer backend.".into()));
+    }
+    mock::herd::add_node(info);
+    Ok(())
+}
+
+pub async fn start_extra_node(node: &NodeId) -> ApiResult<()> {
+    mock::herd::start_node(node).await;
+    Ok(())
+}
+
+pub async fn stop_extra_node(node: &NodeId) -> ApiResult<()> {
+    mock::herd::stop_node(node).await;
+    Ok(())
+}
+
+pub async fn restart_extra_node(node: &NodeId) -> ApiResult<()> {
+    mock::herd::restart_node(node).await;
+    Ok(())
 }
 
 /// Calls `on_status` with every `status` event for the rest of the page's life. `on_error`

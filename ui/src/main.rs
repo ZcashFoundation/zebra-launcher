@@ -25,13 +25,16 @@ mod log_view;
 mod metrics_history;
 mod mock;
 mod node_state;
+mod node_summary;
 mod stats_history;
 mod tauri;
 mod theme;
 mod update_text;
 
 mod components {
+    pub mod add_node;
     pub mod config_form_view;
+    pub mod herd_header;
     pub mod icons;
     pub mod log_insights;
     pub mod nav;
@@ -39,6 +42,7 @@ mod components {
     pub mod radio_choice;
     pub mod reset_config;
     pub mod rows;
+    pub mod sidebar;
     pub mod stale_banner;
     pub mod status_strip;
     pub mod tooltip;
@@ -54,6 +58,7 @@ mod pages {
     pub mod first_run;
     pub mod grafana;
     pub mod logs;
+    pub mod overview;
     pub mod settings;
 }
 

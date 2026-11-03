@@ -162,9 +162,9 @@ fn run_action(dash: Dash, action: Action, busy: RwSignal<bool>, failure: Transie
     failure.clear();
     spawn_local(async move {
         let result = match &action {
-            Action::Start | Action::StartNow => api::start_zebrad().await,
+            Action::Start | Action::StartNow => state.node_untracked().start().await,
             Action::StartKillingStale => api::start_zebrad_killing_stale().await,
-            Action::Restart => api::restart_zebrad().await,
+            Action::Restart => state.node_untracked().restart().await,
             Action::Install => api::install_update().await,
             Action::CancelUpdate => api::cancel_update().await,
             Action::OpenLogsFolder => api::open_path(OpenTarget::LogDir).await,

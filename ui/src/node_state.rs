@@ -6,12 +6,13 @@
 use std::time::SystemTime;
 
 use launcher_types::{
-    LogLine, MetricsSnapshot, NodeDetails, NodeStats, Phase, StaleProcessInfo, Status,
+    LogLine, MetricsSnapshot, Network, NodeDetails, NodeId, NodeInfo, NodeKind, NodePort,
+    NodeStats, Phase, PortRole, StaleProcessInfo, Status,
 };
 use leptos::prelude::*;
 
 use crate::{
-    clock,
+    api, clock,
     insights::{Insights, RunEvent, events::status_events},
     log_view::LogBuffer,
     metrics_history::MetricsHistory,
@@ -21,6 +22,11 @@ use crate::{
 /// One node's signals. `Copy`, like [`AppState`](crate::app::AppState): every field is a signal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NodeState {
+    /// Who the node is: id, name, kind, network, folder, ports.
+    pub info: RwSignal<NodeInfo>,
+    /// The node the backend's single-node commands control (`start_zebrad` and so on). The
+    /// others are reached by id. Until the backend runs several nodes, it is the only one.
+    pub primary: bool,
     pub status: RwSignal<Status>,
     /// Whether a status has arrived from the backend: until then `status` is the default
     /// (Stopped) and the dashboard is still connecting.
@@ -54,8 +60,10 @@ pub struct NodeState {
 
 impl NodeState {
     /// A node nothing has been heard about yet.
-    pub fn new() -> Self {
+    pub fn new(info: NodeInfo, primary: bool) -> Self {
         NodeState {
+            info: RwSignal::new(info),
+            primary,
             status: RwSignal::new(Status::default()),
             status_loaded: RwSignal::new(false),
             stats: RwSignal::new(None),
@@ -158,8 +166,70 @@ impl NodeState {
     }
 }
 
-impl Default for NodeState {
-    fn default() -> Self {
-        Self::new()
+/// The node the single-node backend runs, as far as the UI knows before the settings load:
+/// a zebrad on Mainnet with the default ports. [`primary_info`] fills in the rest.
+pub fn placeholder_primary() -> NodeInfo {
+    primary_info(Network::Mainnet, None)
+}
+
+/// The node the single-node backend runs: its zebrad, on the network and in the folder the
+/// settings name, with zebrad's default ports for that network.
+pub fn primary_info(network: Network, data_dir: Option<&str>) -> NodeInfo {
+    let (p2p, rpc) = match network {
+        Network::Mainnet => (8233, 8232),
+        Network::Testnet => (18233, 18232),
+    };
+    NodeInfo {
+        id: NodeId::suggest(NodeKind::Zebrad, network, &Vec::new()),
+        name: NodeInfo::default_name(NodeKind::Zebrad, network),
+        kind: NodeKind::Zebrad,
+        network,
+        depends_on: None,
+        data_dir: data_dir.unwrap_or("the launcher's data folder").to_owned(),
+        ports: vec![
+            NodePort {
+                role: PortRole::P2p,
+                port: p2p,
+            },
+            NodePort {
+                role: PortRole::Rpc,
+                port: rpc,
+            },
+            NodePort {
+                role: PortRole::Metrics,
+                port: 9999,
+            },
+        ],
+    }
+}
+
+impl NodeState {
+    /// The node's id, untracked.
+    pub fn id(&self) -> NodeId {
+        self.info.with_untracked(|info| info.id.clone())
+    }
+
+    pub async fn start(self) -> api::ApiResult<()> {
+        if self.primary {
+            api::start_zebrad().await
+        } else {
+            api::start_extra_node(&self.id()).await
+        }
+    }
+
+    pub async fn stop(self) -> api::ApiResult<()> {
+        if self.primary {
+            api::stop_zebrad().await
+        } else {
+            api::stop_extra_node(&self.id()).await
+        }
+    }
+
+    pub async fn restart(self) -> api::ApiResult<()> {
+        if self.primary {
+            api::restart_zebrad().await
+        } else {
+            api::restart_extra_node(&self.id()).await
+        }
     }
 }
