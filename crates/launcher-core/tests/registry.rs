@@ -474,6 +474,60 @@ async fn removing_stops_the_node_and_keeps_or_deletes_its_data() {
     within(fx.registry.shutdown()).await;
 }
 
+/// A removal saves the list before it deletes anything, so what cannot be
+/// deleted leaves the node off the list, named in the error, with its
+/// folder keeping its id from a new node.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removal_leaves_the_list_first_and_names_what_it_could_not_delete() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fx = fixture().await;
+    let added = within(fx.registry.add(draft(Network::Testnet, "Zebra · Testnet")))
+        .await
+        .expect("add");
+    let node = fx.registry.node(&added.id).expect("lookup");
+    // A folder in the chain state whose files cannot be removed.
+    let locked = node.state_dir().join("v29").join("testnet");
+    fs::create_dir_all(&locked).expect("a chain");
+    fs::write(locked.join("000001.sst"), b"blocks").expect("a block file");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).expect("lock it");
+    if fs::write(locked.join("probe"), b"").is_ok() {
+        // Permissions do not bind this user (root): nothing to test.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).expect("unlock");
+        within(fx.registry.shutdown()).await;
+        return;
+    }
+
+    let err = within(fx.registry.remove(&added.id, true))
+        .await
+        .expect_err("the locked folder stays");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).expect("unlock");
+    assert!(
+        matches!(
+            &err,
+            NodeError::LeftBehind { name, path, .. }
+                if name == "Zebra · Testnet" && *path == node.state_dir().display().to_string()
+        ),
+        "{err}"
+    );
+    assert!(
+        fx.registry.node(&added.id).is_err(),
+        "the node left the list"
+    );
+    assert_eq!(fx.settings.nodes().len(), 1, "and launcher.json");
+    assert!(node.paths.data_dir().exists(), "its folder stays");
+    let next = within(fx.registry.add(draft(Network::Testnet, "Next")))
+        .await
+        .expect("add");
+    assert_eq!(
+        next.id.as_str(),
+        "zebrad-testnet-2",
+        "the folder keeps its id"
+    );
+    within(fx.registry.shutdown()).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_zebrad_left_by_an_earlier_launcher_run_keeps_its_node_from_being_removed() {
     let fx = fixture().await;

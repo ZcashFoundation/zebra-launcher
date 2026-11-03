@@ -104,8 +104,10 @@ every node command and event carries a node's id, and the mock's zebrad below is
   its own folder, ports and `zebrad.toml`, under the backend's rules: at most eight nodes, and
   a name, ports and data folder no other node has. A node's Node settings tab renames it,
   turns its start at launch on or off and removes it, keeping or deleting its data (the last
-  node cannot be removed). The real backend has the same API and rules; there every node is a
-  zebrad for now.
+  node cannot be removed). `?herd&leftover` makes a removal that deletes the data leave the
+  node's folder behind, as when the backend cannot delete a file: the node leaves the list and
+  the error banner names the folder. The real backend has the same API and rules; there every
+  node is a zebrad for now.
 
 The flags are read from the query string once, when the page loads; the table at the top of
 [`src/mock.rs`](src/mock.rs) lists every one.

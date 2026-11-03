@@ -262,13 +262,25 @@ fn RemoveNode() -> impl IntoView {
         removing.set(true);
         outcome.clear();
         spawn_local(async move {
-            match api::remove_node(&target.id(), delete).await {
-                // The page goes with the node; the overview shows the nodes left.
-                Ok(_) => {
-                    state.refresh_nodes();
-                    state.tab.set(Tab::Overview);
+            let result = api::remove_node(&target.id(), delete).await;
+            // A removal that could not delete all of the node's files has still taken the node
+            // off the list: the backend saves the list first. Its error says so.
+            let gone = match &result {
+                Ok(_) => true,
+                Err(_) => api::list_nodes()
+                    .await
+                    .is_ok_and(|list| list.iter().all(|info| info.id != target.id())),
+            };
+            if gone {
+                // The page goes with the node; the overview shows the nodes left, and what
+                // could not be deleted goes to the error banner.
+                state.refresh_nodes();
+                state.tab.set(Tab::Overview);
+                if let Err(error) = result {
+                    state.backend_error.set(Some(error.to_string()));
                 }
-                Err(error) => outcome.report(Err(format!("Could not remove {name}: {error}"))),
+            } else if let Err(error) = result {
+                outcome.report(Err(format!("Could not remove {name}: {error}")));
             }
             removing.set(false);
             confirming.set(false);

@@ -265,6 +265,14 @@ pub enum NodeError {
     /// The node is the only one.
     #[error("Zeal needs a node: add another before removing {0}")]
     LastNode(String),
+    /// The node left the list, but some of its files could not be deleted:
+    /// not a refusal, so the message says what happened.
+    #[error("{name} was removed, but {path} could not be deleted: {why}")]
+    LeftBehind {
+        name: String,
+        path: String,
+        why: String,
+    },
     /// Something else is under way on the node, or a file operation failed.
     #[error("{0}")]
     Failed(String),

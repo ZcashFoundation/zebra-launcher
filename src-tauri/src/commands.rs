@@ -94,10 +94,11 @@ pub async fn update_node(
         .map_err(message)
 }
 
-/// Removes a node: stops it, deletes its chain state when `delete_data` is
-/// set (with the rules of `delete_node_data`), and takes it off the list.
-/// Refused for the last node. Returns the bytes freed (0 for unknown or
-/// kept).
+/// Removes a node: stops it, takes it off the list, and then deletes its
+/// chain state when `delete_data` is set (with the rules of
+/// `delete_node_data`). Refused for the last node. Returns the bytes freed (0
+/// for unknown or kept); an error once the node has left the list names what
+/// could not be deleted.
 #[tauri::command]
 pub async fn remove_node(
     state: State<'_, AppState>,

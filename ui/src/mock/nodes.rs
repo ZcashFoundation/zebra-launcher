@@ -411,13 +411,25 @@ pub async fn remove_node(node: &NodeId, delete_data: bool) -> Result<u64, String
     if is_main(node) {
         return Err("(mock) the demo keeps its main node; remove one of the others".into());
     }
+    let name = herd::infos()
+        .into_iter()
+        .find(|info| &info.id == node)
+        .map(|info| info.name)
+        .ok_or_else(|| not_found(node))?;
     herd::stop_node(node).await.ok_or_else(|| not_found(node))?;
     sleep(800).await;
     let freed = herd::remove(node, delete_data).ok_or_else(|| not_found(node))?;
-    if !delete_data {
+    // `?leftover`: the node leaves the list, but its folder stays, which keeps its id.
+    let leftover = delete_data && mock().flags.leftover;
+    if !delete_data || leftover {
         KEPT.with_borrow_mut(|kept| kept.push(node.clone()));
     }
     emit_nodes();
+    if leftover {
+        return Err(format!(
+            "{name} was removed, but {DEFAULT_DATA_DIR}/nodes/{node} could not be deleted: (mock) permission denied"
+        ));
+    }
     Ok(freed)
 }
 

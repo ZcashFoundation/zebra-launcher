@@ -457,9 +457,11 @@ Where phase 2a's code differs from the design above:
   `zebrad.toml` stays as it is.
 - **The port check names the port, not its owner.** A port held by another program fails
   the start as `PortInUse` with the address; the owning process is not looked up.
-- **Removing.** The last node cannot be removed. Deleting a node's data removes its chain
-  state with `delete_node_data`'s rules and then the rest of its own folder; for the first
-  node, the launcher's own files (its `zebrad.toml` in the config folder) stay.
+- **Removing.** The last node cannot be removed. The node leaves the list before anything is
+  deleted, so a quit during a long deletion leaves no listed node with part of its state
+  gone; what cannot be deleted is named in the error. Deleting a node's data removes its
+  chain state with `delete_node_data`'s rules and then the rest of its own folder; for the
+  first node, the launcher's own files (its `zebrad.toml` in the config folder) stay.
 - **The first node's id during the first run** follows the network chosen there
   (`zebrad-testnet`), as nothing depends on it yet; afterwards ids never change.
 - **Node settings** is a tab only with several nodes; with one node, Settings holds the same

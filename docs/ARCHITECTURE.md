@@ -102,11 +102,14 @@ from the node's spec (`NodeSpec`, `crates/launcher-core/src/nodes.rs`).
   node's start permits and its config permit (no start or apply can begin), stops it,
   and checks the pid file: the supervisor removes it when its own run ends, so a live
   zebrad there is one an earlier launcher run left, and the removal fails naming its pid
-  (the user stops it, or starts the node and lets Zeal stop it). Then it deletes its
-  chain state with `delete_node_data`'s rules when asked (and then the rest of a folder
-  node's own folder, once its supervisor has closed the log file), and only then takes it
-  off the list. Kept data stays where it is, and its id is not given to a new node while
-  its folder exists.
+  (the user stops it, or starts the node and lets Zeal stop it). Then the node leaves the
+  list, which is saved, and only then, in a task, its supervisor ends and its chain state
+  is deleted with `delete_node_data`'s rules when asked, then the rest of a folder node's
+  own folder (once the supervisor has closed the log file). A quit during a long deletion
+  so never leaves the node listed with part of its state gone; what cannot be deleted
+  stays, named in the error (`NodeError::LeftBehind`), which the UI shows in the error
+  banner since the node has gone. Kept data stays where it is, and its id is not given to
+  a new node while its folder exists.
 - **Ports at every start.** The supervisor tries binding each of the node's addresses
   (P2P on `0.0.0.0`, RPC and metrics on loopback) before it spawns zebrad: one that
   another program holds fails the start as `PortInUse`, naming the port, before zebrad

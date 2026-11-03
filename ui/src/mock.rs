@@ -31,6 +31,7 @@
 //! | `?children` | zebrad runs a `block_notify_command` in cycles of three resource samples: an `sh` with `notify-block` under it, then also 40 `curl`s, more than a sample lists ("and 11 more"), then `notify-block` alone, orphaned ([`resources::block_notify`]). |
 //! | `?unreadable` | The resource samples report CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk tile "the system does not report them". |
 //! | `?readerpanic` | The resource reader panics 30 s into the first run: the samples stop while zebrad keeps running, so the Resources card says it is not measured until zebrad's next run, which Restart starts ([`resources::reader_panicked`]). |
+//! | `?leftover` | Removing a node with its chain state deleted takes it off the list but leaves its folder behind, as when the backend cannot delete a file: the error banner names the folder. |
 //! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). |
 //!
 //! The launcher's own notes (`zebrad started (pid N)`, `stop requested (stdin closed)`,
@@ -176,6 +177,8 @@ struct Flags {
     unreadable: bool,
     /// `?readerpanic`.
     reader_panic: bool,
+    /// `?leftover`.
+    leftover: bool,
 }
 
 impl Flags {
@@ -214,6 +217,7 @@ impl Flags {
             children: flag("children"),
             unreadable: flag("unreadable"),
             reader_panic: flag("readerpanic"),
+            leftover: flag("leftover"),
         }
     }
 
@@ -1025,7 +1029,7 @@ mod tests {
         // Every flag in the module doc's table, combined.
         assert_eq!(
             Flags::parse(
-                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&os=windows&children&unreadable&readerpanic"
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&os=windows&children&unreadable&readerpanic&leftover"
             ),
             Flags {
                 first_run: true,
@@ -1044,6 +1048,7 @@ mod tests {
                 children: true,
                 unreadable: true,
                 reader_panic: true,
+                leftover: true,
             }
         );
         assert_eq!(Flags::parse("?stalled").scenario(), Scenario::Stalled);

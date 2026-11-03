@@ -33,7 +33,7 @@ use launcher_types::{
     PortRole, Settings,
 };
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{OwnedSemaphorePermit, mpsc, oneshot, watch},
     task::JoinSet,
 };
 use tracing::Instrument;
@@ -287,14 +287,19 @@ enum Cmd {
     },
 }
 
+/// What a removal holds from its start to its end: every start permit and
+/// the config permit of the node.
+type RemovalPermits = (OwnedSemaphorePermit, OwnedSemaphorePermit);
+
 enum Event {
     /// A node's phase changed.
     Phase,
-    /// A removal stopped its node and dealt with its data.
-    Removed {
+    /// A removal stopped its node, or could not.
+    Stopped {
         serial: u64,
         delete_data: bool,
-        result: Result<u64, NodeError>,
+        result: Result<(), NodeError>,
+        permits: RemovalPermits,
         reply: Reply<u64>,
     },
 }
@@ -473,14 +478,17 @@ impl RegistryHandle {
         Ok((info, free))
     }
 
-    /// Removes a node: it is stopped (killed after its grace period), its
-    /// chain state deleted with [`firstrun::delete_node_data`]'s rules when
-    /// `delete_data` is set (with the rest of its folder, for a node in a
-    /// folder of its own), its runtime shut down, and it leaves the node
-    /// list. Kept data stays where it is, and its id is not given to a new
-    /// node while its folder exists. Refused for the last node, and while the
-    /// node is starting or its data or config is being changed. Returns the
-    /// bytes freed as far as they are known (0 for unknown or kept).
+    /// Removes a node: it is stopped (killed after its grace period) and
+    /// leaves the node list, which is saved; then its runtime is shut down
+    /// and, when `delete_data` is set, its chain state deleted with
+    /// [`firstrun::delete_node_data`]'s rules (with the rest of its folder,
+    /// for a node in a folder of its own). Kept data stays where it is, and
+    /// its id is not given to a new node while its folder exists. Refused for
+    /// the last node, while the node is starting or its data or config is
+    /// being changed, and while a zebrad from an earlier launcher run holds
+    /// it. Returns the bytes freed as far as they are known (0 for unknown or
+    /// kept); [`NodeError::LeftBehind`] names what could not be deleted once
+    /// the node had left the list.
     pub async fn remove(&self, id: &NodeId, delete_data: bool) -> Result<u64, NodeError> {
         let id = id.clone();
         self.ask(|reply| Cmd::Remove {
@@ -850,12 +858,16 @@ impl Actor {
     async fn on_event(&mut self, event: Event) {
         match event {
             Event::Phase => self.publish_summaries(),
-            Event::Removed {
+            Event::Stopped {
                 serial,
                 delete_data,
                 result,
+                permits,
                 reply,
-            } => self.finish_remove(serial, delete_data, result, reply).await,
+            } => {
+                self.finish_remove(serial, delete_data, result, permits, reply)
+                    .await
+            }
         }
     }
 
@@ -1035,20 +1047,19 @@ impl Actor {
         };
         runtime.removing = true;
         let handle = runtime.handle.clone();
-        let sizes = self.config.sizes.clone();
         let events = self.events_tx.clone();
         // What the removal logs is about the node.
         let span = tracing::info_span!("node", node = %handle.id);
         tokio::spawn(
             async move {
                 let serial = handle.serial;
-                let result = stop_and_delete(&handle, delete_data, &sizes).await;
-                drop(permits);
+                let result = stop_for_removal(&handle).await;
                 let _ = events
-                    .send(Event::Removed {
+                    .send(Event::Stopped {
                         serial,
                         delete_data,
                         result,
+                        permits,
                         reply,
                     })
                     .await;
@@ -1057,26 +1068,30 @@ impl Actor {
         );
     }
 
+    /// Once a removal stopped its node: the node leaves the list, which is
+    /// saved, and its runtime goes; only then are its files deleted, in a
+    /// task. A quit during a long deletion so never leaves the node listed
+    /// with part of its state gone (a folder left behind keeps its id from a
+    /// new node, as kept data does). The permits go with that task, so no
+    /// start can begin before the node's supervisor has ended.
     async fn finish_remove(
         &mut self,
         serial: u64,
         delete_data: bool,
-        result: Result<u64, NodeError>,
+        result: Result<(), NodeError>,
+        permits: RemovalPermits,
         reply: Reply<u64>,
     ) {
         let Some(index) = self.nodes.iter().position(|r| r.handle.serial == serial) else {
             let _ = reply.send(Err(NodeError::Closed));
             return;
         };
-        let freed = match result {
-            Ok(freed) => freed,
-            Err(err) => {
-                // The node stays, stopped, with whatever is left of its data.
-                self.nodes[index].removing = false;
-                let _ = reply.send(Err(err));
-                return;
-            }
-        };
+        if let Err(err) = result {
+            // The node stays, stopped, with its data.
+            self.nodes[index].removing = false;
+            let _ = reply.send(Err(err));
+            return;
+        }
         let mut specs = self.specs();
         let spec = specs.remove(index);
         if let Err(err) = self.save(specs).await {
@@ -1087,18 +1102,25 @@ impl Actor {
         let runtime = self.nodes.remove(index);
         tracing::info!(node = %spec.id, delete_data, "removed a node");
         self.publish();
-        // The supervisor closes the node's log file when it ends; only then
-        // can the rest of its own folder go (Windows keeps open files).
-        let folder = (delete_data && spec.layout == NodeLayout::Folder)
-            .then(|| runtime.handle.paths.data_dir().to_path_buf())
-            .filter(|folder| folder.starts_with(self.config.paths.nodes_dir()));
-        tokio::spawn(async move {
-            let _ = runtime.handle.supervisor.shutdown().await;
-            if let Some(folder) = folder {
-                remove_folder(folder).await;
+        let sizes = self.config.sizes.clone();
+        let nodes_dir = self.config.paths.nodes_dir();
+        let span = tracing::info_span!("node", node = %spec.id);
+        tokio::spawn(
+            async move {
+                // The supervisor closes the node's log file when it ends; only
+                // then can the rest of its own folder go (Windows keeps open
+                // files).
+                let _ = runtime.handle.supervisor.shutdown().await;
+                let result = if delete_data {
+                    delete_files(&runtime.handle, &spec, &nodes_dir, &sizes).await
+                } else {
+                    Ok(0)
+                };
+                drop(permits);
+                let _ = reply.send(result);
             }
-            let _ = reply.send(Ok(freed));
-        });
+            .instrument(span),
+        );
     }
 
     /// Stops every node and ends its runtime, in a task; `reply` hears when
@@ -1119,15 +1141,9 @@ impl Actor {
     }
 }
 
-/// Stops `node` and, with `delete_data`, deletes its chain state with
-/// [`firstrun::delete_node_data`]'s rules: only a `state` folder inside the
-/// launcher's data directory or the node's data folder. Refused while a
-/// zebrad from an earlier launcher run is still running for the node.
-async fn stop_and_delete(
-    node: &NodeHandle,
-    delete_data: bool,
-    sizes: &Arc<SizeCache>,
-) -> Result<u64, NodeError> {
+/// Stops `node` for its removal. Refused while a zebrad from an earlier
+/// launcher run is still running for the node.
+async fn stop_for_removal(node: &NodeHandle) -> Result<(), NodeError> {
     node.supervisor
         .stop()
         .await
@@ -1147,25 +1163,53 @@ async fn stop_and_delete(
             stale.pid
         )));
     }
-    if !delete_data {
-        return Ok(0);
-    }
+    Ok(())
+}
+
+/// Deletes the files of `node`, which has left the list: its chain state
+/// with [`firstrun::delete_node_data`]'s rules (only a `state` folder inside
+/// the launcher's data directory or the node's data folder), then, for a
+/// node in a folder of its own under `nodes_dir`, the rest of that folder.
+/// Returns the bytes freed as far as they are known; what could not be
+/// deleted is named in the error, and the rest stays.
+async fn delete_files(
+    node: &NodeHandle,
+    spec: &NodeSpec,
+    nodes_dir: &Path,
+    sizes: &Arc<SizeCache>,
+) -> Result<u64, NodeError> {
+    let left_behind = |path: &Path, err: io::Error| {
+        tracing::warn!(%err, path = %path.display(), "could not delete a removed node's files");
+        NodeError::LeftBehind {
+            name: spec.name.clone(),
+            path: path.display().to_string(),
+            why: err.to_string(),
+        }
+    };
     let state = node.state_dir();
     let roots = node.data_roots();
     let sizes = sizes.clone();
-    blocking(move || {
+    let target = state.clone();
+    let freed = blocking(move || {
         let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
-        firstrun::delete_node_data(&state, &roots, &sizes)
+        firstrun::delete_node_data(&target, &roots, &sizes)
     })
     .await
-    .map_err(|err| NodeError::Failed(format!("could not delete the node data: {err}")))
+    .map_err(|err| left_behind(&state, err))?;
+    let folder = node.paths.data_dir();
+    if spec.layout == NodeLayout::Folder && folder.starts_with(nodes_dir) {
+        remove_folder(folder.to_path_buf())
+            .await
+            .map_err(|err| left_behind(folder, err))?;
+    }
+    Ok(freed)
 }
 
 /// Removes a removed node's own folder, retrying for a moment while its log
-/// file is still being closed. A failure is logged: the chain state is gone
-/// already, and what is left is small.
-async fn remove_folder(folder: PathBuf) {
-    for attempt in 0..10 {
+/// file is still being closed.
+async fn remove_folder(folder: PathBuf) -> io::Result<()> {
+    let mut attempt = 0;
+    loop {
         let target = folder.clone();
         match blocking(move || match std::fs::remove_dir_all(&target) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -1173,11 +1217,11 @@ async fn remove_folder(folder: PathBuf) {
         })
         .await
         {
-            Ok(()) => return,
-            Err(err) if attempt == 9 => {
-                tracing::warn!(%err, folder = %folder.display(), "could not remove a removed node's folder");
+            Err(_) if attempt < 9 => {
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            result => return result,
         }
     }
 }
