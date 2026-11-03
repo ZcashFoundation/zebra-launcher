@@ -148,13 +148,29 @@ fn NodeItem(node: NodeState) -> impl IntoView {
         }
     };
     let unseen = move || node.insights.with(|insights| insights.unseen_problems());
+    // The name with the state and any new problems: what the folded rail, which shows only
+    // the dot, offers as the item's name and tooltip.
+    let described = move || {
+        let mut text = format!(
+            "{} · {}",
+            node.info.with(|info| info.name.clone()),
+            summary.with(|s| s.text.clone())
+        );
+        match unseen() {
+            0 => {}
+            1 => text.push_str(" · 1 new problem in the log"),
+            count => text.push_str(&format!(" · {count} new problems in the log")),
+        }
+        text
+    };
     view! {
         <button
             type="button"
             class="side-item side-node"
             class:active=active
             aria-current=move || active().then_some("page")
-            title=move || node.info.with(|info| info.name.clone())
+            title=described
+            aria-label=described
             on:click=pick
         >
             <span
@@ -170,10 +186,7 @@ fn NodeItem(node: NodeState) -> impl IntoView {
                 (count > 0)
                     .then(|| {
                         view! {
-                            <span
-                                class="tab-badge"
-                                aria-label=format!("{count} new problems in the log")
-                            >
+                            <span class="tab-badge tab-badge-count" aria-hidden="true">
                                 {count}
                             </span>
                         }

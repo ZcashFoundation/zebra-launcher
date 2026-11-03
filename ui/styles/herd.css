@@ -20,6 +20,7 @@
 }
 
 .side-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -144,9 +145,20 @@
   .sidebar .side-label,
   .sidebar .side-fact,
   .sidebar .side-group-title,
-  .sidebar .brand-name,
-  .sidebar .tab-badge {
+  .sidebar .brand-name {
     display: none;
+  }
+
+  /* New problems stay visible as a dot on the node's item; the count is in its name. */
+  .sidebar .side-node .tab-badge {
+    position: absolute;
+    top: 5px;
+    right: 9px;
+    width: 8px;
+    min-width: 0;
+    height: 8px;
+    padding: 0;
+    font-size: 0;
   }
 
   .side-item {

@@ -7,6 +7,7 @@ use launcher_types::{
     ApplyOutcome, LogLine, Settings, Theme, UpdateHealthFailure, UpdateInfo, UpdateState,
 };
 use leptos::{ev, prelude::*, task::spawn_local};
+use wasm_bindgen::JsCast;
 
 use crate::{
     api, clock,
@@ -547,7 +548,22 @@ pub fn App() -> impl IntoView {
     // Several nodes: a sidebar of nodes replaces the tab bar (docs/MULTI-NODE.md).
     let herd = Memo::new(move |_| state.nodes.with(|nodes| nodes.len() > 1));
     let adding = RwSignal::new(false);
-    let open_add = Callback::new(move |()| adding.set(true));
+    // The launcher's own pages are tab panels of the tab bar; with several nodes the sidebar
+    // opens them instead, so they are named regions without a tab.
+    let panel_role = move || if herd.get() { "region" } else { "tabpanel" };
+    let labelled_by = move |tab: Tab| move || (!herd.get()).then(|| tab.button_id());
+    let labelled = move |tab: Tab| move || herd.get().then(|| tab.label());
+    // What had focus before the add-node dialog opened: the app turns inert under it, which
+    // takes focus away, so the opener notes it first.
+    let return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
+    let open_add = Callback::new(move |()| {
+        let active = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+        return_focus.set_value(active);
+        adding.set(true);
+    });
 
     view! {
         <div class="app" class:app-herd=herd inert=move || first_run_open.get() || adding.get()>
@@ -583,7 +599,7 @@ pub fn App() -> impl IntoView {
             <main class="app-main">
                 <section
                     class="page page-overview"
-                    role="tabpanel"
+                    role="region"
                     id=Tab::Overview.page_id()
                     aria-label="Overview"
                     hidden=hidden(Tab::Overview)
@@ -610,9 +626,10 @@ pub fn App() -> impl IntoView {
                 </section>
                 <section
                     class="page page-grafana"
-                    role="tabpanel"
+                    role=panel_role
                     id=Tab::Grafana.page_id()
-                    aria-labelledby=Tab::Grafana.button_id()
+                    aria-labelledby=labelled_by(Tab::Grafana)
+                    aria-label=labelled(Tab::Grafana)
                     hidden=hidden(Tab::Grafana)
                 >
                     <Grafana />
@@ -628,9 +645,10 @@ pub fn App() -> impl IntoView {
                 </section>
                 <section
                     class="page"
-                    role="tabpanel"
+                    role=panel_role
                     id=Tab::Settings.page_id()
-                    aria-labelledby=Tab::Settings.button_id()
+                    aria-labelledby=labelled_by(Tab::Settings)
+                    aria-label=labelled(Tab::Settings)
                     hidden=hidden(Tab::Settings)
                 >
                     <SettingsPage />
@@ -639,7 +657,7 @@ pub fn App() -> impl IntoView {
             </div>
         </div>
         <FirstRun open=first_run_open />
-        <AddNode open=adding />
+        <AddNode open=adding return_focus />
     }
 }
 

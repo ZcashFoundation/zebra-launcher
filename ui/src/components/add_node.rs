@@ -4,7 +4,8 @@
 //! several.
 
 use launcher_types::{Network, NodeId, NodeInfo, NodeKind, NodePort, NodeRole, assign_ports};
-use leptos::{prelude::*, task::spawn_local};
+use leptos::{ev, html, prelude::*, task::spawn_local};
+use wasm_bindgen::JsCast;
 
 use crate::{api, app::AppState, node_state::NodeState};
 
@@ -89,7 +90,12 @@ enum Step {
 }
 
 #[component]
-pub fn AddNode(open: RwSignal<bool>) -> impl IntoView {
+pub fn AddNode(
+    open: RwSignal<bool>,
+    /// What had focus before the dialog opened, taken by the opener before the app behind
+    /// the dialog turned inert; focus goes back to it on close.
+    return_focus: StoredValue<Option<web_sys::HtmlElement>, LocalStorage>,
+) -> impl IntoView {
     let state = AppState::get();
     let step = RwSignal::new(Step::Kind);
     let kind = RwSignal::new(NodeKind::Zebrad);
@@ -233,11 +239,50 @@ pub fn AddNode(open: RwSignal<bool>) -> impl IntoView {
         None
     };
 
+    // Focus goes back where it was, or to the sidebar's "Add node" where the browser did not
+    // focus the clicked button (WebKit does not).
+    let restore_focus = move || {
+        let target = return_focus
+            .get_value()
+            .filter(|element| element.is_connected() && element.tag_name() != "BODY")
+            .or_else(|| {
+                web_sys::window()
+                    .and_then(|window| window.document())
+                    .and_then(|document| document.query_selector(".side-add").ok().flatten())
+                    .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+            });
+        if let Some(target) = target {
+            request_animation_frame(move || {
+                let _ = target.focus();
+            });
+        }
+    };
     let close = move || {
         if !busy.get_untracked() {
             open.set(false);
+            restore_focus();
         }
     };
+    // Escape closes the dialog wherever focus is, as the tooltip's does.
+    let escape = window_event_listener(ev::keydown, move |event| {
+        if event.key() == "Escape" && open.get_untracked() {
+            close();
+        }
+    });
+    on_cleanup(move || escape.remove());
+    // The title takes focus when the dialog opens and at every step, so keys reach the
+    // dialog and the new step is read out.
+    let heading = NodeRef::<html::H2>::new();
+    Effect::new(move |_| {
+        let _ = step.get();
+        if open.get() {
+            request_animation_frame(move || {
+                if let Some(heading) = heading.get_untracked() {
+                    let _ = heading.focus();
+                }
+            });
+        }
+    });
     let add = move |start: bool| {
         let info = draft.get_untracked();
         busy.set(true);
@@ -252,6 +297,7 @@ pub fn AddNode(open: RwSignal<bool>) -> impl IntoView {
                     state.tab.set(crate::app::Tab::Dashboard);
                     busy.set(false);
                     open.set(false);
+                    restore_focus();
                     if start && let Err(failure) = node.start().await {
                         state.backend_error.set(Some(failure.to_string()));
                     }
@@ -524,19 +570,13 @@ pub fn AddNode(open: RwSignal<bool>) -> impl IntoView {
             </div>
         }
     };
-    let keydown = move |event: web_sys::KeyboardEvent| {
-        if event.key() == "Escape" {
-            close();
-        }
-    };
-
     move || {
         open.get().then(|| {
             view! {
-                <div class="modal-backdrop" on:keydown=keydown>
+                <div class="modal-backdrop">
                     <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="add-node-title">
                         <p class="muted step-count">{move || format!("Step {} of 3", number())}</p>
-                        <h2 id="add-node-title">{title}</h2>
+                        <h2 id="add-node-title" tabindex="-1" node_ref=heading>{title}</h2>
                         <div>{body}</div>
                         {move || {
                             (step.get() == Step::Details)
