@@ -293,14 +293,14 @@ A sidebar replaces the top tab bar once there is more than one node:
 +--------------------+----------------------------------------------------------------+
 | (zebra) Zeal       |  Zebra · Mainnet   zebrad 7.0.0  [Running]   [Stop] [Restart]  |
 |                    |  Dashboard   Logs   Configure   Node settings                  |
-|  Overview          | +------------------------------------------------------------+ |
+| [Mainnet 4|Testnet 2] +------------------------------------------------------------+ |
 |                    | |  (today's dashboard, for this node)                         | |
-|  MAINNET           | |                                                            | |
+|  Overview      4/4 | |                                                            | |
 |  * Zebra      94 % | |                                                            | |
+|  * Zakura     97 % | |                                                            | |
 |  * Zaino   serving | |                                                            | |
 |  o zcashd  stopped | |                                                            | |
-|  TESTNET           | |                                                            | |
-|  * Zebra    at tip | |                                                            | |
+|                    | |                                                            | |
 |                    | |                                                            | |
 |  + Add node        | |                                                            | |
 |                    | |                                                            | |
@@ -309,7 +309,13 @@ A sidebar replaces the top tab bar once there is more than one node:
 +--------------------+----------------------------------------------------------------+
 ```
 
-- The sidebar lists the nodes by network with a status dot and one fact (sync percentage,
+- Mainnet and Testnet tabs at the top of the sidebar, each with its node count, scope the
+  whole window to one network: the sidebar, the overview, the node pages, and later the
+  explorer, the herd's health and the wallet. Testnet is marked everywhere in the warning
+  tone (a band over the page, the tab, the network chips), so Testnet coins are never
+  mistaken for real ones. The window opens on the backend node's network; the add-node
+  dialog starts on the network shown.
+- The sidebar lists the network's nodes with a status dot and one fact (sync percentage,
   "at tip", "serving", "stopped"). Under 900 px it folds to a rail of dots.
 - A node's page has today's tabs scoped to it (Dashboard, Logs, Configure) plus Node
   settings (name, autostart, stop grace, data folder, ports, binary, remove). The status
@@ -377,7 +383,8 @@ The last step mentions that other nodes can be added later from Settings → Nod
 1. **Overview and node pages in the UI, against the mock.** The sidebar, overview, node
    header and add-node dialog, built on a node list that the real backend reports as one
    node until phase 2 lands, so nothing changes for users in between. The mock's `?herd`
-   flag adds four nodes. Screenshotted for review.
+   flag adds five nodes. Screenshotted for review. Mainnet and Testnet tabs at the top of the
+   sidebar scope the whole window to one network, with Testnet marked in the warning tone.
 2. **Several zebrad nodes.** The registry, per-node runtimes, port assignment, settings v3
    and its migration, node-scoped commands and events, the tray per node, Node settings, and
    the single-node entry point to the add-node dialog (Settings → Nodes and the tray), which

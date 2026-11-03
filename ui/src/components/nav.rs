@@ -148,7 +148,7 @@ fn badge_class(badge: Badge) -> &'static str {
 }
 
 /// The classes of the network pill: Testnet stands out in the warning tone.
-fn network_class(network: Network) -> &'static str {
+pub(crate) fn network_class(network: Network) -> &'static str {
     match network {
         Network::Mainnet => "network-pill network-mainnet",
         Network::Testnet => "network-pill network-testnet",

@@ -6,6 +6,7 @@ use leptos::prelude::*;
 
 use crate::{
     app::{AppState, Tab},
+    components::nav::network_class,
     format::version_tag,
     node_summary::summarize,
 };
@@ -55,7 +56,7 @@ pub fn HerdHeader() -> impl IntoView {
                     ></span>
                     <h1>{move || node.info.with(|info| info.name.clone())}</h1>
                     <span class="chip">{move || node.info.with(|info| info.kind.label())}</span>
-                    <span class="chip chip-muted">
+                    <span class=move || node.info.with(|info| network_class(info.network))>
                         {move || node.info.with(|info| info.network.as_str())}
                     </span>
                 </div>
@@ -82,9 +83,12 @@ pub fn HerdHeader() -> impl IntoView {
             }
             .into_any()
         } else {
+            // The overview is about one network; Grafana and Settings are the launcher's own.
+            let network = (tab == Tab::Overview).then(|| state.network.get());
             view! {
                 <div class="herd-title">
                     <h1>{tab.label()}</h1>
+                    {network.map(|network| view! { <span class=network_class(network)>{network.as_str()}</span> })}
                 </div>
                 <div class="tabs"></div>
             }

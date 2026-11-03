@@ -1,6 +1,7 @@
-//! The sidebar of a launcher that runs several nodes (docs/MULTI-NODE.md): the overview, the
-//! nodes grouped by network with a status dot and one fact each, adding a node, and the pages
-//! that are not about one node. With a single node the shell keeps its tab bar instead.
+//! The sidebar of a launcher that runs several nodes (docs/MULTI-NODE.md): a Mainnet and a
+//! Testnet tab that scope the whole window to one network, the overview, that network's nodes
+//! with a status dot and one fact each, adding a node, and the pages that are not about one
+//! node. With a single node the shell keeps its tab bar instead.
 
 use launcher_types::{Network, NodeInfo};
 use leptos::prelude::*;
@@ -14,7 +15,7 @@ use crate::{
 /// The networks in the order the sidebar lists them.
 const NETWORKS: [Network; 2] = [Network::Mainnet, Network::Testnet];
 
-/// What a node is called in the sidebar, under its network's heading: a default name without
+/// What a node is called in the sidebar, under its network's tab: a default name without
 /// its network ("Zebra", "Zebra 2"), any other name as it is.
 pub fn short_name(info: &NodeInfo) -> String {
     match info
@@ -59,45 +60,60 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
             </button>
         }
     };
+    let scoped = move || state.scoped_nodes();
     let running = move || {
-        let (running, total) = state.nodes.with(|nodes| {
-            let running = nodes
-                .iter()
-                .filter(|node| node.status.with(|status| status.phase.is_active()))
-                .count();
-            (running, nodes.len())
-        });
-        format!("{running}/{total}")
+        let nodes = scoped();
+        let running = nodes
+            .iter()
+            .filter(|node| node.status.with(|status| status.phase.is_active()))
+            .count();
+        format!("{running}/{}", nodes.len())
     };
-    let groups = move || {
-        let nodes = state.nodes.get();
-        NETWORKS
-            .into_iter()
-            .filter_map(|network| {
-                let members: Vec<NodeState> = nodes
-                    .iter()
-                    .copied()
-                    .filter(|node| node.info.with(|info| info.network) == network)
-                    .collect();
-                (!members.is_empty()).then(|| {
-                    view! {
-                        <div class="side-group" role="group" aria-label=network.as_str()>
-                            <div class="side-group-title">{network.as_str()}</div>
-                            {members
-                                .into_iter()
-                                .map(|node| view! { <NodeItem node /> })
-                                .collect_view()}
-                        </div>
-                    }
-                })
-            })
-            .collect_view()
+    let list = move || {
+        let nodes = scoped();
+        if nodes.is_empty() {
+            return view! {
+                <p class="side-empty muted">
+                    {format!("No {} nodes yet.", state.network.get().as_str())}
+                </p>
+            }
+            .into_any();
+        }
+        view! {
+            <div class="side-group" role="group" aria-label=move || state.network.get().as_str()>
+                {nodes.into_iter().map(|node| view! { <NodeItem node /> }).collect_view()}
+            </div>
+        }
+        .into_any()
+    };
+    let network_tab = move |network: Network| {
+        let selected = move || state.network.get() == network;
+        let count = move || state.nodes_on(network).len();
+        view! {
+            <button
+                type="button"
+                role="tab"
+                class="net-tab"
+                class:net-tab-testnet=network == Network::Testnet
+                class:active=selected
+                aria-selected=move || selected().to_string()
+                title=move || format!("{} · {} nodes", network.as_str(), count())
+                on:click=move |_| state.network.set(network)
+            >
+                <span class="net-tab-name">{network.as_str()}</span>
+                <span class="net-tab-short" aria-hidden="true">{&network.as_str()[..1]}</span>
+                <span class="net-tab-count">{count}</span>
+            </button>
+        }
     };
     view! {
         <nav class="sidebar" aria-label="Nodes and pages">
             <div class="brand sidebar-brand">
                 <img class="brand-icon" src="/64x64.png" alt="" width="64" height="64" />
                 <span class="brand-name">"Zeal"</span>
+            </div>
+            <div class="net-tabs" role="tablist" aria-label="Network">
+                {NETWORKS.map(network_tab).collect_view()}
             </div>
             <button
                 type="button"
@@ -111,7 +127,7 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
                 <span class="side-label">"Overview"</span>
                 <span class="side-fact" title="Nodes running">{running}</span>
             </button>
-            {groups}
+            {list}
             <button
                 type="button"
                 class="side-item side-add"

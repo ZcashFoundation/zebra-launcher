@@ -114,7 +114,7 @@ pub async fn restart_zebrad() -> ApiResult<()> {
 }
 
 /// The nodes the backend runs besides the one the commands above control. None until the
-/// backend runs several nodes (docs/MULTI-NODE.md); the mock adds four with `?herd`.
+/// backend runs several nodes (docs/MULTI-NODE.md); the mock adds five with `?herd`.
 pub fn extra_nodes() -> Vec<NodeInfo> {
     if is_tauri() {
         return Vec::new();

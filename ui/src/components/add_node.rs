@@ -107,12 +107,12 @@ pub fn AddNode(
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
 
-    // A fresh dialog each time it opens.
+    // A fresh dialog each time it opens, on the network the window shows.
     Effect::new(move |_| {
         if open.get() {
             step.set(Step::Kind);
             kind.set(NodeKind::Zebrad);
-            network.set(Network::Testnet);
+            network.set(state.network.get_untracked());
             name_edited.set(false);
             program.set(String::new());
             uses.set(None);

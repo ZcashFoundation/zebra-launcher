@@ -4,7 +4,7 @@
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
-    ApplyOutcome, LogLine, Settings, Theme, UpdateHealthFailure, UpdateInfo, UpdateState,
+    ApplyOutcome, LogLine, Network, Settings, Theme, UpdateHealthFailure, UpdateInfo, UpdateState,
 };
 use leptos::{ev, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
@@ -183,6 +183,9 @@ pub struct AppState {
     /// the data folder): what the launcher's own pages and banners are about, whichever node
     /// is selected.
     pub primary: NodeState,
+    /// The network the shell shows when it runs several nodes: the sidebar, the overview and
+    /// the node pages list only that network's nodes, and Testnet is marked everywhere.
+    pub network: RwSignal<Network>,
     /// `None` until loaded.
     pub settings: RwSignal<Option<Settings>>,
     /// Whether the resolved appearance is dark (the setting, or the system preference when
@@ -225,6 +228,22 @@ impl AppState {
     /// selected node.
     pub fn node(&self) -> NodeState {
         self.selected.get()
+    }
+
+    /// The nodes on `network`, in the backend's order, tracked.
+    pub fn nodes_on(&self, network: Network) -> Vec<NodeState> {
+        self.nodes.with(|nodes| {
+            nodes
+                .iter()
+                .copied()
+                .filter(|node| node.info.with(|info| info.network) == network)
+                .collect()
+        })
+    }
+
+    /// The nodes on the network the shell shows ([`AppState::network`]), tracked.
+    pub fn scoped_nodes(&self) -> Vec<NodeState> {
+        self.nodes_on(self.network.get())
     }
 
     /// [`AppState::node`] without tracking, for event handlers and the shell's own steps.
@@ -291,6 +310,27 @@ impl AppState {
     }
 }
 
+/// The node to show on `scope`: the selected one (`current`, an index into `networks`, the
+/// nodes' networks) while it is on that network, else the first node that is, else none.
+pub fn pick_in_scope(
+    current: Option<usize>,
+    networks: &[Network],
+    scope: Network,
+) -> Option<usize> {
+    current
+        .filter(|&index| networks.get(index) == Some(&scope))
+        .or_else(|| networks.iter().position(|network| *network == scope))
+}
+
+/// The network the window shows: the chosen scope with several nodes, the node's own with one.
+fn shown_network(state: AppState, herd: bool) -> Network {
+    if herd {
+        state.network.get()
+    } else {
+        state.primary.info.with(|info| info.network)
+    }
+}
+
 /// Feeds an extra node's state from its events (the mock's `?herd` nodes).
 pub fn subscribe_extra(state: AppState, extra: NodeState) {
     let id = extra.id();
@@ -353,6 +393,7 @@ pub fn App() -> impl IntoView {
         nodes: RwSignal::new(std::iter::once(node).chain(extra.iter().copied()).collect()),
         selected: RwSignal::new(node),
         primary: node,
+        network: RwSignal::new(Network::Mainnet),
         settings: RwSignal::new(None),
         resolved_dark: RwSignal::new(true),
         preview_theme: RwSignal::new(None),
@@ -515,6 +556,45 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // The shell opens on the backend node's network, once the settings say which it is.
+    Effect::new(move |seeded: Option<bool>| {
+        if seeded == Some(true) {
+            return true;
+        }
+        let network = state
+            .settings
+            .with(|settings| settings.as_ref().map(|settings| settings.network));
+        if let Some(network) = network {
+            state.network.set(network);
+            return true;
+        }
+        false
+    });
+    // A change of network keeps the shell on that network: the selected node becomes the
+    // first node there, or the overview shows its empty state.
+    Effect::new(move |_| {
+        let scope = state.network.get();
+        let nodes = state.nodes.get_untracked();
+        let selected = state.selected.get_untracked();
+        let networks: Vec<Network> = nodes
+            .iter()
+            .map(|node| node.info.with_untracked(|info| info.network))
+            .collect();
+        let current = nodes.iter().position(|node| *node == selected);
+        match pick_in_scope(current, &networks, scope) {
+            Some(index) => {
+                if nodes[index] != selected {
+                    state.selected.set(nodes[index]);
+                }
+            }
+            None => {
+                if state.tab.get_untracked().is_node_tab() && nodes.len() > 1 {
+                    state.tab.set(Tab::Overview);
+                }
+            }
+        }
+    });
+
     // The backend's node is named after the network and folder in the settings.
     Effect::new(move |_| {
         let named = state.settings.with(|settings| {
@@ -566,7 +646,12 @@ pub fn App() -> impl IntoView {
     });
 
     view! {
-        <div class="app" class:app-herd=herd inert=move || first_run_open.get() || adding.get()>
+        <div
+            class="app"
+            class:app-herd=herd
+            class:scope-testnet=move || shown_network(state, herd.get()) == Network::Testnet
+            inert=move || first_run_open.get() || adding.get()
+        >
             {move || herd.get().then(|| view! { <Sidebar on_add=open_add /> })}
             <div class="app-body">
             <header class="app-header">
@@ -664,6 +749,19 @@ pub fn App() -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_of_network_keeps_or_moves_the_selection() {
+        use Network::{Mainnet, Testnet};
+        let networks = [Mainnet, Mainnet, Testnet, Testnet];
+        // The selected node stays while it is on the network.
+        assert_eq!(pick_in_scope(Some(3), &networks, Testnet), Some(3));
+        // Otherwise the first node on the network is shown.
+        assert_eq!(pick_in_scope(Some(0), &networks, Testnet), Some(2));
+        assert_eq!(pick_in_scope(None, &networks, Mainnet), Some(0));
+        // A network without nodes has nothing to show.
+        assert_eq!(pick_in_scope(Some(1), &[Mainnet, Mainnet], Testnet), None);
+    }
 
     #[test]
     fn tabs_are_numbered_in_order() {

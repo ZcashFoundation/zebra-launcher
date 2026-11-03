@@ -46,16 +46,15 @@ fn order_for(nodes: &[NodeState], starting: bool) -> Vec<NodeState> {
 pub fn Overview(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
     let state = AppState::get();
     let line = move || {
-        let phases: Vec<_> = state.nodes.with(|nodes| {
-            nodes
-                .iter()
-                .map(|node| node.status.with(|status| status.phase.clone()))
-                .collect()
-        });
-        herd_line(&phases)
+        let phases: Vec<_> = state
+            .scoped_nodes()
+            .iter()
+            .map(|node| node.status.with(|status| status.phase.clone()))
+            .collect();
+        format!("{} · {}", state.network.get().as_str(), herd_line(&phases))
     };
     let run_all = move |starting: bool| {
-        let nodes = order_for(&state.nodes.get_untracked(), starting);
+        let nodes = order_for(&untrack(|| state.scoped_nodes()), starting);
         spawn_local(async move {
             for node in nodes {
                 let can = node.status.with_untracked(|status| controls(&status.phase));
@@ -91,12 +90,20 @@ pub fn Overview(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
             </div>
             <div class="node-cards">
                 {move || {
-                    state
-                        .nodes
-                        .get()
-                        .into_iter()
-                        .map(|node| view! { <NodeCard node /> })
-                        .collect_view()
+                    let nodes = state.scoped_nodes();
+                    if nodes.is_empty() {
+                        let network = state.network.get();
+                        return view! {
+                            <div class="card overview-empty">
+                                <p>{format!("No {} nodes yet.", network.as_str())}</p>
+                                <button type="button" class="primary" on:click=move |_| on_add.run(())>
+                                    {format!("Add a {} node", network.as_str())}
+                                </button>
+                            </div>
+                        }
+                        .into_any();
+                    }
+                    nodes.into_iter().map(|node| view! { <NodeCard node /> }).collect_view().into_any()
                 }}
             </div>
             <div class="overview-tables">
@@ -271,8 +278,7 @@ fn PortsTable() -> impl IntoView {
                 <tbody>
                     {move || {
                         state
-                            .nodes
-                            .get()
+                            .scoped_nodes()
                             .into_iter()
                             .map(|node| {
                                 let info = node.info.get();
@@ -310,8 +316,7 @@ fn FoldersTable() -> impl IntoView {
                 <tbody>
                     {move || {
                         state
-                            .nodes
-                            .get()
+                            .scoped_nodes()
                             .into_iter()
                             .map(|node| {
                                 let info = node.info.get();
