@@ -359,6 +359,10 @@ impl HerdNode {
             self.status.update(|status| {
                 status.phase = Phase::Stopped;
                 status.pid = None;
+                // As the supervisor does: no start time or listeners once it exited.
+                status.started_at = None;
+                status.rpc_addr = None;
+                status.metrics_addr = None;
                 status.last_exit = Some(ExitInfo {
                     code: Some(0),
                     class: ExitClass::Clean,

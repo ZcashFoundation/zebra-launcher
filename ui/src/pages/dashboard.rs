@@ -26,6 +26,7 @@ use crate::{
     format::{local_date_short, relative, thousands},
     health::{HealthInput, Level, Verdict, health_verdict},
     metrics_history::{MetricsHistory, names},
+    node_state::NodeState,
     stats_history::{Field, Sample},
 };
 
@@ -359,13 +360,15 @@ pub fn Dashboard() -> impl IntoView {
             .metrics_history
             .with(MetricsFacts::from_history)
     });
-    let details = Memo::new(move |previous: Option<&Option<NodeDetails>>| {
-        state
-            .node()
-            .details
-            .get()
-            .or_else(|| previous.cloned().flatten())
+    // A stopped node keeps showing its last details; another node's never stand in.
+    let kept_details = Memo::new(move |previous: Option<&(NodeState, Option<NodeDetails>)>| {
+        let node = state.node();
+        let kept = previous
+            .filter(|(was, _)| *was == node)
+            .and_then(|(_, details)| details.clone());
+        (node, node.details.get().or(kept))
     });
+    let details = Memo::new(move |_| kept_details.with(|(_, details)| details.clone()));
     // Until the first status the launcher is still connecting; the rules need a status.
     let verdict = Memo::new(move |_| {
         if !state.node().status_loaded.get() {
@@ -376,7 +379,7 @@ pub fn Dashboard() -> impl IntoView {
         with_health_input(state, now, phase_since, health_verdict)
     });
     // "for N min" counts from the moment the verdict's rule or level last changed: the one
-    // writer of `phase_since` after the first status seeded it (see `AppState::phase_since`).
+    // writer of `phase_since` after the first status seeded it (see `NodeState::phase_since`).
     // The step from connecting to the first real verdict keeps the seed.
     Effect::new(move |previous: Option<(u8, Level)>| {
         let key = verdict.with(|verdict| (verdict.rule, verdict.level));

@@ -106,6 +106,9 @@ fn running(kind: NodeKind, stats: Option<&NodeStats>) -> Summary {
         };
     };
     let percent = sync_percent(stats.verification_progress);
+    // Rounded down to the tenth, like the dashboard's hero, so 99.97 % never reads 100.0 %
+    // before the tip.
+    let tenths = (percent * 10.0 + 1e-6).floor() / 10.0;
     if is_synced(stats.verification_progress) {
         Summary {
             tone: Tone::Ok,
@@ -116,7 +119,7 @@ fn running(kind: NodeKind, stats: Option<&NodeStats>) -> Summary {
     } else {
         Summary {
             tone: Tone::Busy,
-            text: format!("Syncing {percent:.1} %"),
+            text: format!("Syncing {tenths:.1} %"),
             short: format!("{} %", percent.floor()),
             progress: Some(percent),
         }
@@ -165,7 +168,17 @@ mod tests {
         );
         assert_eq!(
             (syncing.tone, syncing.text.as_str()),
-            (Tone::Busy, "Syncing 94.6 %")
+            (Tone::Busy, "Syncing 94.5 %")
+        );
+        let almost = summarize(
+            NodeKind::Zebrad,
+            &status(Phase::Running),
+            Some(&stats(0.999_7)),
+            NOW,
+        );
+        assert_eq!(
+            almost.text, "Syncing 99.9 %",
+            "never 100.0 % before the tip"
         );
         assert_eq!(syncing.short, "94 %");
         assert!(syncing.progress.is_some_and(|p| (p - 94.56).abs() < 1e-9));

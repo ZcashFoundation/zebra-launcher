@@ -424,11 +424,11 @@ pub fn SettingsPage() -> impl IntoView {
     }
 }
 
-/// True while the backend accepts data changes (zebrad stopped or failed).
+/// True while the backend accepts data changes (its zebrad stopped or failed).
 fn data_change_open(state: AppState) -> impl Fn() -> bool + Copy {
     move || {
         state
-            .node()
+            .primary
             .status
             .with(|status| data_change_allowed(&status.phase))
     }
@@ -580,7 +580,7 @@ fn About() -> impl IntoView {
         })
     };
     let zebrad = move || {
-        state.node().stats.with(|stats| {
+        state.primary.stats.with(|stats| {
             stats
                 .as_ref()
                 .map_or_else(|| "not running".to_owned(), |s| s.zebrad_version.clone())

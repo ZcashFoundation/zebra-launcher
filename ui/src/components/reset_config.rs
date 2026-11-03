@@ -8,14 +8,15 @@ use crate::{api, app::AppState, format::data_change_allowed};
 
 /// The reset button, its confirmation and the outcome. The backend only resets while zebrad
 /// is stopped or failed, so the button is disabled otherwise. A reset bumps
-/// [`AppState::config_changed`]; `disabled` blocks the button while the caller is busy (an edit
+/// [`NodeState::config_changed`](crate::node_state::NodeState::config_changed) of the backend's
+/// node; `disabled` blocks the button while the caller is busy (an edit
 /// or a save in progress).
 #[component]
 pub fn ResetConfigButton(#[prop(into, optional)] disabled: Signal<bool>) -> impl IntoView {
     let state = AppState::get();
     let allowed = move || {
         state
-            .node()
+            .primary
             .status
             .with(|status| data_change_allowed(&status.phase))
     };
@@ -34,7 +35,7 @@ pub fn ResetConfigButton(#[prop(into, optional)] disabled: Signal<bool>) -> impl
                 Ok(document) => {
                     let message =
                         format!("Reset. The previous file is kept as {}.bak.", document.path);
-                    state.node_untracked().config_changed.update(|n| *n += 1);
+                    state.primary.config_changed.update(|n| *n += 1);
                     Ok(message)
                 }
                 Err(error) => Err(format!("Could not reset the config: {error}")),

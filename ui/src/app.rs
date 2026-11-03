@@ -178,6 +178,10 @@ pub struct AppState {
     /// The node the node pages (Dashboard, Logs, Configure) show; read it with
     /// [`AppState::node`].
     pub selected: RwSignal<NodeState>,
+    /// The node the backend's single-node commands control (`start_zebrad`, `reset_config`,
+    /// the data folder): what the launcher's own pages and banners are about, whichever node
+    /// is selected.
+    pub primary: NodeState,
     /// `None` until loaded.
     pub settings: RwSignal<Option<Settings>>,
     /// Whether the resolved appearance is dark (the setting, or the system preference when
@@ -266,7 +270,7 @@ impl AppState {
     /// The Configure page saved the selected node's config: the outcome joins its timeline
     /// ("Configuration applied", or rolled back when zebrad rejected it).
     pub fn record_config_outcome(&self, outcome: &ApplyOutcome) {
-        self.node_untracked()
+        self.primary
             .record_event(config_outcome_event(outcome, clock::now()));
     }
 
@@ -275,13 +279,6 @@ impl AppState {
     fn record_logs(&self, node: NodeState, batch: Vec<LogLine>) {
         let on_logs_page = self.tab.get_untracked() == Tab::Logs && self.node_untracked() == node;
         node.record_logs(batch, on_logs_page);
-    }
-
-    /// Clears the Logs tab's badge: the user is looking at the selected node's Logs page. The
-    /// shell calls it when the Logs tab opens; [`AppState::record_logs`] covers the batches
-    /// that arrive while the tab is open. The Logs page itself has no part in the rule.
-    pub fn mark_problems_seen(&self) {
-        self.node_untracked().mark_problems_seen();
     }
 
     /// The post-update health failure, from the event or the update info.
@@ -354,6 +351,7 @@ pub fn App() -> impl IntoView {
         tab: RwSignal::new(first_tab),
         nodes: RwSignal::new(std::iter::once(node).chain(extra.iter().copied()).collect()),
         selected: RwSignal::new(node),
+        primary: node,
         settings: RwSignal::new(None),
         resolved_dark: RwSignal::new(true),
         preview_theme: RwSignal::new(None),
@@ -506,10 +504,13 @@ pub fn App() -> impl IntoView {
     });
     on_cleanup(move || shortcuts.remove());
 
-    // Opening the Logs page clears its badge.
+    // Opening the Logs page clears its badge, and so does picking another node while it is
+    // open; `AppState::record_logs` covers the batches that arrive while it is shown. The Logs
+    // page itself has no part in the rule.
     Effect::new(move |_| {
+        let node = state.node();
         if state.tab.get() == Tab::Logs {
-            state.mark_problems_seen();
+            node.mark_problems_seen();
         }
     });
 

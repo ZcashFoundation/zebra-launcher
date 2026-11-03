@@ -338,11 +338,18 @@ pub fn Logs() -> impl IntoView {
                 when=move || !state.node().logs.with(|logs| logs.is_empty())
                 fallback=|| view! { <div class="log-row muted">"Waiting for zebrad output…"</div> }
             >
-                <For
-                    each=move || entries.get()
-                    key=LogEntry::key
-                    children=move |entry| entry_view(entry, text)
-                />
+                // Keys are per-node sequence numbers: picking another node rebuilds the list, or
+                // rows whose number both nodes have would keep the previous node's line.
+                {move || {
+                    let _node = state.node();
+                    view! {
+                        <For
+                            each=move || entries.get()
+                            key=LogEntry::key
+                            children=move |entry| entry_view(entry, text)
+                        />
+                    }
+                }}
             </Show>
         </div>
     }
