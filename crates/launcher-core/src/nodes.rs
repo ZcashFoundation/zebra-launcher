@@ -812,16 +812,16 @@ mod tests {
             NodeError::RelativeDataDir(_)
         ));
         // A folder of its own elsewhere is fine.
-        let elsewhere = plan_new_node(
-            &with_dir("/mnt/big/testnet"),
-            &nodes,
-            &paths,
-            &nothing_in_use,
-        )
-        .expect("a folder elsewhere");
+        let big = if cfg!(windows) {
+            r"D:\big\testnet"
+        } else {
+            "/mnt/big/testnet"
+        };
+        let elsewhere = plan_new_node(&with_dir(big), &nodes, &paths, &nothing_in_use)
+            .expect("a folder elsewhere");
         assert_eq!(
             elsewhere.state_dir(&paths),
-            PathBuf::from("/mnt/big/testnet/state")
+            PathBuf::from(big).join("state")
         );
         // At most MAX_NODES.
         let full: Vec<NodeSpec> = (0..MAX_NODES)
