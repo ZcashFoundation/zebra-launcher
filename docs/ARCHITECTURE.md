@@ -51,11 +51,13 @@ and [`rust-toolchain.toml`](../rust-toolchain.toml) for the toolchain.
 ## Nodes
 
 Zeal runs a list of nodes, each a zebrad with its own files, ports, configuration, log
-and restart policy ([MULTI-NODE.md](MULTI-NODE.md) is the design, phase 2 the part
-built so far). The node registry (`crates/launcher-core/src/registry.rs`) is an actor
-that owns the list and a runtime per node: the node's supervisor, RPC monitor, metrics
-poller, gates (the semaphores below, per node) and log subscription counter, created
-from the node's spec (`NodeSpec`, `crates/launcher-core/src/nodes.rs`).
+and restart policy ([MULTI-NODE.md](MULTI-NODE.md) is the design, phases 1 and 2a the
+part built so far). The node registry (`crates/launcher-core/src/registry.rs`) is an
+actor that owns the list and a runtime per node: the node's supervisor, RPC monitor,
+metrics poller, gates (the semaphores below, per node) and log subscription counter,
+created from the node's spec (`NodeSpec`, `crates/launcher-core/src/nodes.rs`); the node's
+files are brought up to date and its actors started in
+`crates/launcher-core/src/runtime.rs`.
 
 ```text
   RegistryHandle ──Cmd──▶ registry actor ──▶ watch<Arc<Vec<NodeHandle>>>  (lookups by id)

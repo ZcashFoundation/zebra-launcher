@@ -267,7 +267,7 @@ impl AppState {
         self.nodes.with(|nodes| nodes[0])
     }
 
-    /// /// The nodes on `network`, in the backend's order, tracked.
+    /// The nodes on `network`, in the backend's order, tracked.
     pub fn nodes_on(&self, network: Network) -> Vec<NodeState> {
         self.nodes.with(|nodes| {
             nodes

@@ -456,9 +456,10 @@ Where phase 2a's code differs from the design above:
 - **Files.** The first node keeps the launcher's own locations (the `zebrad.toml` in the
   config folder, and so on); only nodes added later have `<app data>/nodes/<id>/`, which
   holds their config, pid file, cookie, log and, unless another folder is chosen, `state/`.
-- **The P2P port is managed only when it has to be.** `network.listen_addr`'s port is
-  written only when it differs from zebrad's default for the network, so a single node's
-  `zebrad.toml` stays as it is.
+- **The P2P port is kept, and added only when it has to be.** The node's P2P port is always
+  kept: an edit of `network.listen_addr` keeps its address and gets the node's port back.
+  The key is added to a file only when the port differs from the network's default, so an
+  upgraded node's `zebrad.toml` stays as it is.
 - **The port check names the port, not its owner.** A port held by another program fails
   the start as `PortInUse` with the address; the owning process is not looked up.
 - **Removing.** The last node cannot be removed. The node leaves the list before anything is
