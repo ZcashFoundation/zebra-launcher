@@ -1,9 +1,10 @@
 # Architecture
 
-Zeal is a Tauri 2 desktop app that supervises a bundled `zebrad`, streams its
-logs, edits its config, and shows node status. A small Rust team must be able to
-maintain it for years, so the rules are: Rust only (no Node toolchain), a thin Tauri
-layer over testable crates, and no mutexes.
+Zeal is a Tauri 2 desktop app that supervises one or more Zcash nodes (for now up to
+eight zebrad nodes, each running the bundled `zebrad`), streams their logs, edits their
+config, and shows their status. A small Rust team must be able to maintain it for years,
+so the rules are: Rust only (no Node toolchain), a thin Tauri layer over testable
+crates, and no mutexes.
 
 This document describes the launcher as built. The plan it grew from is [PLAN.md](PLAN.md),
 kept as the historical design record; where the two differ, this file describes the code.
@@ -19,14 +20,15 @@ kept as the historical design record; where the two differ, this file describes 
 |   +-- <iframe> Grafana (no IPC)                                      |             |
 |                                                                      v             |
 |  crates/launcher-core  (no Tauri)                                                  |
-|    supervisor actor  <-- mpsc<Command>     watch<Status> -->                       |
-|      | log ring + broadcast<LogLine>       config, settings actor, RPC monitor     |
-|      v                                                                             |
-|    spawner thread (std::process::Command, PDEATHSIG / Job Object)                  |
-+------|-----------------------------------------------------------------------------+
-       | stdin pipe (closed = stop), stdout/stderr drained
-       v
-   zebrad (sidecar "zeal-zebrad")
+|    node registry: the node list, settings actor, one runtime per node:             |
+|      supervisor actor  <-- mpsc<Command>     watch<Status> -->                     |
+|        | log ring + broadcast<LogLine>       config, RPC monitor, metrics poller   |
+|        v                                                                           |
+|      spawner thread (std::process::Command, PDEATHSIG / Job Object)                |
++--------|---------------------------------------------------------------------------+
+         | stdin pipe (closed = stop), stdout/stderr drained
+         v
+   zebrad (sidecar "zeal-zebrad"), one process per node; the first node's ports:
        RPC      127.0.0.1:8232  <-- cookie-auth JSON-RPC poll every 5 s (status strip)
        metrics  127.0.0.1:9999  <-- Prometheus <-- Grafana 127.0.0.1:3000 (optional)
        P2P      [::]:8233
@@ -37,7 +39,7 @@ kept as the historical design record; where the two differ, this file describes 
 | Path | Role |
 | --- | --- |
 | `crates/launcher-types` | serde types shared by backend and UI (`Status`, `LogLine`, `Settings`, `NodeStats`, errors). Builds natively and to wasm; no tokio, no Tauri. |
-| `crates/launcher-core` | Logic that does not need Tauri: supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind. |
+| `crates/launcher-core` | Logic that does not need Tauri: the node registry and node specs, supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind. |
 | `crates/launcher-core/src/bin/fake-zebrad.rs` | Scripted stand-in for zebrad, used by tests and PR bundle builds. |
 | `src-tauri` | Thin Tauri 2.12 app: commands, the `Channel` bridge, tray, updater, exit flow, capabilities. |
 | `ui` | Leptos CSR crate built by trunk into `ui/dist`. Talks to Tauri through about 100 lines of hand-written `wasm_bindgen` externs to `window.__TAURI__`. |
@@ -46,13 +48,83 @@ Single sources of truth: `[workspace.package] version` in [`Cargo.toml`](../Carg
 for the launcher version, [`ZEBRAD_VERSION`](../ZEBRAD_VERSION) for the bundled zebrad,
 and [`rust-toolchain.toml`](../rust-toolchain.toml) for the toolchain.
 
+## Nodes
+
+Zeal runs a list of nodes, each a zebrad with its own files, ports, configuration, log
+and restart policy ([MULTI-NODE.md](MULTI-NODE.md) is the design, phase 2 the part
+built so far). The node registry (`crates/launcher-core/src/registry.rs`) is an actor
+that owns the list and a runtime per node: the node's supervisor, RPC monitor, metrics
+poller, gates (the semaphores below, per node) and log subscription counter, created
+from the node's spec (`NodeSpec`, `crates/launcher-core/src/nodes.rs`).
+
+```text
+  RegistryHandle ──Cmd──▶ registry actor ──▶ watch<Arc<Vec<NodeHandle>>>  (lookups by id)
+       │                    │   ▲        ──▶ watch<Vec<NodeSummary>>      (the list, phases)
+       │                    │   └── phase changes, finished removals
+       │                    ▼
+       │          settings actor: launcher.json, settings and node list
+       ▼
+  NodeHandle ──▶ the node's supervisor, RPC monitor, metrics poller and gates
+```
+
+- **Commands by id.** Callers look a node up by id in the published handles (no round
+  trip to the actor) and act on its own actors: start, stop, configure, snapshots, logs.
+  The actor only changes the list and saves it: `add`, `update`, `choose_data_dir`,
+  `remove`. Long work (a removal that stops the node and deletes its state, the shutdown
+  at quit) runs in a task that reports back, so it never holds up the others.
+- **Summaries.** A small task per node forwards its phase changes, and the actor
+  publishes each node's `NodeInfo` with its phase, which the tray and the `nodes` event
+  follow.
+- **Files.** The first node, migrated from a single-node launcher or created at the first
+  run, keeps the launcher's own locations (`NodeLayout::Launcher`: `zebrad.toml` in the
+  config directory, pid file, cookie and state in the data directory, `zebrad.log` in the
+  log directory). Every node added later has a folder of its own, `<data>/nodes/<id>`
+  (`NodeLayout::Folder`), with its `zebrad.toml` (and its `.bak` and `.pending`), pid file,
+  `rpc/` cookie, `zebrad.log` and, unless another data folder is chosen, `state/`.
+- **Adding** (`plan_new_node`): at most eight nodes (`MAX_NODES`); zebrad only for now
+  (`NodeKind::addable`), running the bundled zebrad; a name no other node has; an id no
+  other node has and that no removed node's kept folder uses (the backend picks the first
+  free one, `zebrad-testnet`, `zebrad-mainnet-2`, when the draft leaves it out); ports no
+  other node has and no other program holds (assigned from the kind's defaults with
+  `assign_ports` around every node's ports, then around ports in use, when the draft
+  leaves them out); and a data folder that is not another node's and whose state does not
+  overlap another node's. The node's folder and minimal `zebrad.toml` are written before
+  the list is saved, and removed again if the save fails.
+- **Changing** (`plan_update`): a name, start at launch, stop grace (next launch), or
+  network. A new network moves the ports to that network's defaults around the other
+  nodes', renames a default name ("Zebra · Testnet"), and rewrites the managed keys at
+  once (refused while a configuration change is being applied); it takes effect at the
+  node's next start. Ids are stable, except while the first run is not done: then the
+  first node takes its network's id (`zebrad-testnet`), as nothing ran or depends on it
+  yet, and the registry publishes it as a new handle.
+- **Removing**: refused for the last node. The removal takes all of the node's start
+  permits and its config permit (no start or apply can begin), stops it, deletes its
+  chain state with `delete_node_data`'s rules when asked (and then the rest of a folder
+  node's own folder, once its supervisor has closed the log file), and only then takes it
+  off the list. Kept data stays where it is, and its id is not given to a new node while
+  its folder exists.
+- **Ports at every start.** The supervisor tries binding each of the node's addresses
+  (P2P on `0.0.0.0`, RPC and metrics on loopback) before it spawns zebrad: one that
+  another program holds fails the start as `PortInUse`, naming the port, before zebrad
+  runs; zebrad's own report of a port in use stays the backstop. The addresses come from a watch, so a network change needs no new supervisor (a
+  new one would restart the log's sequence numbers, which the UI merges by).
+- **Launcher lines** go to the node they are about: an event with a `node` field, or
+  inside a tracing span that has one (each node command that changes something runs in
+  one, blocking work and a removal's task included), goes to that node's log; any other
+  to every node's.
+- **The updater** sees the nodes as one: `herd_phase` folds their phases (halted at the
+  end of support when any node is, running while any is active), the end-of-support estimate
+  comes from the first Mainnet zebrad node, and a stop for an update stops every node
+  that runs and remembers which, to start those again.
+
 ## Supervisor
 
-One actor task owns the zebrad child. Nothing else touches it.
+Each node has one actor task that owns its zebrad child. Nothing else touches it.
 
 | Channel | Direction | Carries |
 | --- | --- | --- |
 | `mpsc<Cmd>` | in | `Start{options}`, `Stop`, `Shutdown`, `Subscribe`, `History{since}`, `Note` (a launcher line for the ring, sent with `try_send`) (`crates/launcher-core/src/supervisor.rs`). `SupervisorHandle::restart` is a `Stop` followed by a `Start`; applying a config is the `apply_config` Tauri command, built on the same handle. |
+| `watch<Vec<Listener>>` | in | the addresses zebrad will listen on, tried before every spawn (`SupervisorConfig::listeners`) |
 | `watch<Status>` | out | `phase` (`Stopped`, `Starting`, `Running`, `Stopping`, `Backoff{until, crashes}`, `Failed{class}`), `pid`, `started_at`, the `rpc_addr` and `metrics_addr` zebrad logged as opened, `last_exit` (`ExitInfo{code, class, detail, requested}`), `stale`, `restarts` (automatic restarts this launcher session) and `last_stop` (`StopReport{requested_at, exited_at, forced}` for the last requested stop) (`crates/launcher-types/src/lib.rs`) |
 | `watch<Option<TreeProbe>>` | out | the current run's process tree for the resource sampler (`SupervisorHandle::watch_probe`): run id, pid, and the spawn on the wall and monotonic clocks, read once in `install_run` with `Status.started_at`. `Some` from the spawn until `finalize`, after the exit drain |
 | `broadcast<LogLine>` | out | live log lines, each with a monotonic `seq` |
@@ -70,30 +142,43 @@ any `seq` jump before it, as one "… N lines dropped" row; a real line with the
 ## UI and backend IPC
 
 Commands (`src-tauri/src/commands.rs`) return `launcher-types` structs; errors are strings,
-except `apply_config`, which rejects with an `ApplyError {kind, message}`. Events carry
-changes the UI did not ask for: `status` (every `Status` change), `node_stats` (every
-`Option<NodeStats>` change), `node_details` (every `Option<NodeDetails>` change: the
-details behind the stats, from the same RPC poll), `metrics` (every
-`Option<MetricsSnapshot>` change: zebrad's Prometheus page, read every 10 s while it
-runs), `node_resources` (every `Option<NodeResources>` change: zebrad's process tree, read
-every 5 s from the spawn until the run is finalized), `machine_resources` (every
-`Option<MachineResources>` change: the computer's CPU and memory, every 5 s),
-`stale_process` (a zebrad from an earlier launcher run blocked the start at launch), and for the updater `update_info` (every `UpdateInfo` change), `update_state`
-(its `UpdateState`, when that changed) and `update_health_failed` (an
-`UpdateHealthFailure` after an update that did not come back healthy). The snapshot
-commands are `get_status`, `get_node_stats`, `get_node_details`, `get_metrics`,
-`get_node_resources`, `get_machine_resources` and `get_update_info`.
+except `apply_config`, which rejects with an `ApplyError {kind, message}`. Every command
+about one node takes its id as `node`: `start_node`, `start_node_killing_stale`,
+`stop_node`, `restart_node`, `read_config`, `apply_config`, `reset_config`, the snapshot
+commands `get_status`, `get_node_stats`, `get_node_details` and `get_metrics`,
+`subscribe_logs`, `log_history`, `choose_data_dir`, `delete_node_data`, and `open_path`
+for a node's folders and metrics page. `list_nodes`, `add_node` (a `NodeDraft`),
+`update_node` (a `NodeUpdate`) and `remove_node` manage the list.
 
-At startup the UI subscribes first and then fetches a snapshot (`get_status`,
-`get_node_stats`, `get_node_details`, `get_metrics`, `get_node_resources`,
-`get_machine_resources`, `get_update_info`), so no change falls between the two; the log subscription itself streams the retained history before
-live lines, so logs need no snapshot request.
+Events carry changes the UI did not ask for: `nodes` (the list, a `Vec<NodeInfo>`,
+whenever a node's info changes), and for each node, as a `NodeEvent {node, value}`,
+`status` (every `Status` change), `node_stats` (every `Option<NodeStats>` change),
+`node_details` (every `Option<NodeDetails>` change: the details behind the stats, from
+the same RPC poll), `metrics` (every `Option<MetricsSnapshot>` change: zebrad's
+Prometheus page, read every 10 s while it runs) and `stale_process` (a zebrad from an
+earlier launcher run blocked the start at launch). The bridge starts a node's forwarders
+when it appears and stops them when it leaves (by handle serial, so a node that gets a
+new id during the first run gets new ones). The resources carry no node id:
+`node_resources` (every `Option<NodeResources>` change of the first node: its process
+tree, read every 5 s from the spawn until the run is finalized) and `machine_resources`
+(every `Option<MachineResources>` change: the computer's CPU and memory, every 5 s), with
+the snapshots `get_node_resources` and `get_machine_resources`. For the updater there are
+`update_info` (every `UpdateInfo` change), `update_state` (its `UpdateState`, when that
+changed) and `update_health_failed` (an `UpdateHealthFailure` after an update that did not
+come back healthy), with the snapshot `get_update_info`.
+
+At startup the UI subscribes to every event first and then fetches the node list
+(`list_nodes`), `get_node_resources`, `get_machine_resources` and `get_update_info`, so no
+change falls between the two; each node, once
+the list brings it, fetches its own snapshots (`get_status`, `get_node_stats`,
+`get_node_details`, `get_metrics`) and subscribes to its log, which streams the retained
+history before live lines, so logs need no snapshot request. An event for a node the list
+has not brought yet is dropped; that node's snapshots cover it.
 An event that arrives while a snapshot request is in flight is newer than the snapshot,
-so the UI drops the `get_status`, `get_node_stats`, `get_node_details`, `get_metrics`,
-`get_node_resources`, `get_machine_resources` and `get_update_info` snapshots once an
-event of the same kind has arrived (for the updater:
-`update_info`; an `update_state` that arrives before any `update_info` replaces the
-snapshot's state).
+so the UI drops a node's snapshot once an event of the same kind has arrived for that
+node, the list snapshot once a `nodes` event has, and the resource snapshots once an event
+of their kind has (for the updater: `update_info`; an `update_state` that arrives before
+any `update_info` replaces the snapshot's state).
 Log batches are merged by `seq`, so their order does not matter.
 `stale_process` may be emitted before the UI listens, so the stale-process banner is
 driven by `status.stale`, which the snapshot carries; likewise `update_health_failed`
@@ -101,12 +186,13 @@ is also in `UpdateInfo.health_failure`. A payload that does not deserialize is s
 the UI's error banner (the first one per event or channel), not only logged.
 
 **Launcher lines in the log stream.** The launcher's own decisions appear in the same
-stream as zebrad's output, as `LogLine`s with `stream: launcher`: the supervisor's notes
+stream as zebrad's output (of the node they are about, see [Nodes](#nodes)), as
+`LogLine`s with `stream: launcher`: the supervisor's notes
 (`zebrad started (pid N)`, `stop requested (stdin closed)`, `restarting zebrad in 4s`,
 `not restarting zebrad (ConfigError)`) and every `tracing` event at INFO or louder from
 the rest of the launcher (a configuration applied or rolled back, an update check, a
 stale process handled, startup), which the layer in `src-tauri/src/logging.rs` forwards
-through `SupervisorHandle::note`. Such a line has a `timestamp` from the launcher's clock
+through `RegistryHandle::note` to the node's `SupervisorHandle::note`. Such a line has a `timestamp` from the launcher's clock
 in zebrad's RFC 3339 UTC format, a `level`, the `tracing` `target`
 (`launcher_core::supervisor` for the supervisor's notes, `zeal::updater` and so
 on for the rest) and the `message` with the event's fields appended as `key=value`;
@@ -146,7 +232,7 @@ little). `ExitClass` has these variants:
 | `ConfigError` | stderr `Zebra could not load the provided configuration` | `Failed`, not retried |
 | `EosHalt` | panic `Zebra refuses to run` | `Failed`, not retried |
 | `DbLocked` | panic `Database likely already open` | `Failed`, not retried |
-| `PortInUse` | panic `... already in use` while opening a listener | `Failed`, not retried |
+| `PortInUse` | panic `... already in use` while opening a listener, or the check before the spawn found one of the node's ports held | `Failed`, not retried |
 | `SpawnFailed` | the process could not be started, for example because the sidecar is missing | `Failed`, not retried |
 | `Crash` | any other exit the launcher did not ask for: non-zero code, signal or panic | `Backoff`: 1 s doubling to 60 s; `Failed{Crash}` after 5 crashes in 10 min |
 | `Clean` | exit code 0, or a kill by the launcher after the grace period (`detail: "killed by the launcher"`); a non-zero exit or panic during a requested stop keeps its own class and is still not restarted | `Stopped` |
@@ -158,7 +244,7 @@ normally `Crash`. The log lines these depend on are pinned by fixtures captured 
 zebrad; see
 [`crates/launcher-core/tests/fixtures/README.md`](../crates/launcher-core/tests/fixtures/README.md).
 
-**Spawn environment.** `zebrad -c <app_config_dir>/zebrad.toml start`. Every inherited
+**Spawn environment.** `zebrad -c <the node's zebrad.toml> start`. Every inherited
 `ZEBRA_*` variable is removed with `env_remove` (never `env_clear`, which would drop
 `PATH`, `HOME`, `SystemRoot` and `LOCALAPPDATA`). `ZEBRA_TRACING__USE_COLOR=false` and
 `ZEBRA_TRACING__FORCE_USE_COLOR=false` are forced; `ZEBRA_TRACING__PROGRESS_BAR` and
@@ -216,18 +302,21 @@ every run (see [DEVELOPMENT.md](DEVELOPMENT.md#real-zebrad-contract-tests)).
 
 ## Config protocol
 
-The launcher writes a **minimal** `zebrad.toml`: the keys it manages plus the user's
-edits, never full `zebrad generate` output. Every zebrad section is
-`deny_unknown_fields`, so a stale defaulted key would break the next zebrad bump.
+The launcher writes a **minimal** `zebrad.toml` for each node: the keys it manages plus
+the user's edits, never full `zebrad generate` output. Every zebrad section is
+`deny_unknown_fields`, so a stale defaulted key would break the next zebrad bump. The
+managed keys carry the node's own network, ports, cookie and state folder, so two nodes
+never share a port, a folder or a cookie (`NodeSpec::managed_keys`).
 
 | Managed key | Value |
 | --- | --- |
-| `network.network` | chosen at first run |
-| `rpc.listen_addr` | `127.0.0.1:8232` (`18232` on Testnet) |
+| `network.network` | the node's network, chosen at first run for the first node |
+| the port of `network.listen_addr` | the node's P2P port (8233, or 18233 on Testnet, for a single node); the address stays as the user wrote it, and the key is written only when the port differs from the one zebrad uses without it, so a file that never set it is left as it is |
+| `rpc.listen_addr` | `127.0.0.1:<the node's RPC port>`: `8232` (`18232` on Testnet) for a single node |
 | `rpc.enable_cookie_auth` | `true` |
-| `rpc.cookie_dir` | `<app_local_data_dir>/rpc` |
-| `metrics.endpoint_addr` | `127.0.0.1:9999` |
-| `state.cache_dir` | `<chosen data dir>/state` |
+| `rpc.cookie_dir` | the node's `rpc` folder: `<app_local_data_dir>/rpc` for the first node |
+| `metrics.endpoint_addr` | `127.0.0.1:<the node's metrics port>`: `9999` for a single node |
+| `state.cache_dir` | `<the node's data folder>/state` |
 | `zcashd_compat` | forced off (unsupported) |
 
 **Configuration form.** The Configure page shows every key of the bundled zebrad's
@@ -245,10 +334,11 @@ fixture, so a zebrad bump that adds, removes or re-defaults a key fails `cargo t
 until the schema is updated.
 
 The managed keys are launcher-owned: the supervisor and the RPC monitor rely on them.
-`config::ensure` rewrites them at every start, and `config::begin_apply_with_managed`
-overrides any edit to them before saving, so the editor cannot change them; they change
-only through the launcher (the network and the data directory chosen at first run or in
-Settings).
+`config::ensure` brings them up to date for every node at launch (and when the node's
+network, ports or data folder change), and `config::begin_apply_with_managed` overrides
+any edit to them before saving, so the editor cannot change them; they change only
+through the launcher (the network and the data folder chosen at first run or in
+Settings, the ports given to a node when it is added).
 
 Applying an edit:
 
@@ -272,19 +362,27 @@ cannot start meanwhile, and refuses while an apply is in flight or its marker is
 A bundled zebrad version change is not special-cased: the next start runs the existing
 file against the new zebrad, and a key the new version rejects fails that start as
 `ConfigError`, for the user to fix in Configure. `PortInUse` is not remediated either:
-zebrad fails, the launcher does not retry, and the RPC and metrics ports cannot be moved in
-the launcher, so the user frees the port
+the start fails, the launcher does not retry, and a node's ports cannot be moved in the
+launcher yet (except with its network), so the user frees the port
 ([TROUBLESHOOTING.md](TROUBLESHOOTING.md#a-port-is-already-in-use)). The RPC monitor polls
 the address zebrad logged as opened (`Status.rpc_addr`), which is the managed one.
 
-Launcher settings live in `launcher.json` (with `schema_version`), owned by a settings
-actor. `set_settings` saves everything the UI sends except `first_run_done` and
-`data_dir`, which it keeps as stored: only `complete_first_run` and `choose_data_dir`
-change them, so a stale UI copy cannot undo a data directory choice or skip the checks
-`choose_data_dir` makes. A `launcher.json` older than schema version 2 (or without a
-`schema_version`) predates the first-run flow: `SettingsStore::open` sets
-`first_run_done`, bumps the version and writes it back, so upgrading users keep their
-autostart. Without a file, `first_run_done` starts false.
+Launcher settings live in `launcher.json` (schema version 3), owned by a settings actor
+that is the file's only writer: the launcher's own settings (updates, close to tray,
+Grafana, appearance, the first-run marker) at the top level and the nodes in a `nodes`
+list, which the registry saves through it (`SettingsHandle::save_nodes`; a list that
+breaks the rules of `nodes::check_list`, such as a repeated id, is refused, and a file
+with one counts as corrupt). `set_settings` saves everything the UI sends except
+`first_run_done`, which it keeps as stored: only `complete_first_run` sets it. A
+`launcher.json` older than schema version 2 (or without a `schema_version`) predates the
+first-run flow: `SettingsStore::open` sets `first_run_done`, so upgrading users keep
+their autostart. A version 2 file ran one node: its `network`, `data_dir`,
+`start_node_on_launch` and `stop_grace_secs` become the first node, `zebrad-<network>`,
+in the launcher's own locations and with the ports it has always used (the P2P one as its
+`zebrad.toml` gives it), so its managed keys are the ones that file already has and
+nothing moves or is rewritten. A migrated file is written back. Without a file,
+`first_run_done` starts false and the list holds the first node on Mainnet, which the
+first run may move to Testnet.
 
 ## First run and node data
 
@@ -295,33 +393,40 @@ directories; the commands in `src-tauri/src/commands.rs` call it off the async r
 | --- | --- | --- |
 | `get_first_run_info` | `FirstRunInfo` | first run until `settings.first_run_done`; the default data dir and its free space (`statvfs` / `GetDiskFreeSpaceExW`, at the nearest existing ancestor); alpha.4 leftovers with the state size from a walk capped at 50k entries (then a lower bound), done once per session |
 | `pick_data_dir` | `Option<String>` | the native folder picker |
-| `choose_data_dir(path)` | `DataDirChoice` | checks `path` is absolute and writable, saves `settings.data_dir`, rewrites `state.cache_dir`; returns the free space, the UI decides whether to warn |
+| `choose_data_dir(node, path)` | `NodeDataDirChoice` | checks `path` is absolute and writable and not another node's, saves it as the node's data folder (its default restores the default), rewrites its `state.cache_dir`; returns the node and the free space, the UI decides whether to warn |
 | `free_space(path)` | `Option<u64>` | read-only: the free space at `path` or its nearest existing ancestor; `None` for a relative path, when nothing of it exists, or when it cannot be read. Never creates or saves anything; the wizard and Settings use it for a folder chosen earlier |
-| `import_legacy_state` | `ImportOutcome` | renames `dirs::cache_dir()/zebra/state` into the current state dir; across volumes it fails and asks the user to move it by hand, never copying |
-| `delete_legacy_state` | `u64` (bytes freed) | removes `dirs::cache_dir()/zebra/state` only (the peer cache stays), with the rules of `delete_node_data` and the zebra cache dir as the only root; refuses when the launcher's own state dir is inside that cache dir |
-| `delete_node_data` | `u64` (bytes freed) | removes `<data dir>/state` only, and only inside the launcher's data dir or the chosen one; the bytes come from a size measured earlier in the session, 0 (unknown) otherwise, never from a walk of the whole state |
-| `copy_diagnostics` | `String` | versions, OS, the resolved zebrad binary, the stop grace in effect and in the settings, status and any stale zebrad, node statistics, settings (URL credentials redacted), the updater record and pending-update marker, `zebrad.toml`, last 200 lines of each log, then the newest resource samples with one line per process; never the RPC cookie |
-| `complete_first_run` | `()` | sets `first_run_done`; from then on zebrad starts at launch |
+| `import_legacy_state` | `ImportOutcome` | renames `dirs::cache_dir()/zebra/state` into the first node's state dir; across volumes it fails and asks the user to move it by hand, never copying |
+| `delete_legacy_state` | `u64` (bytes freed) | removes `dirs::cache_dir()/zebra/state` only (the peer cache stays), with the rules of `delete_node_data` and the zebra cache dir as the only root; refuses when a node's own state dir is inside that cache dir |
+| `delete_node_data(node)` | `u64` (bytes freed) | removes the node's `<data folder>/state` only, and only inside the launcher's data dir or the node's data folder; the bytes come from a size measured earlier in the session, 0 (unknown) otherwise, never from a walk of the whole state |
+| `copy_diagnostics` | `String` | versions, OS, the resolved zebrad binary, settings (URL credentials redacted), the updater record and pending-update marker, the launcher log, and for every node its spec, the stop grace in effect and in its settings, status and any stale zebrad, node statistics, `zebrad.toml` and the last 200 lines of its log, then the newest resource samples of the first node, with one line per process, and of the computer; never the RPC cookie |
+| `complete_first_run` | `()` | sets `first_run_done`; from then on the nodes that start at launch do |
 
-zebrad is not started before the first run is complete: `firstrun::start_allowed` is the
+No node is started before the first run is complete: `firstrun::start_allowed` is the
 one rule, checked at launch, by the tray (whose Start item stays disabled until then) and
-by `start_zebrad`, `start_zebrad_killing_stale` and `restart_zebrad`. The data commands run
-only while zebrad is `Stopped` or `Failed`. A semaphore in `AppState` keeps them apart
-from starts: each start (UI, tray, launch, the restart inside `apply_config`) holds one
-permit until it finishes, and a data change holds all of them, so zebrad cannot start
-while its state is being moved or deleted.
+by every start (`NodeHandle::start`: `start_node`, `start_node_killing_stale`,
+`restart_node`). The data commands run only while their node is `Stopped` or `Failed`.
+Each node's gates (`launcher_core::gates::NodeGates`) keep them apart from starts: each
+start (UI, tray, launch, the restart inside `apply_config`) holds one permit until it
+finishes, and a data change holds all of them, so zebrad cannot start while its state is
+being moved or deleted. A removal holds all of them whatever the phase, so nothing starts
+the node while it is stopped and removed.
 
 ## Window, tray and exit
 
 ```text
-tray menu: Show | Start zebrad | Stop zebrad | Quit      tooltip: phase (watch<Status>)
-window close --(close_to_tray && tray exists)--> hide; zebrad keeps running
+tray menu: Show | Start zebrad | Stop zebrad | Quit      tooltip: "Zeal: zebrad running"
+  (several nodes: Show | Start all | Stop all | Quit     tooltip: "Zeal: 2 running, 1 stopped")
+window close --(close_to_tray && tray exists)--> hide; the nodes keep running
             '--(otherwise)--> last window closed -> ExitRequested
-Quit / ExitRequested -> prevent_exit -> supervisor.shutdown() capped at max(grace + 10 s, 70 s) -> exit
+Quit / ExitRequested -> prevent_exit -> registry.shutdown(): every node side by side, each
+  within its own stop grace, capped at the longest max(grace + 10 s, 70 s) -> exit
 Show / second launch (single-instance) / macOS dock -> show + focus the window
 ```
 
-- The tray is built in `setup` (`src-tauri/src/tray.rs`). On Linux it is
+- The tray is built in `setup` (`src-tauri/src/tray.rs`) and follows the registry's
+  summaries: Start (all) starts every node that is stopped or failed, Stop (all) stops
+  every node that runs; with one node the items and the tooltip read as they always did.
+  Submenus per node come later. On Linux it is
   libayatana-appindicator: menu only, no click events, no tooltip. If the library is
   missing (it panics; the panic is caught) the tray is skipped, `AppState::tray_ready`
   stays false and closing the window quits.
@@ -336,7 +441,8 @@ Show / second launch (single-instance) / macOS dock -> show + focus the window
 
 ## Status and metrics
 
-`rpc.rs` and `monitor.rs` poll zebrad's cookie-authenticated RPC every 5 s
+Each node has its own RPC monitor and metrics poller, which follow its supervisor's
+status. `rpc.rs` and `monitor.rs` poll zebrad's cookie-authenticated RPC every 5 s
 (`getblockchaininfo`, `getinfo`, `getmempoolinfo`, `getpeerinfo`; hourly
 `getdeprecationinfo` on Mainnet only) and publish `watch<Option<NodeStats>>` and, from
 the same calls, `watch<Option<NodeDetails>>`: the peer list (address, direction, user
@@ -353,11 +459,12 @@ row. That feeds the status strip and the dashboard, the primary metrics view;
 run by the user, embedded in its own tab; see [GRAFANA.md](GRAFANA.md).
 
 **Resources.** `resources.rs` measures zebrad's process tree and the computer
-([RESOURCES.md](RESOURCES.md)). `ResourceSampler` follows the supervisor's probe watch: from
-the spawn until the run is finalized it reads the tree at once and then every 5 s, and
-publishes `watch<Option<NodeResources>>` (`None` between runs); unlike the RPC monitor and
-the metrics poller it does not wait for `Running`. `MachineSampler` reads the computer's CPU
-and memory every 5 s into `watch<Option<MachineResources>>`. Each read is a
+([RESOURCES.md](RESOURCES.md)). `ResourceSampler` follows a supervisor's probe watch (the
+app runs one, on the first node's): from the spawn until the run is finalized it reads the
+tree at once and then every 5 s, and publishes `watch<Option<NodeResources>>` (`None`
+between runs); unlike the RPC monitor and the metrics poller it does not wait for
+`Running`. `MachineSampler` reads the computer's CPU and memory every 5 s into
+`watch<Option<MachineResources>>`. Each read is a
 `spawn_blocking` task that takes its inputs by value and returns an owned reading, and each
 sampler is an actor that owns its state. `resources/fold.rs` keeps the tree's totals
 continuous across exits: each live process counts its own CPU and its reaped children's,
@@ -467,7 +574,7 @@ is restarted after 5, 10 and 20 s: "zebrad crashed", then "Crash loop", with the
 restarts on This run), `?eos=soon` and `?eos=halt` (the end-of-support warning and halt),
 `?stale` (an earlier zebrad still running), and `?update=countdown` and `?update=health`
 (the install countdown and a launcher update that did not come back healthy). The mock samples
-its zebrad's resources every 5 s while it has a pid; `?os=macos` and `?os=windows` give the
+its main zebrad's resources every 5 s while it has a pid; `?os=macos` and `?os=windows` give the
 Resources card those platforms' figures and labels.
 
 **Appearance.** `Settings.theme` (`system`, `light`, `dark`) is resolved against the
@@ -489,7 +596,8 @@ which preselects Notify.
   what it found. Installing is always a user click.
 - **Auto** also downloads a found update in the background. It installs
   only on a user click, or by itself when zebrad's end-of-support warning is on (the
-  estimated halt is within 14 days, or zebrad already refused to run), and then only
+  estimated halt is within 14 days, read from the first Mainnet zebrad node, or a node's
+  zebrad already refused to run), and then only
   after a visible 60 s countdown that `cancel_update` stops. Never silently mid-session.
 - The `.deb` cannot update itself (root, package manager): it is Notify-only and the UI
   links to the releases page (`UpdateInfo.can_install = false`). Development builds
@@ -528,18 +636,20 @@ cancel: Checking → the found update or the state before the check (UpToDate, E
 update_mode → Off: abort everything except an install in progress → Idle
 ```
 
-Install sequence, in a child task:
+Install sequence, in a child task. "zebrad" is every node: the updater's `NodeControl` is
+the herd (`src-tauri/src/updater.rs`), whose stop stops every node that runs, side by side,
+and whose start starts those again.
 
 ```text
 Update::verify (minisign, signed version; spawn_blocking)  -- fails: Error, zebrad untouched
-  -> supervisor stop (graceful, kill after the grace period), capped at
+  -> stop every node (graceful, kill after its grace period), capped at the longest
      supervisor::shutdown_cap = max(grace + 10 s, 70 s), the exit flow's cap
-  -> write <config>/pending_update_check {from, to, zebrad_was_running}
+  -> write <config>/pending_update_check {from, to, zebrad_was_running, running_nodes}
   -> Update::install -> app.request_restart()  (Windows: the installer exits the app)
-stop fails -> start zebrad again if it was running, Error
-stop exceeds the cap -> keep waiting for it (up to the cap again), then start zebrad
-                        again if it was running (never on top of a stop in flight), Error
-install fails -> remove the marker, start zebrad again if it was running, Error
+stop fails -> start the nodes again that ran, Error
+stop exceeds the cap -> keep waiting for it (up to the cap again), then start the nodes
+                        again that ran (never on top of a stop in flight), Error
+install fails -> remove the marker, start the nodes again that ran, Error
 ```
 
 The launcher verifies the package once, right before stopping zebrad; the plugin also
@@ -547,10 +657,12 @@ verifies inside `download` and `install`. The marker is written only after zebra
 stopped, so a crash or failed stop before the install leaves no marker behind.
 
 At the next launch, if `pending_update_check` exists, the health gate checks that the
-new version is running and, if zebrad was running before, that it reaches `Running`
-with an RPC address within 5 minutes (starting it if `start_node_on_launch` is off).
-Then the marker is removed. On failure the `update_health_failed` event (and
-`UpdateInfo.health_failure`) carries a message and recovery hints:
+new version is running and that every node the marker lists as running (a marker from a
+single-node launcher means the first node) reaches `Running` with an RPC address within 5
+minutes, each checked side by side and started first unless it starts at launch by
+itself. Then the marker is removed. On failure the `update_health_failed` event (and
+`UpdateInfo.health_failure`) carries a message, led by the node's name when several were
+checked, and recovery hints:
 
 | Outcome | Recovery |
 |---|---|
@@ -562,8 +674,8 @@ Then the marker is removed. On failure the `update_health_failed` event (and
 A stale zebrad from an earlier launcher run is not an update failure: the gate's start
 (and the restart after a failed install) emits `stale_process` like the start at
 launch, the gate waits for the user to resolve it, and the 5 minutes start again once
-it is gone. When the update did not complete, zebrad is still started again if it was
-running and `start_node_on_launch` is off.
+it is gone. When the update did not complete, the nodes that ran are still started again
+unless they start at launch.
 
 `UpdateInfo.stale_check_warning` is set when the end of support is within 28 days (or
 zebrad halted) and no check succeeded in the last 14 days; the last successful check

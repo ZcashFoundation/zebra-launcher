@@ -1,8 +1,9 @@
 # Troubleshooting
 
 Start with **Settings → Copy diagnostics**: it copies the launcher and bundled zebrad
-versions, the OS, the node status, the settings, the managed `zebrad.toml` and the last
-200 lines of the launcher and zebrad logs to the clipboard, ready to paste into an issue.
+versions, the OS, the settings, the last 200 lines of the launcher log and, for every node,
+its status, managed `zebrad.toml` and the last 200 lines of its zebrad log to the
+clipboard, ready to paste into an issue.
 It never includes the RPC cookie, and credentials in the Grafana URL are redacted. If the
 clipboard cannot be written, the text is shown below the button to copy by hand.
 
@@ -10,18 +11,20 @@ The logs live in the app log directory: `~/.local/share/org.zfnd.zeal/logs`
 (Linux), `~/Library/Logs/org.zfnd.zeal` (macOS),
 `%LOCALAPPDATA%\org.zfnd.zeal\logs` (Windows). The launcher writes one
 `launcher.<date>.log` per day (14 kept); zebrad's output goes to `zebrad.log`, rotated at
-10 MB. If the launcher cannot start at all, an error dialog names this directory.
+10 MB. A node added later keeps its `zebrad.log` in its own folder, `nodes/<id>` in the
+app's data directory. If the launcher cannot start at all, an error dialog names this
+directory.
 
 ## No tray icon (Linux)
 
 On Linux the tray icon needs `libayatana-appindicator3` (a dependency of the deb, bundled
 in the AppImage) and a desktop that shows AppIndicators. Stock GNOME does not: install
 the "AppIndicator and KStatusNotifierItem Support" extension (Ubuntu ships it enabled).
-On Linux the icon only has a menu (Show, Start zebrad, Stop zebrad, Quit); clicking it
-does nothing else, and it shows no tooltip.
+On Linux the icon only has a menu (Show, Start zebrad, Stop zebrad, Quit; with several
+nodes, Start all and Stop all); clicking it does nothing else, and it shows no tooltip.
 
 If the library is missing, the launcher logs that it could not create the tray icon,
-and closing the window quits (stopping zebrad) instead of hiding it. If the library is
+and closing the window quits (stopping every node) instead of hiding it. If the library is
 present but the desktop does not show the icon, closing the window hides it while zebrad
 keeps running: start the launcher again to bring the window back, or turn off
 **Settings → Close to tray**.
@@ -36,16 +39,23 @@ not moved, so delete it afterwards if you no longer need it (see
 
 ## A port is already in use
 
-zebrad stops with "already in use" when another program holds one of its ports. The
-launcher shows the node as failed ("a port zebrad needs is already in use") and does not
-retry. It cannot move the port for you: the RPC and metrics addresses are managed by the
-launcher and are read-only in Configure. Free the port, then press Start.
+Before it starts zebrad, the launcher checks the node's ports; zebrad also stops with
+"already in use" when another program holds one of them. Either way the launcher shows
+the node as failed ("a port zebrad needs is already in use", with the port in the log)
+and does not retry. It cannot move the port for you: the RPC and metrics addresses are
+managed by the launcher and are read-only in Configure, and the launcher keeps the P2P
+port it gave the node (Configure changes only its address). Free the port, then press
+Start.
 
 | Port | Used for |
 | --- | --- |
 | 8233 (18233 Testnet) | P2P |
 | 8232 (18232 Testnet) | RPC, loopback |
 | 9999 | metrics, loopback |
+
+These are a single node's ports. A node added later gets ports no other node has, moved
+up by 10,000 from the defaults (19999 for a second node's metrics), shown in its Node
+settings.
 
 The usual cause is a second zebrad, for example one started from a terminal. Find it with
 `lsof -i :8233` (Linux, macOS) or `Get-NetTCPConnection -LocalPort 8233` (Windows).

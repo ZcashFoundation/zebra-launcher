@@ -1,8 +1,10 @@
 # Running several nodes
 
-> **Status: proposal, 2026-11-02.** A design for review before any code. It describes
-> the launcher's current shape where needed. [ARCHITECTURE.md](ARCHITECTURE.md) stays the
-> description of what is built and is updated phase by phase as this lands.
+> **Status: phase 1 and phase 2a built, 2026-11-03; the rest is a proposal.** Zeal runs
+> up to eight zebrad nodes; the other kinds are still a design.
+> [ARCHITECTURE.md](ARCHITECTURE.md#nodes) describes what is built, and
+> [Built differently](#built-differently) lists where the code went another way than this
+> document.
 
 Zeal runs one bundled `zebrad` today. The maintainer asked for "great UX and support for
 running multiple node implementations at once": several zebrad nodes (Mainnet and Testnet,
@@ -388,10 +390,17 @@ The last step mentions that other nodes can be added later from Settings → Nod
    node until phase 2 lands, so nothing changes for users in between. The mock's `?herd`
    flag adds five nodes. Screenshotted for review. Mainnet and Testnet tabs at the top of the
    sidebar scope the whole window to one network, with Testnet marked in the warning tone.
-2. **Several zebrad nodes.** The registry, per-node runtimes, port assignment, settings v3
-   and its migration, node-scoped commands and events, the tray per node, Node settings, and
-   the single-node entry point to the add-node dialog (Settings → Nodes and the tray), which
-   phase 1 leaves out because adding a node needs this backend.
+2. **Several zebrad nodes**, in two parts.
+   - **2a, built**: the registry, per-node runtimes, port assignment and the port check at
+     every start, settings v3 and its migration, node-scoped commands and events, the
+     add-node dialog on the real backend (zebrad on Mainnet or Testnet, running the bundled
+     zebrad; the other kinds visible as coming later), Node settings with the name, the
+     start at launch and Remove, Settings → Nodes as the single-node entry point to the
+     dialog, an update that stops and starts every node, Quit that stops every node, and the
+     tray's node counts with Start all and Stop all.
+   - **2b**: a tray submenu per node and "Add a node…" in the tray, the stop grace, data
+     folder and ports in Node settings, the warning for a second node on one network, and
+     the first run's pointer to Settings → Nodes.
 3. **Zakura**, as a variant of the zebrad adapter: its binary, `zakura.toml`, pruning and
    start from a snapshot.
 4. **The generic adapter** and fake-zebrad's mode that behaves like a zcashd-compatible
@@ -403,16 +412,57 @@ The last step mentions that other nodes can be added later from Settings → Nod
 
 ## Open questions
 
-1. Bundle only zebrad and use programs the user provides for every other kind? This
-   document assumes yes; Zakura's signed release sums make it the first candidate for a
+Decided on 2026-11-03, for phase 2:
+
+1. Zeal bundles only zebrad. Every other kind comes through a program the user picks, in
+   the phase that adds it; Zakura's signed release sums make it the first candidate for a
    verified download later.
-2. Zallet needs a zebrad built with the `indexer` feature. Should Zeal bundle such a build
-   (a second sidecar, or the bundled one with the feature turned on), or ask for a
-   user-provided zebrad for wallet setups?
-3. zcashd: run the compatibility build as its own node attached to a zebrad node (as this
-   document proposes), or turn on zebrad's own `[zcashd_compat]` supervision, which Zeal
-   forces off today?
-4. Should a second zebrad node be able to run a different zebrad (the release next to a
-   development build), or only the bundled one plus files the user picks?
-5. Regtest: worth supporting in phase 2 for development setups?
-6. Any limit on how many nodes run at once, beyond the disk, port and peer warnings?
+2. Zallet's zebrad with the `indexer` feature: decided with Zaino, Zallet and the zcashd
+   sidecar, which come later (phase 5).
+3. zcashd as its own node or zebrad's `[zcashd_compat]` supervision: also phase 5.
+4. Every zebrad node in phase 2 runs the bundled zebrad; a zebrad the user picks comes with
+   the programs of the other kinds.
+5. No Regtest yet.
+6. At most eight nodes (`MAX_NODES`).
+
+## Built differently
+
+Where phase 2a's code differs from the design above:
+
+- **Commands are not routed through the registry.** The registry publishes the node handles
+  in a `watch`; a command looks its node up by id and goes straight to that node's actors.
+  Only changes to the list (add, update, data folder, remove) go through the registry actor.
+- **The node summary is the node's info and phase.** `NodeSummary` carries no height, tip,
+  peers or disk: the UI has those from each node's own events, and the tray needs only the
+  phase.
+- **Events are `{node, value}`.** Every node-scoped event carries a `NodeEvent { node,
+  value }` (`status`, `node_stats`, `node_details`, `metrics`, `stale_process`), and `nodes`
+  carries the list as `NodeInfo`s.
+- **No kind adapter or `LaunchSpec` yet.** With zebrad the only kind, the supervisor still
+  takes zebrad's command line; the adapter comes with the second kind.
+- **`add_node` fills in the draft.** A draft may leave out the id (the first free one for the
+  kind and network, skipping removed nodes' kept folders), the ports (the kind's defaults
+  moved around every other node's and around ports in use) and the data folder (a folder of
+  its own). There is no `inspect_binary` or `suggest_ports` yet: the bundled zebrad needs no
+  inspection, and the dialog shows the ports `assign_ports` gives around the known nodes,
+  with a note that the backend checks them again.
+- **`update_node` also takes the network and the stop grace,** which the single-node Settings
+  page and the first run edit; a node's own Node settings has the name and the start at
+  launch so far.
+- **Files.** The first node keeps the launcher's own locations (the `zebrad.toml` in the
+  config folder, and so on); only nodes added later have `<app data>/nodes/<id>/`, which
+  holds their config, pid file, cookie, log and, unless another folder is chosen, `state/`.
+- **The P2P port is managed only when it has to be.** `network.listen_addr`'s port is
+  written only when it differs from zebrad's default for the network, so a single node's
+  `zebrad.toml` stays as it is.
+- **The port check names the port, not its owner.** A port held by another program fails
+  the start as `PortInUse` with the address; the owning process is not looked up.
+- **Removing.** The last node cannot be removed. Deleting a node's data removes its chain
+  state with `delete_node_data`'s rules and then the rest of its own folder; for the first
+  node, the launcher's own files (its `zebrad.toml` in the config folder) stay.
+- **The first node's id during the first run** follows the network chosen there
+  (`zebrad-testnet`), as nothing depends on it yet; afterwards ids never change.
+- **Node settings** is a tab only with several nodes; with one node, Settings holds the same
+  choices.
+- **The updater treats the nodes as one**: an update stops every node that runs, the marker
+  lists them, and the health gate checks each of them after the update.
