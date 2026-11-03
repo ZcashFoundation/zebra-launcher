@@ -23,6 +23,7 @@ use crate::{
     clock,
     components::{
         icons::{check_icon, clock_icon, cross_icon, info_icon, warning_icon},
+        public_services::PublicCard,
         updates::CheckForUpdate,
     },
     format::{local_date_short, relative, thousands},
@@ -465,6 +466,7 @@ pub fn Dashboard() -> impl IntoView {
             <ResourcesCard dash />
             <ActivityRow dash />
             <Details dash />
+            <PublicCard />
             <p class="dash-grafana muted">
                 <span>{move || grafana_line_text(has_grafana_url())}</span>
                 <button class="link" on:click=move |_| state.tab.set(Tab::Grafana)>

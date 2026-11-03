@@ -23,6 +23,8 @@ tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
 launcher-core = { workspace = true }
+launcher-herd = { workspace = true }
+launcher-public = { workspace = true }
 launcher-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

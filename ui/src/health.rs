@@ -1295,6 +1295,7 @@ mod tests {
             started_at: Some(t(0)),
             rpc_addr: "127.0.0.1:8232".parse().ok(),
             metrics_addr: "127.0.0.1:9999".parse().ok(),
+            lightwalletd_addr: None,
             last_exit: None,
             stale: None,
             stop_is_graceful: true,

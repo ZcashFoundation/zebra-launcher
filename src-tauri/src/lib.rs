@@ -15,6 +15,7 @@ pub mod exit;
 pub mod explorer;
 pub mod logging;
 pub mod paths;
+pub mod public;
 pub mod sidecar;
 pub mod tray;
 pub mod updater;
@@ -103,6 +104,15 @@ pub fn run() {
             commands::check_for_update,
             commands::install_update,
             commands::cancel_update,
+            commands::get_public_status,
+            commands::check_connection,
+            commands::begin_public_setup,
+            commands::set_public_switch,
+            commands::answer_public_step,
+            commands::run_public_checks,
+            commands::open_public_service,
+            commands::forget_public_service,
+            commands::open_signup,
             commands::explorer,
         ])
         .setup(|app| {
@@ -140,8 +150,9 @@ pub(crate) fn try_state<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<AppStat
 /// the app with exit code 1 rather than panicking inside the event loop.
 fn setup(app: &AppHandle) {
     match tauri::async_runtime::block_on(start(app)) {
-        Ok(state) => {
+        Ok((state, held)) => {
             app.manage(state.clone());
+            app.manage(public::start(app, &state, held));
             // One snapshot of the settings and the nodes decides who starts
             // which node at launch.
             let plan = launch_plan(&state.settings.current(), &state.registry.infos());
@@ -228,8 +239,9 @@ fn show_startup_error(app: &AppHandle, err: &StartupError) {
 
 /// The startup sequence up to a running registry. Runs inside the Tokio
 /// runtime, which the registry, its nodes' actors and the settings actor
-/// need.
-async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
+/// need. Also returns whether an open public service waits for the
+/// user's switch.
+async fn start(app: &AppHandle) -> Result<(AppState, bool), StartupError> {
     let paths = paths::resolve(app)?;
     let notes = match logging::init(&paths.launcher_log()) {
         Ok(notes) => Some(notes),
@@ -260,6 +272,16 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     }
 
     let settings = SettingsStore::open(&paths)?;
+    launcher_public::install_crypto_provider();
+    // A public service that does not resume loses zebrad's endpoint before the first start.
+    let mut launch = settings.current();
+    let held = launcher_public::prepare_launch(&mut launch);
+    if launch.public != settings.current().public
+        && let Err(err) = settings.update(move |s| s.public = launch.public).await
+    {
+        tracing::error!(%err, "could not save the public services' launch state");
+    }
+
     let sizes = Arc::new(SizeCache::default());
     let stdin_close = std::env::var_os(STDIN_CLOSE_ENV).is_some_and(|v| v == "1");
     let mut config = RegistryConfig::new(paths.clone(), sidecar::resolve(&paths));
@@ -268,6 +290,17 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     }));
     config.sizes = sizes.clone();
     let registry = registry::spawn(config, settings.clone())?;
+    // The light client server's endpoint follows the stored service from the first start on:
+    // a service that does not resume loses it before zebrad starts. A broken zebrad.toml is
+    // not fatal: zebrad reports it, and the user can fix it in the editor.
+    if let Some(node) = registry.first() {
+        let mut keys = node.managed_keys();
+        keys.lightwalletd =
+            config::LightwalletdKey::for_public(&settings.current().public, node.spec().network);
+        if let Err(err) = config::ensure(&node.paths, &keys) {
+            tracing::error!(%err, "could not update the managed keys in zebrad.toml");
+        }
+    }
     // From here on the launcher's own events show in the Logs tab too.
     if let Some(notes) = notes {
         logging::forward_notes(notes, registry.clone());
@@ -275,7 +308,8 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     // Each node's runtime samples its own process tree; the computer is the
     // app's.
     let machine = MachineSampler::spawn();
-    Ok(AppState::new(paths, registry, settings, sizes, machine))
+    let state = AppState::new(paths, registry, settings, sizes, machine);
+    Ok((state, held))
 }
 
 /// Who starts which node at launch. Decided once, from one snapshot of the

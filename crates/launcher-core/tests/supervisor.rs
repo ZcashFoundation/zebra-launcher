@@ -417,6 +417,61 @@ async fn config_error_fails_without_restarting() {
     within(handle.shutdown()).await.expect("shutdown");
 }
 
+/// fake-zebrad in `ok` mode with its light wallet endpoint at `addr`.
+fn light_fixture(addr: std::net::SocketAddr) -> Fixture {
+    let fx = fixture("ok");
+    let config_path = fx._dir.path().join("zebrad.toml");
+    std::fs::write(
+        &config_path,
+        format!("[network]\nnetwork = \"Regtest\"\n[rpc]\nlightwalletd_listen_addr = \"{addr}\"\n"),
+    )
+    .expect("write config");
+    fx
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_light_wallet_endpoint_address_is_reported_and_cleared() {
+    let fx = light_fixture("127.0.0.1:0".parse().unwrap());
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    within(handle.start()).await.expect("start");
+    let status = within(handle.wait_until(|s| s.lightwalletd_addr.is_some()))
+        .await
+        .expect("endpoint opened");
+    let addr = status.lightwalletd_addr.expect("address");
+    assert!(addr.ip().is_loopback() && addr.port() != 0, "{addr}");
+    within(handle.stop()).await.expect("stop");
+    assert_eq!(handle.status().lightwalletd_addr, None);
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_taken_light_wallet_port_fails_without_restarting() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let fx = light_fixture(taken.local_addr().expect("addr"));
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    // The endpoint opens after `Starting zebrad`, so the start itself may succeed.
+    match within(handle.start()).await {
+        Ok(()) | Err(SupervisorError::ExitedDuringStart(_)) => {}
+        Err(err) => panic!("start: {err}"),
+    }
+    let status = wait_phase(&handle, |phase| matches!(phase, Phase::Failed { .. })).await;
+    assert_eq!(
+        status.phase,
+        Phase::Failed {
+            class: ExitClass::PortInUse
+        }
+    );
+    let exit = status.last_exit.expect("exit recorded");
+    assert_eq!(exit.code, Some(1), "{exit:?}");
+    assert!(
+        exit.detail
+            .as_deref()
+            .is_some_and(|detail| detail.starts_with("lightwalletd gRPC endpoint at")),
+        "{exit:?}"
+    );
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
 /// Starts a fake in `crash` mode. It exits right after it reports `Starting
 /// zebrad`, and that line and the exit reach the actor from different tasks,
 /// so `start` either succeeds or learns of the exit; the crash is handled the

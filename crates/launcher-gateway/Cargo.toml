@@ -1,0 +1,31 @@
+[package]
+name = "launcher-gateway"
+description = "Zeal's front door: the TLS server that public services face the internet through"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The internet-facing code depends on tokio, rustls with ring, socket2 and h2 only: never on
+# launcher-core or Tauri, so it is reviewed as a unit. Every TLS crate is built without its
+# default features, which would bring a second crypto provider (aws-lc-rs).
+[dependencies]
+bytes = "1"
+h2 = "0.4"
+http = "1"
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+siphasher = "1"
+socket2 = "0.6"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true

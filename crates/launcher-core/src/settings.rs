@@ -56,12 +56,22 @@ pub fn validate(settings: &Settings) -> Result<(), SettingsError> {
 
 /// Replaces `current` with settings sent by the UI (`set_settings`), keeping
 /// the fields the UI may not set directly: `first_run_done` (only
-/// `complete_first_run` sets it) and `schema_version` (always the version
-/// this launcher writes, so a stale copy cannot undo the migration marker).
+/// `complete_first_run` sets it), `public` (only the public-services commands change
+/// it, so a stale copy cannot switch a service on or give consent) and
+/// `schema_version` (always the version this launcher writes, so a stale copy
+/// cannot undo the migration marker).
 pub fn apply_from_ui(current: &mut Settings, mut incoming: Settings) {
     incoming.first_run_done = current.first_run_done;
+    incoming.public = std::mem::take(&mut current.public);
     incoming.schema_version = Settings::SCHEMA_VERSION;
     *current = incoming;
+}
+
+/// The settings as `get_settings` sends them to the UI: without the `public`
+/// section, which the UI reads through `get_public_status`.
+pub fn for_ui(mut settings: Settings) -> Settings {
+    settings.public = Default::default();
+    settings
 }
 
 type Edit = Box<dyn FnOnce(&mut Settings) + Send>;
@@ -473,6 +483,43 @@ mod tests {
         assert!(current.first_run_done);
         assert_eq!(current.schema_version, Settings::SCHEMA_VERSION);
         assert!(!current.close_to_tray);
+    }
+
+    #[test]
+    fn ui_settings_keep_the_public_section() {
+        use launcher_types::{
+            NodeId,
+            public::{PublicConfig, PublicServiceSpec},
+        };
+
+        let spec = PublicServiceSpec::new_light_server(
+            NodeId::new("zebrad-mainnet").unwrap(),
+            Network::Mainnet,
+        );
+        let stored = PublicConfig {
+            services: vec![PublicServiceSpec {
+                switch_on: false,
+                ..spec.clone()
+            }],
+        };
+        let mut current = Settings {
+            public: stored.clone(),
+            ..Settings::default()
+        };
+        // A page that tries to switch the service on, or one that never saw it.
+        let switched_on = Settings {
+            public: PublicConfig {
+                services: vec![spec],
+            },
+            ..Settings::default()
+        };
+        apply_from_ui(&mut current, switched_on);
+        assert_eq!(current.public, stored);
+        // What a page sends back after `get_settings`.
+        let from_page = for_ui(current.clone());
+        apply_from_ui(&mut current, from_page);
+        assert_eq!(current.public, stored);
+        assert!(for_ui(current).public.is_empty());
     }
 
     #[tokio::test]

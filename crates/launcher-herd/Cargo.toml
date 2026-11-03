@@ -1,0 +1,17 @@
+[package]
+name = "launcher-herd"
+description = "Pure rules for the nodes Zeal runs together, starting with the public services: native and wasm, no I/O"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+launcher-types = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

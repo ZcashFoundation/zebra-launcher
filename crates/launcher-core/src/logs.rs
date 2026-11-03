@@ -186,6 +186,9 @@ pub struct Detector {
     /// The previous stderr line was `thread '...' panicked at ...`, so the next
     /// non-empty line is the panic message.
     pending_panic: bool,
+    /// The listener zebrad last said it was opening, for a bind error that
+    /// does not name it.
+    opening: Option<String>,
 }
 
 impl Detector {
@@ -197,7 +200,7 @@ impl Detector {
     /// Feeds one line and returns the event it carries, if any.
     pub fn detect(&mut self, line: &LogLine) -> Option<LogEvent> {
         match line.stream {
-            LogStream::Stdout => detect_stdout(line),
+            LogStream::Stdout => self.detect_stdout(line),
             LogStream::Stderr => self.detect_stderr(line),
             LogStream::Launcher => None,
         }
@@ -228,11 +231,56 @@ impl Detector {
     }
 }
 
-fn detect_stdout(line: &LogLine) -> Option<LogEvent> {
-    let (Some(target), Some(level)) = (line.target.as_deref(), line.level) else {
-        return None;
-    };
-    let message = line.message.as_str();
+impl Detector {
+    fn detect_stdout(&mut self, line: &LogLine) -> Option<LogEvent> {
+        let (Some(target), Some(level)) = (line.target.as_deref(), line.level) else {
+            return None;
+        };
+        let message = line.message.as_str();
+        if target == LIGHTWALLETD_TARGET
+            && let Some(addr) = message
+                .strip_prefix("Trying to open ")
+                .and_then(|rest| rest.strip_suffix("..."))
+        {
+            self.opening = Some(addr.to_string());
+            return None;
+        }
+        // A listener that cannot bind ends zebrad's start with an error, not a
+        // panic: `shutting down Zebra due to an error error=Address already in use
+        // (os error 98) report=`.
+        if target == "zebrad::components::tokio"
+            && level == LogLevel::Error
+            && message.starts_with("shutting down Zebra due to an error")
+            && is_address_in_use(message)
+        {
+            let error = message
+                .split_once(" error=")
+                .map_or(message, |(_, rest)| rest)
+                .split(" report=")
+                .next()
+                .unwrap_or(message);
+            let message = match self.opening.take() {
+                Some(listener) => format!("{listener}: {error}"),
+                None => error.to_string(),
+            };
+            return Some(LogEvent::PortInUse { message });
+        }
+        detect_stdout(target, level, message)
+    }
+}
+
+/// The target of zebrad's light wallet server lines.
+const LIGHTWALLETD_TARGET: &str = "zebra_rpc::lightwalletd::server";
+
+/// Whether an error message is the OS's "address in use": `os error 98` on
+/// Linux, 48 on macOS and 10048 on Windows.
+fn is_address_in_use(message: &str) -> bool {
+    message.contains("Address already in use")
+        || message.contains("address already in use")
+        || message.contains("(os error 10048)")
+}
+
+fn detect_stdout(target: &str, level: LogLevel, message: &str) -> Option<LogEvent> {
     let event = match target {
         "zebrad::components::tracing::component"
             if message.starts_with("started tracing component") =>
@@ -250,6 +298,9 @@ fn detect_stdout(line: &LogLine) -> Option<LogEvent> {
         }
         "zebra_rpc::server" => LogEvent::RpcOpened {
             addr: addr_after(message, "Opened RPC endpoint at ")?,
+        },
+        LIGHTWALLETD_TARGET => LogEvent::LightwalletdOpened {
+            addr: addr_after(message, "Opened lightwalletd gRPC endpoint at ")?,
         },
         "zebrad::commands::start" if message == "Starting zebrad" => LogEvent::StartingZebrad,
         "zebrad::commands::start" if message == "stopping zebrad" => LogEvent::Stopped,

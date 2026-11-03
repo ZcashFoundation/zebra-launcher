@@ -277,6 +277,42 @@ requests that change `ZEBRAD_VERSION` or `ZEBRAD_COMMIT`, with the release binar
 fetched and verified by `scripts/fetch-zebrad-linux.sh`. Other pull requests skip them,
 so plain `cargo test` still needs no zebrad.
 
+### The light wallet endpoint and the front door
+
+`crates/launcher-public/tests/real_light_server.rs` is the same kind of opt-in test for the
+light client server (docs/PUBLIC-SERVICES.md): a real zebrad on Regtest with
+`rpc.lightwalletd_listen_addr` on loopback, `GetLightdInfo` straight to the endpoint over
+HTTP/2 with prior knowledge and through the front door over TLS, `GetLatestBlock` through it,
+and the front door's own `UNAVAILABLE`. It prints the `LightdInfo` bytes, which
+`tests/fixtures/zebrad-7.0.0-regtest-lightdinfo.hex` pins:
+
+```sh
+ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-public --test real_light_server -- --include-ignored --nocapture
+```
+
+launcher-core's `real_zebrad.rs` also checks the endpoint's log line, that an HTTP/1.1
+request to it gets no gRPC answer, and the failure on a taken port. CI's `real-zebrad` job
+runs both.
+
+## Certificates against Pebble
+
+`crates/launcher-public/tests/pebble.rs` gets certificates from
+[Pebble](https://github.com/letsencrypt/pebble), Let's Encrypt's test ACME server, through
+the real front door: TLS-ALPN-01 on the front door's port, staging then production, the chain
+verified, stored and loaded again without a new order. It needs the `pebble` and
+`pebble-challtestsrv` release binaries, at the version pinned in
+[`.github/tool-versions.env`](../.github/tool-versions.env), and passes with a note without
+them:
+
+```sh
+PEBBLE=/path/to/pebble PEBBLE_CHALLTESTSRV=/path/to/pebble-challtestsrv \
+  cargo test -p launcher-public --test pebble -- --nocapture
+```
+
+pebble-challtestsrv answers every A query with 127.0.0.1, so no name needs to resolve; the
+test makes its own CA for Pebble's HTTPS. CI's `pebble` job downloads both binaries, checks
+their sha256 pins and sets `PEBBLE_REQUIRED=1`, which makes the test fail instead of skipping.
+
 ## Observability stack
 
 `docs/observability/` is a Prometheus and Grafana compose stack for manual testing and

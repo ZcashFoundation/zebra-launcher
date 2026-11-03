@@ -25,6 +25,11 @@
 //!
 //! [`reset`] replaces the file with the minimal one, keeping the old file as
 //! `zebrad.toml.bak` too.
+//!
+//! `rpc.lightwalletd_listen_addr` is managed only once a light client server
+//! is set up ([`LightwalletdKey`], docs/PUBLIC-SERVICES.md): written on
+//! loopback while the service is on and removed while it is off. Without one,
+//! a loopback value set by hand stays.
 
 use std::{
     fs,
@@ -81,6 +86,39 @@ pub struct ManagedKeys {
     pub cookie_dir: PathBuf,
     /// `state.cache_dir`, where the chain state lives.
     pub state_dir: PathBuf,
+    /// `rpc.lightwalletd_listen_addr`, zebrad's light wallet endpoint.
+    pub lightwalletd: LightwalletdKey,
+}
+
+/// What the launcher does with `rpc.lightwalletd_listen_addr`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LightwalletdKey {
+    /// No light client server is set up: the key is the user's, and
+    /// [`validate`] keeps it on loopback.
+    #[default]
+    Unmanaged,
+    /// A light client server is set up and off: the key is removed, so zebrad
+    /// opens no endpoint.
+    Absent,
+    /// The light client server is on: the endpoint listens on `127.0.0.1` at
+    /// this port.
+    Listen(u16),
+}
+
+impl LightwalletdKey {
+    /// The key for zebrad on `network` from the stored public services: the
+    /// user's while no light client server is set up, on loopback at the
+    /// spec's `backend_port` while the service has one, and removed otherwise,
+    /// including while zebrad runs on another network than the service's.
+    pub fn for_public(public: &launcher_types::public::PublicConfig, network: Network) -> Self {
+        match public.light_server() {
+            None => LightwalletdKey::Unmanaged,
+            Some(spec) if spec.network == network => spec
+                .backend_port
+                .map_or(LightwalletdKey::Absent, LightwalletdKey::Listen),
+            Some(_) => LightwalletdKey::Absent,
+        }
+    }
 }
 
 impl ManagedKeys {
@@ -99,6 +137,7 @@ impl ManagedKeys {
             metrics_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, METRICS_PORT)),
             cookie_dir: paths.rpc_cookie_dir(),
             state_dir: state_dir.into(),
+            lightwalletd: LightwalletdKey::Unmanaged,
         }
     }
 
@@ -229,7 +268,29 @@ fn set_managed(doc: &mut DocumentMut, keys: &ManagedKeys) -> Result<bool, Config
             changed |= set_p2p_port(doc, keys.network, keys.p2p_port)?;
         }
     }
+    changed |= match keys.lightwalletd {
+        LightwalletdKey::Unmanaged => false,
+        LightwalletdKey::Absent => remove_key(doc, "rpc", "lightwalletd_listen_addr")?,
+        LightwalletdKey::Listen(port) => set_key(
+            doc,
+            "rpc",
+            "lightwalletd_listen_addr",
+            Value::from(SocketAddr::from((Ipv4Addr::LOCALHOST, port)).to_string()),
+        )?,
+    };
     Ok(changed)
+}
+
+/// Removes `section.key`, returning whether it was there. A missing section
+/// has nothing to remove.
+fn remove_key(doc: &mut DocumentMut, section: &str, key: &str) -> Result<bool, ConfigError> {
+    let Some(item) = doc.as_table_mut().get_mut(section) else {
+        return Ok(false);
+    };
+    let table = item
+        .as_table_like_mut()
+        .ok_or_else(|| ConfigError::NotATable(section.to_string()))?;
+    Ok(table.remove(key).is_some())
 }
 
 /// The port zebrad listens on for peers when `network.listen_addr` names
@@ -734,6 +795,137 @@ tx_cost_limit = 1000
         let before = read(&paths).expect("read").token;
         ensure(&paths, &keys).expect("ensure again");
         assert_eq!(read(&paths).expect("read").token, before);
+    }
+
+    #[test]
+    fn the_light_wallet_endpoint_is_written_only_while_the_service_is_on() {
+        let (_dir, paths, mut keys) = setup();
+        fs::create_dir_all(paths.config_dir()).expect("mkdir");
+        let hand_set = "[rpc]\n# mine\nlightwalletd_listen_addr = \"127.0.0.1:9100\"\n";
+        fs::write(paths.zebrad_config(), hand_set).expect("write");
+
+        // No light client server: a loopback value set by hand stays.
+        ensure(&paths, &keys).expect("ensure");
+        let text = read(&paths).expect("read").text;
+        assert!(
+            text.contains("lightwalletd_listen_addr = \"127.0.0.1:9100\""),
+            "{text}"
+        );
+
+        // On: the managed address replaces it, keeping the comment.
+        keys.lightwalletd = LightwalletdKey::Listen(9067);
+        ensure(&paths, &keys).expect("ensure");
+        let text = read(&paths).expect("read").text;
+        assert!(
+            text.contains("# mine\nlightwalletd_listen_addr = \"127.0.0.1:9067\""),
+            "{text}"
+        );
+        validate(&text).expect("the managed endpoint is on loopback");
+        let token = read(&paths).expect("read").token;
+        ensure(&paths, &keys).expect("ensure again");
+        assert_eq!(read(&paths).expect("read").token, token, "unchanged");
+
+        // Off: the key goes, and stays gone.
+        keys.lightwalletd = LightwalletdKey::Absent;
+        ensure(&paths, &keys).expect("ensure");
+        let text = read(&paths).expect("read").text;
+        assert!(!text.contains("lightwalletd_listen_addr"), "{text}");
+        let token = read(&paths).expect("read").token;
+        ensure(&paths, &keys).expect("ensure again");
+        assert_eq!(read(&paths).expect("read").token, token, "unchanged");
+
+        // A new file holds the key only while the service is on.
+        let minimal = render_minimal(&keys).expect("render");
+        assert!(!minimal.contains("lightwalletd"));
+        keys.lightwalletd = LightwalletdKey::Listen(19067);
+        let minimal = render_minimal(&keys).expect("render");
+        assert!(minimal.contains("lightwalletd_listen_addr = \"127.0.0.1:19067\""));
+    }
+
+    #[test]
+    fn the_endpoint_key_follows_the_stored_service() {
+        use launcher_types::{
+            NodeId,
+            public::{PublicConfig, PublicServiceSpec},
+        };
+        let mut public = PublicConfig::default();
+        assert_eq!(
+            LightwalletdKey::for_public(&public, Network::Mainnet),
+            LightwalletdKey::Unmanaged
+        );
+        let mut spec = PublicServiceSpec::new_light_server(
+            NodeId::new("zebrad-mainnet").unwrap(),
+            Network::Mainnet,
+        );
+        public.services.push(spec.clone());
+        assert_eq!(
+            LightwalletdKey::for_public(&public, Network::Mainnet),
+            LightwalletdKey::Absent
+        );
+        spec.backend_port = Some(9067);
+        public.services = vec![spec];
+        assert_eq!(
+            LightwalletdKey::for_public(&public, Network::Mainnet),
+            LightwalletdKey::Listen(9067)
+        );
+        // Saving the other network removes the key, which the service keeps for later.
+        assert_eq!(
+            LightwalletdKey::for_public(&public, Network::Testnet),
+            LightwalletdKey::Absent
+        );
+    }
+
+    #[test]
+    fn edits_to_the_managed_endpoint_are_overridden() {
+        let (_dir, paths, mut keys) = setup();
+        keys.lightwalletd = LightwalletdKey::Absent;
+        ensure(&paths, &keys).expect("ensure");
+        let original = read(&paths).expect("read");
+
+        // Off: an endpoint added in the editor is removed before the file is saved.
+        let edited = format!(
+            "{}\n[mempool]\ntx_cost_limit = 1000\n",
+            original.text.replace(
+                "[rpc]\n",
+                "[rpc]\nlightwalletd_listen_addr = \"127.0.0.1:9067\"\n"
+            )
+        );
+        begin_apply_with_managed(&paths, &edited, &original.token, &keys)
+            .expect("begin")
+            .commit()
+            .expect("commit");
+        let text = read(&paths).expect("read").text;
+        assert!(!text.contains("lightwalletd"), "{text}");
+        assert!(text.contains("tx_cost_limit = 1000"), "{text}");
+
+        // On: a different port typed in the editor is put back.
+        keys.lightwalletd = LightwalletdKey::Listen(9067);
+        let current = read(&paths).expect("read");
+        let edited = current.text.replace(
+            "[rpc]\n",
+            "[rpc]\nlightwalletd_listen_addr = \"127.0.0.1:1234\"\n",
+        );
+        begin_apply_with_managed(&paths, &edited, &current.token, &keys)
+            .expect("begin")
+            .commit()
+            .expect("commit");
+        let text = read(&paths).expect("read").text;
+        assert!(
+            text.contains("lightwalletd_listen_addr = \"127.0.0.1:9067\""),
+            "{text}"
+        );
+        assert!(!text.contains("1234"), "{text}");
+
+        // A public address is refused whatever the launcher manages.
+        let current = read(&paths).expect("read");
+        assert!(matches!(
+            begin_apply(
+                &paths,
+                "[rpc]\nlightwalletd_listen_addr = \"0.0.0.0:9067\"\n",
+                &current.token
+            ),
+            Err(ConfigEditError::Forbidden { key, .. }) if key == "rpc.lightwalletd_listen_addr"
+        ));
     }
 
     #[test]

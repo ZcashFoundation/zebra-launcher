@@ -2,6 +2,9 @@
 resolver = "3"
 members = [
     "crates/launcher-types",
+    "crates/launcher-herd",
+    "crates/launcher-gateway",
+    "crates/launcher-public",
     "crates/explorer-model",
     "crates/launcher-core",
     "ui",
@@ -17,6 +20,9 @@ publish = false
 
 [workspace.dependencies]
 launcher-types = { path = "crates/launcher-types" }
+launcher-herd = { path = "crates/launcher-herd" }
+launcher-gateway = { path = "crates/launcher-gateway" }
+launcher-public = { path = "crates/launcher-public" }
 explorer-model = { path = "crates/explorer-model" }
 launcher-core = { path = "crates/launcher-core" }
 serde = { version = "1", features = ["derive"] }

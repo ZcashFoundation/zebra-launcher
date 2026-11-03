@@ -44,6 +44,9 @@ kept as the historical design record; where the two differ, this file describes 
 | `crates/explorer-model` | The block explorer's pure model: zebrad's response shapes, the block ledger and shielded budget, network upgrade heights, the search classifier, the pages' views and a synthetic chain for the mock and tests. serde only; builds natively and to wasm. |
 | `crates/launcher-core` | Logic that does not need Tauri: the node registry and node specs, supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind. |
 | `crates/launcher-core/src/bin/fake-zebrad.rs` | Scripted stand-in for zebrad, used by tests and PR bundle builds. |
+| `crates/launcher-herd` | Pure rules for the nodes Zeal runs together, so far the public services': the setup's plan, pauses, the front door's mode, evidence ages, the wallet check. Native and wasm, no I/O; the UI's mock runs it too. |
+| `crates/launcher-gateway` | The front door: the TLS server a public service faces the internet through. tokio, rustls with ring, socket2 and h2 only. |
+| `crates/launcher-public` | The public services without Tauri: the service actor, ACME, dynamic DNS, the network checks, the keychain, the self-tests. |
 | `src-tauri` | Thin Tauri 2.12 app: commands, the `Channel` bridge, tray, updater, exit flow, capabilities. |
 | `ui` | Leptos CSR crate built by trunk into `ui/dist`. Talks to Tauri through about 100 lines of hand-written `wasm_bindgen` externs to `window.__TAURI__`. |
 
@@ -173,6 +176,8 @@ commands `get_status`, `get_node_stats`, `get_node_details` and `get_metrics`,
 `subscribe_logs`, `log_history`, `choose_data_dir`, `delete_node_data`, and `open_path`
 for a node's folders and metrics page. `list_nodes`, `add_node` (a `NodeDraft`),
 `update_node` (a `NodeUpdate`) and `remove_node` manage the list.
+The public services add the `public_status` event (a changed `PublicStatus` of a public
+service) and its snapshot `get_public_status`.
 
 Events carry changes the UI did not ask for: `nodes` (the list, a `Vec<NodeInfo>`,
 whenever a node's info changes), and for each node, as a `NodeEvent {node, value}`,
@@ -351,6 +356,7 @@ never share a port, a folder or a cookie (`NodeSpec::managed_keys`).
 | `metrics.endpoint_addr` | `127.0.0.1:<the node's metrics port>`: `9999` for a single node |
 | `state.cache_dir` | `<the node's data folder>/state` |
 | `zcashd_compat` | forced off (unsupported) |
+| `rpc.lightwalletd_listen_addr` | once a light client server is set up: `127.0.0.1:<port>` (9067 on Mainnet, 19067 on Testnet, or the next free one) while it is on, removed while it is off; without one, the user's, as before |
 
 **Configuration form.** The Configure page shows every key of the bundled zebrad's
 `zebrad.toml` as a form beside the file itself (`ui/src/config_form.rs`, schema in
@@ -629,6 +635,69 @@ colour in the stylesheets is a token, and the embedded Grafana follows the same 
 On Mainnet, zebrad warns 42 days and halts 56 days after its estimated release height,
 so an install that never updates stops working. The UI shows an EOS countdown, a warning
 banner, and a blocking halt card with no restart loop.
+
+## Public services
+
+The light client server of [PUBLIC-SERVICES.md](PUBLIC-SERVICES.md), phase PS1: zebrad's own
+light wallet endpoint, reachable from the internet only through Zeal's TLS front door. Linux
+only, experimental, off until the user sets it up.
+
+```text
+phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (launcher-gateway, own runtime and thread)
+                                            │ name (SNI) and ALPN checked, limits, Let's Encrypt certificate
+                                            ▼ the same HTTP/2 frames, on loopback
+                                        zebrad 127.0.0.1:9067 (rpc.lightwalletd_listen_addr, only while on)
+```
+
+- **The spec** is `launcher.json`'s `public.services` (no secrets). `set_settings` keeps the
+  stored section and `get_settings` leaves it out, so only the public-services commands change
+  it, through the settings actor. Tokens are in the OS keychain (`keyring`, service
+  `org.zfnd.zeal`, account `dns:<provider>:<name>`); the spec holds the account name only.
+- **`PublicServices`** (`launcher-public/src/service.rs`) is one actor. At every change of
+  zebrad's status or statistics, of the settings or of a child, and every 10 s, it gathers the
+  facts, runs launcher-herd's `plan`, `pause`, `state` and `gateway_mode`, drives its children
+  and publishes a `PublicStatus` on a `watch` (the `public_status` event, `get_public_status`).
+  Its children: the `LightMonitor` (`GetLightdInfo` over h2c on loopback at each endpoint
+  change and every 10 minutes, with Zodl's check), the network checks (the default route from
+  `/proc/net/route`, a VPN by interface name, the router's address from NAT-PMP's
+  external-address request) every 5 minutes, the `DdnsActor` (DuckDNS updates, the system
+  resolver), the `AcmeActor` and the front door.
+- **zebrad's endpoint.** While the service is switched on with current consent on zebrad's
+  network, the actor puts a loopback port in the spec's `backend_port` and asks the app's
+  `EndpointHost` (`src-tauri/src/public.rs`) to apply it: the config permit, the start permit
+  while zebrad runs, `config::ensure` with `managed_keys`, which reads the key from the spec,
+  and a restart only if zebrad was running. A busy permit fails fast and the actor clears the
+  port again. Off clears it and applies again; a network change applies it without a restart,
+  for zebrad's next start, and holds the service until the user resumes. At launch
+  `prepare_launch` drops the endpoint before the first ensure when the service does not
+  resume. The front door connects to the address zebrad logged (`Status.lightwalletd_addr`).
+- **The front door** (`launcher-gateway`) reads the certificate, a pending TLS-ALPN-01
+  challenge and its mode from `watch`es at every handshake. `ChallengeOnly` answers only ALPN
+  `acme-tls/1` for the name; `LocalOnly` adds service connections from loopback; `Open` serves
+  everyone within the limits; `Unavailable` answers every call itself with a trailers-only
+  `UNAVAILABLE`. A wrong or missing name gets no certificate. v1 forwards the decrypted bytes
+  (one task owns both streams), with a semaphore for all connections, an actor for the
+  per-address caps and token bucket (IPv4 address or IPv6 /64, keyed by SipHash under a
+  random key), a 10 s handshake, a 10 minute idle timer, a 2 hour connection age and an
+  upload bucket. A mode change closes the connections opened before it, Stop closes the port
+  and every connection at once, and nothing logs a client address.
+- **Certificates** (`launcher-public/src/acme.rs`): instant-acme with ring, TLS-ALPN-01 through
+  the front door, staging first for a new name (its validation is the first evidence from
+  outside), then production with a fresh P-256 key, verified with the platform verifier before
+  the front door gets it. Renewal at two thirds of the lifetime, only while the front door is
+  up. `attempts.json` keeps the order budget. Files under `<app data>/public/`: `acme/`,
+  `certs/<name>/`, `state.json` (evidence, the month's upload).
+- **Gates.** "Open to the internet" (`open_public_service`) re-runs every gate in the actor;
+  before it the front door serves Let's Encrypt and this computer only. Quitting closes the
+  front door before zebrad stops.
+
+The commands are `get_public_status`, `check_connection`, `begin_public_setup`,
+`set_public_switch`, `answer_public_step`, `run_public_checks`, `open_public_service`,
+`forget_public_service` and `open_signup`. The UI's screens are in Settings → Public services,
+with a card on the dashboard and a header banner on the node's pages; every sentence comes
+from `ui/src/public_text.rs`, and the mock's `?public=setup`, `serving`, `unconfirmed`,
+`cgnat` and `expiring` run launcher-herd's rules over fake facts. What PS1 left for later is
+listed in PUBLIC-SERVICES.md ("PS1 as built").
 
 ## Block explorer
 

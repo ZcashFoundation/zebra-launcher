@@ -1,0 +1,179 @@
+/* The public services: Settings → Public services, the dashboard card and the header banner
+   (ui/src/components/public_services.rs). Colours are tokens only. */
+
+.settings.public {
+  margin-bottom: 16px;
+}
+
+.public-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.public-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.public-head h3 {
+  margin: 0;
+  flex: 1 1 auto;
+}
+
+.public-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 72px;
+}
+
+.public-switch-knob {
+  width: 28px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--border);
+  position: relative;
+  flex: none;
+}
+
+.public-switch-knob::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text);
+}
+
+.public-switch.on .public-switch-knob {
+  background: var(--ok);
+}
+
+.public-switch.on .public-switch-knob::after {
+  left: 14px;
+}
+
+.public-line {
+  margin: 0;
+}
+
+.public-line.tone-ok {
+  color: var(--ok);
+}
+
+.public-line.tone-warn {
+  color: var(--warn);
+}
+
+.public-line.tone-error {
+  color: var(--error);
+}
+
+.public-steps {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.public-step {
+  display: grid;
+  grid-template-columns: 1.5em 1fr;
+  gap: 2px 6px;
+}
+
+.public-step.waiting {
+  color: var(--muted);
+}
+
+.public-step.done .public-mark {
+  color: var(--ok);
+}
+
+.public-step.current .public-mark {
+  color: var(--accent-text);
+}
+
+.public-step.failed .public-mark {
+  color: var(--error);
+}
+
+.public-findings {
+  grid-column: 2;
+  margin: 0;
+  padding-left: 1.2em;
+  color: var(--text-secondary);
+}
+
+.public-step-body {
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.public-consent ul,
+.public-howto,
+.public-use,
+.public-still,
+.public-checks {
+  margin: 4px 0;
+  padding-left: 1.2em;
+}
+
+.public-checks .check-pass {
+  color: var(--ok);
+}
+
+.public-checks .check-warn {
+  color: var(--warn);
+}
+
+.public-checks .check-fail {
+  color: var(--error);
+}
+
+.public-copy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.public-copy code {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.public-cards {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.public-cards h4,
+.public-share h4 {
+  margin: 0 0 4px;
+}
+
+.public-cards p {
+  margin: 2px 0;
+}
+
+.public-keep {
+  margin: 4px 0;
+}
+
+.public-dash {
+  margin-bottom: 12px;
+}
+
+.public-dash h3 {
+  margin: 0 0 4px;
+}

@@ -1,0 +1,43 @@
+[package]
+name = "launcher-public"
+description = "Zeal's public services without Tauri: the service actor, ACME, dynamic DNS, the network checks and the self-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The public services' network dependencies live here, reviewed and cargo-denied as a unit.
+# Every TLS crate uses ring, the one crypto provider: none takes its default features, which
+# would bring aws-lc-rs.
+[dependencies]
+launcher-core = { workspace = true }
+launcher-gateway = { workspace = true }
+launcher-herd = { workspace = true }
+launcher-types = { workspace = true }
+bytes = "1"
+h2 = "0.4"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "tls12", "rustls-platform-verifier"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+instant-acme = { version = "0.8.5", default-features = false, features = ["ring", "hyper-rustls", "rcgen", "x509-parser", "time"] }
+keyring = "4.2"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.7"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros", "process", "fs"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tracing = { workspace = true }
+x509-parser = { version = "0.18", default-features = false }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

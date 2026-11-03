@@ -69,6 +69,12 @@
 //! key it only prints the line, with zebrad's default address. When the
 //! address is taken it logs a warning and carries on without the listener,
 //! where zebrad would abort (the `port-in-use` mode plays that).
+//!
+//! When the config sets `rpc.lightwalletd_listen_addr`, the fake binds it as
+//! zebrad's light wallet endpoint, prints the `Opened lightwalletd gRPC
+//! endpoint at` line with the bound address and closes every connection it
+//! accepts: it speaks no gRPC. When the address is taken it logs zebrad's
+//! `shutting down Zebra due to an error` line and exits 1, as zebrad does.
 
 use std::{
     hash::{BuildHasher, Hasher, RandomState},
@@ -333,6 +339,37 @@ async fn run(
         "zebra_rpc::server",
         &format!("Opened RPC endpoint at {rpc_addr}"),
     );
+    if let Some(addr) = config.as_deref().and_then(lightwalletd_config) {
+        log(
+            "INFO",
+            None,
+            "zebrad::commands::start",
+            "spawning lightwalletd gRPC server",
+        );
+        log(
+            "INFO",
+            Some("init"),
+            "zebra_rpc::lightwalletd::server",
+            &format!("Trying to open lightwalletd gRPC endpoint at {addr}..."),
+        );
+        match start_lightwalletd_server(addr).await {
+            Ok(bound) => log(
+                "INFO",
+                Some("init"),
+                "zebra_rpc::lightwalletd::server",
+                &format!("Opened lightwalletd gRPC endpoint at {bound}"),
+            ),
+            Err(err) => {
+                log(
+                    "ERROR",
+                    None,
+                    "zebrad::components::tokio",
+                    &format!("shutting down Zebra due to an error error={err} report="),
+                );
+                return ExitCode::from(1);
+            }
+        }
+    }
     log(
         "INFO",
         None,
@@ -595,6 +632,31 @@ fn rpc_config(path: &Path) -> Option<RpcConfig> {
         listen_addr,
         cookie_dir,
     })
+}
+
+/// Reads `rpc.lightwalletd_listen_addr`. Returns `None` when the file is
+/// unreadable or sets no endpoint.
+fn lightwalletd_config(path: &Path) -> Option<SocketAddr> {
+    let doc: toml_edit::DocumentMut = std::fs::read_to_string(path).ok()?.parse().ok()?;
+    doc.get("rpc")?
+        .as_table_like()?
+        .get("lightwalletd_listen_addr")?
+        .as_str()?
+        .parse()
+        .ok()
+}
+
+/// Binds the light wallet endpoint and closes every connection it accepts.
+/// Returns the bound address.
+async fn start_lightwalletd_server(addr: SocketAddr) -> std::io::Result<SocketAddr> {
+    let listener = TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
+    Ok(bound)
 }
 
 /// Reads `metrics.endpoint_addr`. Returns `None` when the file is unreadable

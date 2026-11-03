@@ -312,6 +312,8 @@ pub enum PortRole {
     Metrics,
     /// A gRPC interface, such as an indexer's lightwalletd-compatible one.
     Grpc,
+    /// The front door of a public service: TLS, reachable from the internet.
+    PublicTls,
 }
 
 impl PortRole {
@@ -321,6 +323,7 @@ impl PortRole {
             PortRole::Rpc => "RPC",
             PortRole::Metrics => "metrics",
             PortRole::Grpc => "gRPC",
+            PortRole::PublicTls => "public TLS",
         }
     }
 }

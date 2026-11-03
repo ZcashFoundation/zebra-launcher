@@ -27,6 +27,7 @@
 //! | `?stalled` | The sync stalls: the height stops moving while the tip estimate creeps on, no blocks are committed, and zebrad's progress lines report the stall (the verdict's "Sync stalled"). |
 //! | `?nopeers` | zebrad finds no peers: 0 peers in every sample and gauge, an empty peer list, the initial connections fail and the log waits for ready peers (the verdict's "No peers" once two minutes of samples agree). |
 //! | `?crashloop` | zebrad panics about 15 s after every start and the launcher restarts it after a backoff that doubles (5, 10, 20 s): "zebrad crashed", then "Crash loop" from the third crash, with the exits and restarts in the log and on the timeline. |
+//! | `?public=setup`, `serving`, `unconfirmed`, `cgnat`, `expiring` | The light client server starts in that state: set up to the router forward while Zebra syncs, open and reachable, open without evidence from outside, stopped at carrier-grade NAT, or open with a certificate whose renewal failed ([`public`], docs/PUBLIC-SERVICES.md). Without the flag nothing is set up. |
 //! | `?os=macos`, `?os=windows` | The resource samples report that platform's figures: memory pressure on macOS; commit, handles and no thread counts on Windows ([`resources`]). Linux is the default. |
 //! | `?children` | zebrad runs a `block_notify_command` in cycles of three resource samples: an `sh` with `notify-block` under it, then also 40 `curl`s, more than a sample lists ("and 11 more"), then `notify-block` alone, orphaned ([`resources::block_notify`]). |
 //! | `?unreadable` | The resource samples report CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk tile "the system does not report them". |
@@ -54,6 +55,7 @@ mod updates;
 pub mod explorer;
 pub mod herd;
 pub mod nodes;
+pub mod public;
 
 use std::{
     sync::{

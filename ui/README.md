@@ -131,6 +131,21 @@ every node command and event carries a node's id, and the mock's zebrad below is
   `?attip`), and the Explorer shows the banner. With `?herd` the Testnet nodes have Testnet
   chains, and Zakura's chain is complete for now (pruning comes later).
 
+- the light client server (docs/PUBLIC-SERVICES.md), in Settings → Public services, with a card
+  on the dashboard and a banner on the node's pages. The mock runs launcher-herd's real rules
+  over fake facts, and moves the setup along after short delays as the backend would. Without a
+  flag nothing is set up: the switch starts the setup at the consent screen, and "Check my
+  connection" shows a public router address. `?public=…` starts in a state:
+  - `setup`: set up to the router forward, with Zebra still syncing (a warning on the endpoint
+    step); "I've done it: check" leads through the firewall, the certificate and the test on
+    this computer to Open;
+  - `serving`: open and reachable from outside (a connection 4 minutes ago), with the panel's
+    connections, certificate and this month's upload;
+  - `unconfirmed`: open, with no evidence from outside yet;
+  - `cgnat`: stopped at the network step, behind carrier-grade NAT;
+  - `expiring`: open, with a certificate that expires in 10 days and a failed renewal: the
+    header banner on the node's pages.
+
 The flags are read from the query string once, when the page loads; the table at the top of
 [`src/mock.rs`](src/mock.rs) lists every one.
 
@@ -182,6 +197,10 @@ to the CSP when it serves the bundled assets.
 | `src/clock.rs` | The current time from JavaScript's `Date` (`SystemTime::now()` panics on wasm) |
 | `src/clipboard.rs` | Copying text to the system clipboard |
 | `src/format.rs` | Display helpers: numbers, durations, relative times, exit classes. Pure, tested natively |
+| `src/public_text.rs` | Every sentence of the light client server's screens, from the typed facts of its status. Pure, tested natively |
+| `src/public_state.rs` | The public services' status as a context: the `public_status` event and its snapshot |
+| `src/api/public.rs`, `src/mock/public.rs` | The public services' commands, to Tauri or to the mock, which runs launcher-herd's rules over fake facts |
+| `src/components/public_services.rs` | Settings → Public services (the switch, the setup with its consent screen, the status panel), the dashboard card and the header banner |
 | `src/log_view.rs` | The Logs page's data model: a capped, de-duplicated buffer in `seq` order, dropped-line markers, level and text filters. Pure, tested natively |
 | `src/insights.rs`, `src/insights/fields.rs` | Log analysis: sync stage, problems, startup milestones and activity counts folded from the log stream; tolerant readers for the fields of a zebrad line. Pure, tested natively |
 | `src/stats_history.rs` | The `NodeStats` samples since the launcher opened, for the dashboard's charts and rates. Pure, tested natively |
