@@ -73,6 +73,45 @@ pub enum Later {
     Command,
 }
 
+impl Later {
+    /// What it is, for a sentence: "This looks like {label}."
+    pub fn label(self) -> &'static str {
+        match self {
+            Later::UnixTime => "a Unix time",
+            Later::Date => "a date",
+            Later::HashPrefix => "the start of a hash",
+            Later::Transparent { .. } => "a transparent address",
+            Later::Tex { .. } => "a TEX address",
+            Later::Sapling { .. } => "a Sapling address",
+            Later::Unified { .. } => "a unified address",
+            Later::Sprout { .. } => "a Sprout address",
+            Later::PaymentRequest => "a payment request",
+            Later::Pool => "a value pool's name",
+            Later::Upgrade => "a network upgrade's name",
+            Later::Zip => "a ZIP number",
+            Later::Command => "a command",
+        }
+    }
+
+    /// Whether it belongs to the other network than the node's.
+    pub fn other_network(self) -> bool {
+        matches!(
+            self,
+            Later::Transparent {
+                other_network: true
+            } | Later::Tex {
+                other_network: true
+            } | Later::Sapling {
+                other_network: true
+            } | Later::Unified {
+                other_network: true
+            } | Later::Sprout {
+                other_network: true
+            }
+        )
+    }
+}
+
 /// Viewing and spending key prefixes, from zcash_protocol's and zcash_address's constants.
 const KEY_PREFIXES: [(&str, SecretKind); 18] = [
     ("zxviews1", SecretKind::ViewingKey),

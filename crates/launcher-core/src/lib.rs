@@ -8,6 +8,7 @@ pub mod apply;
 pub mod clock;
 pub mod config;
 pub mod diagnostics;
+pub mod explorer;
 pub mod firstrun;
 mod fsutil;
 pub mod logfile;
