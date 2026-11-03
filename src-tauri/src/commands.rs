@@ -203,10 +203,11 @@ pub async fn apply_config(
     .await
 }
 
-/// The launcher settings.
+/// The launcher settings, without the public services, which
+/// `get_public_status` reports.
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Settings {
-    state.settings.current()
+    launcher_core::settings::for_ui(state.settings.current())
 }
 
 /// Validates and saves `settings`, returning what was saved.
