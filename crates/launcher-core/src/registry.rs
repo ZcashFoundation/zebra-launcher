@@ -981,16 +981,22 @@ impl Actor {
                 return;
             }
         };
-        if self.nodes.len() == 1 {
+        if self.nodes[index].removing {
+            let _ = reply.send(Err(NodeError::Failed("the node is being removed".into())));
+            return;
+        }
+        // A node must stay: another one that is not being removed as well.
+        let others_stay = self
+            .nodes
+            .iter()
+            .enumerate()
+            .any(|(other, runtime)| other != index && !runtime.removing);
+        if !others_stay {
             let name = self.nodes[index].spec.borrow().name.clone();
             let _ = reply.send(Err(NodeError::LastNode(name)));
             return;
         }
         let runtime = &mut self.nodes[index];
-        if runtime.removing {
-            let _ = reply.send(Err(NodeError::Failed("the node is being removed".into())));
-            return;
-        }
         // No start may begin from here on and no configuration change be
         // applied: the permits go with the removal.
         let permits = runtime

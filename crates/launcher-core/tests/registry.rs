@@ -70,10 +70,19 @@ struct Fixture {
 /// stops and restarts, fast polls, and no port counted as in use elsewhere
 /// unless `in_use` says so.
 fn config(paths: &Paths, in_use: fn(PortRole, u16) -> bool) -> RegistryConfig {
+    config_with_modes(paths, in_use, |_| "ok")
+}
+
+/// [`config`], with the fake's mode for each node picked by `mode`.
+fn config_with_modes(
+    paths: &Paths,
+    in_use: fn(PortRole, u16) -> bool,
+    mode: fn(&NodeSpec) -> &'static str,
+) -> RegistryConfig {
     let mut config = RegistryConfig::new(paths.clone(), fake_zebrad());
-    config.customize = Some(Arc::new(|_spec, supervisor| {
+    config.customize = Some(Arc::new(move |spec, supervisor| {
         supervisor.command.env = vec![
-            ("FAKE_ZEBRAD_MODE".into(), "ok".into()),
+            ("FAKE_ZEBRAD_MODE".into(), mode(spec).into()),
             ("FAKE_ZEBRAD_HEARTBEAT_MS".into(), "50".into()),
         ];
         supervisor.stop_grace = Duration::from_secs(3);
@@ -98,6 +107,14 @@ fn nothing_in_use(_: PortRole, _: u16) -> bool {
 /// A launcher in a temporary directory whose first node, on Mainnet, has
 /// free ports; the first run is done unless `first_run` says otherwise.
 async fn fixture_with(first_run_done: bool, in_use: fn(PortRole, u16) -> bool) -> Fixture {
+    fixture_from(first_run_done, |paths| config(paths, in_use)).await
+}
+
+/// [`fixture_with`] for the registry `config` gives.
+async fn fixture_from(
+    first_run_done: bool,
+    config: impl FnOnce(&Paths) -> RegistryConfig,
+) -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let paths = Paths::under(dir.path());
     paths.ensure_dirs().expect("dirs");
@@ -111,7 +128,7 @@ async fn fixture_with(first_run_done: bool, in_use: fn(PortRole, u16) -> bool) -
     within(settings.update(move |s| s.first_run_done = first_run_done))
         .await
         .expect("first run");
-    let registry = registry::spawn(config(&paths, in_use), settings.clone()).expect("registry");
+    let registry = registry::spawn(config(&paths), settings.clone()).expect("registry");
     Fixture {
         dir,
         paths,
@@ -453,6 +470,61 @@ async fn removing_stops_the_node_and_keeps_or_deletes_its_data() {
         within(fx.registry.remove(&first.id, false)).await,
         Err(NodeError::LastNode(_))
     ));
+    within(fx.registry.shutdown()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_being_removed_does_not_count_as_the_one_that_stays() {
+    // The node called "Slow" ignores the stop request: its removal waits out
+    // the stop grace before the kill.
+    let fx = fixture_from(true, |paths| {
+        config_with_modes(paths, nothing_in_use, |spec| {
+            if spec.name == "Slow" {
+                "hang-on-signal"
+            } else {
+                "ok"
+            }
+        })
+    })
+    .await;
+    let first = fx.registry.first().expect("first");
+    let chain = first.state_dir().join("v29").join("mainnet");
+    fs::create_dir_all(&chain).expect("a chain");
+    fs::write(chain.join("000001.sst"), b"blocks").expect("a block file");
+    let slow = within(fx.registry.add(draft(Network::Testnet, "Slow")))
+        .await
+        .expect("add");
+    within(
+        fx.registry
+            .node(&slow.id)
+            .expect("lookup")
+            .start(&done(), StartOptions::default()),
+    )
+    .await
+    .expect("start");
+    let removal = tokio::spawn({
+        let registry = fx.registry.clone();
+        let id = slow.id.clone();
+        async move { registry.remove(&id, true).await }
+    });
+    wait_for(&fx.registry, &slow.id, "the removal's stop", |s| {
+        s.phase == Phase::Stopping
+    })
+    .await;
+
+    // The other node is the one that stays: it cannot go as well.
+    assert_eq!(
+        within(fx.registry.remove(&first.id, true)).await,
+        Err(NodeError::LastNode(first.spec().name))
+    );
+    assert!(chain.join("000001.sst").exists(), "its data is untouched");
+    within(removal)
+        .await
+        .expect("join")
+        .expect("the slow node is removed");
+    assert_eq!(fx.registry.infos(), vec![first.info()]);
+    assert_eq!(fx.settings.nodes().len(), 1);
+    assert!(chain.join("000001.sst").exists());
     within(fx.registry.shutdown()).await;
 }
 

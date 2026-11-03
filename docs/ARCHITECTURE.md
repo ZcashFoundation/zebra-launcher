@@ -97,11 +97,12 @@ from the node's spec (`NodeSpec`, `crates/launcher-core/src/nodes.rs`).
   node's next start. Ids are stable, except while the first run is not done: then the
   first node takes its network's id (`zebrad-testnet`), as nothing ran or depends on it
   yet, and the registry publishes it as a new handle.
-- **Removing**: refused for the last node. The removal takes all of the node's start
-  permits and its config permit (no start or apply can begin), stops it, deletes its
-  chain state with `delete_node_data`'s rules when asked (and then the rest of a folder
-  node's own folder, once its supervisor has closed the log file), and only then takes it
-  off the list. Kept data stays where it is, and its id is not given to a new node while
+- **Removing**: refused for the last node, and for the last one not already being
+  removed, so two removals at once cannot empty the list. The removal takes all of the
+  node's start permits and its config permit (no start or apply can begin), stops it,
+  deletes its chain state with `delete_node_data`'s rules when asked (and then the rest of
+  a folder node's own folder, once its supervisor has closed the log file), and only then
+  takes it off the list. Kept data stays where it is, and its id is not given to a new node while
   its folder exists.
 - **Ports at every start.** The supervisor tries binding each of the node's addresses
   (P2P on `0.0.0.0`, RPC and metrics on loopback) before it spawns zebrad: one that
