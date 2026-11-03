@@ -269,12 +269,18 @@ impl ResourceHistory {
     /// A sparkline's values over the newest run's samples in the range (all of them for
     /// `None`), at most [`MAX_POINTS`]. Each rate is over the interval that ends at its
     /// sample: since the run's previous sample, or since the spawn for its first, over at
-    /// least a second.
+    /// least a second. Empty while the newest sample cannot read what it plots.
     pub fn spark(&self, kind: SparkKind, span: Option<Duration>, now: SystemTime) -> Vec<f64> {
         let Some(run) = self.points.last().map(|p| p.run) else {
             return Vec::new();
         };
-        if kind == SparkKind::Written && self.points.last().is_some_and(|p| p.written.is_none()) {
+        // Nothing to plot while the OS refuses the counter: a flat line would read as zero.
+        let unreadable = match kind {
+            SparkKind::Cpu => self.latest().is_some_and(|s| s.cpu_cores.is_none()),
+            SparkKind::Memory => false,
+            SparkKind::Written => self.points.last().is_some_and(|p| p.written.is_none()),
+        };
+        if unreadable {
             return Vec::new();
         }
         let window = self.window(span, now);
@@ -485,6 +491,7 @@ mod tests {
         assert_eq!(history.cpu_cores(RATE_WINDOW, at(1005)), None);
         assert_eq!(history.io_rates(RATE_WINDOW, at(1005)), (None, None));
         assert!(history.spark(SparkKind::Written, None, at(1005)).is_empty());
+        assert!(history.spark(SparkKind::Cpu, None, at(1005)).is_empty());
         assert_eq!(history.last_run().unwrap().avg_cores, None);
     }
 
