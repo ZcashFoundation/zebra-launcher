@@ -388,6 +388,16 @@ async fn monitor_follows_the_supervisor_status() {
         "the pools add up to the supply"
     );
     assert_eq!(detail.active_upgrade.as_deref(), Some("NU6"));
+    let names: Vec<&str> = detail
+        .upgrades
+        .iter()
+        .map(|upgrade| upgrade.name.as_str())
+        .collect();
+    assert_eq!(names, ["Overwinter", "Sapling", "NU5", "NU6", "NU6.1"]);
+    assert_eq!(detail.upgrades[4].activation_height, 3_146_400);
+    let consensus = detail.consensus.as_ref().expect("consensus branches");
+    assert_eq!(consensus.chain_tip, "c8e71055");
+    assert_eq!(consensus.next_block, "c8e71055");
     assert_eq!(detail.subversion.as_deref(), Some("/Zebra:7.0.0/"));
     assert_eq!(detail.protocol_version, Some(170_140));
     assert_eq!(detail.mempool_bytes, Some(32_500));

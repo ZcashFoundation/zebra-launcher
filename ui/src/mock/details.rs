@@ -3,7 +3,9 @@
 
 use std::time::Duration;
 
-use launcher_types::{NodeDetails, NodeStats, PeerInfo, ValuePool};
+use launcher_types::{
+    ConsensusBranches, NetworkUpgrade, NodeDetails, NodeStats, PeerInfo, UpgradeStatus, ValuePool,
+};
 
 use super::{Scenario, log_lines::mock_hash};
 
@@ -78,6 +80,52 @@ const POOLS: [(&str, f64); 5] = [
     ("lockbox", 345_678.9),
 ];
 
+/// zebrad 7.0.0's Mainnet upgrades: name, consensus branch id and activation height.
+const UPGRADES: [(&str, &str, u64); 11] = [
+    ("Overwinter", "5ba81b19", 347_500),
+    ("Sapling", "76b809bb", 419_200),
+    ("Blossom", "2bb40e60", 653_600),
+    ("Heartwood", "f5b9230b", 903_000),
+    ("Canopy", "e9ff75a6", 1_046_400),
+    ("NU5", "c2d6d0b4", 1_687_104),
+    ("NU6", "c8e71055", 2_726_400),
+    ("NU6.1", "4dec4df0", 3_146_400),
+    ("NU6.2", "5437f330", 3_364_600),
+    ("NU6.3", "37a5165b", 3_428_143),
+    ("NU7", "77190ad9", 3_543_405),
+];
+
+/// The upgrades as zebrad at `height` reports them, and the branches of the tip and the next
+/// block.
+fn upgrades_at(height: u64) -> (Vec<NetworkUpgrade>, ConsensusBranches) {
+    let upgrades: Vec<NetworkUpgrade> = UPGRADES
+        .iter()
+        .map(|&(name, branch_id, activation_height)| NetworkUpgrade {
+            name: name.into(),
+            branch_id: branch_id.into(),
+            activation_height,
+            status: if activation_height <= height {
+                UpgradeStatus::Active
+            } else {
+                UpgradeStatus::Pending
+            },
+        })
+        .collect();
+    let branch_at = |height: u64| {
+        UPGRADES
+            .iter()
+            .rev()
+            .find(|upgrade| upgrade.2 <= height)
+            .map_or("00000000", |upgrade| upgrade.1)
+            .to_owned()
+    };
+    let consensus = ConsensusBranches {
+        chain_tip: branch_at(height),
+        next_block: branch_at(height + 1),
+    };
+    (upgrades, consensus)
+}
+
 /// The height the pool balances are quoted at.
 const POOLS_HEIGHT: u64 = 2_950_000;
 
@@ -126,6 +174,7 @@ pub(super) fn details(
     let supply = value_pools.iter().map(|pool| pool.zec).sum();
     // Block hashes start with zeros: the proof of work.
     let hash = format!("00000000{}", &mock_hash(stats.height)[8..]);
+    let (upgrades, consensus) = upgrades_at(stats.height);
     NodeDetails {
         peers,
         best_block_hash: Some(hash),
@@ -134,7 +183,13 @@ pub(super) fn details(
         size_on_disk: Some(state_bytes + tick * 2_500_000),
         chain_supply_zec: Some(supply),
         value_pools,
-        active_upgrade: Some("NU6.1".into()),
+        active_upgrade: upgrades
+            .iter()
+            .rev()
+            .find(|upgrade| upgrade.status == UpgradeStatus::Active)
+            .map(|upgrade| upgrade.name.clone()),
+        upgrades,
+        consensus: Some(consensus),
         subversion: Some("/Zebra:7.0.0/".into()),
         protocol_version: Some(PROTOCOL_VERSION),
         mempool_bytes: Some(stats.mempool_transactions * 1_850),
@@ -189,6 +244,16 @@ mod tests {
         assert_eq!(full.size_on_disk, Some(1_000 + 3 * 2_500_000));
         assert_eq!(full.mempool_bytes, Some(24 * 1_850));
         assert_eq!(full.value_pools.len(), 5);
+        // Below NU6.1 the mock runs NU6, and the next block too.
+        assert_eq!(full.active_upgrade.as_deref(), Some("NU6"));
+        assert_eq!(full.upgrades.len(), 11);
+        assert_eq!(full.consensus.as_ref().unwrap().chain_tip, "c8e71055");
+        let (_, at_activation) = upgrades_at(3_146_399);
+        assert_eq!(at_activation.chain_tip, "c8e71055");
+        assert_eq!(
+            at_activation.next_block, "4dec4df0",
+            "the next block activates NU6.1"
+        );
         let supply: f64 = full.value_pools.iter().map(|pool| pool.zec).sum();
         assert_eq!(full.chain_supply_zec, Some(supply));
         // 400 blocks of subsidy went to the orchard pool.

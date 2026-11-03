@@ -673,6 +673,8 @@ mod tests {
                 },
             ],
             active_upgrade: Some("NU6.1".into()),
+            upgrades: Vec::new(),
+            consensus: None,
             subversion: Some("/Zebra:7.0.0/".into()),
             protocol_version: Some(170_120),
             mempool_bytes: Some(44_400),

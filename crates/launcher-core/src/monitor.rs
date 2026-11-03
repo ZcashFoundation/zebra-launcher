@@ -13,10 +13,12 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use launcher_types::{EosInfo, NodeDetails, NodeStats, PeerInfo, Phase, Status, ValuePool};
+use launcher_types::{
+    ConsensusBranches, EosInfo, NodeDetails, NodeStats, PeerInfo, Phase, Status, ValuePool,
+};
 use tokio::sync::watch;
 
-use crate::rpc::{RpcClient, RpcError, active_upgrade, zat_to_zec};
+use crate::rpc::{RpcClient, RpcError, active_upgrade, upgrade_list, zat_to_zec};
 
 /// The default polling interval.
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(5);
@@ -284,6 +286,11 @@ async fn poll(run: &mut Run, eos_interval: Duration) -> Result<(NodeStats, NodeD
             })
             .collect(),
         active_upgrade: active_upgrade(&chain.upgrades),
+        upgrades: upgrade_list(&chain.upgrades),
+        consensus: chain.consensus.map(|consensus| ConsensusBranches {
+            chain_tip: consensus.chain_tip,
+            next_block: consensus.next_block,
+        }),
         subversion: (!info.subversion.is_empty()).then_some(info.subversion),
         protocol_version: info.protocol_version,
         mempool_bytes: mempool.bytes,

@@ -21,7 +21,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use launcher_types::PeerInfo;
+use launcher_types::{NetworkUpgrade, PeerInfo, UpgradeStatus};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -100,6 +100,20 @@ pub struct BlockchainInfo {
     /// The network upgrades by consensus branch id (hex).
     #[serde(default)]
     pub upgrades: BTreeMap<String, UpgradeInfo>,
+    /// The consensus branches of the tip and the next block.
+    #[serde(default)]
+    pub consensus: Option<Consensus>,
+}
+
+/// `getblockchaininfo.consensus`: the branch ids (hex) of the tip and the next block.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct Consensus {
+    /// The branch the tip was validated with.
+    #[serde(rename = "chaintip")]
+    pub chain_tip: String,
+    /// The branch the next block is validated with.
+    #[serde(rename = "nextblock")]
+    pub next_block: String,
 }
 
 /// A value pool's balance: `chainSupply` and the `valuePools` entries.
@@ -135,6 +149,30 @@ pub const ZATOSHIS_PER_ZEC: u64 = 100_000_000;
 /// supply needs 51 bits and an `f64` has 53.
 pub fn zat_to_zec(zat: u64) -> f64 {
     zat as f64 / ZATOSHIS_PER_ZEC as f64
+}
+
+/// The upgrades as the UI receives them, by activation height. An entry whose status is not
+/// one of zebrad's three is left out.
+pub fn upgrade_list(upgrades: &BTreeMap<String, UpgradeInfo>) -> Vec<NetworkUpgrade> {
+    let mut list: Vec<NetworkUpgrade> = upgrades
+        .iter()
+        .filter_map(|(branch_id, upgrade)| {
+            let status = match upgrade.status.as_str() {
+                "active" => UpgradeStatus::Active,
+                "pending" => UpgradeStatus::Pending,
+                "disabled" => UpgradeStatus::Disabled,
+                _ => return None,
+            };
+            Some(NetworkUpgrade {
+                name: upgrade.name.clone(),
+                branch_id: branch_id.clone(),
+                activation_height: upgrade.activation_height,
+                status,
+            })
+        })
+        .collect();
+    list.sort_by_key(|upgrade| upgrade.activation_height);
+    list
 }
 
 /// The name of the active network upgrade: among the entries with status
@@ -742,6 +780,7 @@ mod tests {
         assert_eq!(bare.chain_supply, None);
         assert!(bare.value_pools.is_empty());
         assert!(bare.upgrades.is_empty());
+        assert_eq!(bare.consensus, None);
         assert_eq!(active_upgrade(&bare.upgrades), None);
 
         let full: BlockchainInfo = decode(
@@ -772,6 +811,22 @@ mod tests {
         assert_eq!(full.value_pools[1].id, "sapling");
         assert_eq!(full.value_pools[1].chain_value_zat, Some(50_000_000));
         assert_eq!(active_upgrade(&full.upgrades).as_deref(), Some("NU6"));
+        assert_eq!(
+            full.consensus,
+            Some(Consensus {
+                chain_tip: "c8e71055".into(),
+                next_block: "c8e71055".into()
+            })
+        );
+        let list = upgrade_list(&full.upgrades);
+        let names: Vec<&str> = list.iter().map(|upgrade| upgrade.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Sapling", "NU6", "NU6.1"],
+            "by height, not by branch id"
+        );
+        assert_eq!(list[2].branch_id, "4dec4df0");
+        assert_eq!(list[2].status, UpgradeStatus::Pending);
     }
 
     #[test]

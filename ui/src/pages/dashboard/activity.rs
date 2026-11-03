@@ -570,6 +570,8 @@ mod tests {
             chain_supply_zec: None,
             value_pools: Vec::new(),
             active_upgrade: None,
+            upgrades: Vec::new(),
+            consensus: None,
             subversion: None,
             protocol_version: None,
             mempool_bytes: None,
