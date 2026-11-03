@@ -86,7 +86,9 @@ it, rebuilding on changes. Useful environment variables:
 The launcher keeps its files in the per-user directories for the identifier
 `org.zfnd.zeal` (`zebrad.toml` and `launcher.json` in the config directory,
 the chain state, pidfile and RPC cookie in the local data directory, `launcher.*.log`
-and `zebrad.log` in the log directory). The `open_path` command opens them.
+and `zebrad.log` in the log directory). Those are the first node's; a node added later
+keeps its `zebrad.toml`, pidfile, cookie, `zebrad.log` and default chain state in
+`nodes/<id>` in the local data directory. The `open_path` command opens them.
 
 On Linux, if the window is blank, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
@@ -94,8 +96,8 @@ To see dashboards in the Grafana tab, start the stack in [GRAFANA.md](GRAFANA.md
 Tauri, `trunk serve` in `ui/` shows the UI against a mock backend at http://localhost:1420.
 The mock starts zebrad on load; query flags such as `?firstrun`, `?stale`, `?eos=halt` or
 `?update=available` put it into other states (`?running` is a first-run flag: zebrad is
-already running and Start fails), and `?stalled`, `?nopeers` and `?crashloop` put the
-dashboard's verdict into its warning states. The table at the top of
+already running and Start fails), `?stalled`, `?nopeers` and `?crashloop` put the
+dashboard's verdict into its warning states, and `?herd` runs several nodes. The table at the top of
 [ui/src/mock.rs](../ui/src/mock.rs) lists every flag;
 [ui/README.md](../ui/README.md#develop-in-a-browser-mock-mode) describes the states.
 

@@ -1,5 +1,5 @@
-//! The mock's resource samples: the primary zebrad's process tree every 5 s while it has a
-//! pid (Starting, Running and Stopping, like the backend's sampler, which does not wait for
+//! The mock's resource samples: each node's process tree every 5 s while it has a pid
+//! (Starting, Running and Stopping, like the backend's samplers, which do not wait for
 //! Running), and the computer every 5 s. The numbers are pure functions of the run, the phase
 //! and the sample count, with jitter from a hash of the count rather than `Math.random`, so
 //! they are tested natively; they reach the page through `api::mock_handler`, like every mock
@@ -21,11 +21,35 @@
 //! ([`block_notify`]), `?unreadable` reports CPU and I/O as refused by the OS, and
 //! `?readerpanic` stops the samples 30 s into the first run while zebrad runs on, as the
 //! backend does after a reader panic ([`reader_panicked`]).
+//!
+//! The herd's nodes ([`super::herd`]: `?herd` and the nodes the add-node dialog adds) have
+//! samples of their own ([`NodeSamples`]), with docs/RESOURCES.md's figures where it gives
+//! them ([`herd_load`]):
+//!
+//! | Node | Uses |
+//! | --- | --- |
+//! | Zebra · Testnet, at the tip | 0.15 cores, 1.9 GiB |
+//! | Zakura · Testnet, pruned, at the tip | 0.1 cores, 1.2 GiB |
+//! | Zakura · Mainnet, catching up | 3.2 cores, 4.4 GiB; once at the tip, as zebrad there |
+//! | Zaino · Mainnet | 0.3 cores, 650 MiB |
+//! | zcashd · Mainnet | stopped, so no sample; started, 0.2 cores and 2.4 GiB |
+//! | A zebrad the dialog added, at the tip | as the main zebrad at the tip on Mainnet, as Zebra · Testnet on Testnet |
+//!
+//! With `?herd` the computer has 16 logical CPUs and 32 GiB, so the herd fits without a memory
+//! warning; its figures count every node's newest sample.
 
-use std::time::{Duration, SystemTime};
+use std::{
+    cell::RefCell,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime},
+};
 
 use launcher_types::{
-    MAX_MEMBERS, MachineResources, MemoryPressure, NodeResources, Phase, Platform, ProcessUsage,
+    MAX_MEMBERS, MachineResources, MemoryPressure, Network, NodeKind, NodeResources, Phase,
+    Platform, ProcessUsage, Status,
 };
 use leptos::prelude::*;
 
@@ -77,14 +101,34 @@ const READER_PANIC_SECS: f64 = 30.0;
 const CLIMB_SECS: f64 = 30.0 * 60.0;
 const SAWTOOTH_SECS: f64 = 4.0 * 60.0;
 
-const LOGICAL_CPUS: u32 = 8;
-const MEMORY_TOTAL_GIB: f64 = 16.0;
+/// The computer the mock runs on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Computer {
+    pub logical_cpus: u32,
+    pub memory_gib: f64,
+    /// Windows: the commit limit.
+    pub commit_limit_gib: f64,
+}
+
+/// One node's computer: 8 logical CPUs and 16 GiB.
+pub(super) const ONE_NODE: Computer = Computer {
+    logical_cpus: 8,
+    memory_gib: 16.0,
+    commit_limit_gib: 24.0,
+};
+
+/// `?herd`'s computer: 16 logical CPUs and 32 GiB, so the herd fits without a memory warning.
+pub(super) const HERD_COMPUTER: Computer = Computer {
+    logical_cpus: 16,
+    memory_gib: 32.0,
+    commit_limit_gib: 48.0,
+};
+
 /// What the other programs on the computer use.
 const OTHER_MEMORY_GIB: f64 = 5.2;
 const SWAP_TOTAL_GIB: f64 = 2.0;
 const SWAP_USED_GIB: f64 = 0.3;
-/// Windows: the commit limit, and what the other programs commit.
-const COMMIT_LIMIT_GIB: f64 = 24.0;
+/// Windows: what the other programs commit.
 const OTHER_COMMIT_GIB: f64 = 7.0;
 /// Windows: zebrad's commit charge for its working set.
 const COMMIT_RATIO: f64 = 1.15;
@@ -93,6 +137,42 @@ const COMMIT_RATIO: f64 = 1.15;
 const THREADS: u32 = 68;
 const OPEN_FILES: u32 = 412;
 const HANDLES: u32 = 1204;
+
+/// The first process of a node's tree, with its threads and open files (handles on Windows).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Root {
+    /// As Linux and macOS name it; Windows adds `.exe`.
+    pub name: &'static str,
+    pub threads: u32,
+    pub files: u32,
+    pub handles: u32,
+}
+
+/// The mock's zebrad.
+const ZEBRAD: Root = Root {
+    name: "zebrad",
+    threads: THREADS,
+    files: OPEN_FILES,
+    handles: HANDLES,
+};
+
+/// The first process of a `kind` node's tree.
+pub(super) fn root_of(kind: NodeKind) -> Root {
+    let program = kind.program().unwrap_or("program");
+    let (threads, files, handles) = match kind {
+        NodeKind::Zebrad => return ZEBRAD,
+        NodeKind::Zakura => (64, 380, 1100),
+        NodeKind::Zcashd => (40, 210, 620),
+        NodeKind::Zaino => (24, 96, 260),
+        NodeKind::Zebend | NodeKind::Zallet | NodeKind::Generic => (12, 48, 180),
+    };
+    Root {
+        name: program,
+        threads,
+        files,
+        handles,
+    }
+}
 
 /// `?children`: the `curl`s `notify-block` starts, more than a sample lists, and the open
 /// files (handles on Windows) of each child.
@@ -260,13 +340,15 @@ pub(super) fn block_notify(
     }
 }
 
-/// One run of the mock's zebrad, as the backend's fold would see it: counters since the
-/// spawn and the peak.
+/// One run of a mock node, as the backend's fold would see it: counters since the spawn and
+/// the peak.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct MockTree {
     pub run: u64,
     pub pid: u32,
     pub started_at: SystemTime,
+    /// The process the run started: zebrad, or a herd node's program.
+    root: Root,
     run_secs: f64,
     /// zebrad's own CPU.
     cpu_secs: f64,
@@ -282,11 +364,18 @@ pub(super) struct MockTree {
 }
 
 impl MockTree {
+    /// A run of the main zebrad.
     pub(super) fn new(run: u64, pid: u32, started_at: SystemTime) -> Self {
+        Self::with_root(ZEBRAD, run, pid, started_at)
+    }
+
+    /// A run that starts `root`.
+    pub(super) fn with_root(root: Root, run: u64, pid: u32, started_at: SystemTime) -> Self {
         MockTree {
             run,
             pid,
             started_at,
+            root,
             run_secs: 0.0,
             cpu_secs: 0.0,
             children_cpu_secs: 0.0,
@@ -326,18 +415,22 @@ impl MockTree {
         let children = u32::try_from(self.children.len()).unwrap_or(u32::MAX);
         let read = self.read.round() as u64;
         let written = self.written.round() as u64;
-        let zebrad = ProcessUsage {
+        let root = ProcessUsage {
             pid: self.pid,
             parent: None,
-            name: if windows { "zebrad.exe" } else { "zebrad" }.to_owned(),
+            name: if windows {
+                format!("{}.exe", self.root.name)
+            } else {
+                self.root.name.to_owned()
+            },
             started_at: self.started_at,
             cpu_secs: self.cpu_secs,
             memory_bytes: Some(load.memory),
             read_bytes: Some(read),
             written_bytes: Some(written),
-            threads: (!windows).then_some(THREADS),
+            threads: (!windows).then_some(self.root.threads),
         };
-        let members = std::iter::once(zebrad)
+        let members = std::iter::once(root)
             .chain(self.children.iter().map(|child| {
                 let age = at.duration_since(child.started_at).unwrap_or_default();
                 ProcessUsage {
@@ -367,11 +460,11 @@ impl MockTree {
             read_bytes: Some(read),
             written_bytes: Some(written),
             processes: 1 + children,
-            threads: (!windows).then_some(THREADS + children),
+            threads: (!windows).then_some(self.root.threads + children),
             descriptors: Some(if windows {
-                HANDLES + CHILD_HANDLES * children
+                self.root.handles + CHILD_HANDLES * children
             } else {
-                OPEN_FILES + CHILD_FILES * children
+                self.root.files + CHILD_FILES * children
             }),
             members,
         };
@@ -391,34 +484,144 @@ impl MockTree {
     }
 }
 
-/// The computer at sample `count`, with the node's newest sample (`None` while it has no
-/// run). The first sample has no busy figure, like the backend's.
+/// What a herd node uses over one interval ([`super::herd`]), from docs/RESOURCES.md's mock
+/// data where it gives figures: `catching_up` says its sync is behind the tip.
+pub(super) fn herd_load(kind: NodeKind, network: Network, catching_up: bool, count: u64) -> Load {
+    let j = |series| jitter(count, series);
+    // Cores, GiB, MB/s read and written.
+    let (cores, memory, read, written) = match (kind, network) {
+        (NodeKind::Zakura, _) if catching_up => (3.2, 4.4, 20.0, 60.0),
+        (NodeKind::Zakura, Network::Testnet) => (0.1, 1.2, 0.05, 0.2),
+        (NodeKind::Zebrad, Network::Testnet) => (0.15, 1.9, 0.05, 0.2),
+        // At the tip on Mainnet, like the main zebrad there.
+        (NodeKind::Zebrad | NodeKind::Zakura, Network::Mainnet) => (0.25, 3.2, 0.1, 0.4),
+        (NodeKind::Zaino, _) => (0.3, 650.0 / 1024.0, 1.0, 0.5),
+        (NodeKind::Zcashd, _) => (0.2, 2.4, 0.1, 0.3),
+        (NodeKind::Zebend | NodeKind::Zallet | NodeKind::Generic, _) => (0.1, 0.5, 0.05, 0.1),
+    };
+    Load {
+        cores: (cores * (1.0 + 0.1 * j(2))).max(0.0),
+        read_per_sec: (read * (1.0 + 0.2 * j(3))).max(0.0) * MB,
+        written_per_sec: (written * (1.0 + 0.2 * j(4))).max(0.0) * MB,
+        memory: gib(memory * (1.0 + 0.01 * j(1))),
+    }
+}
+
+thread_local! {
+    /// The herd's nodes' newest samples, for the computer's figures: each node's signal, `None`
+    /// while it has no run. Kept here rather than read from the herd, so the main zebrad's
+    /// sampler never starts the herd's simulation.
+    static HERD_SAMPLES: RefCell<Vec<ArcRwSignal<Option<NodeResources>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// A herd node's resource samples: its runs and its newest sample.
+#[derive(Clone)]
+pub(super) struct NodeSamples {
+    /// `None` while the node has no run.
+    pub resources: ArcRwSignal<Option<NodeResources>>,
+    /// The current or last run behind `resources`.
+    tree: ArcRwSignal<Option<MockTree>>,
+    /// Seconds of ticks so far, for the 5 s cadence.
+    seconds: Arc<AtomicU64>,
+}
+
+impl NodeSamples {
+    /// The samples of a node that has not run yet, counted in the computer's figures.
+    pub(super) fn new() -> Self {
+        let samples = NodeSamples {
+            resources: ArcRwSignal::new(None),
+            tree: ArcRwSignal::new(None),
+            seconds: Arc::new(AtomicU64::new(0)),
+        };
+        HERD_SAMPLES.with_borrow_mut(|all| all.push(samples.resources.clone()));
+        samples
+    }
+
+    /// Every second, like the main zebrad's sampler ([`super::Mock::tick_resources`]): a new run
+    /// publishes its first sample at once, a running one every [`INTERVAL`], and a node without
+    /// a pid publishes `None`. `?children` and `?readerpanic` are about the main zebrad only.
+    pub(super) fn tick(
+        &self,
+        kind: NodeKind,
+        network: Network,
+        status: &Status,
+        catching_up: bool,
+        flags: Flags,
+    ) {
+        let second = self.seconds.fetch_add(1, Ordering::Relaxed);
+        let tree = self.tree.get_untracked();
+        let (Some(pid), Some(started_at)) = (status.pid, status.started_at) else {
+            if self.resources.with_untracked(Option::is_some) {
+                self.resources.set(None);
+            }
+            // The next run starts its own counters; its id follows this run's.
+            if let Some(tree) = tree.filter(|tree| tree.pid != 0) {
+                self.tree.set(Some(MockTree { pid: 0, ..tree }));
+            }
+            return;
+        };
+        let new_run = tree.as_ref().is_none_or(|tree| tree.pid != pid);
+        if !new_run && !second.is_multiple_of(INTERVAL.as_secs()) {
+            return;
+        }
+        let mut tree = match tree {
+            Some(tree) if !new_run => tree,
+            previous => MockTree::with_root(
+                root_of(kind),
+                previous.map_or(1, |tree| tree.run + 1),
+                pid,
+                started_at,
+            ),
+        };
+        let now = clock::now();
+        let run_secs = now
+            .duration_since(started_at)
+            .map_or(0.0, |since| since.as_secs_f64());
+        let load = herd_load(kind, network, catching_up, tree.count);
+        let flags = Flags {
+            children: false,
+            ..flags
+        };
+        let sample = tree.sample(now, run_secs, &load, flags);
+        self.tree.set(Some(tree));
+        self.resources.set(Some(sample));
+    }
+}
+
+/// The herd's nodes' newest samples, of those that have a run.
+fn herd_samples() -> Vec<NodeResources> {
+    HERD_SAMPLES.with_borrow(|all| all.iter().filter_map(ArcRwSignal::get_untracked).collect())
+}
+
+/// The computer at sample `count`, with the newest sample of each node that has a run. The
+/// first sample has no busy figure, like the backend's.
 pub(super) fn machine(
     at: SystemTime,
     count: u64,
     os: OsFlag,
-    node: Option<&NodeResources>,
+    computer: Computer,
+    nodes: &[&NodeResources],
 ) -> MachineResources {
     let others = 0.75 + 0.15 * jitter(count, 5);
-    let node_cores = node.and_then(|node| node.cpu_cores).unwrap_or(0.0);
-    let node_memory = node.map_or(0, |node| node.memory_bytes);
-    let total = gib(MEMORY_TOTAL_GIB);
+    let node_cores: f64 = nodes.iter().filter_map(|node| node.cpu_cores).sum();
+    let node_memory: u64 = nodes.iter().map(|node| node.memory_bytes).sum();
+    let node_commit: u64 = nodes.iter().filter_map(|node| node.committed_bytes).sum();
+    let total = gib(computer.memory_gib);
     let used = node_memory + gib(OTHER_MEMORY_GIB);
     let windows = os == OsFlag::Windows;
     let swap = (!windows).then_some((gib(SWAP_TOTAL_GIB), gib(SWAP_USED_GIB)));
+    let cpus = computer.logical_cpus;
     MachineResources {
         at,
-        logical_cpus: LOGICAL_CPUS,
-        cpu_busy_cores: (count > 0)
-            .then(|| (node_cores + others).clamp(0.0, f64::from(LOGICAL_CPUS))),
+        logical_cpus: cpus,
+        cpu_busy_cores: (count > 0).then(|| (node_cores + others).clamp(0.0, f64::from(cpus))),
         memory_total_bytes: total,
         memory_available_bytes: Some(total.saturating_sub(used)),
         swap_total_bytes: swap.map(|(total, _)| total),
         swap_used_bytes: swap.map(|(_, used)| used),
-        commit_bytes: windows.then(|| {
-            gib(OTHER_COMMIT_GIB) + node.and_then(|node| node.committed_bytes).unwrap_or(0)
-        }),
-        commit_limit_bytes: windows.then(|| gib(COMMIT_LIMIT_GIB)),
+        commit_bytes: windows.then(|| gib(OTHER_COMMIT_GIB) + node_commit),
+        commit_limit_bytes: windows.then(|| gib(computer.commit_limit_gib)),
         pressure: (os == OsFlag::Macos).then_some(MemoryPressure::Normal),
     }
 }
@@ -495,23 +698,21 @@ impl super::Mock {
         }
         if second.is_multiple_of(INTERVAL.as_secs()) {
             let count = second / INTERVAL.as_secs();
-            let sample = match &unpublished {
-                Some(node) => machine(now, count, self.flags.os, Some(node)),
-                None => self
-                    .resources
-                    .with_untracked(|node| machine(now, count, self.flags.os, node.as_ref())),
+            let main = unpublished.or_else(|| self.resources.get_untracked());
+            let herd = herd_samples();
+            let nodes: Vec<&NodeResources> = main.iter().chain(&herd).collect();
+            let computer = if self.flags.herd {
+                HERD_COMPUTER
+            } else {
+                ONE_NODE
             };
-            self.machine.set(Some(sample));
+            self.machine
+                .set(Some(machine(now, count, self.flags.os, computer, &nodes)));
         }
     }
 }
 
-/// Calls `handler` with every change of the node's resources, starting with the current value.
-pub fn on_node_resources(handler: impl Fn(Option<NodeResources>) + 'static) {
-    let resources = mock().resources;
-    Effect::new(move |_| handler(resources.get()));
-}
-
+/// The main zebrad's newest sample; [`super::nodes`] sends its changes to the UI.
 pub async fn get_node_resources() -> Option<NodeResources> {
     sleep(50).await;
     mock().resources.get_untracked()
@@ -763,12 +964,12 @@ mod tests {
     #[test]
     fn the_computer_holds_the_node() {
         let at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
-        let first = machine(at, 0, OsFlag::Linux, None);
+        let first = machine(at, 0, OsFlag::Linux, ONE_NODE, &[]);
         assert_eq!(
             first.cpu_busy_cores, None,
             "no busy figure before a second reading"
         );
-        assert_eq!(first.logical_cpus, LOGICAL_CPUS);
+        assert_eq!(first.logical_cpus, ONE_NODE.logical_cpus);
         let start = at - Duration::from_secs(600);
         let mut tree = MockTree::new(1, 7, start);
         let node = tree.sample(
@@ -777,9 +978,9 @@ mod tests {
             &load(&state(600.0, false, Scenario::Normal)),
             Flags::default(),
         );
-        let linux = machine(at, 3, OsFlag::Linux, Some(&node));
+        let linux = machine(at, 3, OsFlag::Linux, ONE_NODE, &[&node]);
         let busy = linux.cpu_busy_cores.unwrap();
-        assert!(busy > node.cpu_cores.unwrap() && busy <= f64::from(LOGICAL_CPUS));
+        assert!(busy > node.cpu_cores.unwrap() && busy <= f64::from(ONE_NODE.logical_cpus));
         let available = linux.memory_available_bytes.unwrap();
         assert_eq!(
             available,
@@ -789,12 +990,109 @@ mod tests {
         assert_eq!(linux.pressure, None);
         assert_eq!(linux.commit_bytes, None);
 
-        let mac = machine(at, 3, OsFlag::Macos, Some(&node));
+        let mac = machine(at, 3, OsFlag::Macos, ONE_NODE, &[&node]);
         assert_eq!(mac.pressure, Some(MemoryPressure::Normal));
-        let windows = machine(at, 3, OsFlag::Windows, Some(&node));
+        let windows = machine(at, 3, OsFlag::Windows, ONE_NODE, &[&node]);
         assert_eq!(windows.swap_total_bytes, None);
-        assert_eq!(windows.commit_limit_bytes, Some(gib(COMMIT_LIMIT_GIB)));
+        assert_eq!(
+            windows.commit_limit_bytes,
+            Some(gib(ONE_NODE.commit_limit_gib))
+        );
         assert!(windows.commit_bytes.unwrap() >= gib(OTHER_COMMIT_GIB));
+    }
+
+    #[test]
+    fn the_herds_nodes_use_the_designs_figures() {
+        let gib_of = |load: &Load| load.memory as f64 / GIB;
+        for count in 0..200 {
+            let zebra = herd_load(NodeKind::Zebrad, Network::Testnet, false, count);
+            assert!((0.13..0.17).contains(&zebra.cores), "{zebra:?}");
+            assert!((1.85..1.95).contains(&gib_of(&zebra)), "{zebra:?}");
+            let pruned = herd_load(NodeKind::Zakura, Network::Testnet, false, count);
+            assert!((0.09..0.11).contains(&pruned.cores), "{pruned:?}");
+            assert!((1.18..1.22).contains(&gib_of(&pruned)), "{pruned:?}");
+            let catching_up = herd_load(NodeKind::Zakura, Network::Mainnet, true, count);
+            assert!((2.8..3.6).contains(&catching_up.cores), "{catching_up:?}");
+            assert!(
+                (4.3..4.5).contains(&gib_of(&catching_up)),
+                "{catching_up:?}"
+            );
+            let indexer = herd_load(NodeKind::Zaino, Network::Mainnet, false, count);
+            assert!((0.27..0.33).contains(&indexer.cores), "{indexer:?}");
+            let mib = indexer.memory as f64 / MIB;
+            assert!((640.0..660.0).contains(&mib), "{indexer:?}");
+        }
+        // Caught up, Zakura uses what zebrad does at the tip.
+        let caught_up = herd_load(NodeKind::Zakura, Network::Mainnet, false, 0);
+        assert!(caught_up.cores < 0.3, "{caught_up:?}");
+    }
+
+    #[test]
+    fn a_herd_nodes_tree_starts_with_its_program() {
+        let start = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let mut tree = MockTree::with_root(root_of(NodeKind::Zakura), 1, 4310, start);
+        let load = herd_load(NodeKind::Zakura, Network::Mainnet, true, 0);
+        let sample = tree.sample(start + Duration::from_secs(5), 5.0, &load, Flags::default());
+        assert_eq!(sample.members[0].name, "zakurad");
+        assert_eq!(sample.members[0].pid, 4310);
+        assert_eq!(sample.processes, 1);
+        assert_eq!(sample.threads, Some(64));
+        assert!(sample.cpu_secs > 10.0, "{sample:?}");
+        let windows = tree.sample(
+            start + Duration::from_secs(10),
+            10.0,
+            &load,
+            Flags {
+                os: OsFlag::Windows,
+                ..Flags::default()
+            },
+        );
+        assert_eq!(windows.members[0].name, "zakurad.exe");
+        assert_eq!(windows.descriptors, Some(1100));
+        assert_eq!(root_of(NodeKind::Zebrad), ZEBRAD);
+        assert_eq!(root_of(NodeKind::Zaino).name, "zainod");
+    }
+
+    #[test]
+    fn the_herd_fits_its_computer() {
+        let at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let start = at - Duration::from_secs(3600);
+        // The main zebrad at its largest, syncing, beside the herd's running nodes.
+        let main = MockTree::new(1, 7, start).sample(
+            at,
+            3600.0,
+            &load(&state(3600.0, false, Scenario::Normal)),
+            Flags::default(),
+        );
+        let herd: Vec<NodeResources> = [
+            (NodeKind::Zebrad, Network::Testnet, false),
+            (NodeKind::Zakura, Network::Testnet, false),
+            (NodeKind::Zakura, Network::Mainnet, true),
+            (NodeKind::Zaino, Network::Mainnet, false),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (kind, network, catching_up))| {
+            let mut tree = MockTree::with_root(root_of(kind), 1, 4300 + i as u32, start);
+            tree.sample(
+                at,
+                3600.0,
+                &herd_load(kind, network, catching_up, 3),
+                Flags::default(),
+            )
+        })
+        .collect();
+        let nodes: Vec<&NodeResources> = std::iter::once(&main).chain(&herd).collect();
+        let computer = machine(at, 3, OsFlag::Linux, HERD_COMPUTER, &nodes);
+        assert_eq!(computer.logical_cpus, 16);
+        let busy = computer.cpu_busy_cores.unwrap();
+        assert!((8.0..16.0).contains(&busy), "{busy}");
+        let available = computer.memory_available_bytes.unwrap() as f64;
+        let share = available / computer.memory_total_bytes as f64;
+        assert!(share > 0.25, "no memory warning: {share}");
+        // One node's computer could not hold them.
+        let small = machine(at, 3, OsFlag::Linux, ONE_NODE, &nodes);
+        assert!(small.memory_available_bytes.unwrap() < gib(1.0));
     }
 
     #[test]

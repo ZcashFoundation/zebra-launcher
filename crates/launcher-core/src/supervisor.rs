@@ -26,12 +26,13 @@
 
 use std::{
     io,
+    net::SocketAddr,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime},
 };
 
-use launcher_types::{ExitInfo, LogLevel, LogLine, Status};
+use launcher_types::{ExitInfo, LogLevel, LogLine, PortRole, Status};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::{
@@ -77,12 +78,54 @@ pub struct SupervisorConfig {
     pub pidfile: Option<PathBuf>,
     /// Where to copy zebrad's output on disk, if anywhere.
     pub log_file: Option<RotatingLogConfig>,
+    /// The addresses zebrad will listen on, checked before every spawn: one
+    /// that another program holds fails the start as
+    /// [`launcher_types::ExitClass::PortInUse`] before zebrad runs. A watch,
+    /// so a node's ports can change (a new network) without a new
+    /// supervisor. zebrad's own detection of a port in use stays the
+    /// backstop: the check binds each address briefly ([`addr_in_use`]),
+    /// which some systems allow even while another program listens there.
+    pub listeners: watch::Receiver<Vec<Listener>>,
+}
+
+/// An address zebrad will listen on ([`SupervisorConfig::listeners`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Listener {
+    /// What the port is for, to name it in the failure.
+    pub role: PortRole,
+    /// The address to try binding before zebrad starts.
+    pub addr: SocketAddr,
+}
+
+/// Whether another socket holds `addr`: binding a TCP socket to it fails
+/// with `AddrInUse`. Any other failure (no IPv6, a port the system reserves)
+/// does not count; zebrad reports it.
+///
+/// The probe binds but never listens, so the launcher itself never listens
+/// on a non-loopback address: Windows Defender Firewall asks about a program
+/// at its first `listen` there, and that prompt is for zebrad. Like the
+/// standard library's listener, the probe allows reusing the address on
+/// Unix, so a port with connections in `TIME_WAIT` is free; on Windows that
+/// option would let the bind succeed over a live listener, so it is not set.
+pub fn addr_in_use(addr: SocketAddr) -> bool {
+    let socket = match addr {
+        SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+        SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+    };
+    let Ok(socket) = socket else {
+        return false;
+    };
+    #[cfg(unix)]
+    if socket.set_reuseaddr(true).is_err() {
+        return false;
+    }
+    matches!(socket.bind(addr), Err(err) if err.kind() == io::ErrorKind::AddrInUse)
 }
 
 impl SupervisorConfig {
     /// Production defaults around `command`: a 60 s stop grace (zebrad's own
     /// task shutdown timeout is 20 s), 10 000 lines of history, the default
-    /// restart policy, no pid file and no log file.
+    /// restart policy, no pid file, no log file and no listeners to check.
     pub fn new(command: ZebradCommand) -> Self {
         Self {
             command,
@@ -93,6 +136,7 @@ impl SupervisorConfig {
             restart: RestartPolicy::default(),
             pidfile: None,
             log_file: None,
+            listeners: watch::channel(Vec::new()).1,
         }
     }
 }
@@ -110,6 +154,10 @@ pub enum SupervisorError {
     /// zebrad exited before it finished starting.
     #[error("zebrad exited while starting ({:?}){}", .0.class, detail_suffix(.0))]
     ExitedDuringStart(ExitInfo),
+    /// A port zebrad needs is held by another program, so zebrad was not
+    /// started; the message names it.
+    #[error("{0}")]
+    PortInUse(String),
     /// The supervisor is shutting down or has shut down.
     #[error("the supervisor has shut down")]
     Closed,

@@ -1,5 +1,5 @@
-//! The banner for a zebrad left behind by an earlier launcher run, with a button that
-//! terminates it and starts the launcher's own zebrad.
+//! The banner for a zebrad left behind by an earlier launcher run of the selected node, with a
+//! button that terminates it and starts the node.
 
 use leptos::{prelude::*, task::spawn_local};
 
@@ -15,7 +15,8 @@ pub fn StaleBanner() -> impl IntoView {
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            if let Err(failure) = api::start_zebrad_killing_stale().await {
+            let node = state.node_untracked().id();
+            if let Err(failure) = api::start_node_killing_stale(&node).await {
                 error.set(Some(format!("Could not stop it and start: {failure}")));
             }
             busy.set(false);
@@ -23,7 +24,7 @@ pub fn StaleBanner() -> impl IntoView {
     };
 
     move || {
-        let stale = state.primary.status.with(|status| status.stale.clone())?;
+        let stale = state.node().status.with(|status| status.stale.clone())?;
         Some(view! {
             <div class="banner banner-warn" role="alert">
                 <span>

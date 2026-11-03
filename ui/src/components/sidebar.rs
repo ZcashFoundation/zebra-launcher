@@ -167,7 +167,8 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
             <button
                 type="button"
                 class="side-item side-add"
-                title="Add node"
+                title=move || state.add_refused().unwrap_or_else(|| "Add node".to_owned())
+                disabled=move || state.add_refused().is_some()
                 on:click=move |_| on_add.run(())
             >
                 <span class="side-plus" aria-hidden="true">"+"</span>
@@ -250,7 +251,7 @@ fn NodeItem(node: NodeState) -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use launcher_types::{NodeId, NodeKind};
+    use launcher_types::{NodeId, NodeKind, NodeProgram};
 
     use super::*;
 
@@ -262,7 +263,11 @@ mod tests {
             network: Network::Mainnet,
             depends_on: None,
             data_dir: String::new(),
+            own_folder: None,
             ports: Vec::new(),
+            program: NodeProgram::Bundled,
+            autostart: true,
+            stop_grace_secs: 60,
         }
     }
 

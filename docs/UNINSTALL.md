@@ -13,6 +13,7 @@ The app identifier is `org.zfnd.zeal`.
 | RPC cookie | `<app_local_data_dir>/rpc` |
 | `zebrad.toml`, `launcher.json` | `<app_config_dir>` |
 | Logs (`launcher.<date>.log`, `zebrad.log`) | `<app_log_dir>` |
+| Each node added later: its `zebrad.toml`, cookie, `zebrad.log` and default chain state | `<app_local_data_dir>/nodes/<id>` |
 
 | OS | `app_local_data_dir` / `app_config_dir` |
 | --- | --- |
@@ -45,6 +46,11 @@ nothing else: `zebrad.toml`, `launcher.json` (the launcher settings), the logs a
 cookie stay, and the next start syncs from scratch. It shows how much space was freed. It refuses to delete anything that is not a `state` directory inside
 the launcher's data dir or the data dir chosen in the settings. A data dir you chose
 yourself is never removed by an uninstaller; delete it by hand if you no longer want it.
+
+With several nodes, a node's **Node settings → Remove** asks whether to keep its data or
+delete it. Deleting removes its chain state with the same rules and then, for a node added
+later, the rest of its `nodes/<id>` folder; the first node's `zebrad.toml` and logs stay.
+Kept data stays where it is; delete it by hand if you no longer want it.
 
 ## Linux
 

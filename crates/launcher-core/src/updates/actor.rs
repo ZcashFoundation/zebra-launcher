@@ -714,10 +714,16 @@ impl<B: UpdateBackend, N: NodeControl> Actor<B, N> {
         let (release, bytes) = (found.release.clone(), bytes.clone());
         let version = found.version.clone();
         self.countdown_until = None;
+        // A node that halted at its end of support makes the folded status
+        // `Failed`, while other nodes may still run: the nodes that run count
+        // too, so a failed install brings them back and the next launch
+        // starts and checks them.
+        let running_nodes = self.node.running_nodes();
         let pending = PendingUpdate {
             from_version: self.config.current_version.clone(),
             to_version: version.clone(),
-            zebrad_was_running: self.status.borrow().phase.is_active(),
+            zebrad_was_running: self.status.borrow().phase.is_active() || !running_nodes.is_empty(),
+            running_nodes,
             written_at: SystemTime::now(),
         };
         // The supervisor's grace is fixed at launch; the settings may have
@@ -993,6 +999,8 @@ mod tests {
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
+    use launcher_types::NodeId;
+
     use super::*;
     use crate::{
         supervisor,
@@ -1112,6 +1120,8 @@ mod tests {
         stopping: Arc<AtomicBool>,
         /// A start arrived while a stop was under way.
         started_while_stopping: Arc<AtomicBool>,
+        /// What `running_nodes` answers: none, as for a single node.
+        running: Arc<watch::Sender<Vec<NodeId>>>,
     }
 
     fn running() -> Status {
@@ -1132,6 +1142,7 @@ mod tests {
                 stop_delay_secs: Arc::default(),
                 stopping: Arc::default(),
                 started_while_stopping: Arc::default(),
+                running: Arc::new(watch::channel(Vec::new()).0),
             }
         }
     }
@@ -1160,6 +1171,9 @@ mod tests {
             self.starts.fetch_add(1, Ordering::SeqCst);
             self.status.send_replace(running());
             Ok(())
+        }
+        fn running_nodes(&self) -> Vec<NodeId> {
+            self.running.borrow().clone()
         }
     }
 
@@ -1450,6 +1464,50 @@ mod tests {
         assert!(!pending.zebrad_was_running);
     }
 
+    /// The herd as the updater sees it when a Mainnet node halted at its end
+    /// of support while a Testnet node runs: the folded status is the halt.
+    fn halted_beside_a_running_node(h: &Harness) -> NodeId {
+        h.node.status.send_replace(Status {
+            phase: Phase::Failed {
+                class: ExitClass::EosHalt,
+            },
+            ..Status::default()
+        });
+        let testnet = NodeId::new("zebrad-testnet").expect("an id");
+        h.node.running.send_replace(vec![testnet.clone()]);
+        testnet
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_node_running_beside_a_halted_one_is_marked_as_running() {
+        let h = harness(UpdateMode::Notify, FakeBackend::with_latest(Some("0.2.0")));
+        let testnet = halted_beside_a_running_node(&h);
+        check_and_install(&h).await;
+        idle(Duration::from_secs(1)).await;
+        assert_eq!(h.backend.count(|i| &i.installs), 1);
+        assert_eq!(h.node.stops.load(Ordering::SeqCst), 1);
+        // The next launch brings the Testnet node back and checks it.
+        let pending = read_marker(&h.marker).expect("read").expect("marker");
+        assert!(pending.zebrad_was_running);
+        assert_eq!(pending.running_nodes, vec![testnet]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_install_brings_back_a_node_that_ran_beside_a_halted_one() {
+        let backend = FakeBackend::with_latest(Some("0.2.0"));
+        backend.inner.install_fails.store(true, Ordering::SeqCst);
+        let h = harness(UpdateMode::Notify, backend);
+        halted_beside_a_running_node(&h);
+        check_and_install(&h).await;
+        wait_for(&h.handle, "error", |i| {
+            matches!(i.state, UpdateState::Error { .. })
+        })
+        .await;
+        assert_eq!(h.node.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(h.node.starts.load(Ordering::SeqCst), 1, "started again");
+        assert_eq!(read_marker(&h.marker).expect("read"), None);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_failed_install_restarts_zebrad_and_reports() {
         let backend = FakeBackend::with_latest(Some("0.2.0"));
@@ -1622,9 +1680,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_stop_cap_follows_the_supervisor_not_the_settings() {
         let h = harness(UpdateMode::Notify, FakeBackend::with_latest(Some("0.2.0")));
-        // The grace was lowered in the settings after launch; the supervisor
-        // still waits its 120 s before killing zebrad, and so must the cap.
-        h.settings.send_modify(|s| s.stop_grace_secs = 5);
+        // The grace may be lowered in the node's settings after launch; the
+        // supervisor still waits its 120 s before killing zebrad, and so must
+        // the cap.
         h.node.stop_grace_secs.store(120, Ordering::SeqCst);
         h.node.stop_delay_secs.store(100, Ordering::SeqCst);
         check_and_install(&h).await;

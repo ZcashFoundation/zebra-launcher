@@ -28,6 +28,7 @@ use crate::{
         Control, FIELDS, Field, FieldId, FormState, ParsedConfig, field_named, normalize,
         parse_config, render_config, validate,
     },
+    node_state::NodeState,
 };
 
 /// Whether the file was read.
@@ -409,7 +410,8 @@ pub struct ConfigEditor {
 }
 
 impl ConfigEditor {
-    /// Creates the editor, reads the file, and keeps it re-read: when the file is replaced
+    /// Creates the editor for the selected node's file, reads it, and keeps it re-read: when
+    /// another node is picked (its file replaces the draft), when the file is replaced
     /// elsewhere (a reset, which bumps `config_changed`) and when the Configure tab is opened
     /// without pending changes.
     pub fn new() -> Self {
@@ -483,14 +485,23 @@ impl ConfigEditor {
 
         spawn_local(editor.reload(Reload::Replace));
 
+        // Another node's file: read it, replacing the draft, which was the other file's.
+        Effect::new(move |previous: Option<NodeState>| {
+            let node = state.node();
+            if previous.is_some_and(|previous| previous != node) {
+                spawn_local(editor.reload(Reload::Replace));
+            }
+            node
+        });
         // The file was replaced elsewhere (a reset from the update recovery panel, or the one
         // below the panes): re-read it, keeping a pending draft.
-        Effect::new(move |previous: Option<u64>| {
-            let changed = state.primary.config_changed.get();
-            if previous.is_some_and(|previous| previous != changed) {
+        Effect::new(move |previous: Option<(NodeState, u64)>| {
+            let node = state.node();
+            let changed = node.config_changed.get();
+            if previous.is_some_and(|(before, count)| before == node && count != changed) {
                 spawn_local(editor.reload_pending());
             }
-            changed
+            (node, changed)
         });
         // Opening the page re-reads the file while there is nothing to lose: no draft edit, and
         // no rejected text typed into a field, which the draft does not hold.
@@ -588,7 +599,10 @@ impl ConfigEditor {
         // The panes stay enabled while the file is read (a reload is not a save), so an edit
         // made meanwhile must not be replaced by the fresh file.
         let draft_before = self.draft.get_untracked();
-        let fresh = match api::read_config().await {
+        let node = self.state.node_untracked();
+        let fresh = match api::read_config(&node.id()).await {
+            // Another node was picked meanwhile: its own read follows.
+            Ok(_) if self.state.node_untracked() != node => return,
             Ok(fresh) => fresh,
             Err(error) => {
                 self.load
@@ -692,10 +706,10 @@ impl ConfigEditor {
         self.text_mode.set(on);
     }
 
-    /// True while saving restarts zebrad.
+    /// True while saving restarts the node's zebrad.
     pub fn restarts(self) -> bool {
         self.state
-            .primary
+            .node()
             .status
             .with(|status| restarts_zebrad(&status.phase))
     }
@@ -731,12 +745,13 @@ impl ConfigEditor {
         };
         let text = self.draft.get_untracked();
         let restarted = untrack(|| self.restarts());
+        let node = self.state.node_untracked();
         self.saving.set(true);
         self.notice.clear();
         spawn_local(async move {
-            let result = api::apply_config(text, token).await;
+            let result = api::apply_config(&node.id(), text, token).await;
             if let Ok(outcome) = &result {
-                self.state.record_config_outcome(outcome);
+                self.state.record_config_outcome(node, outcome);
             }
             let (reload, notice) = after_apply(result, restarted, || self.keeps_draft());
             if let Some(reload) = reload {

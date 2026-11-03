@@ -28,6 +28,7 @@ use std::{
 
 use launcher_types::{MachineResources, NodeResources, Platform};
 use tokio::{sync::watch, time::MissedTickBehavior};
+use tracing::Instrument;
 
 use crate::process::TreeProbe;
 
@@ -199,7 +200,9 @@ pub struct ResourceSampler;
 
 impl ResourceSampler {
     /// Samples the probe's tree every [`INTERVAL`] while the probe is `Some`, with this
-    /// platform's reader. Must be called inside a Tokio runtime.
+    /// platform's reader. Must be called inside a Tokio runtime. The sampler logs inside the
+    /// span that is current here, so a node's sampler started in the node's span logs to that
+    /// node.
     pub fn spawn(
         probe: watch::Receiver<Option<TreeProbe>>,
     ) -> watch::Receiver<Option<NodeResources>> {
@@ -213,7 +216,7 @@ impl ResourceSampler {
         reader: Arc<dyn Reader>,
     ) -> watch::Receiver<Option<NodeResources>> {
         let (tx, rx) = watch::channel(None);
-        tokio::spawn(sample_trees(probe, interval, reader, tx));
+        tokio::spawn(sample_trees(probe, interval, reader, tx).in_current_span());
         rx
     }
 }

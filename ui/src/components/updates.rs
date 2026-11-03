@@ -314,7 +314,7 @@ pub fn UpdateActions() -> impl IntoView {
                 Action::Cancel => api::cancel_update().await,
                 // The new state arrives as events, like every other.
                 Action::Check => api::check_for_update().await.map(|_| ()),
-                Action::OpenReleases => api::open_path(OpenTarget::ReleasesPage).await,
+                Action::OpenReleases => api::open_path(OpenTarget::ReleasesPage, None).await,
             };
             if let Err(failure) = result {
                 error.set(Some(format!("Could not {what}: {failure}")));
@@ -619,7 +619,8 @@ fn HealthFailurePanel() -> impl IntoView {
     let open = move |target: OpenTarget, what: &'static str| {
         error.set(None);
         spawn_local(async move {
-            if let Err(failure) = api::open_path(target).await {
+            let node = state.node_untracked().id();
+            if let Err(failure) = api::open_path(target, Some(&node)).await {
                 error.set(Some(format!("Could not open {what}: {failure}")));
             }
         });
@@ -642,7 +643,7 @@ fn HealthFailurePanel() -> impl IntoView {
             <li>
                 <ResetConfigButton />
                 {move || {
-                    let stopped = state.primary.status.with(|status| data_change_allowed(&status.phase));
+                    let stopped = state.node().status.with(|status| data_change_allowed(&status.phase));
                     (!stopped)
                         .then(|| {
                             view! {
