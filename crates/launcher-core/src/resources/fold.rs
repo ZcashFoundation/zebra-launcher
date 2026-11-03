@@ -24,6 +24,9 @@
 //!   (a shell that runs a command, both done within one interval), is checked against the
 //!   nearest live ancestor's rollup, shallowest first: that rollup holds the parent's total,
 //!   and the parent's holds the child's.
+//! - A member waiting on a parent that then leaves moves up the same way, to the parent's
+//!   live ancestor, and settles after the parent's own departure, waiting one more reading if
+//!   it must: the parent's final total holds the member's.
 //!
 //! The published totals never decrease within a run, which hides the one-reading dip of a torn
 //! read.
@@ -366,6 +369,25 @@ impl Fold {
     fn settle_departures(&mut self, members: &[MemberReading], index: &HashMap<Identity, usize>) {
         let live = |id: &Identity| index.contains_key(id);
         let mut pending = std::mem::take(&mut self.pending);
+        // A waiting departure whose anchor has left since: its time is in the anchor's final
+        // total, so it moves up to the anchor's live ancestor and settles behind the anchor's
+        // own departure, with the same one-reading grace.
+        for departure in &mut pending {
+            while !live(&departure.anchor) && departure.depth < MAX_CHAIN {
+                match self
+                    .last
+                    .get(&departure.anchor)
+                    .and_then(|seen| seen.parent)
+                {
+                    Some(up) => {
+                        departure.anchor = up;
+                        departure.depth += 1;
+                        departure.waited = false;
+                    }
+                    None => break,
+                }
+            }
+        }
         let mut departed: Vec<(&Identity, &Seen)> =
             self.last.iter().filter(|(id, _)| !live(id)).collect();
         departed.sort_by_key(|(id, _)| (id.pid, id.start));
@@ -753,6 +775,87 @@ mod tests {
         let settled = fold.fold(clock.reading(3, vec![member(100, 1, 100.0, 1.5, 0)]));
         assert!(close(settled.cpu_secs, 103.5), "{}", settled.cpu_secs);
         assert!(close(fold.lost.cpu, 2.0));
+    }
+
+    #[test]
+    fn a_member_waiting_on_a_parent_that_leaves_moves_up() {
+        // A torn read: sh (101) was read just before it reaped cmd (102), so cmd is gone and
+        // waits on sh. Before the next reading zebrad reaps sh, whose final total holds cmd's:
+        // sh's own 1.3 s and cmd's 2.3 s, and cmd's 50 bytes.
+        let clock = clock();
+        let mut fold = Fold::new(&clock.probe(1), Platform::Linux);
+        fold.fold(clock.reading(
+            1,
+            vec![
+                member(100, 1, 100.0, 0.0, 0),
+                member(101, 100, 1.0, 0.0, 0),
+                member(102, 101, 2.0, 0.0, 50),
+            ],
+        ));
+        fold.fold(clock.reading(
+            2,
+            vec![member(100, 1, 100.0, 0.0, 0), member(101, 100, 1.2, 0.0, 0)],
+        ));
+        let third = fold.fold(clock.reading(3, vec![member(100, 1, 100.0, 3.6, 50)]));
+        assert!(close(third.cpu_secs, 103.6), "{}", third.cpu_secs);
+        assert_eq!(third.read_bytes, Some(50), "cmd's bytes once");
+        assert!(close(fold.lost.cpu, 0.0));
+
+        // The same with I/O on every member: sh's 500 bytes and cmd's 2,000 reach zebrad's
+        // count with sh.
+        let mut fold = Fold::new(&clock.probe(2), Platform::Linux);
+        fold.fold(clock.reading(
+            1,
+            vec![
+                member(100, 1, 100.0, 0.0, 100),
+                member(101, 100, 1.0, 0.0, 500),
+                member(102, 101, 2.0, 0.0, 2000),
+            ],
+        ));
+        fold.fold(clock.reading(
+            2,
+            vec![
+                member(100, 1, 100.0, 0.0, 100),
+                member(101, 100, 1.5, 0.0, 500),
+            ],
+        ));
+        for tick in 3..=4 {
+            let sample = fold.fold(clock.reading(tick, vec![member(100, 1, 100.0, 4.0, 3100)]));
+            assert!(close(sample.cpu_secs, 104.0), "{}", sample.cpu_secs);
+            assert_eq!(sample.read_bytes, Some(3100));
+        }
+    }
+
+    #[test]
+    fn an_auto_reaped_child_whose_parent_leaves_is_lost_once() {
+        // sh (101) ignores SIGCHLD, so the kernel reaps cmd (102) without folding it in. Then
+        // zebrad reaps sh: its rollup grows by sh's 1.5 s and 600 bytes only. cmd moves up to
+        // zebrad with a fresh grace, settles after sh, and its seen part is lost.
+        let clock = clock();
+        let mut fold = Fold::new(&clock.probe(1), Platform::Linux);
+        fold.fold(clock.reading(
+            1,
+            vec![
+                member(100, 1, 100.0, 0.0, 100),
+                member(101, 100, 1.0, 0.0, 500),
+                member(102, 101, 0.8, 0.0, 2000),
+            ],
+        ));
+        fold.fold(clock.reading(
+            2,
+            vec![
+                member(100, 1, 100.0, 0.0, 100),
+                member(101, 100, 1.0, 0.0, 500),
+            ],
+        ));
+        let mut last = None;
+        for tick in 3..=5 {
+            last = Some(fold.fold(clock.reading(tick, vec![member(100, 1, 100.0, 1.5, 700)])));
+        }
+        let settled = last.unwrap();
+        assert!(close(settled.cpu_secs, 102.3), "{}", settled.cpu_secs);
+        assert_eq!(settled.read_bytes, Some(2700));
+        assert!(close(fold.lost.cpu, 0.8));
     }
 
     #[test]

@@ -1421,6 +1421,11 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      `block_notify_command` is the case: `sh` reaps the command and zebrad reaps `sh` within
      one interval, so zebrad's rollup holds both, and the rule above alone (the command has
      no live parent, so its time goes to `lost`) would count the command twice.
+   - A member waiting on its parent after such a torn read moves up to the parent's live
+     ancestor when the parent leaves before the next reading, and settles after the
+     parent's own departure, waiting one more reading if it must. The parent's final total
+     holds the member's, so sending the member to `lost` would count it twice; an `sh` that
+     ends within a second of its command is the usual case.
    - The root's identity stays among the sticky ids after the root exits, so its start
      time is checked once per run.
    - The first reading comes within milliseconds of the spawn, so a run's first rate is
