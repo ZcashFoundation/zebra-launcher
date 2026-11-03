@@ -201,6 +201,31 @@ pub fn changes_text(count: usize, text_differs: bool) -> String {
     }
 }
 
+/// The bar's count while a field's text is invalid, in place of [`changes_text`]: Save stays
+/// off until it is fixed, so that is what the bar says.
+pub fn fix_text(count: usize) -> String {
+    if count == 1 {
+        "1 setting to fix".to_owned()
+    } else {
+        format!("{count} settings to fix")
+    }
+}
+
+/// The fields whose text the form rejects and the saved file does not hold: typed edits the
+/// draft cannot take yet, which Discard clears. A value the form rejects in the file itself is
+/// not one; Discard cannot change it.
+pub fn invalid_edits(
+    errors: &BTreeMap<FieldId, String>,
+    values: &FormState,
+    saved: &FormState,
+) -> Vec<FieldId> {
+    errors
+        .keys()
+        .filter(|id| values.get(**id) != saved.get(**id))
+        .copied()
+        .collect()
+}
+
 /// The note under the count when the text differs from the saved file without a setting
 /// changing.
 pub fn text_only_note(count: usize, text_differs: bool) -> Option<&'static str> {
@@ -672,6 +697,17 @@ impl ConfigEditor {
             .with(|status| restarts_zebrad(&status.phase))
     }
 
+    /// True while a field holds invalid text the user typed ([`invalid_edits`]): Discard has
+    /// something to clear although the draft is unchanged.
+    pub fn has_invalid_edit(self) -> bool {
+        self.errors.with(|errors| {
+            self.values.with(|values| {
+                self.saved
+                    .with(|saved| !invalid_edits(errors, values, saved).is_empty())
+            })
+        })
+    }
+
     pub fn can_save(self) -> bool {
         self.load.with(|load| *load == Load::Ready)
             && !self.saving.get()
@@ -993,11 +1029,24 @@ mod tests {
     }
 
     #[test]
+    fn an_invalid_edit_is_rejected_text_the_file_does_not_hold() {
+        let saved = with(&[(PORT.id(), "8233")]);
+        let typed = with(&[(PORT.id(), "82x")]);
+        let errors = BTreeMap::from([(PORT.id(), "Enter a whole number".to_owned())]);
+        assert_eq!(invalid_edits(&errors, &typed, &saved), vec![PORT.id()]);
+        // The file's own value, untouched: Discard would not change it.
+        assert!(invalid_edits(&errors, &saved, &saved).is_empty());
+        assert!(invalid_edits(&BTreeMap::new(), &typed, &saved).is_empty());
+    }
+
+    #[test]
     fn texts() {
         assert_eq!(changes_text(0, false), "No changes");
         assert_eq!(changes_text(0, true), "No setting changes");
         assert_eq!(changes_text(1, false), "1 change");
         assert_eq!(changes_text(3, true), "3 changes");
+        assert_eq!(fix_text(1), "1 setting to fix");
+        assert_eq!(fix_text(2), "2 settings to fix");
         assert!(text_only_note(0, true).is_some_and(|note| note.contains("comments")));
         assert_eq!(text_only_note(0, false), None);
         assert_eq!(text_only_note(2, true), None);

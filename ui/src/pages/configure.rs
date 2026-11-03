@@ -19,8 +19,8 @@ use wasm_bindgen::{JsCast, closure::Closure};
 use crate::{
     components::{config_form_view::ZebradConfigForm, reset_config::ResetConfigButton},
     config_editor::{
-        ConfigEditor, Load, Notice, changed_list, changes_text, save_label, saved_message,
-        text_only_note,
+        ConfigEditor, Load, Notice, changed_list, changes_text, fix_text, save_label,
+        saved_message, text_only_note,
     },
     config_view::{
         LineChange, change_summary, highlight_toml, key_line, line_changes, scroll_to_reveal,
@@ -129,6 +129,16 @@ pub fn Configure() -> impl IntoView {
         })
     };
     let change_count = move || editor.changes.with(Vec::len) + editor.removals.with(Vec::len);
+    // A field whose text is invalid keeps Save off, so the bar names it instead of counting
+    // changes: "No changes" beside a field with an error leaves Save unexplained.
+    let to_fix = move || {
+        editor.errors.with(|errors| {
+            (!errors.is_empty()).then(|| {
+                let fields: Vec<_> = errors.keys().copied().collect();
+                (fix_text(fields.len()), changed_list(&fields, &[]))
+            })
+        })
+    };
     let changes_detail = move || {
         let dirty = editor.dirty.get();
         // A draft the form cannot write (a forbidden key typed as text, say) is named here as
@@ -237,14 +247,27 @@ pub fn Configure() -> impl IntoView {
                 {notice_view}
                 <div class="cfg-bar">
                     <div class="cfg-changes">
-                        <span>{move || changes_text(change_count(), editor.dirty.get())}</span>
-                        <span class="muted cfg-changed-list">{changes_detail}</span>
+                        {move || match to_fix() {
+                            Some((count, fields)) => view! {
+                                <span>{count}</span>
+                                <span class="error cfg-changed-list">{fields}</span>
+                            }
+                            .into_any(),
+                            None => view! {
+                                <span>{move || changes_text(change_count(), editor.dirty.get())}</span>
+                                <span class="muted cfg-changed-list">{changes_detail}</span>
+                            }
+                            .into_any(),
+                        }}
                     </div>
                     <p class="cfg-status ok" role="status">{saved_view}</p>
                     <div class="buttons">
                         <button
                             type="button"
-                            disabled=move || editor.saving.get() || !editor.edited.get()
+                            disabled=move || {
+                                editor.saving.get()
+                                    || !(editor.edited.get() || editor.has_invalid_edit())
+                            }
                             on:click=move |_| editor.discard()
                         >
                             "Discard"
