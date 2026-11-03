@@ -18,6 +18,7 @@ pub mod paths;
 pub mod pidfile;
 pub mod policy;
 pub mod process;
+pub mod resources;
 pub mod rpc;
 pub mod settings;
 pub mod supervisor;
