@@ -3,7 +3,8 @@
 //! verified and served.
 //!
 //! The test runs when `PEBBLE` and `PEBBLE_CHALLTESTSRV` name the two binaries (CI's `pebble`
-//! job sets them); without them it prints a note and passes, so `cargo test` needs neither:
+//! job sets them); without them it prints a note and passes, so `cargo test` needs neither,
+//! unless `PEBBLE_REQUIRED` is set, as in that job, which makes it fail instead:
 //!
 //! ```sh
 //! PEBBLE=/path/to/pebble PEBBLE_CHALLTESTSRV=/path/to/pebble-challtestsrv \
@@ -182,6 +183,10 @@ async fn front_door(cert: watch::Receiver<Option<Arc<launcher_gateway::Certified
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tls_alpn_01_through_the_front_door_from_staging_to_production() {
     let Some((pebble, challtestsrv)) = binaries() else {
+        assert!(
+            std::env::var_os("PEBBLE_REQUIRED").is_none(),
+            "PEBBLE_REQUIRED is set, but PEBBLE and PEBBLE_CHALLTESTSRV do not name the binaries"
+        );
         eprintln!("skipped: PEBBLE and PEBBLE_CHALLTESTSRV are not set");
         return;
     };

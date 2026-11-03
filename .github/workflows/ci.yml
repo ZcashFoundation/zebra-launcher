@@ -157,6 +157,51 @@ jobs:
         env:
           ZEBRAD_BIN: ${{ runner.temp }}/zebrad/zebrad
         run: cargo test -p launcher-core --test real_zebrad --locked -- --include-ignored --nocapture
+      # zebrad's light wallet endpoint, straight and through the front door
+      # (crates/launcher-public/tests/real_light_server.rs).
+      - name: Run the light wallet endpoint's contract test
+        if: steps.gate.outputs.run == 'true'
+        env:
+          ZEBRAD_BIN: ${{ runner.temp }}/zebrad/zebrad
+        run: cargo test -p launcher-public --test real_light_server --locked -- --include-ignored --nocapture
+  # Certificates against Pebble, Let's Encrypt's test ACME server, through the
+  # real front door (crates/launcher-public/tests/pebble.rs). The test passes
+  # with a note without the binaries; PEBBLE_REQUIRED makes it fail instead, so
+  # this job cannot pass without running it.
+  pebble:
+    name: ACME against Pebble (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Pebble and pebble-challtestsrv (pinned)
+        run: |
+          set -euo pipefail
+          pin() { sed -n "s/^$1=//p" .github/tool-versions.env | tr -d '\r'; }
+          version="$(pin PEBBLE_VERSION)"
+          dir="${RUNNER_TEMP}/pebble"
+          mkdir -p "${dir}"
+          fetch() { # fetch NAME SHA256
+            curl --proto '=https' --tlsv1.2 -sSfL --retry 3 -o "${dir}/$1.tar.gz" \
+              "https://github.com/letsencrypt/pebble/releases/download/v${version}/$1-linux-amd64.tar.gz"
+            echo "$2  ${dir}/$1.tar.gz" | sha256sum -c -
+            tar -xzf "${dir}/$1.tar.gz" -C "${dir}" --strip-components=3 "$1-linux-amd64/linux/amd64/$1"
+            chmod +x "${dir}/$1"
+          }
+          fetch pebble "$(pin PEBBLE_SHA256_X86_64_LINUX)"
+          fetch pebble-challtestsrv "$(pin PEBBLE_CHALLTESTSRV_SHA256_X86_64_LINUX)"
+          {
+            echo "PEBBLE=${dir}/pebble"
+            echo "PEBBLE_CHALLTESTSRV=${dir}/pebble-challtestsrv"
+          } >> "${GITHUB_ENV}"
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Run the ACME test
+        env:
+          PEBBLE_REQUIRED: "1"
+        run: cargo test -p launcher-public --test pebble --locked -- --nocapture
 
   test-os:
     name: Test (${{ matrix.os }})

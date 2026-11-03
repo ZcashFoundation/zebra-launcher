@@ -230,6 +230,9 @@ fn bind(addr: SocketAddr) -> Result<TcpListener, GatewayError> {
     if addr.is_ipv6() {
         socket.set_only_v6(false).map_err(listen)?;
     }
+    // Rebinding over connections in TIME_WAIT after a restart. Not on Windows, where the
+    // option lets a socket take a port another one is bound to.
+    #[cfg(unix)]
     socket.set_reuse_address(true).map_err(listen)?;
     socket.set_nonblocking(true).map_err(listen)?;
     socket.bind(&addr.into()).map_err(|source| {
