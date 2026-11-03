@@ -16,6 +16,7 @@ use launcher_core::{
     config,
     nodes::{NodeError, NodeLayout, NodeSpec},
     paths::Paths,
+    pidfile,
     policy::RestartPolicy,
     registry::{self, RegistryConfig, RegistryHandle, StartError},
     settings::{SettingsHandle, SettingsStore},
@@ -470,6 +471,54 @@ async fn removing_stops_the_node_and_keeps_or_deletes_its_data() {
         within(fx.registry.remove(&first.id, false)).await,
         Err(NodeError::LastNode(_))
     ));
+    within(fx.registry.shutdown()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_zebrad_left_by_an_earlier_launcher_run_keeps_its_node_from_being_removed() {
+    let fx = fixture().await;
+    let added = within(fx.registry.add(draft(Network::Testnet, "Zebra · Testnet")))
+        .await
+        .expect("add");
+    let node = fx.registry.node(&added.id).expect("lookup");
+    let chain = node.state_dir().join("v29").join("testnet");
+    fs::create_dir_all(&chain).expect("a chain");
+    fs::write(chain.join("000001.sst"), b"blocks").expect("a block file");
+    // A zebrad "left behind" by an earlier run: started outside the
+    // supervisor, with the node's pid file naming it.
+    let mut orphan = std::process::Command::new(fake_zebrad())
+        .args([
+            "-c",
+            &node.paths.zebrad_config().display().to_string(),
+            "start",
+        ])
+        .env("FAKE_ZEBRAD_MODE", "ok")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the orphan");
+    pidfile::write(&node.paths.pidfile(), orphan.id(), &fake_zebrad()).expect("pid file");
+
+    let refused = within(fx.registry.remove(&added.id, true))
+        .await
+        .expect_err("the orphan is still running");
+    assert!(
+        refused
+            .to_string()
+            .contains(&format!("(pid {})", orphan.id())),
+        "{refused}"
+    );
+    assert!(fx.registry.node(&added.id).is_ok(), "the node stays listed");
+    assert_eq!(fx.settings.nodes().len(), 2);
+    assert!(chain.join("000001.sst").exists(), "with its data");
+
+    // Once it is gone, the node can go.
+    orphan.kill().expect("kill the orphan");
+    orphan.wait().expect("reap the orphan");
+    within(fx.registry.remove(&added.id, true))
+        .await
+        .expect("removed");
+    assert!(!chain.exists());
     within(fx.registry.shutdown()).await;
 }
 

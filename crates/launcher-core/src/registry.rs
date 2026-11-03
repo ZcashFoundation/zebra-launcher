@@ -46,6 +46,7 @@ use crate::{
     monitor,
     nodes::{self, NodeError, NodeLayout, NodeSpec},
     paths::{NodePaths, Paths},
+    pidfile,
     runtime::{self, NodeActors},
     settings::SettingsHandle,
     supervisor::{self, Listener, Note, StartOptions, SupervisorConfig, SupervisorError},
@@ -1120,7 +1121,8 @@ impl Actor {
 
 /// Stops `node` and, with `delete_data`, deletes its chain state with
 /// [`firstrun::delete_node_data`]'s rules: only a `state` folder inside the
-/// launcher's data directory or the node's data folder.
+/// launcher's data directory or the node's data folder. Refused while a
+/// zebrad from an earlier launcher run is still running for the node.
 async fn stop_and_delete(
     node: &NodeHandle,
     delete_data: bool,
@@ -1130,6 +1132,21 @@ async fn stop_and_delete(
         .stop()
         .await
         .map_err(|err| NodeError::Failed(err.to_string()))?;
+    // The supervisor removes the pid file when its own run ends, so a live
+    // zebrad there is one an earlier launcher run left behind, which only a
+    // start would have met. Removing the node would leave it running on the
+    // node's ports and files, with nothing left to find it again.
+    let pidfile = node.paths.pidfile();
+    if let Some(stale) = blocking(move || pidfile::check(&pidfile))
+        .await
+        .map_err(|err| NodeError::Failed(format!("could not read the pid file: {err}")))?
+    {
+        return Err(NodeError::Failed(format!(
+            "a zebrad from an earlier launcher run is still running (pid {}): stop it, or start \
+             the node and let Zeal stop it, then remove the node",
+            stale.pid
+        )));
+    }
     if !delete_data {
         return Ok(0);
     }

@@ -70,6 +70,8 @@ killed), the launcher finds it through its pid file at the next start and shows 
 instead of starting a second one: "A zebrad from an earlier launcher run is still running
 (pid …), so the launcher cannot start its own." Its **Stop it and start** button
 terminates that zebrad and starts a fresh one; or wait for it to exit by itself.
+Removing the node is refused while that zebrad runs: the launcher checks the pid file
+again once the node is stopped, so the removal never leaves it running unseen.
 
 The launcher never reuses a terminal zebrad's state directory, so otherwise this means two
 launchers or a manual zebrad pointed at the launcher's data dir.
