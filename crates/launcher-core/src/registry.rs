@@ -36,6 +36,7 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinSet,
 };
+use tracing::Instrument;
 
 use crate::{
     config,
@@ -988,19 +989,24 @@ impl Actor {
         let handle = runtime.handle.clone();
         let sizes = self.config.sizes.clone();
         let events = self.events_tx.clone();
-        tokio::spawn(async move {
-            let serial = handle.serial;
-            let result = stop_and_delete(&handle, delete_data, &sizes).await;
-            drop(permits);
-            let _ = events
-                .send(Event::Removed {
-                    serial,
-                    delete_data,
-                    result,
-                    reply,
-                })
-                .await;
-        });
+        // What the removal logs is about the node.
+        let span = tracing::info_span!("node", node = %handle.id);
+        tokio::spawn(
+            async move {
+                let serial = handle.serial;
+                let result = stop_and_delete(&handle, delete_data, &sizes).await;
+                drop(permits);
+                let _ = events
+                    .send(Event::Removed {
+                        serial,
+                        delete_data,
+                        result,
+                        reply,
+                    })
+                    .await;
+            }
+            .instrument(span),
+        );
     }
 
     async fn finish_remove(
@@ -1112,11 +1118,13 @@ async fn remove_folder(folder: PathBuf) {
     }
 }
 
-/// Runs blocking file work off the async runtime.
+/// Runs blocking file work off the async runtime, in the caller's tracing
+/// span.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<T> {
-    tokio::task::spawn_blocking(f)
+    let span = tracing::Span::current();
+    tokio::task::spawn_blocking(move || span.in_scope(f))
         .await
         .map_err(io::Error::other)?
 }
