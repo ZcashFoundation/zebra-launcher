@@ -28,19 +28,26 @@ pub use resources::{
 
 /// The names of the events the backend emits and the UI listens to. Logs do
 /// not go through an event: they take a `tauri::ipc::Channel` of
-/// `Vec<LogLine>` batches, set up by the `subscribe_logs` command.
+/// `Vec<LogLine>` batches, set up by the `subscribe_logs` command for one
+/// node.
+///
+/// An event about one node carries a [`NodeEvent`](crate::NodeEvent): the
+/// node's id and the value, `{"node": "zebrad-mainnet", "value": ...}`.
 pub mod events {
-    /// Every [`Status`](crate::Status) change.
+    /// Every change of the node list: a `Vec<NodeInfo>`
+    /// ([`NodeInfo`](crate::NodeInfo)), in the list's order.
+    pub const NODES: &str = "nodes";
+    /// Every [`Status`](crate::Status) change of a node.
     pub const STATUS: &str = "status";
-    /// Every `Option<NodeStats>` change ([`NodeStats`](crate::NodeStats)).
+    /// Every `Option<NodeStats>` change of a node ([`NodeStats`](crate::NodeStats)).
     pub const NODE_STATS: &str = "node_stats";
-    /// Every `Option<NodeDetails>` change
+    /// Every `Option<NodeDetails>` change of a node
     /// ([`NodeDetails`](crate::NodeDetails)): the details behind the node
     /// statistics, from the same RPC poll.
     pub const NODE_DETAILS: &str = "node_details";
-    /// zebrad was to start at launch, but a zebrad from an earlier launcher
+    /// A node was to start at launch, but a zebrad from an earlier launcher
     /// run is still alive: a [`StaleProcessInfo`](crate::StaleProcessInfo).
-    /// The UI offers `start_zebrad_killing_stale`.
+    /// The UI offers `start_node_killing_stale`.
     pub const STALE_PROCESS: &str = "stale_process";
     /// Every [`UpdateState`](crate::UpdateState) change.
     pub const UPDATE_STATE: &str = "update_state";
@@ -49,13 +56,14 @@ pub mod events {
     /// The launcher did not come back healthy after an update: an
     /// [`UpdateHealthFailure`](crate::UpdateHealthFailure).
     pub const UPDATE_HEALTH_FAILED: &str = "update_health_failed";
-    /// Every `Option<MetricsSnapshot>` change
+    /// Every `Option<MetricsSnapshot>` change of a node
     /// ([`MetricsSnapshot`](crate::MetricsSnapshot)): zebrad's Prometheus
     /// metrics, read every 10 s while it runs.
     pub const METRICS: &str = "metrics";
-    /// Every `Option<NodeResources>` change
-    /// ([`NodeResources`](crate::NodeResources)): what the node's processes use,
-    /// read every 5 s from the spawn until the run ends.
+    /// Every `Option<NodeResources>` change of the first node
+    /// ([`NodeResources`](crate::NodeResources)): what its processes use, read
+    /// every 5 s from the spawn until the run ends. The value alone, without a
+    /// `NodeEvent`.
     pub const NODE_RESOURCES: &str = "node_resources";
     /// Every `Option<MachineResources>` change
     /// ([`MachineResources`](crate::MachineResources)): the computer's CPU and
@@ -994,6 +1002,16 @@ pub struct ImportOutcome {
     pub from: String,
     /// Where it is now.
     pub to: String,
+}
+
+/// The result of `choose_data_dir` for a node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeDataDirChoice {
+    /// The node, with its new data folder.
+    pub node: NodeInfo,
+    /// Free space on the chosen volume, if it could be read. Warning about
+    /// too little space is up to the UI.
+    pub free_bytes: Option<u64>,
 }
 
 /// The result of `choose_data_dir`.

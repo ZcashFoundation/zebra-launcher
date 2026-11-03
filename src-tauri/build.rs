@@ -15,13 +15,17 @@ use std::collections::BTreeSet;
 /// Every command the UI may call. Checked against `src/lib.rs` and
 /// `capabilities/main.json` by [`check_command_lists`].
 const COMMANDS: &[&str] = &[
+    "list_nodes",
+    "add_node",
+    "update_node",
+    "remove_node",
     "get_status",
     "subscribe_logs",
     "log_history",
-    "start_zebrad",
-    "start_zebrad_killing_stale",
-    "stop_zebrad",
-    "restart_zebrad",
+    "start_node",
+    "start_node_killing_stale",
+    "stop_node",
+    "restart_node",
     "read_config",
     "apply_config",
     "reset_config",

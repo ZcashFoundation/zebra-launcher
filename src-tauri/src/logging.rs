@@ -1,6 +1,6 @@
 //! The launcher's own log: `launcher.<date>.log` in the log directory, rotated
 //! daily, plus stderr in debug builds, and a copy of its INFO and louder
-//! events for the Logs tab, through the supervisor's log ring.
+//! events for the Logs tab, through the nodes' log rings.
 //!
 //! The filter for the file comes from `RUST_LOG` and defaults to `info`.
 //! Writes are synchronous, so nothing is lost when the process exits right
@@ -8,24 +8,28 @@
 //!
 //! The copy for the UI is a third layer that turns each event into a
 //! [`Note`] and queues it without waiting ([`NOTE_QUEUE`] deep); [`init`]
-//! returns the queue and [`forward_notes`] drains it into the supervisor once
-//! that exists, so the events logged during startup are kept. Targets that
+//! returns the queue and [`forward_notes`] drains it into the registry once
+//! that exists, so the events logged during startup are kept. An event about
+//! one node (a `node` field, on the event or on a span it is in) goes to
+//! that node's log; any other goes to every node's. Targets that
 //! log per batch forwarded to the UI ([`EXCLUDED_TARGETS`]) are left out, or
 //! each line would log another one.
 
 use std::{path::Path, time::SystemTime};
 
-use launcher_core::supervisor::{Note, SupervisorHandle};
-use launcher_types::LogLevel;
+use launcher_core::{registry::RegistryHandle, supervisor::Note};
+use launcher_types::{LogLevel, NodeId};
 use tokio::sync::mpsc;
 use tracing::{
     Event, Level, Metadata, Subscriber,
     field::{Field, Visit},
+    span,
 };
 use tracing_appender::rolling::{Builder as RollingBuilder, Rotation};
 use tracing_subscriber::{
     EnvFilter, Layer, filter, fmt,
     layer::{Context, SubscriberExt},
+    registry::LookupSpan,
     util::SubscriberInitExt,
 };
 
@@ -57,12 +61,15 @@ pub enum LoggingError {
     Init(#[from] tracing_subscriber::util::TryInitError),
 }
 
+/// A launcher event for the log rings: the node it is about, if any.
+pub type RoutedNote = (Option<NodeId>, Note);
+
 /// Installs the global subscriber writing to `log_file`, whose stem and
 /// extension become the prefix and suffix of the dated files, and returns
-/// the queue of launcher events for the log ring (see [`forward_notes`]).
+/// the queue of launcher events for the log rings (see [`forward_notes`]).
 ///
 /// Also routes panics to the log, so a crash leaves a trace for support.
-pub fn init(log_file: &Path) -> Result<mpsc::Receiver<Note>, LoggingError> {
+pub fn init(log_file: &Path) -> Result<mpsc::Receiver<RoutedNote>, LoggingError> {
     let dir = log_file.parent().unwrap_or_else(|| Path::new("."));
     let prefix = log_file
         .file_stem()
@@ -102,14 +109,15 @@ pub fn init(log_file: &Path) -> Result<mpsc::Receiver<Note>, LoggingError> {
     Ok(notes_rx)
 }
 
-/// Moves the queued launcher events into the supervisor's log ring, for the
-/// rest of the process. Each one is handed over with
-/// [`SupervisorHandle::note_at`], which never waits: when the actor is behind
-/// or gone the event is dropped, as a log line is not worth stalling for.
-pub fn forward_notes(mut notes: mpsc::Receiver<Note>, supervisor: SupervisorHandle) {
+/// Moves the queued launcher events into the nodes' log rings, for the rest
+/// of the process: an event about one node into that node's, any other into
+/// every node's. Each one is handed over with [`RegistryHandle::note`], which
+/// never waits: when a supervisor is behind or gone the event is dropped, as
+/// a log line is not worth stalling for.
+pub fn forward_notes(mut notes: mpsc::Receiver<RoutedNote>, registry: RegistryHandle) {
     tauri::async_runtime::spawn(async move {
-        while let Some(note) = notes.recv().await {
-            supervisor.note_at(note);
+        while let Some((node, note)) = notes.recv().await {
+            registry.note(node.as_ref(), note);
         }
     });
 }
@@ -140,23 +148,42 @@ fn log_level(level: Level) -> LogLevel {
     }
 }
 
-/// Turns each event into a [`Note`] on the queue, without waiting.
+/// Turns each event into a [`Note`] on the queue, without waiting, with the
+/// node it is about.
 struct NoteLayer {
-    tx: mpsc::Sender<Note>,
+    tx: mpsc::Sender<RoutedNote>,
 }
 
-impl<S: Subscriber> Layer<S> for NoteLayer {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+/// The node a span is about: its `node` field, kept in the span's extensions.
+struct NodeTag(NodeId);
+
+impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for NoteLayer {
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        let mut fields = Fields::default();
+        attrs.record(&mut fields);
+        if let (Some(node), Some(span)) = (fields.node, ctx.span(id)) {
+            span.extensions_mut().insert(NodeTag(node));
+        }
+    }
+
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let meta = event.metadata();
         let mut fields = Fields::default();
         event.record(&mut fields);
-        // A full queue drops the newest event: a logging call never blocks.
-        let _ = self.tx.try_send(Note {
-            at: SystemTime::now(),
-            level: log_level(*meta.level()),
-            target: meta.target().to_string(),
-            message: fields.finish(),
+        let node = fields.node.take().or_else(|| {
+            ctx.event_scope(event)?
+                .find_map(|span| span.extensions().get::<NodeTag>().map(|tag| tag.0.clone()))
         });
+        // A full queue drops the newest event: a logging call never blocks.
+        let _ = self.tx.try_send((
+            node,
+            Note {
+                at: SystemTime::now(),
+                level: log_level(*meta.level()),
+                target: meta.target().to_string(),
+                message: fields.finish(),
+            },
+        ));
     }
 }
 
@@ -166,6 +193,9 @@ impl<S: Subscriber> Layer<S> for NoteLayer {
 struct Fields {
     message: Option<String>,
     rest: Vec<String>,
+    /// A `node` field naming a node: where the event goes, not part of the
+    /// message.
+    node: Option<NodeId>,
 }
 
 impl Fields {
@@ -181,11 +211,27 @@ impl Fields {
     }
 }
 
+impl Fields {
+    /// Takes a `node` field that names a node; anything else stays a field.
+    fn take_node(&mut self, field: &Field, text: &str) -> bool {
+        if field.name() != "node" {
+            return false;
+        }
+        match NodeId::new(text) {
+            Some(node) => {
+                self.node = Some(node);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 impl Visit for Fields {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
             self.message = Some(format!("{value:?}"));
-        } else {
+        } else if !self.take_node(field, &format!("{value:?}")) {
             self.rest.push(format!("{}={value:?}", field.name()));
         }
     }
@@ -193,7 +239,7 @@ impl Visit for Fields {
     fn record_str(&mut self, field: &Field, value: &str) {
         if field.name() == "message" {
             self.message = Some(value.to_string());
-        } else {
+        } else if !self.take_node(field, value) {
             self.rest.push(format!("{}={value:?}", field.name()));
         }
     }
@@ -207,8 +253,8 @@ impl Visit for Fields {
 mod tests {
     use super::*;
 
-    /// The notes `f`'s events produce.
-    fn capture(queue: usize, f: impl FnOnce()) -> Vec<Note> {
+    /// The notes `f`'s events produce, with the node each is about.
+    fn capture_routed(queue: usize, f: impl FnOnce()) -> Vec<RoutedNote> {
         let (tx, mut rx) = mpsc::channel(queue);
         let subscriber = tracing_subscriber::registry()
             .with(NoteLayer { tx }.with_filter(filter::filter_fn(forwarded)));
@@ -218,6 +264,44 @@ mod tests {
             notes.push(note);
         }
         notes
+    }
+
+    /// The notes `f`'s events produce.
+    fn capture(queue: usize, f: impl FnOnce()) -> Vec<Note> {
+        capture_routed(queue, f)
+            .into_iter()
+            .map(|(_, note)| note)
+            .collect()
+    }
+
+    #[test]
+    fn an_event_about_a_node_names_it_and_the_others_name_none() {
+        let notes = capture_routed(NOTE_QUEUE, || {
+            tracing::info!(target: "zeal::x", node = "zebrad-testnet", "about one node");
+            let span = tracing::info_span!("node", node = "zebrad-mainnet");
+            span.in_scope(|| {
+                tracing::info!(target: "launcher_core::apply", "inside a node's span");
+                // The event's own field wins over its span's.
+                tracing::info!(target: "zeal::x", node = "zebrad-testnet", "named twice");
+            });
+            tracing::info!(target: "zeal::x", "about every node");
+            // A `node` field that is no node's id stays a field.
+            tracing::info!(target: "zeal::x", node = "Not an id", "odd");
+        });
+        let routed: Vec<(Option<&str>, &str)> = notes
+            .iter()
+            .map(|(node, note)| (node.as_ref().map(NodeId::as_str), note.message.as_str()))
+            .collect();
+        assert_eq!(
+            routed,
+            [
+                (Some("zebrad-testnet"), "about one node"),
+                (Some("zebrad-mainnet"), "inside a node's span"),
+                (Some("zebrad-testnet"), "named twice"),
+                (None, "about every node"),
+                (None, "odd node=\"Not an id\""),
+            ]
+        );
     }
 
     #[test]

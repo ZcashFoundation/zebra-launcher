@@ -1,11 +1,12 @@
 //! Zeal: a thin Tauri 2 layer over `launcher-core`.
 //!
 //! Startup (in [`run`]'s setup hook): resolve the per-user directories,
-//! start the launcher log, roll back an interrupted config change, load the
-//! settings, bring the managed `zebrad.toml` keys up to date, start the
-//! supervisor, the RPC monitor, the metrics poller and the resource samplers,
-//! forward their state to the UI, and start zebrad if the settings say so.
-//! Quitting stops zebrad first; see [`exit`].
+//! start the launcher log, roll back an interrupted config change of the
+//! first node, load the settings and the node list, start the node registry
+//! (each node's supervisor, RPC monitor and metrics poller, with its managed
+//! `zebrad.toml` keys brought up to date) and the resource samplers, forward
+//! their state to the UI, and start the nodes that start at launch. Quitting
+//! stops every node first; see [`exit`].
 
 pub mod app_state;
 pub mod bridge;
@@ -20,19 +21,19 @@ pub mod updater;
 use std::{sync::Arc, time::Duration};
 
 use launcher_core::{
-    config, firstrun,
-    nodes::NodeSpec,
+    config,
+    firstrun::{self, SizeCache},
     pidfile::StaleProcess,
-    registry::RegistryConfig,
+    registry::{self, NodeHandle, RegistryConfig, StartError},
     resources::{MachineSampler, ResourceSampler},
-    runtime::{self, NodeActors},
     settings::SettingsStore,
-    supervisor::SupervisorError,
+    supervisor::{StartOptions, SupervisorError},
 };
-use launcher_types::{StaleProcessInfo, events};
+use launcher_types::{NodeEvent, NodeId, NodeInfo, StaleProcessInfo, events};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::watch;
+use tracing::Instrument;
 
 use crate::app_state::{AppState, ResourceWatches};
 
@@ -47,7 +48,7 @@ enum StartupError {
     Paths(#[from] paths::PathsError),
     #[error("could not load the launcher settings: {0}")]
     Settings(#[from] launcher_core::settings::SettingsError),
-    #[error("could not start the zebrad supervisor: {0}")]
+    #[error("could not start the nodes' supervisors: {0}")]
     Supervisor(#[from] std::io::Error),
 }
 
@@ -66,13 +67,17 @@ pub fn run() {
         // build.rs fails the build unless this list, its COMMANDS and the
         // allow-* permissions in capabilities/main.json agree.
         .invoke_handler(tauri::generate_handler![
+            commands::list_nodes,
+            commands::add_node,
+            commands::update_node,
+            commands::remove_node,
             commands::get_status,
             commands::subscribe_logs,
             commands::log_history,
-            commands::start_zebrad,
-            commands::start_zebrad_killing_stale,
-            commands::stop_zebrad,
-            commands::restart_zebrad,
+            commands::start_node,
+            commands::start_node_killing_stale,
+            commands::stop_node,
+            commands::restart_node,
             commands::read_config,
             commands::apply_config,
             commands::reset_config,
@@ -136,18 +141,22 @@ fn setup(app: &AppHandle) {
     match tauri::async_runtime::block_on(start(app)) {
         Ok(state) => {
             app.manage(state.clone());
-            // One settings snapshot decides who starts zebrad at launch.
-            let plan = launch_plan(&state.settings.current());
-            app.manage(updater::start(app, &state, plan.gate_may_start));
-            bridge::forward_status(app.clone(), state.supervisor.watch_status());
-            bridge::forward_node_stats(app.clone(), state.node_stats.clone());
-            bridge::forward_node_details(app.clone(), state.node_details.clone());
-            bridge::forward_metrics(app.clone(), state.metrics.clone());
+            // One snapshot of the settings and the nodes decides who starts
+            // which node at launch.
+            let plan = launch_plan(&state.settings.current(), &state.registry.infos());
+            app.manage(updater::start(app, &state, &plan));
+            bridge::forward_nodes(app.clone(), state.registry.clone());
             bridge::forward_node_resources(app.clone(), state.node_resources.clone());
             bridge::forward_machine_resources(app.clone(), state.machine.clone());
             tray::install(app, &state);
-            if plan.start_now {
-                tauri::async_runtime::spawn(start_in_background(app.clone(), state));
+            for id in &plan.start_now {
+                if let Ok(node) = state.node(id) {
+                    tauri::async_runtime::spawn(start_in_background(
+                        app.clone(),
+                        state.clone(),
+                        node,
+                    ));
+                }
             }
         }
         Err(err) => {
@@ -214,8 +223,9 @@ fn show_startup_error(app: &AppHandle, err: &StartupError) {
         });
 }
 
-/// The startup sequence up to a running supervisor. Runs inside the Tokio
-/// runtime, which the supervisor, monitor and settings actors need.
+/// The startup sequence up to a running registry. Runs inside the Tokio
+/// runtime, which the registry, its nodes' actors and the settings actor
+/// need.
 async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     let paths = paths::resolve(app)?;
     let notes = match logging::init(&paths.launcher_log()) {
@@ -233,6 +243,9 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
         "Zeal starting"
     );
 
+    // Before the settings are read: migrating a single-node launcher's
+    // settings reads the P2P port from the first node's zebrad.toml. The
+    // registry checks every node again.
     match config::recover(&paths.launcher_node()) {
         Ok(Some(_)) => tracing::warn!(
             "a configuration change was interrupted by a launcher exit; restored the previous zebrad.toml"
@@ -244,97 +257,112 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     }
 
     let settings = SettingsStore::open(&paths)?;
-    let current = settings.current();
-    // The one node, as the settings describe it.
-    let mut node = NodeSpec::first(current.network);
-    node.data_dir = current.data_dir.clone();
-    node.stop_grace_secs = current.stop_grace_secs;
-    runtime::prepare_files(&paths, &node);
+    let sizes = Arc::new(SizeCache::default());
     let stdin_close = std::env::var_os(STDIN_CLOSE_ENV).is_some_and(|v| v == "1");
     let mut config = RegistryConfig::new(paths.clone(), sidecar::resolve(&paths));
     config.customize = Some(Arc::new(move |_node, supervisor| {
         supervisor.command.shutdown_on_stdin_close = stdin_close;
     }));
-    let NodeActors {
-        supervisor,
-        stats,
-        details,
-        metrics,
-    } = runtime::spawn(&config, &node, watch::channel(Vec::new()).1)?;
+    config.sizes = sizes.clone();
+    let registry = registry::spawn(config, settings.clone())?;
     // From here on the launcher's own events show in the Logs tab too.
     if let Some(notes) = notes {
-        logging::forward_notes(notes, supervisor.clone());
+        logging::forward_notes(notes, registry.clone());
     }
+    // One process tree is sampled, the first node's, as the one node's was.
     let resources = ResourceWatches {
-        node: ResourceSampler::spawn(supervisor.watch_probe()),
+        node: match registry.first() {
+            Some(node) => ResourceSampler::spawn(node.supervisor.watch_probe()),
+            None => watch::channel(None).1,
+        },
         machine: MachineSampler::spawn(),
     };
-    Ok(AppState::new(
-        paths, supervisor, settings, stats, details, metrics, resources,
-    ))
+    Ok(AppState::new(paths, registry, settings, sizes, resources))
 }
 
-/// Who starts zebrad at launch. Decided once, from one settings snapshot, so
-/// the two paths that can start it cannot read different settings.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Who starts which node at launch. Decided once, from one snapshot of the
+/// settings and the nodes, so the two paths that can start a node cannot
+/// read different ones.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LaunchPlan {
-    /// `setup` starts zebrad right away: `start_node_on_launch` is set and
-    /// the first run is done. Until then the user has not chosen where the
-    /// chain state goes, so zebrad waits for them.
-    pub start_now: bool,
-    /// The post-update health gate may start zebrad when the update stopped
-    /// a running one: only when the launcher does not start it anyway, so a
-    /// node is never started twice.
-    pub gate_may_start: bool,
+    /// The nodes `setup` starts right away: those that start at launch,
+    /// once the first run is done. Until then the user has not chosen where
+    /// the chain state goes, so every node waits for them.
+    pub start_now: Vec<NodeId>,
 }
 
-/// The [`LaunchPlan`] for `settings`.
-pub(crate) fn launch_plan(settings: &launcher_types::Settings) -> LaunchPlan {
-    LaunchPlan {
-        start_now: settings.start_node_on_launch && firstrun::start_allowed(settings).is_ok(),
-        gate_may_start: !settings.start_node_on_launch,
+impl LaunchPlan {
+    /// Whether the post-update health gate may start `node` when the update
+    /// stopped it: only when the launcher does not start it anyway, so a
+    /// node is never started twice.
+    pub fn gate_may_start(&self, node: &NodeId) -> bool {
+        !self.start_now.contains(node)
     }
 }
 
-/// Starts zebrad the way every start without a UI request waiting for the
+/// The [`LaunchPlan`] for `settings` and `nodes`.
+pub(crate) fn launch_plan(settings: &launcher_types::Settings, nodes: &[NodeInfo]) -> LaunchPlan {
+    let allowed = firstrun::start_allowed(settings).is_ok();
+    LaunchPlan {
+        start_now: nodes
+            .iter()
+            .filter(|node| allowed && node.autostart)
+            .map(|node| node.id.clone())
+            .collect(),
+    }
+}
+
+/// Starts `node` the way every start without a UI request waiting for the
 /// result does: not before the first run is done
-/// ([`firstrun::start_allowed`]), not while the node data is being changed
+/// ([`firstrun::start_allowed`]), not while the node's data is being changed
 /// ([`NodeGates::start_permit`](launcher_core::gates::NodeGates::start_permit)),
-/// and with a zebrad left by an earlier run
-/// reported to the UI with [`events::STALE_PROCESS`]. The error is the message
-/// for the log or the caller.
+/// and with a zebrad left by an earlier run reported to the UI with
+/// [`events::STALE_PROCESS`]. The error is the message for the log or the
+/// caller.
 pub(crate) async fn start_node<R: tauri::Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
+    node: &NodeHandle,
 ) -> Result<(), String> {
-    firstrun::start_allowed(&state.settings.current())?;
-    let _permit = state.gates.start_permit()?;
-    match state.supervisor.start().await {
+    let settings = state.settings.current();
+    let started = node
+        .start(&settings, StartOptions::default())
+        .instrument(tracing::info_span!("node", node = %node.id))
+        .await;
+    match started {
         Ok(()) => Ok(()),
-        Err(SupervisorError::StaleProcess(stale)) => {
-            report_stale_process(app, &stale);
+        Err(StartError::Supervisor(SupervisorError::StaleProcess(stale))) => {
+            report_stale_process(app, &node.id, &stale);
             Err(SupervisorError::StaleProcess(stale).to_string())
         }
         Err(err) => Err(err.to_string()),
     }
 }
 
-/// [`start_node`] for the places that only log a failure: at launch when
-/// [`LaunchPlan::start_now`] is set, and from the tray.
-pub(crate) async fn start_in_background(app: AppHandle, state: AppState) {
-    if let Err(err) = start_node(&app, &state).await {
-        tracing::warn!(%err, "zebrad was not started");
+/// [`start_node`] for the places that only log a failure: at launch for
+/// the nodes in [`LaunchPlan::start_now`], and from the tray.
+pub(crate) async fn start_in_background(app: AppHandle, state: AppState, node: NodeHandle) {
+    if let Err(err) = start_node(&app, &state, &node).await {
+        tracing::warn!(node = %node.id, %err, "zebrad was not started");
     }
 }
 
 /// Tells the UI with [`events::STALE_PROCESS`] that a zebrad from an earlier
-/// launcher run is still alive.
-pub(crate) fn report_stale_process<R: tauri::Runtime>(app: &AppHandle<R>, stale: &StaleProcess) {
+/// launcher run of `node` is still alive.
+pub(crate) fn report_stale_process<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    node: &NodeId,
+    stale: &StaleProcess,
+) {
     tracing::warn!(
+        node = %node,
         pid = stale.pid,
         "a zebrad from an earlier launcher run is still running"
     );
-    let info = StaleProcessInfo::from(stale);
+    let info = NodeEvent {
+        node: node.clone(),
+        value: StaleProcessInfo::from(stale),
+    };
     if let Err(err) = app.emit(events::STALE_PROCESS, info) {
         tracing::warn!(%err, "could not emit stale_process");
     }
@@ -342,45 +370,35 @@ pub(crate) fn report_stale_process<R: tauri::Runtime>(app: &AppHandle<R>, stale:
 
 #[cfg(test)]
 mod tests {
-    use launcher_types::Settings;
+    use launcher_core::{nodes::NodeSpec, paths::Paths};
+    use launcher_types::{Network, Settings};
 
-    use super::{LaunchPlan, launch_plan};
+    use super::launch_plan;
 
     #[test]
-    fn launch_plan_starts_once_at_most() {
-        // A fresh install: zebrad waits for the first run, and nobody starts it.
-        let fresh = Settings::default();
-        assert!(fresh.start_node_on_launch);
-        assert_eq!(
-            launch_plan(&fresh),
-            LaunchPlan {
-                start_now: false,
-                gate_may_start: false
-            }
-        );
-        // The first run is done: setup starts zebrad, the gate never does.
+    fn launch_plan_starts_each_node_once_at_most() {
+        let paths = Paths::under("/root");
+        let main = NodeSpec::first(Network::Mainnet).info(&paths);
+        let manual = launcher_types::NodeInfo {
+            id: launcher_types::NodeId::new("zebrad-testnet").unwrap(),
+            autostart: false,
+            ..NodeSpec::first(Network::Testnet).info(&paths)
+        };
+        let nodes = [main.clone(), manual.clone()];
+        // A fresh install: every node waits for the first run, and the gate
+        // could start any (none ran before an update anyway).
+        let fresh = launch_plan(&Settings::default(), &nodes);
+        assert!(fresh.start_now.is_empty());
+        assert!(fresh.gate_may_start(&main.id));
+        // The first run is done: setup starts the node that starts at
+        // launch, the gate only the one that does not.
         let done = Settings {
             first_run_done: true,
             ..Settings::default()
         };
-        assert_eq!(
-            launch_plan(&done),
-            LaunchPlan {
-                start_now: true,
-                gate_may_start: false
-            }
-        );
-        // The user turned the launch start off: only the gate may start it.
-        let manual = Settings {
-            start_node_on_launch: false,
-            ..done
-        };
-        assert_eq!(
-            launch_plan(&manual),
-            LaunchPlan {
-                start_now: false,
-                gate_may_start: true
-            }
-        );
+        let plan = launch_plan(&done, &nodes);
+        assert_eq!(plan.start_now, std::slice::from_ref(&main.id));
+        assert!(!plan.gate_may_start(&main.id));
+        assert!(plan.gate_may_start(&manual.id));
     }
 }
