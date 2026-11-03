@@ -70,11 +70,11 @@ Some GPU drivers (often NVIDIA, or VMs) leave the WebKitGTK window blank. Start 
 launcher with the DMA-BUF renderer disabled:
 
 ```sh
-WEBKIT_DISABLE_DMABUF_RENDERER=1 zeal
+WEBKIT_DISABLE_DMABUF_RENDERER=1 zeal-app
 ```
 
 For the AppImage: `WEBKIT_DISABLE_DMABUF_RENDERER=1 ./zeal_<version>_x86_64.AppImage`.
-The deb installs the binary as `/usr/bin/zeal`. To make the setting permanent
+The deb installs the binary as `/usr/bin/zeal-app`. To make the setting permanent
 for the desktop entry, copy the `.desktop` file the package installs under
 `/usr/share/applications/` to `~/.local/share/applications/` and prefix its `Exec=` line
 with `env WEBKIT_DISABLE_DMABUF_RENDERER=1`.

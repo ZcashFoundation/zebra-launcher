@@ -52,7 +52,7 @@ yourself is never removed by an uninstaller; delete it by hand if you no longer 
   outside the AppImage mount:
   `~/.local/share/org.zfnd.zeal/sidecar/<launcher version>/zeal-zebrad`
   (the launcher deletes other versions' copies, never the current one).
-- **deb:** `sudo apt remove zeal` (the package installs `/usr/bin/zeal`
+- **deb:** `sudo apt remove zeal-app` (the package installs `/usr/bin/zeal-app`
   and `/usr/bin/zeal-zebrad`).
 
 Then remove the directories above to delete state, config and logs.

@@ -119,7 +119,7 @@ Windows zebrad builds are cold.
       without an "unidentified developer" block and the node reaches Running.
 - [ ] **Windows 11**: `Get-AuthenticodeSignature .\zeal_X.Y.Z_x86_64-setup.exe`
       is `Valid`; the installer runs per-user without a UAC prompt;
-      `Get-AuthenticodeSignature` is `Valid` for `zeal.exe` and
+      `Get-AuthenticodeSignature` is `Valid` for `zeal-app.exe` and
       `zeal-zebrad.exe` in `%LOCALAPPDATA%\Zeal`; the node reaches
       Running.
 - [ ] **Every OS**: with close-to-tray on, closing the window keeps the node running;

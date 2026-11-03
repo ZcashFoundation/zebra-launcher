@@ -4,7 +4,7 @@
 # it run for a while, then checks that it was still running when stopped, that
 # its log says the bundled zebrad started, and that no zebrad is left over.
 #
-#   --deb      runs the installed /usr/bin/zeal (install the .deb first)
+#   --deb      runs the installed /usr/bin/zeal-app (install the .deb first)
 #   --appimage PATH runs the AppImage (set APPIMAGE_EXTRACT_AND_RUN=1 where
 #              there is no FUSE, as in containers)
 #
@@ -31,7 +31,7 @@ cmd=()
 seconds=15
 while [ $# -gt 0 ]; do
     case "$1" in
-        --deb) cmd=(/usr/bin/zeal); shift ;;
+        --deb) cmd=(/usr/bin/zeal-app); shift ;;
         --appimage)
             [ $# -ge 2 ] || die "--appimage needs a path"
             chmod +x "$2"

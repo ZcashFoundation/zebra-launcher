@@ -18,6 +18,9 @@ called Zebra Launcher until November 2026.
 | macOS 12 or later, Apple Silicon and Intel | `.dmg` |
 | Windows 10 or 11, x64 | `-setup.exe` (installs for the current user) |
 
+On Linux the `.deb` package and the command are `zeal-app`, because Debian and Ubuntu already
+have a `zeal` package (the Zeal documentation browser); the menu entry says Zeal.
+
 All builds are 64-bit. On Windows, stopping the node (Stop, Restart, a config change, or
 quitting the launcher) terminates zebrad at once instead of asking it to shut down, so it
 skips its own shutdown steps: a windowless parent cannot deliver the Ctrl-C that zebrad

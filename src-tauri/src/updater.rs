@@ -306,14 +306,14 @@ mod tests {
     #[test]
     fn app_bundle_detection() {
         assert!(is_in_app_bundle(Path::new(
-            "/Applications/Zeal.app/Contents/MacOS/zeal"
+            "/Applications/Zeal.app/Contents/MacOS/zeal-app"
         )));
         assert!(!is_in_app_bundle(Path::new(
-            "/Users/me/zeal/target/debug/zeal"
+            "/Users/me/zeal/target/debug/zeal-app"
         )));
         assert!(!is_in_app_bundle(Path::new(
-            "/Applications/Zeal.app/Contents/Resources/zeal"
+            "/Applications/Zeal.app/Contents/Resources/zeal-app"
         )));
-        assert!(!is_in_app_bundle(Path::new("/Contents/MacOS/zeal")));
+        assert!(!is_in_app_bundle(Path::new("/Contents/MacOS/zeal-app")));
     }
 }

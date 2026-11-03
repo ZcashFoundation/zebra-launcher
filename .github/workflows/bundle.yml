@@ -346,7 +346,7 @@ jobs:
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           apt-get install -y ./dist/zeal_*_amd64.deb
-          dpkg -L zeal | grep -E '/usr/bin/'
+          dpkg -L zeal-app | grep -E '/usr/bin/'
           /usr/bin/zeal-zebrad --version | grep -q "zebrad ${ZEBRAD_VERSION}"
 
       - name: "Smoke: run the .deb install"

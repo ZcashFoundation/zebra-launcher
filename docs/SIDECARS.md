@@ -140,7 +140,7 @@ The run uploads these artifacts:
 | Artifact | Contents |
 | --- | --- |
 | `zebrad-<triple>` | `zeal-zebrad-<triple>[.exe]` and `zebrad-build-info.txt` |
-| `bundles-<triple>-dev-<short commit>` | the installers that `collect-bundles.sh` collects (Windows: `zeal_<ver>_x86_64-setup.exe`), `raw/zeal[.exe]` with `raw/zeal-zebrad[.exe]` beside it, and `zebrad-build-info.txt` |
+| `bundles-<triple>-dev-<short commit>` | the installers that `collect-bundles.sh` collects (Windows: `zeal_<ver>_x86_64-setup.exe`), `raw/zeal-app[.exe]` with `raw/zeal-zebrad[.exe]` beside it, and `zebrad-build-info.txt` |
 
 `zebrad-build-info.txt` names the ref, the resolved commit, the
 `zebrad --version` output, the target and the workflow run, under an
@@ -148,7 +148,7 @@ The run uploads these artifacts:
 same, with a warning that the build is unsigned and unverified. Download an
 artifact with `gh run download <run id> -n <artifact>`. On Windows, either run
 the NSIS installer, which SmartScreen flags because it is unsigned, or run
-`raw/zeal.exe` directly, keeping `zeal-zebrad.exe` in the
+`raw/zeal-app.exe` directly, keeping `zeal-zebrad.exe` in the
 same directory, because the launcher looks for zebrad next to itself.
 
 On Linux, the development zebrad needs the glibc of the ubuntu-24.04 runner
