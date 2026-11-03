@@ -704,6 +704,56 @@ async fn a_note_goes_to_the_node_it_names_or_to_every_node() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_end_of_support_follower_waits_once_the_mainnet_nodes_runtime_ended() {
+    // The Testnet node ignores the stop request, so the shutdown waits out
+    // its stop grace after the Mainnet node's runtime ended.
+    let fx = fixture_from(true, |paths| {
+        config_with_modes(paths, nothing_in_use, |spec| {
+            if spec.network == Network::Testnet {
+                "hang-on-signal"
+            } else {
+                "ok"
+            }
+        })
+    })
+    .await;
+    let testnet = within(fx.registry.add(draft(Network::Testnet, "Zebra · Testnet")))
+        .await
+        .expect("add");
+    let testnet = fx.registry.node(&testnet.id).expect("lookup");
+    within(testnet.start(&done(), StartOptions::default()))
+        .await
+        .expect("start");
+    let first = fx.registry.first().expect("first");
+    let mut eos = fx.registry.eos_stats();
+    let shutdown = tokio::spawn({
+        let registry = fx.registry.clone();
+        async move { registry.shutdown().await }
+    });
+    // The Mainnet node's monitor ends with its runtime.
+    support::within_limit(LIMIT, "the Mainnet node's monitor to end", async {
+        while first.stats.has_changed().is_ok() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        testnet.supervisor.status().phase,
+        Phase::Stopping,
+        "the Testnet node is still stopping"
+    );
+    eos.borrow_and_update();
+    let mut changes = 0;
+    let quiet = tokio::time::Instant::now() + Duration::from_secs(1);
+    while let Ok(Ok(())) = tokio::time::timeout_at(quiet, eos.changed()).await {
+        changes += 1;
+    }
+    assert!(changes <= 1, "{changes} changes while nothing changed");
+    assert_eq!(*eos.borrow(), None);
+    within(shutdown).await.expect("join");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_updater_follows_the_herd_and_the_mainnet_nodes_statistics() {
     let fx = fixture().await;
     let testnet = within(fx.registry.add(draft(Network::Testnet, "Zebra · Testnet")))

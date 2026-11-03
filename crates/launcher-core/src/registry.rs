@@ -565,12 +565,20 @@ impl RegistryHandle {
     /// The statistics the updater reads the end of support from: those of
     /// the first zebrad node on Mainnet, the only network with one (every
     /// node runs the same zebrad, so one is enough), and `None` while there
-    /// is no such node. Kept up to date by a task, which follows the node
-    /// list too, until the receiver or the registry is gone.
+    /// is no such node or its runtime has ended. Kept up to date by a task,
+    /// which follows the node list too, until the receiver or the registry
+    /// is gone; the receiver hears of a change of the value only.
     pub fn eos_stats(&self) -> watch::Receiver<Option<NodeStats>> {
         let registry = self.clone();
         let (tx, rx) = watch::channel(None);
         tokio::spawn(async move {
+            let publish = |latest: Option<NodeStats>| {
+                tx.send_if_modified(|current| {
+                    let changed = *current != latest;
+                    *current = latest;
+                    changed
+                });
+            };
             let mut summaries = registry.summaries.clone();
             loop {
                 summaries.borrow_and_update();
@@ -584,7 +592,7 @@ impl RegistryHandle {
                     })
                     .cloned();
                 let Some(node) = source else {
-                    tx.send_if_modified(|current| current.take().is_some());
+                    publish(None);
                     tokio::select! {
                         changed = summaries.changed() => if changed.is_err() {
                             return;
@@ -595,11 +603,24 @@ impl RegistryHandle {
                 };
                 let mut stats = node.stats.clone();
                 loop {
-                    tx.send_replace(stats.borrow_and_update().clone());
+                    // The node's monitor ended with its runtime (at quit,
+                    // the others may still be stopping): nothing more comes
+                    // from it, so wait for the list to change, as without a
+                    // node, rather than find the same node again at once.
+                    if stats.has_changed().is_err() {
+                        publish(None);
+                        tokio::select! {
+                            changed = summaries.changed() => if changed.is_err() {
+                                return;
+                            },
+                            () = tx.closed() => return,
+                        }
+                        break;
+                    }
+                    publish(stats.borrow_and_update().clone());
                     tokio::select! {
-                        changed = stats.changed() => if changed.is_err() {
-                            break;
-                        },
+                        // An end is handled above.
+                        _ = stats.changed() => {}
                         changed = summaries.changed() => {
                             if changed.is_err() {
                                 return;
