@@ -94,6 +94,22 @@ pub enum LightwalletdKey {
     Listen(u16),
 }
 
+impl LightwalletdKey {
+    /// The key for zebrad on `network` from the stored public services: the
+    /// user's while no light client server is set up, on loopback at the
+    /// spec's `backend_port` while the service has one, and removed otherwise,
+    /// including while zebrad runs on another network than the service's.
+    pub fn for_public(public: &launcher_types::public::PublicConfig, network: Network) -> Self {
+        match public.light_server() {
+            None => LightwalletdKey::Unmanaged,
+            Some(spec) if spec.network == network => spec
+                .backend_port
+                .map_or(LightwalletdKey::Absent, LightwalletdKey::Listen),
+            Some(_) => LightwalletdKey::Absent,
+        }
+    }
+}
+
 impl ManagedKeys {
     /// The defaults for `network`: RPC on `127.0.0.1:8232` (Mainnet) or
     /// `127.0.0.1:18232` (Testnet), metrics on `127.0.0.1:9999`, and the cookie
@@ -725,6 +741,39 @@ tx_cost_limit = 1000
         keys.lightwalletd = LightwalletdKey::Listen(19067);
         let minimal = render_minimal(&keys).expect("render");
         assert!(minimal.contains("lightwalletd_listen_addr = \"127.0.0.1:19067\""));
+    }
+
+    #[test]
+    fn the_endpoint_key_follows_the_stored_service() {
+        use launcher_types::{
+            NodeId,
+            public::{PublicConfig, PublicServiceSpec},
+        };
+        let mut public = PublicConfig::default();
+        assert_eq!(
+            LightwalletdKey::for_public(&public, Network::Mainnet),
+            LightwalletdKey::Unmanaged
+        );
+        let mut spec = PublicServiceSpec::new_light_server(
+            NodeId::new("zebrad-mainnet").unwrap(),
+            Network::Mainnet,
+        );
+        public.services.push(spec.clone());
+        assert_eq!(
+            LightwalletdKey::for_public(&public, Network::Mainnet),
+            LightwalletdKey::Absent
+        );
+        spec.backend_port = Some(9067);
+        public.services = vec![spec];
+        assert_eq!(
+            LightwalletdKey::for_public(&public, Network::Mainnet),
+            LightwalletdKey::Listen(9067)
+        );
+        // Saving the other network removes the key, which the service keeps for later.
+        assert_eq!(
+            LightwalletdKey::for_public(&public, Network::Testnet),
+            LightwalletdKey::Absent
+        );
     }
 
     #[test]

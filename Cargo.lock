@@ -2639,7 +2639,6 @@ dependencies = [
  "launcher-gateway",
  "launcher-herd",
  "launcher-types",
- "libc",
  "rcgen",
  "rustls",
  "rustls-platform-verifier",
@@ -6910,6 +6909,8 @@ name = "zeal"
 version = "0.1.0"
 dependencies = [
  "launcher-core",
+ "launcher-herd",
+ "launcher-public",
  "launcher-types",
  "serde",
  "serde_json",

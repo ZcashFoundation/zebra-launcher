@@ -13,6 +13,7 @@ pub mod commands;
 pub mod exit;
 pub mod logging;
 pub mod paths;
+pub mod public;
 pub mod sidecar;
 pub mod tray;
 pub mod updater;
@@ -95,6 +96,15 @@ pub fn run() {
             commands::check_for_update,
             commands::install_update,
             commands::cancel_update,
+            commands::get_public_status,
+            commands::check_connection,
+            commands::begin_public_setup,
+            commands::set_public_switch,
+            commands::answer_public_step,
+            commands::run_public_checks,
+            commands::open_public_service,
+            commands::forget_public_service,
+            commands::open_signup,
         ])
         .setup(|app| {
             setup(app.handle());
@@ -131,8 +141,9 @@ pub(crate) fn try_state<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<AppStat
 /// the app with exit code 1 rather than panicking inside the event loop.
 fn setup(app: &AppHandle) {
     match tauri::async_runtime::block_on(start(app)) {
-        Ok(state) => {
+        Ok((state, held)) => {
             app.manage(state.clone());
+            app.manage(public::start(app, &state, held));
             // One settings snapshot decides who starts zebrad at launch.
             let plan = launch_plan(&state.settings.current());
             app.manage(updater::start(app, &state, plan.gate_may_start));
@@ -210,8 +221,9 @@ fn show_startup_error(app: &AppHandle, err: &StartupError) {
 }
 
 /// The startup sequence up to a running supervisor. Runs inside the Tokio
-/// runtime, which the supervisor, monitor and settings actors need.
-async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
+/// runtime, which the supervisor, monitor and settings actors need. Also
+/// returns whether an open public service waits for the user's switch.
+async fn start(app: &AppHandle) -> Result<(AppState, bool), StartupError> {
     let paths = paths::resolve(app)?;
     let notes = match logging::init(&paths.launcher_log()) {
         Ok(notes) => Some(notes),
@@ -239,6 +251,15 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     }
 
     let settings = SettingsStore::open(&paths)?;
+    launcher_public::install_crypto_provider();
+    // A public service that does not resume loses zebrad's endpoint before the first start.
+    let mut launch = settings.current();
+    let held = launcher_public::prepare_launch(&mut launch);
+    if launch.public != settings.current().public
+        && let Err(err) = settings.update(move |s| s.public = launch.public).await
+    {
+        tracing::error!(%err, "could not save the public services' launch state");
+    }
     let current = settings.current();
     // A broken zebrad.toml is not fatal: zebrad reports it, and the user can
     // fix it in the editor.
@@ -264,9 +285,8 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
         monitor::DEFAULT_INTERVAL,
     );
     let metrics = MetricsPoller::spawn(supervisor.watch_status());
-    Ok(AppState::new(
-        paths, supervisor, settings, stats, details, metrics,
-    ))
+    let state = AppState::new(paths, supervisor, settings, stats, details, metrics);
+    Ok((state, held))
 }
 
 /// Who starts zebrad at launch. Decided once, from one settings snapshot, so

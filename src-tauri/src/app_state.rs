@@ -12,7 +12,7 @@ use std::{
 };
 
 use launcher_core::{
-    config::ManagedKeys,
+    config::{LightwalletdKey, ManagedKeys},
     firstrun::{LegacyLocations, SizeCache},
     paths::Paths,
     settings::SettingsHandle,
@@ -157,7 +157,13 @@ pub fn state_dir(settings: &Settings, paths: &Paths) -> PathBuf {
     }
 }
 
-/// The `zebrad.toml` keys the launcher manages for `settings`.
+/// The `zebrad.toml` keys the launcher manages for `settings`, the light
+/// wallet endpoint included: every caller (launch, `set_settings`,
+/// `choose_data_dir`, `reset_config`, `apply_config`) takes it from the
+/// stored public services, so a Configure save keeps it.
 pub fn managed_keys(settings: &Settings, paths: &Paths) -> ManagedKeys {
-    ManagedKeys::defaults(settings.network, paths, state_dir(settings, paths))
+    ManagedKeys {
+        lightwalletd: LightwalletdKey::for_public(&settings.public, settings.network),
+        ..ManagedKeys::defaults(settings.network, paths, state_dir(settings, paths))
+    }
 }

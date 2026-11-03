@@ -43,9 +43,10 @@ pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
                 return;
             }
             let state = state.inner().clone();
+            let public = public_services(app);
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                shutdown(&state).await;
+                shutdown(&state, public).await;
                 state.exit.finished.store(true, Ordering::SeqCst);
                 if code == Some(tauri::RESTART_EXIT_CODE) {
                     app.request_restart();
@@ -85,18 +86,29 @@ pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
             state.exit.started.store(true, Ordering::SeqCst);
             tracing::warn!("exiting without a prior exit request; stopping zebrad");
             // If a shutdown is already running, this waits for the actor to end.
-            tauri::async_runtime::block_on(shutdown(state.inner()));
+            tauri::async_runtime::block_on(shutdown(state.inner(), public_services(app)));
             state.exit.finished.store(true, Ordering::SeqCst);
         }
         _ => {}
     }
 }
 
-/// Stops zebrad and the supervisor, giving up after the cap.
+/// The public services, once startup managed them.
+fn public_services<R: Runtime>(app: &AppHandle<R>) -> Option<launcher_public::PublicServices> {
+    app.try_state::<launcher_public::PublicServices>()
+        .map(|public| public.inner().clone())
+}
+
+/// Closes the public services' front door, then stops zebrad and the
+/// supervisor, giving up after the cap.
 ///
 /// The cap is the supervisor's: its grace is fixed at launch, while the
 /// settings may have changed since.
-async fn shutdown(state: &AppState) {
+async fn shutdown(state: &AppState, public: Option<launcher_public::PublicServices>) {
+    if let Some(public) = public {
+        // Nothing public outlives Zeal: the front door closes before zebrad stops.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), public.shutdown()).await;
+    }
     let cap = state.supervisor.shutdown_cap();
     tracing::info!(cap_secs = cap.as_secs(), "stopping zebrad before exit");
     match tokio::time::timeout(cap, state.supervisor.shutdown()).await {

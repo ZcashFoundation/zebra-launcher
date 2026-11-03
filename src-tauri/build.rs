@@ -45,6 +45,15 @@ const COMMANDS: &[&str] = &[
     "check_for_update",
     "install_update",
     "cancel_update",
+    "get_public_status",
+    "check_connection",
+    "begin_public_setup",
+    "set_public_switch",
+    "answer_public_step",
+    "run_public_checks",
+    "open_public_service",
+    "forget_public_service",
+    "open_signup",
 ];
 
 const LIB_RS: &str = "src/lib.rs";

@@ -18,9 +18,15 @@ use launcher_core::{
     firstrun::{self, LegacyLocations},
     supervisor::StartOptions,
 };
+use launcher_public::PublicServices;
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
-    ImportOutcome, LogLine, MetricsSnapshot, NodeDetails, NodeStats, OpenTarget, Settings, Status,
+    ImportOutcome, LogLine, MetricsSnapshot, Network, NodeDetails, NodeId, NodeStats, OpenTarget,
+    Settings, Status,
+    public::{
+        ConnectionReport, DnsProvider, OpenError, PublicService, PublicStatus, StepAnswer, StepId,
+        StillPublic,
+    },
 };
 use tauri::{AppHandle, Runtime, State, ipc::Channel};
 use tauri_plugin_dialog::DialogExt;
@@ -569,4 +575,85 @@ pub async fn cancel_update(
     updater: State<'_, launcher_core::updates::UpdaterHandle>,
 ) -> Result<(), String> {
     updater.cancel().await.map_err(message)
+}
+
+/// Every public service's status (docs/PUBLIC-SERVICES.md); empty while nothing is set up.
+/// Every change is also sent as the `public_status` event.
+#[tauri::command]
+pub fn get_public_status(public: State<'_, PublicServices>) -> Vec<PublicStatus> {
+    public.statuses()
+}
+
+/// "Check my connection": the read-only network checks and what they mean for a light
+/// client server, without setting anything up.
+#[tauri::command]
+pub async fn check_connection(
+    public: State<'_, PublicServices>,
+) -> Result<ConnectionReport, String> {
+    public.check_connection().await
+}
+
+/// Sets up `service` for zebrad on `network`, switched on and waiting for consent, and returns
+/// the serving node. Nothing is exposed before the guided steps pass.
+#[tauri::command]
+pub async fn begin_public_setup(
+    public: State<'_, PublicServices>,
+    service: PublicService,
+    network: Network,
+) -> Result<NodeId, String> {
+    match service {
+        PublicService::LightServer => public.begin_setup(network).await,
+    }
+}
+
+/// The service's switch: off closes the front door at once; on resumes.
+#[tauri::command]
+pub async fn set_public_switch(public: State<'_, PublicServices>, on: bool) -> Result<(), String> {
+    public.set_switch(on).await
+}
+
+/// The user's input for a setup step. A token goes to the keychain at once.
+#[tauri::command]
+pub async fn answer_public_step(
+    public: State<'_, PublicServices>,
+    answer: StepAnswer,
+) -> Result<(), String> {
+    public.answer(answer).await
+}
+
+/// Runs one step's checks again.
+#[tauri::command]
+pub async fn run_public_checks(
+    public: State<'_, PublicServices>,
+    step: StepId,
+) -> Result<(), String> {
+    public.run_checks(step).await
+}
+
+/// "Open to the internet": the only command that opens the service, refused with the failing
+/// check unless every gate passes now.
+#[tauri::command]
+pub async fn open_public_service(public: State<'_, PublicServices>) -> Result<(), OpenError> {
+    public.open().await
+}
+
+/// Turns the service off and forgets it, and returns what stays public.
+#[tauri::command]
+pub async fn forget_public_service(
+    public: State<'_, PublicServices>,
+    remove_token: bool,
+) -> Result<StillPublic, String> {
+    public.forget(remove_token).await
+}
+
+/// Opens a provider's sign-up page, compiled into Zeal: the UI never sends a URL.
+#[tauri::command]
+pub fn open_signup<R: Runtime>(app: AppHandle<R>, provider: DnsProvider) -> Result<(), String> {
+    match provider {
+        DnsProvider::DuckDns => app
+            .opener()
+            .open_url(launcher_herd::public::names::DUCKDNS_SIGNUP, None::<&str>)
+            .map_err(message),
+        DnsProvider::Manual => Err("a name kept by hand has no sign-up page".into()),
+    }
 }

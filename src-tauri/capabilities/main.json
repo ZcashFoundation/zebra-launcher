@@ -37,6 +37,15 @@
     "allow-get-update-info",
     "allow-check-for-update",
     "allow-install-update",
-    "allow-cancel-update"
+    "allow-cancel-update",
+    "allow-get-public-status",
+    "allow-check-connection",
+    "allow-begin-public-setup",
+    "allow-set-public-switch",
+    "allow-answer-public-step",
+    "allow-run-public-checks",
+    "allow-open-public-service",
+    "allow-forget-public-service",
+    "allow-open-signup"
   ]
 }
