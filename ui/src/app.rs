@@ -556,19 +556,19 @@ pub fn App() -> impl IntoView {
         }
     });
 
-    // The shell opens on the backend node's network, once the settings say which it is.
-    Effect::new(move |seeded: Option<bool>| {
-        if seeded == Some(true) {
-            return true;
-        }
+    // The shell shows the backend node's network once the settings say which it is, and moves
+    // with it when the first-run wizard or Settings changes it. A save that keeps the network
+    // leaves the network the user picked.
+    Effect::new(move |last: Option<Option<Network>>| {
         let network = state
             .settings
             .with(|settings| settings.as_ref().map(|settings| settings.network));
-        if let Some(network) = network {
+        if let Some(network) = network
+            && last.flatten() != Some(network)
+        {
             state.network.set(network);
-            return true;
         }
-        false
+        network
     });
     // A change of network keeps the shell on that network: the selected node becomes the
     // first node there, or the overview shows its empty state.
@@ -592,6 +592,17 @@ pub fn App() -> impl IntoView {
                     state.tab.set(Tab::Overview);
                 }
             }
+        }
+    });
+    // And the other way round: a node page shown any other way (a node just added, the
+    // backend node after its network changed, a shortcut to a node page while the network
+    // shown has no nodes) brings its node's network along, so a node never shows under the
+    // other network's tab and band. The network is read untracked: a network the user picks
+    // moves the selection (above) and is not undone here.
+    Effect::new(move |_| {
+        let network = state.node().info.with(|info| info.network);
+        if state.tab.get().is_node_tab() && state.network.get_untracked() != network {
+            state.network.set(network);
         }
     });
 
