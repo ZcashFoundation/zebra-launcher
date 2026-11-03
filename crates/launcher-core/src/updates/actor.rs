@@ -1623,9 +1623,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn the_stop_cap_follows_the_supervisor_not_the_settings() {
         let h = harness(UpdateMode::Notify, FakeBackend::with_latest(Some("0.2.0")));
-        // The grace was lowered in the settings after launch; the supervisor
-        // still waits its 120 s before killing zebrad, and so must the cap.
-        h.settings.send_modify(|s| s.stop_grace_secs = 5);
+        // The grace may be lowered in the node's settings after launch; the
+        // supervisor still waits its 120 s before killing zebrad, and so must
+        // the cap.
         h.node.stop_grace_secs.store(120, Ordering::SeqCst);
         h.node.stop_delay_secs.store(100, Ordering::SeqCst);
         check_and_install(&h).await;

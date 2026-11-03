@@ -500,7 +500,9 @@ impl Theme {
     }
 }
 
-/// The launcher's own settings, stored in `launcher.json`.
+/// The launcher's own settings, stored in `launcher.json` next to the node list. Each node's
+/// network, data folder, start at launch and stop grace are in its spec
+/// ([`NodeInfo`]).
 ///
 /// Missing fields take their default, so older files keep loading.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -515,19 +517,11 @@ pub struct Settings {
     pub update_mode: UpdateMode,
     /// Closing the window hides it to the tray instead of quitting.
     pub close_to_tray: bool,
-    /// Start zebrad when the launcher starts.
-    pub start_node_on_launch: bool,
     /// The Grafana dashboard URL to embed: `http://127.0.0.1` or
     /// `http://localhost` with any port and path, see [`is_loopback_http_url`].
     pub grafana_url: Option<String>,
-    /// The directory chosen for the chain state, if not the default.
-    pub data_dir: Option<String>,
-    /// The network zebrad runs on.
-    pub network: Network,
-    /// How long a graceful stop may take before zebrad is killed, in seconds.
-    pub stop_grace_secs: u64,
     /// The first-run flow was completed (`complete_first_run`). Until then
-    /// the UI shows it and zebrad is not started.
+    /// the UI shows it and no node is started.
     ///
     /// New installs start with `false`. A `launcher.json` written before
     /// schema version 2 belongs to a user who already ran the launcher, so
@@ -546,7 +540,7 @@ impl Settings {
 /// The stop grace period a node gets unless the user sets another, in seconds.
 pub const DEFAULT_STOP_GRACE_SECS: u64 = 60;
 /// The shortest stop grace period that can be saved, in seconds
-/// ([`Settings::stop_grace_secs`]). The backend validates against these
+/// ([`NodeInfo::stop_grace_secs`]). The backend validates against these
 /// bounds and the settings form applies them to its field.
 pub const MIN_STOP_GRACE_SECS: u64 = 5;
 /// The longest stop grace period that can be saved, in seconds.
@@ -561,11 +555,7 @@ impl Default for Settings {
             schema_version: Self::SCHEMA_VERSION,
             update_mode: UpdateMode::Off,
             close_to_tray: true,
-            start_node_on_launch: true,
             grafana_url: None,
-            data_dir: None,
-            network: Network::Mainnet,
-            stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
             first_run_done: false,
             theme: Theme::System,
         }
@@ -1014,16 +1004,6 @@ pub struct NodeDataDirChoice {
     pub free_bytes: Option<u64>,
 }
 
-/// The result of `choose_data_dir`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DataDirChoice {
-    /// The saved settings, with the new `data_dir`.
-    pub settings: Settings,
-    /// Free space on the chosen volume, if it could be read. Warning about
-    /// too little space is up to the UI.
-    pub free_bytes: Option<u64>,
-}
-
 /// What the launcher's updater is doing. Sent with every change as the
 /// `update_state` event and returned by `get_update_state`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1382,21 +1362,27 @@ mod tests {
     #[test]
     fn settings_defaults_fill_missing_fields() {
         let settings: Settings =
-            serde_json::from_str(r#"{"network":"testnet"}"#).expect("partial settings parse");
+            serde_json::from_str(r#"{"close_to_tray":false}"#).expect("partial settings parse");
         assert_eq!(
             settings,
             Settings {
-                network: Network::Testnet,
+                close_to_tray: false,
                 ..Settings::default()
             }
         );
         assert_eq!(settings.theme, Theme::System);
+        // A file of a single-node launcher still reads; its node's fields are not settings.
+        let old: Settings = serde_json::from_str(
+            r#"{"schema_version":2,"network":"testnet","data_dir":"/big","stop_grace_secs":90}"#,
+        )
+        .expect("a version 2 file parses");
+        assert_eq!(old.schema_version, 2);
     }
 
     #[test]
     fn stop_grace_bounds_hold_the_default() {
         assert_eq!(STOP_GRACE_SECS, MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS);
-        assert!(STOP_GRACE_SECS.contains(&Settings::default().stop_grace_secs));
+        assert!(STOP_GRACE_SECS.contains(&DEFAULT_STOP_GRACE_SECS));
         assert!(!STOP_GRACE_SECS.contains(&(MIN_STOP_GRACE_SECS - 1)));
         assert!(!STOP_GRACE_SECS.contains(&(MAX_STOP_GRACE_SECS + 1)));
     }

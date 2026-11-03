@@ -28,11 +28,6 @@ pub enum SettingsError {
     /// The Grafana URL is not `http://127.0.0.1` or `http://localhost`.
     #[error("the Grafana URL {0:?} must start with http://127.0.0.1 or http://localhost")]
     InvalidGrafanaUrl(String),
-    /// The stop grace period is outside [`MIN_STOP_GRACE_SECS`]..=[`MAX_STOP_GRACE_SECS`].
-    #[error(
-        "the stop grace period of {0} s must be between {MIN_STOP_GRACE_SECS} and {MAX_STOP_GRACE_SECS} s"
-    )]
-    InvalidStopGrace(u64),
     /// The settings file could not be read or written.
     #[error("settings file I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -47,29 +42,24 @@ pub enum SettingsError {
     Closed,
 }
 
-/// Checks settings before they are saved: a loopback Grafana URL and a stop
-/// grace period within bounds (the supervisor adds it to an `Instant`, and a
-/// very short one would kill zebrad before it can stop).
+/// Checks settings before they are saved: a loopback Grafana URL. (A node's
+/// stop grace period is checked with the node list, see
+/// [`nodes::check_list`].)
 pub fn validate(settings: &Settings) -> Result<(), SettingsError> {
     if let Some(url) = &settings.grafana_url
         && !is_loopback_http_url(url)
     {
         return Err(SettingsError::InvalidGrafanaUrl(url.clone()));
     }
-    if !STOP_GRACE_SECS.contains(&settings.stop_grace_secs) {
-        return Err(SettingsError::InvalidStopGrace(settings.stop_grace_secs));
-    }
     Ok(())
 }
 
 /// Replaces `current` with settings sent by the UI (`set_settings`), keeping
 /// the fields the UI may not set directly: `first_run_done` (only
-/// `complete_first_run` sets it), `data_dir` (only `choose_data_dir` changes
-/// it, after its checks) and `schema_version` (always the version this
-/// launcher writes, so a stale copy cannot undo the migration marker).
+/// `complete_first_run` sets it) and `schema_version` (always the version
+/// this launcher writes, so a stale copy cannot undo the migration marker).
 pub fn apply_from_ui(current: &mut Settings, mut incoming: Settings) {
     incoming.first_run_done = current.first_run_done;
-    incoming.data_dir = current.data_dir.take();
     incoming.schema_version = Settings::SCHEMA_VERSION;
     *current = incoming;
 }
@@ -441,15 +431,6 @@ fn sanitize(settings: &mut Settings) {
         tracing::warn!(%url, "launcher.json has an invalid Grafana URL; ignoring it");
         settings.grafana_url = None;
     }
-    if !STOP_GRACE_SECS.contains(&settings.stop_grace_secs) {
-        let default = Settings::default().stop_grace_secs;
-        tracing::warn!(
-            secs = settings.stop_grace_secs,
-            default,
-            "launcher.json has a stop grace period out of range; using the default"
-        );
-        settings.stop_grace_secs = default;
-    }
 }
 
 fn corrupt_path(path: &std::path::Path) -> PathBuf {
@@ -477,72 +458,33 @@ mod tests {
     }
 
     #[test]
-    fn ui_settings_keep_the_data_dir_first_run_marker_and_schema_version() {
+    fn ui_settings_keep_the_first_run_marker_and_schema_version() {
         let mut current = Settings {
-            data_dir: Some("/chosen".into()),
             first_run_done: true,
             ..Settings::default()
         };
         let stale = Settings {
             schema_version: 0,
-            data_dir: None,
             first_run_done: false,
-            network: Network::Testnet,
+            close_to_tray: false,
             ..Settings::default()
         };
         apply_from_ui(&mut current, stale);
-        assert_eq!(current.data_dir.as_deref(), Some("/chosen"));
         assert!(current.first_run_done);
         assert_eq!(current.schema_version, Settings::SCHEMA_VERSION);
-        assert_eq!(current.network, Network::Testnet);
-    }
-
-    #[test]
-    fn the_stop_grace_must_be_within_bounds() {
-        for secs in [MIN_STOP_GRACE_SECS, 60, MAX_STOP_GRACE_SECS] {
-            let settings = Settings {
-                stop_grace_secs: secs,
-                ..Settings::default()
-            };
-            validate(&settings).unwrap_or_else(|err| panic!("{secs}: {err}"));
-        }
-        for secs in [
-            0,
-            MIN_STOP_GRACE_SECS - 1,
-            MAX_STOP_GRACE_SECS + 1,
-            u64::MAX,
-        ] {
-            let settings = Settings {
-                stop_grace_secs: secs,
-                ..Settings::default()
-            };
-            assert!(
-                matches!(validate(&settings), Err(SettingsError::InvalidStopGrace(s)) if s == secs),
-                "{secs}"
-            );
-        }
+        assert!(!current.close_to_tray);
     }
 
     #[tokio::test]
-    async fn an_out_of_range_stop_grace_is_rejected_and_loads_as_the_default() {
+    async fn an_out_of_range_stop_grace_in_a_version_2_file_loads_as_the_default() {
         let (_dir, paths) = paths();
-        let store = SettingsStore::open(&paths).expect("open");
-        let err = timeout(T, store.update(|s| s.stop_grace_secs = 0))
-            .await
-            .expect("in time")
-            .expect_err("zero grace");
-        assert!(matches!(err, SettingsError::InvalidStopGrace(0)), "{err:?}");
-        assert_eq!(store.current(), Settings::default());
-        drop(store);
-
-        // A hand-edited file keeps loading, with the default grace.
         fs::create_dir_all(paths.config_dir()).expect("mkdir");
         let edited = br#"{ "schema_version": 2, "stop_grace_secs": 18446744073709551615, "network": "testnet" }"#;
         fs::write(paths.settings_file(), edited).expect("write");
         let store = SettingsStore::open(&paths).expect("open");
-        let current = store.current();
-        assert_eq!(current.stop_grace_secs, Settings::default().stop_grace_secs);
-        assert_eq!(current.network, Network::Testnet, "the rest is kept");
+        let [node] = store.nodes().try_into().expect("one node");
+        assert_eq!(node.stop_grace_secs, DEFAULT_STOP_GRACE_SECS);
+        assert_eq!(node.network, Network::Testnet, "the rest is kept");
     }
 
     #[tokio::test]
@@ -561,16 +503,15 @@ mod tests {
         let saved = timeout(
             T,
             store.update(|s| {
-                s.network = Network::Testnet;
+                s.close_to_tray = false;
                 s.update_mode = UpdateMode::Notify;
                 s.grafana_url = Some("http://127.0.0.1:3000/d/zebra".into());
-                s.data_dir = Some("/big/disk".into());
             }),
         )
         .await
         .expect("in time")
         .expect("update");
-        assert_eq!(saved.network, Network::Testnet);
+        assert_eq!(saved.update_mode, UpdateMode::Notify);
         timeout(T, watch.changed())
             .await
             .expect("in time")
@@ -595,8 +536,8 @@ mod tests {
             let store = SettingsStore::open(&paths).expect("open");
             let current = store.current();
             assert!(current.first_run_done, "upgrading users skip the first run");
-            assert!(current.start_node_on_launch);
-            assert_eq!(current.network, Network::Testnet);
+            assert!(store.nodes()[0].autostart);
+            assert_eq!(store.nodes()[0].network, Network::Testnet);
             assert_eq!(current.schema_version, Settings::SCHEMA_VERSION);
             let written = fs::read(paths.settings_file()).expect("read");
             let on_disk: Settings = serde_json::from_slice(&written).expect("json");
@@ -890,6 +831,15 @@ mod tests {
         assert!(!paths.settings_file().exists());
     }
 
+    /// The port of the Grafana URL, as a counter for [`concurrent_updates_serialise`].
+    fn grafana_port(settings: &Settings) -> u16 {
+        settings
+            .grafana_url
+            .as_deref()
+            .and_then(|url| url.rsplit(':').next()?.parse().ok())
+            .unwrap_or(3000)
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_updates_serialise() {
         let (_dir, paths) = paths();
@@ -898,7 +848,12 @@ mod tests {
         for _ in 0..50 {
             let store = store.clone();
             tasks.push(tokio::spawn(async move {
-                store.update(|s| s.stop_grace_secs += 1).await
+                store
+                    .update(|s| {
+                        let next = grafana_port(s) + 1;
+                        s.grafana_url = Some(format!("http://127.0.0.1:{next}"));
+                    })
+                    .await
             }));
         }
         for task in tasks {
@@ -908,10 +863,10 @@ mod tests {
                 .expect("task")
                 .expect("update");
         }
-        assert_eq!(store.current().stop_grace_secs, 110);
+        assert_eq!(grafana_port(&store.current()), 3050);
         let on_disk: Settings =
             serde_json::from_slice(&fs::read(paths.settings_file()).expect("read")).expect("json");
-        assert_eq!(on_disk.stop_grace_secs, 110);
+        assert_eq!(grafana_port(&on_disk), 3050);
         let names: Vec<_> = fs::read_dir(paths.config_dir())
             .expect("list")
             .map(|e| e.expect("entry").file_name())
