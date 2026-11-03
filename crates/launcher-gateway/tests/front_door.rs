@@ -416,7 +416,17 @@ async fn the_connection_limits_refuse_the_excess() {
     assert!(within(connect(&door)).await.is_err(), "over the total");
     drop(first);
     wait_stats(&door, |s| s.open_connections == 0).await;
-    within(connect(&door)).await.expect("a slot came free");
+    // The slot is free once the dropped connection's task has ended, which Windows may
+    // report a moment after the count; try again briefly.
+    within(async {
+        loop {
+            match connect(&door).await {
+                Ok(stream) => break stream,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await;
 
     let burst = Limits {
         new_burst: 2,
