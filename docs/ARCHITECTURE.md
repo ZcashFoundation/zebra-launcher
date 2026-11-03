@@ -346,7 +346,7 @@ row. That feeds the status strip and the dashboard, the primary metrics view;
 `OpenTarget::MetricsEndpoint` opens the raw page in the browser. Grafana is optional and
 run by the user, embedded in its own tab; see [GRAFANA.md](GRAFANA.md).
 
-**Dashboard.** The UI keeps two histories since the launcher opened; nothing is persisted.
+**Dashboard.** The UI keeps three histories since the launcher opened; nothing is persisted.
 `ui/src/stats_history.rs` holds every published `NodeStats` as a `Sample` (up to 4 h of the
 monitor's 5 s polls; the peer list of the same poll adds the inbound and outbound counts)
 and answers, over a window, the block rate, the ETA to the tip, the last height change and
@@ -354,7 +354,10 @@ how long the peer count has been low. `ui/src/metrics_history.rs` holds every
 `MetricsSnapshot` reduced to the families the page derives series from (`KEPT_FAMILIES`:
 disk and memory bytes, the network byte counters, ready and unready peers, downloads in
 flight, the checkpoint height and so on; 4 h of 10 s snapshots), the newest kept whole for
-the one-off gauges. Tiles and charts read both over the range the user picks (15 min, 1 h,
+the one-off gauges. `ui/src/resource_history.rs` holds the samples of the node's process tree
+(4 h of 5 s samples, the newest minute with their process lists) and answers the one-minute
+rates of CPU and disk I/O, each process's rates, the sparklines of the current run and the
+last run's summary. Tiles and charts read them over the range the user picks (15 min, 1 h,
 4 h, all); the sync hero's rate and ETA use a fixed 15 min window (`HERO_RATE_WINDOW`), so
 they do not move with the range control.
 
@@ -391,7 +394,12 @@ from the statistics history, the metrics (Disk) and the status (Uptime). The pag
 mounts the two inline SVG line charts (`ui/src/charts.rs`, no chart library; hover
 crosshair, keyboard navigation and a table view): "Blocks behind the tip" and "Peers" by
 direction, whose table adds the peer set's ready and unready counts from the metrics.
-`activity.rs` is the activity row: Recent problems and This run (views from
+`resources.rs` is the Resources card under the charts (see
+[RESOURCES.md](RESOURCES.md)): four tiles (CPU, Memory, Disk or I/O, Processes) with rates
+over the last minute, the table of the node's processes in tree order, and a line about the
+computer's CPUs, memory and swap (commit on Windows, memory pressure on macOS). It stays
+hidden until the node's first sample, and a stopped node shows its last run instead of live
+values; none of its figures takes a tone. `activity.rs` is the activity row: Recent problems and This run (views from
 `ui/src/components/log_insights.rs`) and the Peers card with its caption, the table of
 connected peers from `NodeDetails` and the handshake and obsolete-peer counters from the
 metrics. `details.rs` holds the Node and Chain cards, each with Copy, from the status, the
@@ -434,7 +442,9 @@ two minutes of samples agree), `?crashloop` (zebrad panics about 15 s after ever
 is restarted after 5, 10 and 20 s: "zebrad crashed", then "Crash loop", with the exits and
 restarts on This run), `?eos=soon` and `?eos=halt` (the end-of-support warning and halt),
 `?stale` (an earlier zebrad still running), and `?update=countdown` and `?update=health`
-(the install countdown and a launcher update that did not come back healthy).
+(the install countdown and a launcher update that did not come back healthy). The mock samples
+its zebrad's resources every 5 s while it has a pid; `?os=macos` and `?os=windows` give the
+Resources card those platforms' figures and labels.
 
 **Appearance.** `Settings.theme` (`system`, `light`, `dark`) is resolved against the
 system preference in `ui/src/theme.rs` and applied as `data-theme` on `<html>`; every

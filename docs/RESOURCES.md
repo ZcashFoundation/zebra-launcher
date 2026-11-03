@@ -1,10 +1,11 @@
 # Resource monitoring
 
-> **Status: proposal, 2026-11-03.** A design for review before any code. It answers the
-> maintainer's question "can we also monitor resource usage of each node or child
-> process?". [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built and
-> is updated phase by phase as this lands. [MULTI-NODE.md](MULTI-NODE.md) is the plan it
-> fits into.
+> **Status, 2026-11-03: phase 1 is built (the Resources card against the mock); phases 2
+> to 7 are the design.** [Phases](#phases) says what each built phase changed from this
+> design. It answers the maintainer's question "can we also monitor resource usage of each
+> node or child process?". [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what
+> is built and is updated phase by phase as this lands. [MULTI-NODE.md](MULTI-NODE.md) is
+> the plan it fits into.
 
 Yes, for each node and for every process a node starts. Zeal already draws the boundary of
 each node's process tree:
@@ -1365,6 +1366,28 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    `extra_nodes()` returns nothing today, so the card stays hidden and nothing changes for
    users. Screenshots: syncing, at the tip, stopped, `?os=macos`, `?os=windows` and a
    narrow window.
+
+   **Built.** As planned, with these differences:
+
+   - `MachineResources` has no `volumes` field yet, and `VolumeUsage` and
+     `NodeResourcesEvent` do not exist: they come with phases 5 and 7. The field defaults on
+     the wire, so adding it later breaks nothing. The card's footer line has no free-space
+     part until then.
+   - `MemoryPressure::as_str` gives the footer's words; the macOS memory label reads "Memory
+     as Activity Monitor shows it", the basis line's wording.
+   - `format::mem_bytes` drops a trailing `.0`, so totals read "16 GiB" and a commit charge of
+     exactly 7 GiB reads "7 GiB committed".
+   - The Disk and Processes tiles show their value on two lines, as in the sketch. The Disk
+     tile's sparkline plots the write rate. While stopped, the tiles keep the last run's
+     sparklines.
+   - "syncing uses every CPU" follows zebrad's own progress lines (syncing, slow or close to
+     the tip), so a stalled node shows the run's average instead.
+   - The footer's busy share is the newest computer sample's (its last 5 s); one-minute
+     averages of the computer wait for `MachineHistory` (phase 4).
+   - The mock has no flag for the tip: its sync reaches the tip after about 47 minutes, when
+     the card shows the tip's figures.
+   - The node card's "State memory (of 6.1 GiB in use)" cross-check is in no phase yet and is
+     not built.
 2. **Live on Linux.**
    - `TreeProbe`, `ChildHandle::probe` and `watch_probe` (`install_run`, `finalize`).
    - `resources/{procfs, fold, linux}.rs`.
