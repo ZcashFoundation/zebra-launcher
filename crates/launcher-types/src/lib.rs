@@ -16,6 +16,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 mod nodes;
+pub mod public;
 
 pub use nodes::{NodeId, NodeInfo, NodeKind, NodePort, NodeRole, PortRole, assign_ports};
 
@@ -46,6 +47,9 @@ pub mod events {
     /// ([`MetricsSnapshot`](crate::MetricsSnapshot)): zebrad's Prometheus
     /// metrics, read every 10 s while it runs.
     pub const METRICS: &str = "metrics";
+    /// A public service's state changed: one
+    /// [`PublicStatus`](crate::public::PublicStatus), counters coalesced.
+    pub const PUBLIC_STATUS: &str = "public_status";
 }
 
 /// A location the `open_path` command opens with the system's default
@@ -512,6 +516,11 @@ pub struct Settings {
     /// The light or dark look, or following the operating system. Files
     /// without it follow the system.
     pub theme: Theme,
+    /// The public services (docs/PUBLIC-SERVICES.md). Only the public-services
+    /// commands change it: `set_settings` keeps the stored section and
+    /// `get_settings` leaves it out.
+    #[serde(skip_serializing_if = "public::PublicConfig::is_empty")]
+    pub public: public::PublicConfig,
 }
 
 impl Settings {
@@ -542,6 +551,7 @@ impl Default for Settings {
             stop_grace_secs: 60,
             first_run_done: false,
             theme: Theme::System,
+            public: public::PublicConfig::default(),
         }
     }
 }
