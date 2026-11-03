@@ -574,6 +574,26 @@ async fn a_reorganisation_at_the_tip_is_followed_once() {
     assert_eq!(harness.explorer.live().borrow().live.tip.unwrap().epoch, 1);
 }
 
+#[tokio::test]
+async fn the_follower_checks_the_tip_at_every_poll() {
+    let poll = Duration::from_millis(100);
+    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
+        config.tip_poll = poll;
+    });
+    harness
+        .reply(ExplorerRequest::Interest {
+            visible: true,
+            page: PageKind::Chain,
+        })
+        .await;
+    tokio::time::sleep(poll * 3).await;
+    let before = harness.counts()[0];
+    tokio::time::sleep(poll * 15).await;
+    let checks = harness.counts()[0] - before;
+    // One check a poll; a check that skipped every other poll would make about seven.
+    assert!(checks >= 11, "{checks} tip checks in 15 polls");
+}
+
 /// Every event's fields, as text, from the explorer's threads.
 mod capture {
     use std::{

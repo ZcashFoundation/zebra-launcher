@@ -632,10 +632,13 @@ where
 
     fn on_tick(&mut self) {
         let now = Instant::now();
+        // A check that ended just after the last tick is a little younger than a poll at this
+        // one; half a poll keeps that check from skipping it, and still skips the tick after a
+        // page's own check.
         if self.visible
             && self.run.is_some()
             && self.at_tip()
-            && !self.index.checked_within(self.config.tip_poll, now)
+            && !self.index.checked_within(self.config.tip_poll / 2, now)
         {
             self.follow();
         }
