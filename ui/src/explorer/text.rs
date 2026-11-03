@@ -1,13 +1,13 @@
-//! The Explorer's words: the unit amounts read in, search hints and refusals. Pure, tested
-//! natively.
+//! The Explorer's words and numbers: amounts in ZEC (TAZ on Testnet), budgets, intervals,
+//! search hints and refusals. Pure, tested natively.
 
 use explorer_model::classify::{Classified, Later};
 use launcher_types::{
     Network,
-    explorer::{NotFoundHint, SecretKind},
+    explorer::{Budget, NotFoundHint, PerPool, Pool, SecretKind},
 };
 
-use crate::format::thousands;
+use crate::format::{bytes, thousands};
 
 /// Blocks this deep are final in Zebra.
 pub const FINAL_DEPTH: u32 = 1_000;
@@ -20,11 +20,100 @@ pub fn unit(network: Network) -> &'static str {
     }
 }
 
+/// An exact amount in whole coins, without trailing zeros: `1.5625`, `0.0010007`, `2`,
+/// `-0.5`, `14,654,995.76514816`.
+pub fn coins(zat: i64) -> String {
+    let sign = if zat < 0 { "-" } else { "" };
+    let magnitude = zat.unsigned_abs();
+    let whole = thousands(magnitude / 100_000_000);
+    let fraction = format!("{:08}", magnitude % 100_000_000);
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        format!("{sign}{whole}")
+    } else {
+        format!("{sign}{whole}.{fraction}")
+    }
+}
+
+/// [`coins`] with the unit: `1.5625 ZEC`.
+pub fn amount(zat: i64, unit: &str) -> String {
+    format!("{} {unit}", coins(zat))
+}
+
+/// A large amount rounded to two decimals from 1,000 coins up, exact below: pool balances and
+/// the supply.
+pub fn amount_rounded(zat: u64, unit: &str) -> String {
+    if zat < 100_000_000_000 {
+        return amount(i64::try_from(zat).unwrap_or(i64::MAX), unit);
+    }
+    let hundredths = (zat + 500_000) / 1_000_000;
+    format!(
+        "{}.{:02} {unit}",
+        thousands(hundredths / 100),
+        hundredths % 100
+    )
+}
+
+/// What users moved into the shielded pools in a block, net of what they took out.
+pub fn net_shielding(users: &PerPool<i64>) -> i64 {
+    Pool::SHIELDED.iter().map(|pool| users.get(*pool)).sum()
+}
+
+/// How full a block is: `≥ 39 of 330`, `70.6 kB of 2.0 MB`.
+pub fn budget_text(budget: &Budget) -> String {
+    match *budget {
+        Budget::Units {
+            used,
+            limit,
+            complete,
+        } => {
+            let at_least = if complete { "" } else { "≥ " };
+            format!("{at_least}{used} of {limit}")
+        }
+        Budget::Bytes { used, limit } => {
+            format!("{} of {}", bytes(u64::from(used)), bytes(u64::from(limit)))
+        }
+        Budget::Unknown => "unknown".to_owned(),
+    }
+}
+
 fn capitalise(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
+    }
+}
+
+/// `about 2 h 5 min`, `about 4 d 3 h`, `under a minute`.
+pub fn eta_text(secs: u64) -> String {
+    if secs < 60 {
+        return "under a minute".to_owned();
+    }
+    format!(
+        "about {}",
+        crate::charts::uptime_text(std::time::Duration::from_secs(secs))
+    )
+}
+
+/// The network difficulty: whole with separators from a thousand up, two decimals below.
+pub fn difficulty(difficulty: f64) -> String {
+    if !difficulty.is_finite() || difficulty < 0.0 {
+        "unknown".to_owned()
+    } else if difficulty >= 1000.0 {
+        thousands(difficulty.round() as u64)
+    } else {
+        format!("{difficulty:.2}")
+    }
+}
+
+/// The seconds between two blocks: `1 min 15 s`, `-5 s` (miners set the times).
+pub fn interval_text(secs: i64) -> String {
+    let sign = if secs < 0 { "-" } else { "" };
+    let magnitude = secs.unsigned_abs();
+    match magnitude {
+        0..60 => format!("{sign}{magnitude} s"),
+        _ => format!("{sign}{} min {} s", magnitude / 60, magnitude % 60),
     }
 }
 
@@ -100,6 +189,39 @@ pub fn not_found_text(hint: &NotFoundHint) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amounts_are_exact_and_say_their_unit() {
+        assert_eq!(coins(156_250_000), "1.5625");
+        assert_eq!(coins(100_070), "0.0010007");
+        assert_eq!(coins(200_000_000), "2");
+        assert_eq!(coins(-50_000_000), "-0.5");
+        assert_eq!(coins(0), "0");
+        assert_eq!(coins(1_465_499_576_514_816), "14,654,995.76514816");
+        assert_eq!(amount(1, "TAZ"), "0.00000001 TAZ");
+        assert_eq!(unit(Network::Testnet), "TAZ");
+        assert_eq!(unit(Network::Mainnet), "ZEC");
+        assert_eq!(
+            amount_rounded(1_465_499_576_514_816, "ZEC"),
+            "14,654,995.77 ZEC"
+        );
+        assert_eq!(amount_rounded(12_345_678, "ZEC"), "0.12345678 ZEC");
+    }
+
+    #[test]
+    fn difficulty_reads_whole_or_with_two_decimals() {
+        assert_eq!(difficulty(118_462_377.5), "118,462,378");
+        assert_eq!(difficulty(42.123), "42.12");
+        assert_eq!(difficulty(f64::NAN), "unknown");
+    }
+
+    #[test]
+    fn times_and_intervals() {
+        assert_eq!(eta_text(30), "under a minute");
+        assert_eq!(eta_text(7_500), "about 2 h 5 min");
+        assert_eq!(interval_text(75), "1 min 15 s");
+        assert_eq!(interval_text(-5), "-5 s");
+    }
 
     #[test]
     fn hints_and_refusals() {

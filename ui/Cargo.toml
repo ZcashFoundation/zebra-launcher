@@ -25,6 +25,7 @@ web-sys = { version = "0.3", features = [
     "MediaQueryList",
     "MediaQueryListEvent",
     "Navigator",
+    "NodeList",
     "ResizeObserver",
     "Storage",
     "VisibilityState",
