@@ -6,6 +6,7 @@
 //! crate gathers the facts they read and carries out what they decide. It keeps the network
 //! dependencies (ACME, the keychain, HTTPS) in one place, reviewed and cargo-denied as a unit.
 
+pub mod acme;
 pub mod awake;
 pub mod ddns;
 pub mod dns;
