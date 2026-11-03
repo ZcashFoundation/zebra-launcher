@@ -80,6 +80,7 @@ it, rebuilding on changes. Useful environment variables:
 | --- | --- |
 | `RUST_LOG` | Launcher log filter, default `info`. Debug builds also log to stderr. |
 | `FAKE_ZEBRAD_MODE` | fake-zebrad's behaviour, see above. |
+| `FAKE_ZEBRAD_BURN_MS`, `FAKE_ZEBRAD_ALLOC_MB`, `FAKE_ZEBRAD_WRITE_MB`, `FAKE_ZEBRAD_CHILD` | Give fake-zebrad's process tree a busy thread, held memory, written bytes or a child (`busy`, `session`, `short`, `late`), for the dashboard's Resources card on Linux; the table at the top of [`fake-zebrad.rs`](../crates/launcher-core/src/bin/fake-zebrad.rs) says what each does. `RUST_LOG=info,launcher_core::resources=debug` logs each reading's time. |
 | `LAUNCHER_STDIN_CLOSE=1` | Spawn zebrad with `--shutdown-on-stdin-close` and stop it by closing its stdin (fake-zebrad, or a zebrad with the proposed upstream flag; the pinned zebrad does not have it yet). |
 
 The launcher keeps its files in the per-user directories for the identifier

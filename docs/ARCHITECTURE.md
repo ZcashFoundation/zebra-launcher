@@ -37,7 +37,7 @@ kept as the historical design record; where the two differ, this file describes 
 | Path | Role |
 | --- | --- |
 | `crates/launcher-types` | serde types shared by backend and UI (`Status`, `LogLine`, `Settings`, `NodeStats`, errors). Builds natively and to wasm; no tokio, no Tauri. |
-| `crates/launcher-core` | Logic that does not need Tauri: supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, paths, end-of-support, install kind. |
+| `crates/launcher-core` | Logic that does not need Tauri: supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind. |
 | `crates/launcher-core/src/bin/fake-zebrad.rs` | Scripted stand-in for zebrad, used by tests and PR bundle builds. |
 | `src-tauri` | Thin Tauri 2.12 app: commands, the `Channel` bridge, tray, updater, exit flow, capabilities. |
 | `ui` | Leptos CSR crate built by trunk into `ui/dist`. Talks to Tauri through about 100 lines of hand-written `wasm_bindgen` externs to `window.__TAURI__`. |
@@ -54,6 +54,7 @@ One actor task owns the zebrad child. Nothing else touches it.
 | --- | --- | --- |
 | `mpsc<Cmd>` | in | `Start{options}`, `Stop`, `Shutdown`, `Subscribe`, `History{since}`, `Note` (a launcher line for the ring, sent with `try_send`) (`crates/launcher-core/src/supervisor.rs`). `SupervisorHandle::restart` is a `Stop` followed by a `Start`; applying a config is the `apply_config` Tauri command, built on the same handle. |
 | `watch<Status>` | out | `phase` (`Stopped`, `Starting`, `Running`, `Stopping`, `Backoff{until, crashes}`, `Failed{class}`), `pid`, `started_at`, the `rpc_addr` and `metrics_addr` zebrad logged as opened, `last_exit` (`ExitInfo{code, class, detail, requested}`), `stale`, `restarts` (automatic restarts this launcher session) and `last_stop` (`StopReport{requested_at, exited_at, forced}` for the last requested stop) (`crates/launcher-types/src/lib.rs`) |
+| `watch<Option<TreeProbe>>` | out | the current run's process tree for the resource sampler (`SupervisorHandle::watch_probe`): run id, pid, and the spawn on the wall and monotonic clocks, read once in `install_run` with `Status.started_at`. `Some` from the spawn until `finalize`, after the exit drain |
 | `broadcast<LogLine>` | out | live log lines, each with a monotonic `seq` |
 | `oneshot` | reply | each command's answer; `History{since}` returns lines from the 10 000-line `VecDeque` ring, for late subscribers |
 
@@ -74,20 +75,23 @@ changes the UI did not ask for: `status` (every `Status` change), `node_stats` (
 `Option<NodeStats>` change), `node_details` (every `Option<NodeDetails>` change: the
 details behind the stats, from the same RPC poll), `metrics` (every
 `Option<MetricsSnapshot>` change: zebrad's Prometheus page, read every 10 s while it
-runs), `stale_process` (a zebrad from an earlier launcher run blocked the start at
-launch), and for the updater `update_info` (every `UpdateInfo` change), `update_state`
+runs), `node_resources` (every `Option<NodeResources>` change: zebrad's process tree, read
+every 5 s from the spawn until the run is finalized), `machine_resources` (every
+`Option<MachineResources>` change: the computer's CPU and memory, every 5 s),
+`stale_process` (a zebrad from an earlier launcher run blocked the start at launch), and for the updater `update_info` (every `UpdateInfo` change), `update_state`
 (its `UpdateState`, when that changed) and `update_health_failed` (an
 `UpdateHealthFailure` after an update that did not come back healthy). The snapshot
-commands are `get_status`, `get_node_stats`, `get_node_details`, `get_metrics` and
-`get_update_info`.
+commands are `get_status`, `get_node_stats`, `get_node_details`, `get_metrics`,
+`get_node_resources`, `get_machine_resources` and `get_update_info`.
 
 At startup the UI subscribes first and then fetches a snapshot (`get_status`,
-`get_node_stats`, `get_node_details`, `get_metrics`, `get_update_info`), so no change
-falls between the two; the log subscription itself streams the retained history before
+`get_node_stats`, `get_node_details`, `get_metrics`, `get_node_resources`,
+`get_machine_resources`, `get_update_info`), so no change falls between the two; the log subscription itself streams the retained history before
 live lines, so logs need no snapshot request.
 An event that arrives while a snapshot request is in flight is newer than the snapshot,
-so the UI drops the `get_status`, `get_node_stats`, `get_node_details`, `get_metrics` and
-`get_update_info` snapshots once an event of the same kind has arrived (for the updater:
+so the UI drops the `get_status`, `get_node_stats`, `get_node_details`, `get_metrics`,
+`get_node_resources`, `get_machine_resources` and `get_update_info` snapshots once an
+event of the same kind has arrived (for the updater:
 `update_info`; an `update_state` that arrives before any `update_info` replaces the
 snapshot's state).
 Log batches are merged by `seq`, so their order does not matter.
@@ -169,6 +173,8 @@ zebrad; see
 | Escalation after the grace period (default 60 s) | `SIGKILL` to the process group, `wait()` | `SIGKILL` to the process group, `wait()` | `TerminateJobObject`, wait |
 | Launcher exits | the exit flow stops zebrad first; `PR_SET_PDEATHSIG(SIGTERM)` covers a crash | the exit flow stops zebrad first; after a crash zebrad runs on until the next launch finds it through the pidfile | `KILL_ON_JOB_CLOSE` on the per-zebrad Job Object |
 | Stale zebrad on start | pidfile | pidfile | pidfile |
+| Process tree for resource monitoring ([RESOURCES.md](RESOURCES.md)) | from a `/proc` scan every 5 s: the root (checked once against the spawn time), its process group, children of members by parent link (started no earlier than the parent) and members seen before; read parent first | not measured yet: the card stays hidden | not measured yet (the job object will hold the tree) |
+| CPU, memory, disk I/O and counts of the tree | `stat` (utime + stime, and cutime + cstime of the reaped children), `status` (VmRSS, VmHWM), `io` (read_bytes, write_bytes), the entries of `fd`; the computer from `/proc/stat` and `/proc/meminfo` | — | — |
 
 - **Stdin-close shutdown** is a proposed upstream, opt-in zebrad flag: zebrad shuts down
   when its stdin reaches EOF and logs `stdin closed, starting shutdown` (target
@@ -294,7 +300,7 @@ directories; the commands in `src-tauri/src/commands.rs` call it off the async r
 | `import_legacy_state` | `ImportOutcome` | renames `dirs::cache_dir()/zebra/state` into the current state dir; across volumes it fails and asks the user to move it by hand, never copying |
 | `delete_legacy_state` | `u64` (bytes freed) | removes `dirs::cache_dir()/zebra/state` only (the peer cache stays), with the rules of `delete_node_data` and the zebra cache dir as the only root; refuses when the launcher's own state dir is inside that cache dir |
 | `delete_node_data` | `u64` (bytes freed) | removes `<data dir>/state` only, and only inside the launcher's data dir or the chosen one; the bytes come from a size measured earlier in the session, 0 (unknown) otherwise, never from a walk of the whole state |
-| `copy_diagnostics` | `String` | versions, OS, the resolved zebrad binary, the stop grace in effect and in the settings, status and any stale zebrad, node statistics, settings (URL credentials redacted), the updater record and pending-update marker, `zebrad.toml`, last 200 lines of each log; never the RPC cookie |
+| `copy_diagnostics` | `String` | versions, OS, the resolved zebrad binary, the stop grace in effect and in the settings, status and any stale zebrad, node statistics, settings (URL credentials redacted), the updater record and pending-update marker, `zebrad.toml`, last 200 lines of each log, then the newest resource samples with one line per process; never the RPC cookie |
 | `complete_first_run` | `()` | sets `first_run_done`; from then on zebrad starts at launch |
 
 zebrad is not started before the first run is complete: `firstrun::start_allowed` is the
@@ -345,6 +351,23 @@ the snapshot is `None` while zebrad is not running and after three failed reads 
 row. That feeds the status strip and the dashboard, the primary metrics view;
 `OpenTarget::MetricsEndpoint` opens the raw page in the browser. Grafana is optional and
 run by the user, embedded in its own tab; see [GRAFANA.md](GRAFANA.md).
+
+**Resources.** `resources.rs` measures zebrad's process tree and the computer
+([RESOURCES.md](RESOURCES.md)). `ResourceSampler` follows the supervisor's probe watch: from
+the spawn until the run is finalized it reads the tree at once and then every 5 s, and
+publishes `watch<Option<NodeResources>>` (`None` between runs); unlike the RPC monitor and
+the metrics poller it does not wait for `Running`. `MachineSampler` reads the computer's CPU
+and memory every 5 s into `watch<Option<MachineResources>>`. Each read is a
+`spawn_blocking` task that takes its inputs by value and returns an owned reading, and each
+sampler is an actor that owns its state. `resources/fold.rs` keeps the tree's totals
+continuous across exits: each live process counts its own CPU and its reaped children's,
+and a process that left without reaching a live member's rollup moves its last-seen
+counters to a lost total; the published totals never fall within a run. A read that spans
+a probe change is dropped, failures are logged once per run, and a reader panic stops
+sampling until the next run; each tick logs its read time at debug (about 4 µs per process
+on the computer: 0.6 ms for 150 processes, 11 ms for 2,600). Linux reads `/proc`
+(`resources/linux.rs`, no `unsafe`); macOS and Windows report the reading unsupported, so
+the samplers publish `None` and the dashboard's Resources card stays hidden there.
 
 **Dashboard.** The UI keeps three histories since the launcher opened; nothing is persisted.
 `ui/src/stats_history.rs` holds every published `NodeStats` as a `Sample` (up to 4 h of the

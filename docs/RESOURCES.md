@@ -1,8 +1,8 @@
 # Resource monitoring
 
-> **Status, 2026-11-03: phase 1 is built (the Resources card against the mock); phases 2
-> to 7 are the design.** [Phases](#phases) says what each built phase changed from this
-> design. It answers the maintainer's question "can we also monitor resource usage of each
+> **Status, 2026-11-03: phases 1 and 2 are built (the Resources card, live on Linux);
+> phases 3 to 7 are the design.** [Phases](#phases) says what each built phase changed from
+> this design. It answers the maintainer's question "can we also monitor resource usage of each
 > node or child process?". [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what
 > is built and is updated phase by phase as this lands. [MULTI-NODE.md](MULTI-NODE.md) is
 > the plan it fits into.
@@ -1400,6 +1400,45 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    The macOS and Windows readers return "unsupported", so the card stays hidden there.
    Ships: Linux users see their zebrad's CPU, memory, disk I/O and processes. Screenshot:
    the app under `cargo tauri dev` with `FAKE_ZEBRAD_BURN_MS`.
+
+   **Built.** As planned, with these differences:
+
+   - `TreeProbe` holds the run id, the pid and the spawn on both clocks; it has no job field,
+     and `ChildHandle.job` stays a plain `Job`, until phase 3.
+   - `MachineSampler::spawn()` and `spawn_with(interval, reader)` take no data folders, and
+     `MachineReader` has only `machine()`: `DataDir`, the `data_dirs` mapping in src-tauri
+     and its test come with the volumes in phase 5.
+   - `TreeReading` has no `job` field and `MemberReading` no commit charge (Windows, phase
+     3). The fold has Linux's rule only, CPU and I/O rolling into the parent; the `Rollup`
+     modes of macOS and Windows come with their readers. `TreeReading.denied` says which
+     fields the OS refused, and the sampler logs each such field once.
+   - After the scan, the reader reads each member in tree order, a parent before its
+     children. A reap between two reads can then hide a child's time for one reading, which
+     the never-decreasing total holds, but never count it twice.
+   - The fold also covers a member that leaves in the same interval as its parent: it is
+     checked against the nearest live ancestor, shallowest first, and growth that its
+     departures leave unclaimed carries over to the waiting ones. zebrad running a
+     `block_notify_command` is the case: `sh` reaps the command and zebrad reaps `sh` within
+     one interval, so zebrad's rollup holds both, and the rule above alone (the command has
+     no live parent, so its time goes to `lost`) would count the command twice.
+   - The root's identity stays among the sticky ids after the root exits, so its start
+     time is checked once per run.
+   - The first reading comes within milliseconds of the spawn, so a run's first rate is
+     averaged over at least 1 s.
+   - On a platform without a reader, each sampler publishes `None` after its first attempt
+     and stops for good.
+   - `copy_diagnostics` appends the section after the log tails; it gives exact byte counts
+     beside GiB.
+   - fake-zebrad's `short` child starts 300 ms after `Starting zebrad`, as the sampler's
+     reading at the spawn would see it otherwise. `FAKE_ZEBRAD_WRITE_MB` writes next to its
+     `-c` config, which the test keeps under `CARGO_TARGET_TMPDIR`.
+   - The `procfs.rs` tests use literal fixtures written for them; the captures from a
+     syncing zebrad 7.0.0 under `tests/fixtures/proc/` are not made yet, and neither is the
+     real-zebrad contract check, which needs the pinned zebrad. The live tests are gated to
+     Linux.
+   - The read costs about 4 µs per process on the computer: 0.6 ms with 150 processes and
+     11 ms with 2,600 (release build, Linux 6.6 under WSL2). A periodic full scan with reads
+     of known members in between is not needed at those sizes.
 3. **macOS and Windows.**
    - `resources/macos.rs` with the local Mach declarations.
    - `Job::{accounting, process_ids, contains}` and `resources/windows.rs`.
@@ -1492,12 +1531,13 @@ Unconfirmed, to be checked in the phase named:
   - How much network traffic the Windows job's I/O counters include.
   - Whether `QueryInformationJobObject` fails with `ERROR_MORE_DATA` on a short process
     list (the loop handles both cases).
-- **Phase 2:** the cost of the `/proc` scan with thousands of processes, from the per-tick
-  log.
+- **Phase 2:** the cost of the `/proc` scan with thousands of processes. Measured: 11 ms
+  for 2,600 processes on one computer (see phase 2); the per-tick debug log shows it
+  elsewhere.
 - **MULTI-NODE phases 3–5:** whether Zakura, Zaino, Zallet and the zcashd build start
   children or export process metrics of their own.
-- **Estimates:** the 16,000-SST estimate, and a Rust `/proc` scan of a few hundred processes
-  in under 5 ms.
+- **Estimates:** the 16,000-SST estimate. (A Rust `/proc` scan of a few hundred processes
+  takes under 5 ms: 0.6 ms for 150.)
 
 ## Alternatives considered
 
