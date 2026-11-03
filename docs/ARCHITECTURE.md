@@ -11,7 +11,7 @@ kept as the historical design record; where the two differ, this file describes 
 ## Overview
 
 ```text
-+--------------------------- Zeal (one process) ---------------------------+
++-------------------------------- Zeal (one process) --------------------------------+
 |                                                                                    |
 |  ui/  Leptos CSR (wasm) --- invoke / Channel<Vec<LogLine>> ---> src-tauri/         |
 |   |   Dashboard, Logs, Grafana, Configure, Settings              commands, tray,   |
