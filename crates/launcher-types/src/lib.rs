@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize};
 mod nodes;
 mod resources;
 
-pub use nodes::{NodeId, NodeInfo, NodeKind, NodePort, NodeRole, PortRole, assign_ports};
+pub use nodes::{
+    MAX_NODES, NodeDraft, NodeEvent, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram, NodeRole,
+    NodeUpdate, PortRole, assign_ports,
+};
 pub use resources::{
     MAX_MEMBERS, MachineResources, MemoryPressure, NodeResources, Platform, ProcessUsage,
 };
@@ -531,6 +534,8 @@ impl Settings {
     pub const SCHEMA_VERSION: u32 = 2;
 }
 
+/// The stop grace period a node gets unless the user sets another, in seconds.
+pub const DEFAULT_STOP_GRACE_SECS: u64 = 60;
 /// The shortest stop grace period that can be saved, in seconds
 /// ([`Settings::stop_grace_secs`]). The backend validates against these
 /// bounds and the settings form applies them to its field.
@@ -551,7 +556,7 @@ impl Default for Settings {
             grafana_url: None,
             data_dir: None,
             network: Network::Mainnet,
-            stop_grace_secs: 60,
+            stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
             first_run_done: false,
             theme: Theme::System,
         }

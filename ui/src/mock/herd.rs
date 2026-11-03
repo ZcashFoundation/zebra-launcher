@@ -23,8 +23,8 @@ use std::{
 };
 
 use launcher_types::{
-    ExitClass, ExitInfo, LogLevel, LogLine, LogStream, Network, NodeId, NodeInfo, NodeKind,
-    NodePort, NodeStats, Phase, PortRole, Status,
+    DEFAULT_STOP_GRACE_SECS, ExitClass, ExitInfo, LogLevel, LogLine, LogStream, Network, NodeId,
+    NodeInfo, NodeKind, NodePort, NodeProgram, NodeStats, Phase, PortRole, Status,
 };
 use leptos::prelude::*;
 
@@ -100,6 +100,9 @@ fn info(
         depends_on: depends_on.map(id),
         data_dir: format!("/mnt/zcash/{slug}"),
         ports: ports(port_list),
+        program: NodeProgram::Bundled,
+        autostart: true,
+        stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
     }
 }
 

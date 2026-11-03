@@ -250,7 +250,7 @@ fn NodeItem(node: NodeState) -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use launcher_types::{NodeId, NodeKind};
+    use launcher_types::{NodeId, NodeKind, NodeProgram};
 
     use super::*;
 
@@ -263,6 +263,9 @@ mod tests {
             depends_on: None,
             data_dir: String::new(),
             ports: Vec::new(),
+            program: NodeProgram::Bundled,
+            autostart: true,
+            stop_grace_secs: 60,
         }
     }
 

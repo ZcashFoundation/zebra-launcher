@@ -6,8 +6,9 @@
 use std::time::SystemTime;
 
 use launcher_types::{
-    LogLine, MetricsSnapshot, Network, NodeDetails, NodeId, NodeInfo, NodeKind, NodePort,
-    NodeResources, NodeStats, Phase, PortRole, StaleProcessInfo, Status,
+    DEFAULT_STOP_GRACE_SECS, LogLine, MetricsSnapshot, Network, NodeDetails, NodeId, NodeInfo,
+    NodeKind, NodePort, NodeProgram, NodeResources, NodeStats, Phase, PortRole, StaleProcessInfo,
+    Status,
 };
 use leptos::prelude::*;
 
@@ -215,6 +216,9 @@ pub fn primary_info(network: Network, data_dir: Option<&str>) -> NodeInfo {
                 port: 9999,
             },
         ],
+        program: NodeProgram::Bundled,
+        autostart: true,
+        stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
     }
 }
 

@@ -3,7 +3,10 @@
 //! out of the way of the nodes that exist. Only the mock can add nodes until the backend runs
 //! several.
 
-use launcher_types::{Network, NodeId, NodeInfo, NodeKind, NodePort, NodeRole, assign_ports};
+use launcher_types::{
+    DEFAULT_STOP_GRACE_SECS, Network, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram, NodeRole,
+    assign_ports,
+};
 use leptos::{ev, html, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
 
@@ -192,6 +195,9 @@ pub fn AddNode(
                 uses.get()
             },
             ports,
+            program: NodeProgram::Bundled,
+            autostart: true,
+            stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
         }
     });
     // Ports that moved, and who has the one they wanted.
