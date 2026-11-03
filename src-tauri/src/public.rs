@@ -76,19 +76,19 @@ pub fn start<R: Runtime>(app: &AppHandle<R>, state: &AppState, held: bool) -> Pu
             Arc::new(Unreachable)
         }
     };
-    let services = PublicServices::spawn(
-        options,
-        Wiring {
-            settings: state.settings.clone(),
-            node: node.watch_spec(),
-            status: node.supervisor.watch_status(),
-            stats: node.stats.clone(),
-            host: Arc::new(Host { app: app.clone() }),
-            secrets: Arc::new(Keychain),
-            fetch,
-        },
-        held,
-    );
+    let wiring = Wiring {
+        settings: state.settings.clone(),
+        node: node.watch_spec(),
+        status: node.supervisor.watch_status(),
+        stats: node.stats.clone(),
+        host: Arc::new(Host { app: app.clone() }),
+        secrets: Arc::new(Keychain),
+        fetch,
+    };
+    // The actor and its forwarders are Tokio tasks, and the setup hook runs outside the
+    // runtime: spawn them inside it, as the explorer does.
+    let services =
+        tauri::async_runtime::block_on(async move { PublicServices::spawn(options, wiring, held) });
     let app = app.clone();
     let mut rx = services.watch();
     tauri::async_runtime::spawn(async move {
