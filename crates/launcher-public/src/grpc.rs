@@ -48,6 +48,14 @@ where
     decode_lightd_info(&answer)
 }
 
+/// `GetLightdInfo(Empty)`'s message as the server sent it, undecoded.
+pub async fn get_lightd_info_bytes<S>(io: S, authority: &str, tls: bool) -> Result<Bytes, GrpcError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    unary(io, authority, tls, "GetLightdInfo", &[]).await
+}
+
 /// `GetLatestBlock(ChainSpec)`.
 pub async fn get_latest_block<S>(io: S, authority: &str, tls: bool) -> Result<BlockId, GrpcError>
 where
@@ -313,6 +321,29 @@ mod tests {
         bytes.extend_from_slice(&[0x82, 0x01, 3, b'N', b'U', b'7', 0x89, 0x01]);
         bytes.extend_from_slice(&[0; 8]);
         assert_eq!(decode_lightd_info(&bytes).unwrap(), info);
+    }
+
+    #[test]
+    fn zebrads_own_answer_decodes() {
+        let hex = include_str!("../tests/fixtures/zebrad-7.0.0-regtest-lightdinfo.hex").trim();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        let info = decode_lightd_info(&bytes).unwrap();
+        assert_eq!(
+            info,
+            LightdInfo {
+                version: "v7.0.0+git.e8db87e".into(),
+                vendor: "ZcashFoundation/zebra".into(),
+                chain_name: "test".into(),
+                sapling_activation_height: 1,
+                consensus_branch_id: "00000000".into(),
+                block_height: 0,
+                zcashd_build: "v7.0.0+git.e8db87e".into(),
+                zcashd_subversion: "/Zebra:7.0.0/".into(),
+            }
+        );
     }
 
     #[test]
