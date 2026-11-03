@@ -34,7 +34,7 @@ pub fn Nav() -> impl IntoView {
         <div class="nav-bar">
             <div class="brand">
                 <img class="brand-icon" src="/64x64.png" alt="" width="64" height="64" />
-                <span class="brand-name">"Zebra Launcher"</span>
+                <span class="brand-name">"Zeal"</span>
             </div>
             <nav class="tabs" role="tablist" aria-label="Pages">
                 {Tab::ALL
@@ -104,7 +104,7 @@ pub fn Nav() -> impl IntoView {
                         .map(|version| {
                             view! {
                                 // Tells the launcher's version apart from zebrad's in the strip.
-                                <span class="launcher-version muted" title="Zebra Launcher version">
+                                <span class="launcher-version muted" title="Zeal version">
                                     <span class="visually-hidden">"Launcher version "</span>
                                     {version}
                                 </span>

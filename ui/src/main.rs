@@ -1,4 +1,4 @@
-//! The Zebra Launcher user interface: a client-side rendered Leptos app that trunk builds to
+//! The Zeal user interface: a client-side rendered Leptos app that trunk builds to
 //! WebAssembly and Tauri serves from `ui/dist`.
 //!
 //! The crate also compiles natively so the workspace-wide `cargo clippy` and `cargo test` cover
@@ -64,5 +64,5 @@ fn main() {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    println!("The Zebra Launcher UI runs in a webview: run `trunk serve` in `ui/` instead.");
+    println!("The Zeal UI runs in a webview: run `trunk serve` in `ui/` instead.");
 }

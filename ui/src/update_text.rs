@@ -91,26 +91,26 @@ pub fn update_state_text(state: &UpdateState, now: SystemTime) -> String {
         UpdateState::Idle => "Not checked yet.".to_owned(),
         UpdateState::Checking => "Checking for updates…".to_owned(),
         UpdateState::Available { version, .. } => {
-            format!("Zebra Launcher {version} is available.")
+            format!("Zeal {version} is available.")
         }
         UpdateState::Downloading {
             version,
             downloaded,
             total,
         } => format!(
-            "Downloading Zebra Launcher {version}: {}.",
+            "Downloading Zeal {version}: {}.",
             download_progress(*downloaded, *total)
         ),
         UpdateState::ReadyToInstall {
             version,
             countdown_secs: None,
-        } => format!("Zebra Launcher {version} is downloaded and verified, ready to install."),
+        } => format!("Zeal {version} is downloaded and verified, ready to install."),
         UpdateState::ReadyToInstall {
             version,
             countdown_secs: Some(secs),
-        } => format!("Zebra Launcher {version} installs in {secs} s."),
+        } => format!("Zeal {version} installs in {secs} s."),
         UpdateState::Installing { version } => {
-            format!("Installing Zebra Launcher {version}; the launcher restarts next.")
+            format!("Installing Zeal {version}; the launcher restarts next.")
         }
         UpdateState::UpToDate { checked_at } => {
             format!("Up to date. Last checked {}.", relative(*checked_at, now))
@@ -177,7 +177,7 @@ mod tests {
         );
         assert_eq!(notes_excerpt("ééééé", 3), Some("ééé…".into()));
         // CRLF line ends, as release notes written on Windows have, and Markdown headings.
-        let crlf = "## Zebra Launcher 0.2.0\r\n\r\nBumps zebrad to 7.1.0.\r\nFixes a crash.\r\n\r\n### Details\r\nMore.\r\n";
+        let crlf = "## Zeal 0.2.0\r\n\r\nBumps zebrad to 7.1.0.\r\nFixes a crash.\r\n\r\n### Details\r\nMore.\r\n";
         assert_eq!(
             notes_excerpt(crlf, 280),
             Some("Bumps zebrad to 7.1.0.\nFixes a crash.…".into())
@@ -217,7 +217,7 @@ mod tests {
                 },
                 now
             ),
-            "Zebra Launcher 0.2.0 installs in 42 s."
+            "Zeal 0.2.0 installs in 42 s."
         );
         assert_eq!(
             update_state_text(
@@ -228,7 +228,7 @@ mod tests {
                 },
                 now
             ),
-            "Downloading Zebra Launcher 0.2.0: 1.0 MB of 4.0 MB (25 %)."
+            "Downloading Zeal 0.2.0: 1.0 MB of 4.0 MB (25 %)."
         );
     }
 

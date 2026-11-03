@@ -1056,7 +1056,7 @@ pub fn summary_text(input: &HealthInput<'_>, verdict: &Verdict) -> String {
     let facts = Facts::new(input);
     let now = input.now;
     let status = input.status;
-    let mut lines = vec![format!("Zebra Launcher · {}", local_datetime_short(now))];
+    let mut lines = vec![format!("Zeal · {}", local_datetime_short(now))];
 
     lines.push(format!("Verdict: {}", verdict.title()));
     if !verdict.reason.is_empty() {
@@ -2500,7 +2500,7 @@ mod tests {
         ]);
         let summary = scene.summary();
         let expected = "\
-Zebra Launcher · 23 Oct, 19:20
+Zeal · 23 Oct, 19:20
 Verdict: Attention · Restarted after a crash
   zebrad crashed 21 min ago · thread 'tokio-rt-worker' panicked at zebrad/src/x.rs:38:27:
 Versions: launcher 0.2.0 · zebrad 7.0.0 · chain main
@@ -2555,7 +2555,7 @@ This run:
         let summary = scene.summary();
         assert_eq!(
             summary,
-            "Zebra Launcher · 23 Oct, 19:20\nVerdict: Stopped\n  Not started yet\nPhase: Stopped\nSync: no answer from zebrad's RPC yet\nRecent problems: none in this session\n"
+            "Zeal · 23 Oct, 19:20\nVerdict: Stopped\n  Not started yet\nPhase: Stopped\nSync: no answer from zebrad's RPC yet\nRecent problems: none in this session\n"
         );
         // Stopped after a short run: the last numbers, with nothing being estimated.
         let mut scene = Scene::syncing(20);

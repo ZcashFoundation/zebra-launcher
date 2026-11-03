@@ -1280,12 +1280,13 @@ enabled = false
 
     #[test]
     fn setting_a_value_creates_the_section() {
-        let original = "# zebrad configuration managed by Zebra Launcher.\n\n[network]\nnetwork = \"Mainnet\"\n";
+        let original =
+            "# zebrad configuration managed by Zeal.\n\n[network]\nnetwork = \"Mainnet\"\n";
         let form = form_with(("sync", "download_concurrency_limit"), " 100 ");
         let rendered = render_config(original, &form).expect("renders");
         assert_eq!(
             rendered,
-            "# zebrad configuration managed by Zebra Launcher.\n\n[network]\nnetwork = \"Mainnet\"\n\n[sync]\ndownload_concurrency_limit = 100\n"
+            "# zebrad configuration managed by Zeal.\n\n[network]\nnetwork = \"Mainnet\"\n\n[sync]\ndownload_concurrency_limit = 100\n"
         );
         let parsed = parse_config(&rendered).expect("parses");
         assert_eq!(

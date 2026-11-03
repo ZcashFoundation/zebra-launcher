@@ -596,7 +596,7 @@ fn About() -> impl IntoView {
         <fieldset class="about">
             <legend>"About"</legend>
             <Rows rows=vec![
-                ("Zebra Launcher", launcher.into_any()),
+                ("Zeal", launcher.into_any()),
                 ("zebrad", zebrad.into_any()),
                 ("Network", network.into_any()),
             ] />

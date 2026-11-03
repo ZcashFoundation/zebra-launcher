@@ -32,7 +32,7 @@ enum Step {
 impl Step {
     fn title(self) -> &'static str {
         match self {
-            Step::Welcome => "Welcome to Zebra Launcher",
+            Step::Welcome => "Welcome to Zeal",
             Step::Data => "Where to keep the chain",
             Step::Legacy => "Files from an earlier launcher",
             Step::Updates => "Launcher updates",
