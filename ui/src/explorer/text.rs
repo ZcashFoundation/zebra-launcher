@@ -1,10 +1,10 @@
-//! The Explorer's words and numbers: amounts in ZEC (TAZ on Testnet), budgets, intervals,
-//! search hints and refusals. Pure, tested natively.
+//! The Explorer's words and numbers: amounts in ZEC (TAZ on Testnet), block sentences,
+//! budgets, confirmations, search hints and refusals. Pure, tested natively.
 
 use explorer_model::classify::{Classified, Later};
 use launcher_types::{
     Network,
-    explorer::{Budget, NotFoundHint, PerPool, Pool, SecretKind},
+    explorer::{BlockSummary, Budget, LedgerCheck, NotFoundHint, PerPool, Pool, SecretKind},
 };
 
 use crate::format::{bytes, thousands};
@@ -59,6 +59,51 @@ pub fn net_shielding(users: &PerPool<i64>) -> i64 {
     Pool::SHIELDED.iter().map(|pool| users.get(*pool)).sum()
 }
 
+/// The net shielding as words: `13.4 ZEC into shielded pools`.
+pub fn shielding_text(net: i64, unit: &str) -> String {
+    match net {
+        0 => "nothing in or out of shielded pools".to_owned(),
+        net if net > 0 => format!("{} into shielded pools", amount(net, unit)),
+        net => format!("{} out of shielded pools", amount(-net, unit)),
+    }
+}
+
+/// The notes a block created, `212 note commitments`, or `None` when unknown.
+pub fn notes_text(notes: Option<[u32; 3]>) -> Option<String> {
+    let total: u32 = notes?.iter().sum();
+    Some(match total {
+        1 => "1 note commitment".to_owned(),
+        n => format!("{} note commitments", thousands(u64::from(n))),
+    })
+}
+
+/// A block in one sentence: `37 transactions · 212 note commitments · users moved 13.4 ZEC
+/// into shielded pools · fees 0.0021 ZEC (0.00126 burned)`.
+pub fn block_sentence(summary: &BlockSummary, unit: &str) -> String {
+    let ledger = &summary.ledger;
+    let mut parts = vec![match summary.tx_count {
+        1 => "1 transaction".to_owned(),
+        n => format!("{} transactions", thousands(u64::from(n))),
+    }];
+    parts.extend(notes_text(ledger.notes));
+    if let Some(users) = &ledger.users {
+        parts.push(format!(
+            "users moved {}",
+            shielding_text(net_shielding(users), unit)
+        ));
+    }
+    match (ledger.fees, ledger.burned) {
+        (Some(fees), Some(burned)) => parts.push(format!(
+            "fees {} ({} burned)",
+            amount(fees as i64, unit),
+            coins(burned as i64)
+        )),
+        (Some(fees), None) => parts.push(format!("fees {}", amount(fees as i64, unit))),
+        (None, _) => parts.push("fees unknown".to_owned()),
+    }
+    parts.join(" · ")
+}
+
 /// How full a block is: `≥ 39 of 330`, `70.6 kB of 2.0 MB`.
 pub fn budget_text(budget: &Budget) -> String {
     match *budget {
@@ -77,11 +122,69 @@ pub fn budget_text(budget: &Budget) -> String {
     }
 }
 
+/// A budget as a fraction of its limit, for a meter.
+pub fn budget_fraction(budget: &Budget) -> Option<f64> {
+    match *budget {
+        Budget::Units { used, limit, .. } | Budget::Bytes { used, limit } if limit > 0 => {
+            Some(f64::from(used) / f64::from(limit))
+        }
+        _ => None,
+    }
+}
+
+/// The era's check as a caption.
+pub fn check_text(check: &LedgerCheck, unit: &str) -> String {
+    match check {
+        LedgerCheck::Balanced => "Pool changes, the subsidy and the fees add up ✓".to_owned(),
+        LedgerCheck::Unclaimed { zat } => format!(
+            "The miner left {} of the subsidy and fees unclaimed",
+            amount(*zat as i64, unit)
+        ),
+        LedgerCheck::Unverified => {
+            "Unverified: the pool changes, the subsidy and the fees do not add up".to_owned()
+        }
+        LedgerCheck::NotChecked => {
+            "Not checked: the subsidy or the pool changes are unknown".to_owned()
+        }
+    }
+}
+
 fn capitalise(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
+    }
+}
+
+/// Confirmations of a block at `height` with the node's tip at `tip`: the block itself counts.
+pub fn confirmations(height: u32, tip: u32) -> u32 {
+    tip.saturating_sub(height)
+        .saturating_add(1)
+        .min(if height > tip { 0 } else { u32::MAX })
+}
+
+/// Zebra's finality: a block 1,000 deep is final; above that it is provisional, `deep` blocks
+/// down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Finality {
+    Final,
+    Provisional { deep: u32 },
+}
+
+pub fn finality(height: u32, tip: u32) -> Finality {
+    let deep = tip.saturating_sub(height);
+    if deep >= FINAL_DEPTH {
+        Finality::Final
+    } else {
+        Finality::Provisional { deep }
+    }
+}
+
+pub fn finality_text(finality: Finality) -> String {
+    match finality {
+        Finality::Final => "Final in Zebra".to_owned(),
+        Finality::Provisional { deep } => format!("Provisional · {deep} of 1,000 deep"),
     }
 }
 
@@ -188,6 +291,8 @@ pub fn not_found_text(hint: &NotFoundHint) -> String {
 
 #[cfg(test)]
 mod tests {
+    use launcher_types::explorer::{BlockLedger, Hash32};
+
     use super::*;
 
     #[test]
@@ -206,6 +311,72 @@ mod tests {
             "14,654,995.77 ZEC"
         );
         assert_eq!(amount_rounded(12_345_678, "ZEC"), "0.12345678 ZEC");
+    }
+
+    fn summary(users: Option<[i64; 6]>, fees: Option<u64>, burned: Option<u64>) -> BlockSummary {
+        BlockSummary {
+            height: 3_550_000,
+            hash: Hash32([0; 32]),
+            time: 0,
+            interval: Some(30),
+            size: Some(70_000),
+            tx_count: 37,
+            ledger: BlockLedger {
+                pools: None,
+                deltas: None,
+                coinbase: None,
+                users: users.map(PerPool),
+                fees,
+                burned,
+                notes: Some([10, 2, 200]),
+                budget: Budget::Units {
+                    used: 212,
+                    limit: 330,
+                    complete: false,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn a_block_in_a_sentence() {
+        let block = summary(
+            Some([-1_350_000_000, 0, 340_000_000, 0, 0, 1_000_000_000]),
+            Some(210_000),
+            Some(126_000),
+        );
+        assert_eq!(
+            block_sentence(&block, "ZEC"),
+            "37 transactions · 212 note commitments · users moved 13.4 ZEC into shielded pools · \
+             fees 0.0021 ZEC (0.00126 burned)"
+        );
+        let unknown = summary(None, None, None);
+        assert_eq!(
+            block_sentence(&unknown, "TAZ"),
+            "37 transactions · 212 note commitments · fees unknown"
+        );
+        assert_eq!(budget_text(&block.ledger.budget), "≥ 212 of 330");
+        assert_eq!(
+            budget_text(&Budget::Bytes {
+                used: 70_553,
+                limit: 2_000_000
+            }),
+            "70.6 kB of 2.0 MB"
+        );
+        assert_eq!(budget_fraction(&Budget::Unknown), None);
+    }
+
+    #[test]
+    fn confirmations_and_finality() {
+        assert_eq!(confirmations(100, 100), 1);
+        assert_eq!(confirmations(90, 100), 11);
+        assert_eq!(confirmations(101, 100), 0);
+        assert_eq!(finality(100, 1_099), Finality::Provisional { deep: 999 });
+        assert_eq!(finality(100, 1_100), Finality::Final);
+        assert_eq!(
+            finality_text(Finality::Provisional { deep: 3 }),
+            "Provisional · 3 of 1,000 deep"
+        );
     }
 
     #[test]

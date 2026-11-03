@@ -6,6 +6,7 @@
 //! node keeps its own place ([`state::Explorers`]). The tab tells the node's explorer when it
 //! is on screen (`Interest`), so the explorer follows the tip only then.
 
+mod block;
 mod chain;
 mod history;
 mod parts;
@@ -30,6 +31,7 @@ use crate::{
     components::icons::info_icon,
     format::{local_datetime_short, thousands},
 };
+use block::BlockPage;
 use chain::ChainPage;
 use search::{SearchBox, SearchPage};
 use state::{Explorers, NodeExplorer};
@@ -145,6 +147,7 @@ pub fn Explorer() -> impl IntoView {
         let network = network.get();
         match nav.route() {
             ExplorerRoute::Chain => view! { <ChainPage node nav network /> }.into_any(),
+            ExplorerRoute::Block { id } => view! { <BlockPage node nav network id /> }.into_any(),
             ExplorerRoute::Search { query } => view! { <SearchPage node nav query /> }.into_any(),
             route => view! { <Unbuilt route /> }.into_any(),
         }
