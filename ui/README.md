@@ -88,7 +88,10 @@ backend that makes every page demoable:
   their parents; then 40 `curl`s as well, more than a sample lists, so the table ends with
   "and 11 more"; then `notify-block` alone, orphaned, on a line of its own. `?unreadable`
   reports CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk
-  tile "—" with "the system does not report them";
+  tile "—" with "the system does not report them". `?readerpanic` makes the resource reader
+  panic 30 s into the first run, as the backend's can: the samples stop while zebrad keeps
+  running, and the card says it is not measured until zebrad's next run, which Restart
+  starts;
 - several nodes: `?herd` adds five nodes beside the mock's zebrad: on Mainnet, Zakura catching
   up from a snapshot, Zaino reading the Mainnet Zebra, and the zcashd compatibility build,
   stopped; on Testnet, a Zebra and a pruned Zakura at the tip. The window shows the sidebar

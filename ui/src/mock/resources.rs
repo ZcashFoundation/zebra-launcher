@@ -18,7 +18,9 @@
 //! holds 0.3 of 2 GiB. `?os=macos` and `?os=windows` switch the figures to those platforms'
 //! (memory pressure on macOS; commit, handles and no thread counts on Windows).
 //! `?children` gives zebrad a `block_notify_command` that runs in cycles of three samples
-//! ([`block_notify`]), and `?unreadable` reports CPU and I/O as refused by the OS.
+//! ([`block_notify`]), `?unreadable` reports CPU and I/O as refused by the OS, and
+//! `?readerpanic` stops the samples 30 s into the first run while zebrad runs on, as the
+//! backend does after a reader panic ([`reader_panicked`]).
 
 use std::time::{Duration, SystemTime};
 
@@ -67,6 +69,9 @@ pub(super) const INTERVAL: Duration = Duration::from_secs(5);
 
 /// How long the database open takes at the start of every run.
 const OPENING_SECS: f64 = 10.0;
+
+/// `?readerpanic`: how far into the first run the resource reader panics.
+const READER_PANIC_SECS: f64 = 30.0;
 
 /// How long memory climbs while syncing, and the period of the sawtooth after that.
 const CLIMB_SECS: f64 = 30.0 * 60.0;
@@ -167,6 +172,13 @@ pub(super) fn load(state: &RunState) -> Load {
         written_per_sec: written_mb.max(0.0) * MB,
         memory: gib(memory_gib(state)),
     }
+}
+
+/// `?readerpanic`: whether the resource reader has panicked, `run_secs` into `run`. It panics
+/// once, in the first run, and the backend then publishes `None` until the next run while
+/// zebrad keeps running.
+pub(super) fn reader_panicked(flags: Flags, run: u64, run_secs: f64) -> bool {
+    flags.reader_panic && run == 1 && run_secs >= READER_PANIC_SECS
 }
 
 /// A process under the mock's zebrad, for `?children`. It does no disk I/O.
@@ -413,8 +425,9 @@ pub(super) fn machine(
 
 impl super::Mock {
     /// Every second: a new run publishes its first sample at once, a running one every
-    /// [`INTERVAL`], and a node without a pid publishes `None`; the computer publishes every
-    /// [`INTERVAL`], from the page's load.
+    /// [`INTERVAL`], and a node without a pid publishes `None`, as does a run whose reader
+    /// panicked (`?readerpanic`); the computer publishes every [`INTERVAL`], from the page's
+    /// load, and sees the node's use either way.
     pub(super) fn tick_resources(&self) {
         let now = clock::now();
         let second = self
@@ -434,6 +447,8 @@ impl super::Mock {
             })
         });
         let tree = self.tree.get_untracked();
+        // A sample the node's sampler did not publish, which the computer still sees.
+        let mut unpublished = None;
         match (pid, started_at) {
             (Some(pid), Some(started_at)) => {
                 let new_run = tree.as_ref().is_none_or(|tree| tree.pid != pid);
@@ -456,8 +471,16 @@ impl super::Mock {
                         count: tree.count,
                     };
                     let sample = tree.sample(now, run_secs, &load(&state), self.flags);
+                    let panicked = reader_panicked(self.flags, tree.run, run_secs);
                     self.tree.set(Some(tree));
-                    self.resources.set(Some(sample));
+                    if !panicked {
+                        self.resources.set(Some(sample));
+                    } else {
+                        if self.resources.with_untracked(Option::is_some) {
+                            self.resources.set(None);
+                        }
+                        unpublished = Some(sample);
+                    }
                 }
             }
             _ => {
@@ -472,9 +495,12 @@ impl super::Mock {
         }
         if second.is_multiple_of(INTERVAL.as_secs()) {
             let count = second / INTERVAL.as_secs();
-            let sample = self
-                .resources
-                .with_untracked(|node| machine(now, count, self.flags.os, node.as_ref()));
+            let sample = match &unpublished {
+                Some(node) => machine(now, count, self.flags.os, Some(node)),
+                None => self
+                    .resources
+                    .with_untracked(|node| machine(now, count, self.flags.os, node.as_ref())),
+            };
             self.machine.set(Some(sample));
         }
     }
@@ -697,6 +723,22 @@ mod tests {
         let windows = block_notify(&[], 4242, 1, start, OsFlag::Windows);
         let names: Vec<&str> = windows.iter().map(|child| child.name).collect();
         assert_eq!(names, vec!["cmd.exe", "notify-block.exe"]);
+    }
+
+    #[test]
+    fn the_reader_panics_once_in_the_first_run() {
+        let flags = Flags {
+            reader_panic: true,
+            ..Flags::default()
+        };
+        assert!(!reader_panicked(flags, 1, 29.0));
+        assert!(reader_panicked(flags, 1, 30.0));
+        assert!(reader_panicked(flags, 1, 3600.0), "until the run ends");
+        assert!(
+            !reader_panicked(flags, 2, 3600.0),
+            "the next run is measured"
+        );
+        assert!(!reader_panicked(Flags::default(), 1, 3600.0));
     }
 
     #[test]

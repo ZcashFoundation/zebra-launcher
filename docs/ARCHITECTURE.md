@@ -421,8 +421,9 @@ direction, whose table adds the peer set's ready and unready counts from the met
 [RESOURCES.md](RESOURCES.md)): four tiles (CPU, Memory, Disk or I/O, Processes) with rates
 over the last minute, the table of the node's processes in tree order, and a line about the
 computer's CPUs, memory and swap (commit on Windows, memory pressure on macOS). It stays
-hidden until the node's first sample, and a stopped node shows its last run instead of live
-values; none of its figures takes a tone. `activity.rs` is the activity row: Recent problems and This run (views from
+hidden until the node's first sample, a stopped node shows its last run instead of live
+values, and a running node whose sampler stopped after a panic says it is not measured until
+the next run; none of its figures takes a tone. `activity.rs` is the activity row: Recent problems and This run (views from
 `ui/src/components/log_insights.rs`) and the Peers card with its caption, the table of
 connected peers from `NodeDetails` and the handshake and obsolete-peer counters from the
 metrics. `details.rs` holds the Node and Chain cards, each with Copy, from the status, the

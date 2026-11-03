@@ -1454,6 +1454,10 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      averaged over at least 1 s.
    - On a platform without a reader, each sampler publishes `None` after its first attempt
      and stops for good.
+   - After a reader panic the sampler publishes `None` while zebrad keeps running, until
+     the next run. The card then says "Not measured until zebrad's next run" instead of the
+     last-run line, since the newest sample's first process is still the node's pid; the
+     mock's `?readerpanic` shows it.
    - `copy_diagnostics` appends the section after the log tails; it gives exact byte counts
      beside GiB.
    - fake-zebrad's `short` child starts 300 ms after `Starting zebrad`, as the sampler's

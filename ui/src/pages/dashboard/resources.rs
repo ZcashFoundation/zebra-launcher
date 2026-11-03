@@ -2,7 +2,8 @@
 //! the backend takes every 5 s from the spawn to the end of the run. Four tiles (CPU, Memory,
 //! Disk or I/O, Processes) with one-minute rates, the table of the tree's processes, and a line
 //! about the computer. The card stays hidden until the node's first sample; a stopped node
-//! shows its last run, never live-looking numbers. No figure here takes a warning tone. The
+//! shows its last run, never live-looking numbers, and a running node whose sampler stopped
+//! says it is not measured until the next run. No figure here takes a warning tone. The
 //! sentences are pure functions, tested natively.
 
 use std::time::SystemTime;
@@ -174,6 +175,25 @@ pub fn last_run_text(summary: &RunSummary) -> String {
     format!("last run: {}", parts.join(" · "))
 }
 
+/// The line under the tiles while no sample is live: the last run's line, unless the newest
+/// sample is of the run still going (its first process is the node's `pid`). The backend
+/// withdraws the sample when its reader panics, until the next run, and that run is not over.
+pub fn idle_line(
+    pid: Option<u32>,
+    latest: Option<&NodeResources>,
+    summary: Option<&RunSummary>,
+    root: &str,
+) -> Option<String> {
+    let sampled_pid = latest
+        .and_then(|sample| sample.members.first())
+        .map(|member| member.pid);
+    if pid.is_some() && pid == sampled_pid {
+        Some(format!("Not measured until {root}'s next run"))
+    } else {
+        summary.map(last_run_text)
+    }
+}
+
 /// The line about the computer: `This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB
 /// available · swap 0.3 of 2 GiB`, with the commit charge on Windows and the memory pressure
 /// on macOS.
@@ -309,8 +329,8 @@ fn is_syncing(stage: Option<SyncStage>) -> bool {
 pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
     let state = dash.state;
     let history = move || state.node().resource_history;
-    // The node has a run: the samples are live. Otherwise the history's newest sample is the
-    // last run's last.
+    // The backend publishes a sample: it is live. Otherwise the history's newest sample is the
+    // last run's last, or the last before the run's sampler stopped ([`idle_line`]).
     let live = Memo::new(move |_| state.node().resources.with(Option::is_some));
     let latest = Memo::new(move |_| history().with(|history| history.latest().cloned()));
     let shown = move || latest.with(Option::is_some);
@@ -449,6 +469,7 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                         })
                     })
                     .unwrap_or_else(|| "The node".to_owned());
+                let idle_root = root.clone();
                 let threads = platform != Platform::Windows;
                 let columns = if threads { "8" } else { "7" };
                 let process_row = move |row: ProcessRow| {
@@ -515,9 +536,16 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                         <Show
                             when=move || live.get()
                             fallback=move || {
+                                let root = idle_root.clone();
                                 view! {
                                     <p class="muted dash-resources-line">
-                                        {move || summary.get().map(|summary| last_run_text(&summary))}
+                                        {move || {
+                                            let pid = state.node().status.with(|status| status.pid);
+                                            let summary = summary.get();
+                                            history().with(|history| {
+                                                idle_line(pid, history.latest(), summary.as_ref(), &root)
+                                            })
+                                        }}
                                     </p>
                                 }
                             }
@@ -706,6 +734,48 @@ mod tests {
             ..summary
         };
         assert_eq!(last_run_text(&blind), "last run: peak 6.8 GiB · 40 s");
+    }
+
+    #[test]
+    fn a_running_node_without_samples_has_not_ended_its_run() {
+        let summary = RunSummary {
+            run: 1,
+            started_at: at(1000),
+            ended_at: at(1600),
+            length: Duration::from_secs(600),
+            avg_cores: Some(2.0),
+            peak: 2 * GIB,
+            read: None,
+            written: None,
+        };
+        let last = NodeResources {
+            run: 1,
+            at: at(1600),
+            run_secs: 600.0,
+            platform: Platform::Linux,
+            cpu_secs: 1200.0,
+            cpu_cores: Some(2.0),
+            memory_bytes: GIB,
+            peak_memory_bytes: 2 * GIB,
+            committed_bytes: None,
+            read_bytes: None,
+            written_bytes: None,
+            processes: 1,
+            threads: None,
+            descriptors: None,
+            members: vec![member(4242, None, "zebrad")],
+        };
+        let idle = |pid| idle_line(pid, Some(&last), Some(&summary), "zebrad");
+        // The sampler stopped while zebrad 4242 runs on.
+        assert_eq!(
+            idle(Some(4242)),
+            Some("Not measured until zebrad's next run".to_owned())
+        );
+        // Stopped, or a new run before its first sample: the last run's line.
+        let ended = Some("last run: average 2.0 cores · peak 2 GiB · 10 min".to_owned());
+        assert_eq!(idle(None), ended);
+        assert_eq!(idle(Some(4243)), ended);
+        assert_eq!(idle_line(None, None, None, "zebrad"), None);
     }
 
     #[test]
