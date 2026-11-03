@@ -3,7 +3,8 @@
 //! Status, node statistics and metrics change rarely, so every change is
 //! emitted as a Tauri event ([`events::STATUS`], [`events::NODE_STATS`],
 //! [`events::NODE_DETAILS`], [`events::METRICS`]). Logs can arrive by the thousand per second, so they
-//! go through a `tauri::ipc::Channel` in batches.
+//! go through a `tauri::ipc::Channel` in batches. The explorer's live state is an event too
+//! ([`events::EXPLORER_LIVE`]), at most four a second.
 
 use std::{
     sync::{
@@ -14,7 +15,9 @@ use std::{
 };
 
 use launcher_core::supervisor::LogSubscription;
-use launcher_types::{LogLine, MetricsSnapshot, NodeDetails, NodeStats, Status, events};
+use launcher_types::{
+    LogLine, MetricsSnapshot, NodeDetails, NodeStats, Status, events, explorer::ExplorerLiveEvent,
+};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, ipc::Channel};
 use tokio::{
@@ -63,6 +66,40 @@ async fn forward_watch<R: Runtime, T: Clone + Serialize>(
         if let Err(err) = app.emit(event, value) {
             tracing::warn!(%err, event, "could not emit an event to the UI");
         }
+        if rx.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// The shortest time between two [`events::EXPLORER_LIVE`] events: a reorganisation or a node
+/// that stops can change several things in a row.
+pub const EXPLORER_LIVE_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Emits [`events::EXPLORER_LIVE`] (the node and its explorer's live state) now and on every
+/// change, at most once per [`EXPLORER_LIVE_INTERVAL`], until the explorer ends.
+pub fn forward_explorer_live<R: Runtime>(
+    app: AppHandle<R>,
+    rx: watch::Receiver<ExplorerLiveEvent>,
+) {
+    tauri::async_runtime::spawn(throttle(rx, EXPLORER_LIVE_INTERVAL, move |event| {
+        if let Err(err) = app.emit(events::EXPLORER_LIVE, event) {
+            tracing::warn!(%err, "could not emit explorer_live to the UI");
+        }
+    }));
+}
+
+/// Sends the watch's value now and after every change, waiting `interval` after each send: the
+/// latest value always arrives, and the ones in between may not.
+pub async fn throttle<T: Clone>(
+    mut rx: watch::Receiver<T>,
+    interval: Duration,
+    mut send: impl FnMut(T),
+) {
+    loop {
+        let value = rx.borrow_and_update().clone();
+        send(value);
+        tokio::time::sleep(interval).await;
         if rx.changed().await.is_err() {
             return;
         }
@@ -207,6 +244,30 @@ mod tests {
         assert_eq!(lines[2].dropped, Some(3));
         assert_eq!(lines[2].message, "3 lines dropped");
         assert!(lines.iter().filter(|line| line.is_gap_marker()).count() == 1);
+    }
+
+    #[tokio::test]
+    async fn explorer_events_are_throttled_and_end_on_the_latest() {
+        let (tx, rx) = watch::channel(0u32);
+        let (sent_tx, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(throttle(rx, Duration::from_millis(100), move |value| {
+            let _ = sent_tx.send(value);
+        }));
+        assert_eq!(sent.recv().await, Some(0));
+        for value in 1..=10 {
+            tx.send_replace(value);
+        }
+        // The changes made while it waited arrive as one: the latest.
+        let next = tokio::time::timeout(Duration::from_secs(5), sent.recv())
+            .await
+            .expect("in time");
+        assert_eq!(next, Some(10));
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the forwarder ends with the watch")
+            .expect("no panic");
+        assert!(sent.try_recv().is_err(), "nothing else was sent");
     }
 
     #[test]

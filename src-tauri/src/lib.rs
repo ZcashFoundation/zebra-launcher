@@ -11,6 +11,7 @@ pub mod app_state;
 pub mod bridge;
 pub mod commands;
 pub mod exit;
+pub mod explorer;
 pub mod logging;
 pub mod paths;
 pub mod sidecar;
@@ -95,6 +96,7 @@ pub fn run() {
             commands::check_for_update,
             commands::install_update,
             commands::cancel_update,
+            commands::explorer,
         ])
         .setup(|app| {
             setup(app.handle());
@@ -140,6 +142,9 @@ fn setup(app: &AppHandle) {
             bridge::forward_node_stats(app.clone(), state.node_stats.clone());
             bridge::forward_node_details(app.clone(), state.node_details.clone());
             bridge::forward_metrics(app.clone(), state.metrics.clone());
+            let explorer = explorer::start(&state);
+            bridge::forward_explorer_live(app.clone(), explorer.live());
+            app.manage(explorer);
             tray::install(app, &state);
             if plan.start_now {
                 tauri::async_runtime::spawn(start_in_background(app.clone(), state));

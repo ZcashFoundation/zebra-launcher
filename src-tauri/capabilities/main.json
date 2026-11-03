@@ -37,6 +37,7 @@
     "allow-get-update-info",
     "allow-check-for-update",
     "allow-install-update",
-    "allow-cancel-update"
+    "allow-cancel-update",
+    "allow-explorer"
   ]
 }
