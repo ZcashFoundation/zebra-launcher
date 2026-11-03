@@ -211,15 +211,12 @@ pub async fn get_metrics(node: &NodeId) -> Result<Option<MetricsSnapshot>, Strin
         .ok_or_else(|| not_found(node))
 }
 
-/// The herd's nodes report no resources yet.
 pub async fn get_node_resources(node: &NodeId) -> Result<Option<NodeResources>, String> {
     if is_main(node) {
         return Ok(super::resources::get_node_resources().await);
     }
     sleep(50).await;
-    herd::status(node)
-        .map(|_| None)
-        .ok_or_else(|| not_found(node))
+    herd::resources(node).ok_or_else(|| not_found(node))
 }
 
 pub fn subscribe_logs(node: &NodeId, on_batch: impl Fn(Vec<LogLine>) + 'static) {

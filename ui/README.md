@@ -111,8 +111,13 @@ every node command and event carries a node's id, and the mock's zebrad below is
   `?stale` its removal is refused while the zebrad from an earlier run is still there.
   `?herd&leftover` makes a removal that deletes the data leave the node's folder (or the first
   node's chain state) behind, as when the backend cannot delete a file: the node leaves the
-  list and the error banner names what stayed. The real backend has the same API and rules;
-  there every node is a zebrad for now.
+  list and the error banner names what stayed. Every node has a Resources card of its own,
+  sampled every 5 s while it has a pid: Zebra · Testnet uses 0.15 cores and 1.9 GiB, the
+  pruned Zakura · Testnet 0.1 cores and 1.2 GiB, Zakura · Mainnet 3.2 cores and 4.4 GiB while
+  it catches up, Zaino 0.3 cores and 650 MiB, and zcashd, stopped, has no card until it is
+  started (0.2 cores, 2.4 GiB); a zebrad the dialog adds uses what the mock's zebrad does at
+  the tip. With `?herd` the computer has 16 CPUs and 32 GiB, and its figures count every
+  node. The real backend has the same API and rules; there every node is a zebrad for now.
 
 The flags are read from the query string once, when the page loads; the table at the top of
 [`src/mock.rs`](src/mock.rs) lists every one.

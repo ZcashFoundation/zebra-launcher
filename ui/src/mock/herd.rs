@@ -3,8 +3,9 @@
 //! adds. [`super::nodes`] routes the node-scoped API here for every node but the main one.
 //!
 //! The nodes are light simulations, not the zebrad mock: a status, statistics that move
-//! every 5 s while running, a log line now and then, and for a zebrad node a `zebrad.toml` of
-//! its own.
+//! every 5 s while running, resource samples every 5 s while they have a pid
+//! ([`NodeSamples`]), a log line now and then, and for a zebrad node a
+//! `zebrad.toml` of its own.
 //!
 //! | Node | State |
 //! | --- | --- |
@@ -25,12 +26,14 @@ use std::{
 
 use launcher_types::{
     ApplyOutcome, ConfigDocument, DEFAULT_STOP_GRACE_SECS, ExitClass, ExitInfo, LogLevel, LogLine,
-    LogStream, Network, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram, NodeStats, Phase,
-    PortRole, Status,
+    LogStream, Network, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram, NodeResources,
+    NodeStats, Phase, PortRole, Status,
 };
 use leptos::prelude::*;
 
-use super::{DEFAULT_DATA_DIR, FIRST_TIP, config::minimal_config, mock, nodes};
+use super::{
+    DEFAULT_DATA_DIR, FIRST_TIP, Flags, config::minimal_config, mock, nodes, resources::NodeSamples,
+};
 use crate::{clock, format};
 
 /// The block interval after NU7, for the nodes at the tip.
@@ -61,6 +64,8 @@ struct HerdNode {
     next_pid: Arc<AtomicU32>,
     /// Bumped by every command, so a delayed transition from an older one is skipped.
     generation: Arc<AtomicU64>,
+    /// What the node's processes use, every 5 s while it has a pid.
+    samples: NodeSamples,
 }
 
 thread_local! {
@@ -68,15 +73,11 @@ thread_local! {
 }
 
 fn herd_from_url() -> Vec<HerdNode> {
-    let wanted = web_sys::window()
-        .and_then(|window| window.location().search().ok())
-        .is_some_and(|search| {
-            search
-                .trim_start_matches('?')
-                .split('&')
-                .any(|flag| flag == "herd")
-        });
-    if wanted { herd() } else { Vec::new() }
+    if Flags::from_url().herd {
+        herd()
+    } else {
+        Vec::new()
+    }
 }
 
 fn id(text: &str) -> NodeId {
@@ -202,6 +203,7 @@ impl HerdNode {
             height: Arc::new(AtomicU64::new(height)),
             next_pid: Arc::new(AtomicU32::new(pid)),
             generation: Arc::new(AtomicU64::new(0)),
+            samples: NodeSamples::new(),
         }
     }
 
@@ -247,12 +249,14 @@ impl HerdNode {
         self.info.with_untracked(|info| info.network)
     }
 
-    /// Sends every change of the node's status and statistics to the UI's handlers.
+    /// Sends every change of the node's status, statistics and resources to the UI's handlers.
     fn report(&self) {
         let (node, status) = (self.clone(), self.status.clone());
         Effect::new(move |_| nodes::emit_status(&node.id(), status.get()));
         let (node, stats) = (self.clone(), self.stats.clone());
         Effect::new(move |_| nodes::emit_stats(&node.id(), stats.get()));
+        let (node, resources) = (self.clone(), self.samples.resources.clone());
+        Effect::new(move |_| nodes::emit_resources(&node.id(), resources.get()));
     }
 
     /// The tip this node's network is at: the mock's Mainnet tip moves with the main node.
@@ -266,7 +270,8 @@ impl HerdNode {
         }
     }
 
-    /// Statistics every 5 s and a log line now and then, while running.
+    /// Statistics every 5 s and a log line now and then, while running, and resource samples
+    /// while the node has a pid.
     fn simulate(self) {
         self.report();
         let node = self.clone();
@@ -280,6 +285,27 @@ impl HerdNode {
             STATS_INTERVAL,
         );
         self.tick();
+        let node = self.clone();
+        set_interval(move || node.tick_resources(), Duration::from_secs(1));
+        self.tick_resources();
+    }
+
+    /// A second of the node's resource sampler ([`NodeSamples::tick`]): a node behind its
+    /// network's tip is catching up.
+    fn tick_resources(&self) {
+        let (kind, network) = self.info.with_untracked(|info| (info.kind, info.network));
+        let catching_up = self.stats.with_untracked(|stats| {
+            stats
+                .as_ref()
+                .is_some_and(|stats| stats.height + 1 < stats.estimated_height)
+        });
+        self.samples.tick(
+            kind,
+            network,
+            &self.status.get_untracked(),
+            catching_up,
+            mock().flags,
+        );
     }
 
     fn tick(&self) {
@@ -513,6 +539,10 @@ pub fn status(node: &NodeId) -> Option<Status> {
 
 pub fn stats(node: &NodeId) -> Option<Option<NodeStats>> {
     find(node).map(|node| node.stats.get_untracked())
+}
+
+pub fn resources(node: &NodeId) -> Option<Option<NodeResources>> {
+    find(node).map(|node| node.samples.resources.get_untracked())
 }
 
 /// Sends `node`'s log lines in batches, as the bridge does.
