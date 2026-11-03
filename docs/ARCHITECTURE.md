@@ -427,8 +427,8 @@ the next run; none of its figures takes a tone. `activity.rs` is the activity ro
 `ui/src/components/log_insights.rs`) and the Peers card with its caption, the table of
 connected peers from `NodeDetails` and the handshake and obsolete-peer counters from the
 metrics. `details.rs` holds the Node and Chain cards, each with Copy, from the status, the
-statistics, the details, the settings, the metrics and the log facts. Every slot renders
-in every state: loading, running, stopped and refetching replace values in place.
+statistics, the details, the settings, the metrics and the log facts. Every other slot
+renders in every state: loading, running, stopped and refetching replace values in place.
 
 **Log analysis.** `ui/src/insights.rs` folds every log batch, in `seq` order, into a
 summary of the run: the sync stage from zebrad's `sync::progress` lines (syncing, near

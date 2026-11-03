@@ -2,8 +2,9 @@
 //! progress), the range row, the six stat tiles, the two charts, the Resources card, the
 //! activity row (recent problems, this run, peers), the node and chain details and the Grafana
 //! line, in the page specification's order. The cards live in the `dashboard/` modules; this
-//! file holds the signals they share, the chart data and the page order. Every slot renders in
-//! every state: loading, running, stopped and refetching replace values in place.
+//! file holds the signals they share, the chart data and the page order. Every slot but the
+//! Resources card renders in every state: loading, running, stopped and refetching replace
+//! values in place; the card appears with the node's first sample.
 
 mod activity;
 mod details;
