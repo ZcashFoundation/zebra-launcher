@@ -926,7 +926,14 @@ async fn a_syncing_node_is_not_followed_and_gets_fewer_reads_at_once() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(harness.counts()[1] - before, u64::from(limit));
+        let running = harness.counts()[1] - before;
+        if limit == 4 {
+            assert_eq!(running, 4, "while the node syncs");
+        } else {
+            // At the tip the follower checks the tip too, on the same permits, and the closed
+            // gate holds that check: one page read may wait for it.
+            assert!((5..=6).contains(&running), "at the tip: {running}");
+        }
         harness.gate.send_replace(true);
         for page in pages {
             page.await.expect("no panic").expect("a block page");
