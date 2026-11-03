@@ -32,6 +32,21 @@
 //! also shuts down when stdin reaches EOF, mirroring the flag proposed for
 //! zebrad.
 //!
+//! These give the process tree something for the resource sampler to measure,
+//! right after `Starting zebrad`:
+//!
+//! | variable | effect |
+//! |---|---|
+//! | `FAKE_ZEBRAD_BURN_MS=1500` | one thread spins for that long |
+//! | `FAKE_ZEBRAD_ALLOC_MB=128` | allocates that much, touches every page, and holds it until exit |
+//! | `FAKE_ZEBRAD_WRITE_MB=32` | writes that much to a file next to the `-c` config, then `sync_all` |
+//! | `FAKE_ZEBRAD_CHILD=busy` | starts a `fake-zebrad child` that spins 500 ms and lives 10 s, and waits for it |
+//! | `FAKE_ZEBRAD_CHILD=session` | the same child, which calls `setsid()` first, like Zebend's services |
+//! | `FAKE_ZEBRAD_CHILD=short` | 300 ms later, a child that spins 100 ms and exits, waited for at once |
+//! | `FAKE_ZEBRAD_CHILD=late` | a child that spins 500 ms and exits; the fake reaps it 15 s later |
+//!
+//! The children's stdio is null, so they never hold the supervisor's pipes.
+//!
 //! When the `-c` config sets `rpc.listen_addr`, the fake also serves a minimal
 //! JSON-RPC endpoint there (port 0 picks a free port, and the bound address is
 //! printed in the `Opened RPC endpoint at` line). With `rpc.cookie_dir` set and
@@ -60,9 +75,9 @@ use std::{
     io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{ExitCode, Stdio},
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -110,6 +125,22 @@ fn main() -> ExitCode {
         Some("linger") => {
             let ms = rest.get(1).and_then(|ms| ms.parse().ok()).unwrap_or(0);
             std::thread::sleep(Duration::from_millis(ms));
+            ExitCode::SUCCESS
+        }
+        // The child of `FAKE_ZEBRAD_CHILD`: `child <spin ms> <live ms> [session]`.
+        Some("child") => {
+            let millis = |i: usize| {
+                Duration::from_millis(rest.get(i).and_then(|ms| ms.parse().ok()).unwrap_or(0))
+            };
+            #[cfg(unix)]
+            if rest.get(3).is_some_and(|arg| arg == "session") {
+                let _ = nix::unistd::setsid();
+            }
+            let started = Instant::now();
+            spin_for(millis(1));
+            if let Some(left) = millis(2).checked_sub(started.elapsed()) {
+                std::thread::sleep(left);
+            }
             ExitCode::SUCCESS
         }
         Some(other) => {
@@ -247,6 +278,8 @@ async fn run(
         &format!("Opened metrics endpoint at {metrics_addr}"),
     );
     log("INFO", None, "zebrad::commands::start", "Starting zebrad");
+    // Held until the fake exits.
+    let _memory = start_resource_modes(config.as_deref());
     log(
         "INFO",
         None,
@@ -356,6 +389,110 @@ async fn run(
             );
         }
     }
+}
+
+/// Starts what `FAKE_ZEBRAD_BURN_MS`, `FAKE_ZEBRAD_ALLOC_MB`,
+/// `FAKE_ZEBRAD_WRITE_MB` and `FAKE_ZEBRAD_CHILD` ask for, and returns the
+/// allocated memory, which the caller holds.
+fn start_resource_modes(config: Option<&Path>) -> Vec<u8> {
+    let burn = env_millis("FAKE_ZEBRAD_BURN_MS", 0);
+    if !burn.is_zero() {
+        std::thread::spawn(move || spin_for(burn));
+    }
+    let bytes = usize::try_from(env_u64("FAKE_ZEBRAD_ALLOC_MB", 0)).unwrap_or(0) * 1024 * 1024;
+    let mut memory = vec![0u8; bytes];
+    // One write per page makes every page resident.
+    for page in memory.iter_mut().step_by(4096) {
+        *page = 1;
+    }
+    std::hint::black_box(&mut memory);
+    let write = env_u64("FAKE_ZEBRAD_WRITE_MB", 0);
+    if write > 0 {
+        let dir = config.and_then(Path::parent).unwrap_or(Path::new("."));
+        if let Err(err) = write_scratch(&dir.join("fake-zebrad-write.bin"), write) {
+            log(
+                "WARN",
+                None,
+                "fake_zebrad",
+                &format!("could not write: {err}"),
+            );
+        }
+    }
+    if let Ok(child) = std::env::var("FAKE_ZEBRAD_CHILD") {
+        spawn_child(&child);
+    }
+    memory
+}
+
+/// Keeps one CPU busy for `duration`.
+fn spin_for(duration: Duration) {
+    let end = Instant::now() + duration;
+    let mut x = 1u64;
+    while Instant::now() < end {
+        x = std::hint::black_box(x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1));
+    }
+}
+
+/// Writes `megabytes` MiB to `path` and syncs them to the disk.
+fn write_scratch(path: &Path, megabytes: u64) -> std::io::Result<()> {
+    let chunk = vec![0x5a_u8; 1024 * 1024];
+    let mut file = std::fs::File::create(path)?;
+    for _ in 0..megabytes {
+        file.write_all(&chunk)?;
+    }
+    file.sync_all()
+}
+
+/// Starts the child of `FAKE_ZEBRAD_CHILD` on a thread of its own and waits for
+/// it there, at once or (`late`) 15 s after it exited. The `short` child starts
+/// 300 ms late, so a sampler's reading at the spawn does not see it.
+fn spawn_child(mode: &str) {
+    let ms = Duration::from_millis;
+    let (spin_ms, live_ms, session, start_after, reap_after) = match mode {
+        "busy" => (500, 10_000, false, Duration::ZERO, Duration::ZERO),
+        "session" => (500, 10_000, true, Duration::ZERO, Duration::ZERO),
+        "short" => (100, 100, false, ms(300), Duration::ZERO),
+        "late" => (500, 500, false, Duration::ZERO, ms(15_000)),
+        other => {
+            log(
+                "WARN",
+                None,
+                "fake_zebrad",
+                &format!("unknown FAKE_ZEBRAD_CHILD {other:?}"),
+            );
+            return;
+        }
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("child")
+        .arg(spin_ms.to_string())
+        .arg(live_ms.to_string());
+    if session {
+        command.arg("session");
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    std::thread::spawn(move || {
+        std::thread::sleep(start_after);
+        match command.spawn() {
+            Ok(mut child) => {
+                std::thread::sleep(reap_after);
+                let _ = child.wait();
+            }
+            Err(err) => log(
+                "WARN",
+                None,
+                "fake_zebrad",
+                &format!("could not start the child: {err}"),
+            ),
+        }
+    });
 }
 
 /// How the fake exits after a graceful shutdown: 0, or 3 in `crash-on-stop`
