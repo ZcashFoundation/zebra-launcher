@@ -1,6 +1,6 @@
 # Releasing
 
-How to cut a Zebra Launcher release with
+How to cut a Zeal release with
 [`release.yml`](../.github/workflows/release.yml). The goal: another maintainer can cut a
 release candidate from a clean clone by following this file alone. The pipeline design
 is in [ARCHITECTURE.md](ARCHITECTURE.md#release-pipeline), and signing and key
@@ -39,7 +39,7 @@ Windows zebrad builds are cold.
 
    ```sh
    git switch main && git pull --ff-only
-   git tag -s v0.2.0 -m "Zebra Launcher 0.2.0"
+   git tag -s v0.2.0 -m "Zeal 0.2.0"
    git push origin v0.2.0
    ```
 
@@ -63,7 +63,7 @@ Windows zebrad builds are cold.
    cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
      --certificate-identity "https://github.com/ZcashFoundation/zebra-launcher/.github/workflows/release.yml@refs/tags/$TAG" \
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
-   for f in zebra-launcher_* latest.json; do
+   for f in zeal_* latest.json; do
      gh attestation verify "$f" --repo ZcashFoundation/zebra-launcher \
        --signer-workflow ZcashFoundation/zebra-launcher/.github/workflows/release.yml
    done
@@ -107,23 +107,23 @@ Windows zebrad builds are cold.
 - [ ] `for s in *.sig; do base64 -d < "$s" | sed -n 3p; done` prints, for every
       signature, a trusted comment ending in `version:X.Y.Z` (this version).
 - [ ] **Linux x86_64** (Ubuntu 22.04 and 24.04): the AppImage starts after `chmod +x`,
-      the node reaches Running, and About shows "Zebra Launcher X.Y.Z (zebrad A.B.C)".
-- [ ] **Linux deb** (Debian 12): `sudo apt install ./zebra-launcher_X.Y.Z_amd64.deb`
+      the node reaches Running, and About shows "Zeal X.Y.Z (zebrad A.B.C)".
+- [ ] **Linux deb** (Debian 12): `sudo apt install ./zeal_X.Y.Z_amd64.deb`
       installs, the app starts, and the update setting is Notify-only.
 - [ ] **Linux aarch64**: the AppImage starts and the node reaches Running.
 - [ ] **macOS Apple Silicon and Intel**: the dmg opens; after copying to Applications,
-      `spctl -a -vv "/Applications/Zebra Launcher.app"` reports
+      `spctl -a -vv "/Applications/Zeal.app"` reports
       `source=Notarized Developer ID`, and
-      `codesign -dv --verbose=4 "/Applications/Zebra Launcher.app/Contents/MacOS/zebra-launcher-zebrad"`
+      `codesign -dv --verbose=4 "/Applications/Zeal.app/Contents/MacOS/zeal-zebrad"`
       shows the Developer ID authority and `flags=0x10000(runtime)`. The app opens
       without an "unidentified developer" block and the node reaches Running.
-- [ ] **Windows 11**: `Get-AuthenticodeSignature .\zebra-launcher_X.Y.Z_x86_64-setup.exe`
+- [ ] **Windows 11**: `Get-AuthenticodeSignature .\zeal_X.Y.Z_x86_64-setup.exe`
       is `Valid`; the installer runs per-user without a UAC prompt;
-      `Get-AuthenticodeSignature` is `Valid` for `zebra-launcher.exe` and
-      `zebra-launcher-zebrad.exe` in `%LOCALAPPDATA%\Zebra Launcher`; the node reaches
+      `Get-AuthenticodeSignature` is `Valid` for `zeal-app.exe` and
+      `zeal-zebrad.exe` in `%LOCALAPPDATA%\Zeal`; the node reaches
       Running.
 - [ ] **Every OS**: with close-to-tray on, closing the window keeps the node running;
-      tray Quit leaves no `zebra-launcher-zebrad` process.
+      tray Quit leaves no `zeal-zebrad` process.
 - [ ] **Updater** (releases that ship it): every `.sig` names this version (see below), and
       the [update rehearsal](#update-rehearsal) from the previous rc to this release
       works on every target; the `.deb` shows the release link instead of installing.
@@ -172,7 +172,7 @@ jq -r '.platforms | to_entries[] | "\(.key) \(.value.signature)"' latest.json |
 ```
 
 The third line of a decoded signature is its trusted comment, for example
-`trusted comment: timestamp:1793000000<TAB>file:zebra-launcher_0.2.0_x86_64.AppImage<TAB>version:0.2.0`.
+`trusted comment: timestamp:1793000000<TAB>file:zeal_0.2.0_x86_64.AppImage<TAB>version:0.2.0`.
 Every key must print `ok`.
 
 ## Update rehearsal
@@ -306,7 +306,7 @@ Triggers:
    05:17 UTC and on dispatch) compares Zebra's latest `vX.Y.Z` release that has signed
    binaries with `ZEBRAD_VERSION` and opens a bump PR (`bump/zebrad-<ver>`) with a
    GitHub App token, since PRs opened with `GITHUB_TOKEN` do not trigger CI. It needs
-   the `ZEBRA_LAUNCHER_APP_ID` and `ZEBRA_LAUNCHER_APP_PRIVATE_KEY` secrets; without
+   the `ZEAL_APP_ID` and `ZEAL_APP_PRIVATE_KEY` secrets; without
    them it opens a `release-blocker` issue instead. See
    [SIDECARS.md](SIDECARS.md#bumping-zebrad_version).
 

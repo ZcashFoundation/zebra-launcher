@@ -1,10 +1,10 @@
 # The bundled zebrad
 
-Zebra Launcher ships zebrad as a Tauri sidecar. Tauri looks for it at
-`src-tauri/binaries/zebra-launcher-zebrad-<target triple>` (with `.exe` on
+Zeal ships zebrad as a Tauri sidecar. Tauri looks for it at
+`src-tauri/binaries/zeal-zebrad-<target triple>` (with `.exe` on
 Windows), the name `bundle.externalBin` in `src-tauri/tauri.conf.json` gives.
 That directory is git-ignored, so the binary always comes from one of the
-scripts below and is never committed. The `zebra-launcher-` prefix keeps the
+scripts below and is never committed. The `zeal-` prefix keeps the
 Linux `.deb` from shadowing a system `/usr/bin/zebrad`.
 
 The zebrad version is pinned in [`ZEBRAD_VERSION`](../ZEBRAD_VERSION), written
@@ -93,7 +93,7 @@ sidecars.
 To check that a sidecar artifact came from this workflow:
 
 ```sh
-gh attestation verify zebra-launcher-zebrad-aarch64-apple-darwin \
+gh attestation verify zeal-zebrad-aarch64-apple-darwin \
   --repo ZcashFoundation/zebra-launcher \
   --signer-workflow ZcashFoundation/zebra-launcher/.github/workflows/zebrad-sidecars.yml
 ```
@@ -108,8 +108,8 @@ example, a Windows-only build with zebrad from Zebra's `main`:
 gh workflow run bundle.yml -f zebrad_ref=main -f targets=x86_64-pc-windows-msvc --ref <branch>
 ```
 
-- `--ref <branch>` is the zebra-launcher branch whose workflows and launcher
-  code are built.
+- `--ref <branch>` is the branch of this repository whose workflows and
+  launcher code are built.
 - `zebrad_ref` is a Zebra branch (`main`), tag (`v7.0.0`), pull request head
   (`refs/pull/<number>/head`) or full 40-character commit SHA. An abbreviated
   SHA cannot be fetched.
@@ -139,8 +139,8 @@ The run uploads these artifacts:
 
 | Artifact | Contents |
 | --- | --- |
-| `zebrad-<triple>` | `zebra-launcher-zebrad-<triple>[.exe]` and `zebrad-build-info.txt` |
-| `bundles-<triple>-dev-<short commit>` | the installers that `collect-bundles.sh` collects (Windows: `zebra-launcher_<ver>_x86_64-setup.exe`), `raw/zebra-launcher[.exe]` with `raw/zebra-launcher-zebrad[.exe]` beside it, and `zebrad-build-info.txt` |
+| `zebrad-<triple>` | `zeal-zebrad-<triple>[.exe]` and `zebrad-build-info.txt` |
+| `bundles-<triple>-dev-<short commit>` | the installers that `collect-bundles.sh` collects (Windows: `zeal_<ver>_x86_64-setup.exe`), `raw/zeal-app[.exe]` with `raw/zeal-zebrad[.exe]` beside it, and `zebrad-build-info.txt` |
 
 `zebrad-build-info.txt` names the ref, the resolved commit, the
 `zebrad --version` output, the target and the workflow run, under an
@@ -148,7 +148,7 @@ The run uploads these artifacts:
 same, with a warning that the build is unsigned and unverified. Download an
 artifact with `gh run download <run id> -n <artifact>`. On Windows, either run
 the NSIS installer, which SmartScreen flags because it is unsigned, or run
-`raw/zebra-launcher.exe` directly, keeping `zebra-launcher-zebrad.exe` in the
+`raw/zeal-app.exe` directly, keeping `zeal-zebrad.exe` in the
 same directory, because the launcher looks for zebrad next to itself.
 
 On Linux, the development zebrad needs the glibc of the ubuntu-24.04 runner
@@ -250,8 +250,8 @@ requests** read/write (ZF already runs such an App for the zebra repo):
 
 | Secret | Value |
 | --- | --- |
-| `ZEBRA_LAUNCHER_APP_ID` | the App's ID |
-| `ZEBRA_LAUNCHER_APP_PRIVATE_KEY` | a private key of the App, in PEM form |
+| `ZEAL_APP_ID` | the App's ID |
+| `ZEAL_APP_PRIVATE_KEY` | a private key of the App, in PEM form |
 
 Without them, the watcher opens (or updates) an issue titled
 `Bump zebrad to <ver>`, labelled `release-blocker`, instead. To try the

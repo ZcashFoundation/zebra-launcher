@@ -1,4 +1,4 @@
-//! Zebra Launcher: a thin Tauri 2 layer over `launcher-core`.
+//! Zeal: a thin Tauri 2 layer over `launcher-core`.
 //!
 //! Startup (in [`run`]'s setup hook): resolve the per-user directories,
 //! start the launcher log, roll back an interrupted config change, load the
@@ -105,7 +105,7 @@ pub fn run() {
         Ok(app) => app.run(exit::on_run_event),
         Err(err) => {
             tracing::error!(%err, "could not build the app");
-            eprintln!("Zebra Launcher could not start: {err}");
+            eprintln!("Zeal could not start: {err}");
             std::process::exit(1);
         }
     }
@@ -146,8 +146,8 @@ fn setup(app: &AppHandle) {
             }
         }
         Err(err) => {
-            tracing::error!(%err, "Zebra Launcher could not start");
-            eprintln!("Zebra Launcher could not start: {err}");
+            tracing::error!(%err, "Zeal could not start");
+            eprintln!("Zeal could not start: {err}");
             show_startup_error(app, &err);
         }
     }
@@ -200,10 +200,8 @@ fn show_startup_error(app: &AppHandle, err: &StartupError) {
         std::process::exit(1);
     }
     app.dialog()
-        .message(format!(
-            "Zebra Launcher could not start:\n\n{err}{log_hint}"
-        ))
-        .title("Zebra Launcher")
+        .message(format!("Zeal could not start:\n\n{err}{log_hint}"))
+        .title("Zeal")
         .kind(MessageDialogKind::Error)
         .buttons(MessageDialogButtons::Ok)
         .show(move |_| {
@@ -218,7 +216,7 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     let notes = match logging::init(&paths.launcher_log()) {
         Ok(notes) => Some(notes),
         Err(err) => {
-            eprintln!("Zebra Launcher is running without a log file: {err}");
+            eprintln!("Zeal is running without a log file: {err}");
             None
         }
     };
@@ -227,7 +225,7 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
         config_dir = %paths.config_dir().display(),
         data_dir = %paths.data_dir().display(),
         log_dir = %paths.log_dir().display(),
-        "Zebra Launcher starting"
+        "Zeal starting"
     );
 
     match config::recover(&paths) {

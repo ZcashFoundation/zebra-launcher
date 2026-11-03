@@ -1,6 +1,6 @@
 # Produces the zebrad sidecar binaries that the launcher bundles, one workflow
 # artifact per target, named `zebrad-<target triple>`, each holding
-# `zebra-launcher-zebrad-<target triple>[.exe]` (the name Tauri expects in
+# `zeal-zebrad-<target triple>[.exe]` (the name Tauri expects in
 # src-tauri/binaries/).
 #
 # - Linux (x86_64, aarch64): Zebra's own release tarballs, verified with cosign
@@ -223,7 +223,7 @@ jobs:
       ZEBRAD_REF: ${{ needs.version.outputs.zebrad_ref }}
       ZEBRAD_COMMIT: ${{ needs.version.outputs.zebrad_commit }}
       TARGET: ${{ matrix.target }}
-      SIDECAR: dist/zebra-launcher-zebrad-${{ matrix.target }}
+      SIDECAR: dist/zeal-zebrad-${{ matrix.target }}
     steps:
       - name: ${{ needs.version.outputs.zebrad_ref == '' && 'Fetch' || 'Build' }} zebrad for ${{ matrix.target }}
         run: |
@@ -341,7 +341,7 @@ jobs:
       ZEBRAD_REF: ${{ needs.version.outputs.zebrad_ref }}
       ZEBRAD_COMMIT: ${{ needs.version.outputs.zebrad_commit }}
       TARGET: ${{ matrix.target }}
-      SIDECAR: dist/zebra-launcher-zebrad-${{ matrix.target }}
+      SIDECAR: dist/zeal-zebrad-${{ matrix.target }}
     steps:
       - name: Build zebrad for ${{ matrix.target }}
         run: |
@@ -445,7 +445,7 @@ jobs:
       ZEBRAD_REF: ${{ needs.version.outputs.zebrad_ref }}
       ZEBRAD_COMMIT: ${{ needs.version.outputs.zebrad_commit }}
       TARGET: ${{ matrix.target }}
-      SIDECAR: dist/zebra-launcher-zebrad-${{ matrix.target }}${{ matrix.exe_suffix }}
+      SIDECAR: dist/zeal-zebrad-${{ matrix.target }}${{ matrix.exe_suffix }}
       # bindgen's libclang: build-zebrad.ps1 finds the LLVM that the runner
       # image preinstalls in C:\Program Files\LLVM, and fails if it is missing.
     defaults:

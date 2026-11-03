@@ -9,7 +9,7 @@ use leptos::prelude::*;
 use super::{DEFAULT_DATA_DIR, mock, sleep};
 
 /// The config document the mock starts with: what the launcher's minimal managed file looks like.
-pub(super) const SAMPLE_CONFIG: &str = r#"# Managed by Zebra Launcher. Keys you add are kept; the RPC, metrics and
+pub(super) const SAMPLE_CONFIG: &str = r#"# Managed by Zeal. Keys you add are kept; the RPC, metrics and
 # network keys below are enforced by the launcher.
 
 [network]
@@ -24,7 +24,7 @@ enable_cookie_auth = true
 endpoint_addr = "127.0.0.1:9999"
 
 [state]
-cache_dir = "/home/user/.local/share/org.zfnd.zebra-launcher/zebra"
+cache_dir = "/home/user/.local/share/org.zfnd.zeal/zebra"
 
 [tracing]
 use_color = false
@@ -38,7 +38,7 @@ fn minimal_config(network: Network, state_dir: &str) -> String {
         Network::Testnet => 18232,
     };
     format!(
-        r#"# zebrad configuration managed by Zebra Launcher.
+        r#"# zebrad configuration managed by Zeal.
 #
 # The launcher keeps network.network, rpc.listen_addr, rpc.enable_cookie_auth,
 # rpc.cookie_dir, metrics.endpoint_addr and state.cache_dir up to date.

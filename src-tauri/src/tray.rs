@@ -59,7 +59,7 @@ struct Items {
 }
 
 fn build(app: &AppHandle) -> tauri::Result<(TrayIcon, Items)> {
-    let show = MenuItem::with_id(app, SHOW, "Show Zebra Launcher", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, SHOW, "Show Zeal", true, None::<&str>)?;
     let start = MenuItem::with_id(app, START, "Start zebrad", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, STOP, "Stop zebrad", false, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
@@ -137,7 +137,7 @@ pub fn tooltip(phase: &Phase) -> String {
         Phase::Backoff { .. } => "zebrad crashed, restarting soon",
         Phase::Failed { .. } => "zebrad failed, needs attention",
     };
-    format!("Zebra Launcher: {what}")
+    format!("Zeal: {what}")
 }
 
 /// Whether Start and Stop are enabled in `phase`: Start while zebrad is
@@ -169,6 +169,6 @@ mod tests {
         assert_eq!(menu_state(&Phase::Running, true), (false, true));
         assert_eq!(menu_state(&Phase::Starting, true), (false, true));
         assert_eq!(menu_state(&Phase::Stopping, true), (false, false));
-        assert_eq!(tooltip(&Phase::Running), "Zebra Launcher: zebrad running");
+        assert_eq!(tooltip(&Phase::Running), "Zeal: zebrad running");
     }
 }

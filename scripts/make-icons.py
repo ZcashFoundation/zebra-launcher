@@ -107,7 +107,7 @@ def main() -> int:
     head = head_crop(source)
 
     with tempfile.TemporaryDirectory() as tmp:
-        big_path = Path(tmp) / "zebra-launcher-icon-1024.png"
+        big_path = Path(tmp) / "zeal-icon-1024.png"
         icon.save(big_path, optimize=True)
         subprocess.run(
             ["cargo", "tauri", "icon", str(big_path), "-o", str(ICONS)],

@@ -14,7 +14,7 @@ die() {
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 host="$(host_triple)"
-out="${root}/src-tauri/binaries/zebra-launcher-zebrad-${host}"
+out="${root}/src-tauri/binaries/zeal-zebrad-${host}"
 
 # Take the binary's path from cargo, which knows about build.target-dir,
 # CARGO_TARGET_DIR and CARGO_BUILD_TARGET. Diagnostics still go to stderr.

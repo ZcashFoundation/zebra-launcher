@@ -1,4 +1,4 @@
-/* Zebra Launcher: one small theme in a dark and a light set, no frameworks, no remote fonts.
+/* Zeal: one small theme in a dark and a light set, no frameworks, no remote fonts.
    Every colour is a token on :root (the dark set, the default); the light set redefines them
    under :root[data-theme="light"], which theme.rs sets on <html>. Rules below use var(--token)
    only, never a literal colour, so both looks stay in step. */

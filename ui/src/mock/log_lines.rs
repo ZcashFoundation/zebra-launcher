@@ -95,7 +95,7 @@ const STARTUP_LINES: &[SampleLine] = &[
         Some(LogLevel::Info),
         None,
         Some("zebra_state::service::finalized_state::disk_db"),
-        "Opened Zebra state cache at /home/user/.local/share/org.zfnd.zebra-launcher/state/state/v29/mainnet",
+        "Opened Zebra state cache at /home/user/.local/share/org.zfnd.zeal/state/state/v29/mainnet",
     ),
     (
         LogStream::Stdout,

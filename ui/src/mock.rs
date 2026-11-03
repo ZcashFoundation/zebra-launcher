@@ -67,7 +67,7 @@ pub use updates::{
 };
 
 /// The launcher's own data directory in the mock.
-const DEFAULT_DATA_DIR: &str = "/home/user/.local/share/org.zfnd.zebra-launcher";
+const DEFAULT_DATA_DIR: &str = "/home/user/.local/share/org.zfnd.zeal";
 
 /// What the mock folder picker returns.
 const PICKED_DATA_DIR: &str = "/mnt/storage/zebra";
@@ -317,7 +317,7 @@ impl Mock {
             config: ArcRwSignal::new(ConfigDocument {
                 text: SAMPLE_CONFIG.into(),
                 token: "mock-1".into(),
-                path: "/home/user/.local/share/org.zfnd.zebra-launcher/zebrad.toml".into(),
+                path: "/home/user/.local/share/org.zfnd.zeal/zebrad.toml".into(),
             }),
             next_seq: Arc::new(AtomicU64::new(0)),
             run_first_seq: Arc::new(AtomicU64::new(0)),
@@ -362,7 +362,7 @@ impl Mock {
             mock.status.update(|status| {
                 status.stale = Some(StaleProcessInfo {
                     pid: 1234,
-                    binary: "/opt/zebra-launcher/zebrad".into(),
+                    binary: "/opt/zeal/zebrad".into(),
                 })
             });
         } else if !first_run || flags.running {
@@ -950,7 +950,7 @@ pub async fn copy_diagnostics() -> String {
         .unwrap_or_default();
     let config = mock.config.with_untracked(|config| config.text.clone());
     format!(
-        "Zebra Launcher 0.1.0 (zebrad 7.0.0) [mock]\n\
+        "Zeal 0.1.0 (zebrad 7.0.0) [mock]\n\
          OS: {user_agent}\n\
          Phase: {phase:?}\n\
          Settings: {settings:?}\n\
@@ -958,7 +958,7 @@ pub async fn copy_diagnostics() -> String {
          --- zebrad.toml ---\n\
          {config}\n\
          --- launcher log (last lines) ---\n\
-         (mock) INFO zebra_launcher: started\n\
+         (mock) INFO zeal: started\n\
          --- zebrad log (last lines) ---\n\
          (mock) INFO zebrad::commands::start: Starting zebrad\n"
     )

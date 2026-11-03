@@ -143,7 +143,7 @@ pub struct Note {
     pub at: SystemTime,
     /// How loud it is.
     pub level: LogLevel,
-    /// Where it came from: a `tracing` target such as `zebra_launcher::updater`.
+    /// Where it came from: a `tracing` target such as `zeal::updater`.
     pub target: String,
     /// The message, with any fields appended as `key=value`.
     pub message: String,

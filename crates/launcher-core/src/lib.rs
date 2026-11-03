@@ -1,4 +1,4 @@
-//! Zebra Launcher logic that does not depend on Tauri.
+//! Zeal logic that does not depend on Tauri.
 //!
 //! The Tauri app is a thin bridge over this crate: it maps commands and events to
 //! the handles exposed here, so everything in this crate is testable with plain

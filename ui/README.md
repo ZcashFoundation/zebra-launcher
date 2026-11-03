@@ -1,4 +1,4 @@
-# Zebra Launcher UI
+# Zeal UI
 
 The launcher's user interface: a [Leptos](https://leptos.dev) 0.8 app, client-side rendered only
 (no SSR, no server functions), compiled to WebAssembly by [trunk](https://trunkrs.dev). There is no

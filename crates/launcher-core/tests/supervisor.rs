@@ -782,7 +782,7 @@ async fn launcher_notes_join_the_log_stream_with_their_fields() {
     let before = SystemTime::now();
     assert!(handle.note(
         LogLevel::Warn,
-        "zebra_launcher::updater",
+        "zeal::updater",
         "update check failed err=offline"
     ));
     let after = SystemTime::now();
@@ -790,7 +790,7 @@ async fn launcher_notes_join_the_log_stream_with_their_fields() {
     assert_eq!(line.seq, 0);
     assert_eq!(line.stream, LogStream::Launcher);
     assert_eq!(line.level, Some(LogLevel::Warn));
-    assert_eq!(line.target.as_deref(), Some("zebra_launcher::updater"));
+    assert_eq!(line.target.as_deref(), Some("zeal::updater"));
     assert_eq!(line.message, "update check failed err=offline");
     assert_eq!(line.spans, None);
     assert!(!line.is_gap_marker());
@@ -806,7 +806,7 @@ async fn launcher_notes_join_the_log_stream_with_their_fields() {
     assert!(handle.note_at(Note {
         at,
         level: LogLevel::Error,
-        target: "zebra_launcher::apply".into(),
+        target: "zeal::apply".into(),
         message: "zebrad refused the new configuration".into(),
     }));
     let line = within(sub.live.recv()).await.expect("live line");
@@ -816,7 +816,7 @@ async fn launcher_notes_join_the_log_stream_with_their_fields() {
         Some("2026-10-28T17:55:44.000000Z")
     );
     assert_eq!(line.level, Some(LogLevel::Error));
-    assert_eq!(line.target.as_deref(), Some("zebra_launcher::apply"));
+    assert_eq!(line.target.as_deref(), Some("zeal::apply"));
 
     // The actor's own notes carry the same fields.
     within(handle.start()).await.expect("start");
@@ -845,7 +845,7 @@ async fn launcher_notes_join_the_log_stream_with_their_fields() {
         .unwrap_or_default();
     assert!(
         log.contains(
-            "[launcher] 2026-10-28T17:55:44.000000Z ERROR zebra_launcher::apply: zebrad refused the new configuration"
+            "[launcher] 2026-10-28T17:55:44.000000Z ERROR zeal::apply: zebrad refused the new configuration"
         ),
         "log file: {log:?}"
     );
@@ -863,7 +863,7 @@ async fn a_multi_line_note_continues_like_a_multi_line_zebrad_message() {
     assert!(handle.note_at(Note {
         at,
         level: LogLevel::Error,
-        target: "zebra_launcher::config".into(),
+        target: "zeal::config".into(),
         message: "a\nb\n".into(),
     }));
     let first = within(sub.live.recv()).await.expect("live line");
@@ -874,7 +874,7 @@ async fn a_multi_line_note_continues_like_a_multi_line_zebrad_message() {
         Some("2026-10-28T17:55:44.000000Z")
     );
     assert_eq!(first.level, Some(LogLevel::Error));
-    assert_eq!(first.target.as_deref(), Some("zebra_launcher::config"));
+    assert_eq!(first.target.as_deref(), Some("zeal::config"));
     assert_eq!(first.message, "a");
     // The continuation line: the same stream, no timestamp, level or target.
     let second = within(sub.live.recv()).await.expect("live line");
@@ -889,8 +889,7 @@ async fn a_multi_line_note_continues_like_a_multi_line_zebrad_message() {
     // On disk each line is behind the launcher marker. The writer thread may
     // still be draining, so poll.
     let path = fx.config.log_file.as_ref().unwrap().path.clone();
-    let expected =
-        "[launcher] 2026-10-28T17:55:44.000000Z ERROR zebra_launcher::config: a\n[launcher] b\n";
+    let expected = "[launcher] 2026-10-28T17:55:44.000000Z ERROR zeal::config: a\n[launcher] b\n";
     let deadline = std::time::Instant::now() + LIMIT;
     loop {
         let log = std::fs::read_to_string(&path).unwrap_or_default();

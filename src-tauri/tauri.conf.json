@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Zebra Launcher",
-  "mainBinaryName": "zebra-launcher",
-  "identifier": "org.zfnd.zebra-launcher",
+  "productName": "Zeal",
+  "mainBinaryName": "zeal-app",
+  "identifier": "org.zfnd.zeal",
   "build": {
     "devUrl": "http://localhost:1420",
     "frontendDist": "../ui/dist",
@@ -21,7 +21,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Zebra Launcher",
+        "title": "Zeal",
         "width": 1000,
         "height": 800
       }
@@ -57,10 +57,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/zebra-launcher-zebrad"],
+    "externalBin": ["binaries/zeal-zebrad"],
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libayatana-appindicator3-1"]
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libayatana-appindicator3-1"],
+        "desktopTemplate": "linux/zeal.desktop"
       }
     },
     "windows": {

@@ -111,7 +111,7 @@ jobs:
             echo "version=${version}"
             echo "prerelease=${prerelease}"
           } >> "${GITHUB_OUTPUT}"
-          echo "Zebra Launcher ${version}, prerelease: ${prerelease}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Zeal ${version}, prerelease: ${prerelease}" >> "${GITHUB_STEP_SUMMARY}"
 
       # The five-target matrix, from .github/targets.json through the same
       # script as bundle.yml (no `targets` input here: a release builds all).
@@ -220,7 +220,7 @@ jobs:
             *) exit "${status}" ;;
           esac
           {
-            echo "Zebra Launcher ${VERSION}, bundling zebrad ${ZEBRAD_VERSION} (Zebra commit ${ZEBRAD_COMMIT})."
+            echo "Zeal ${VERSION}, bundling zebrad ${ZEBRAD_VERSION} (Zebra commit ${ZEBRAD_COMMIT})."
             echo
             printf '%s\n' "${changes}"
             echo
@@ -256,7 +256,7 @@ jobs:
           found="$(find_release)"
           if [ "$(jq length <<< "${found}")" -eq 0 ]; then
             args=(--draft --verify-tag
-              --title "Zebra Launcher ${VERSION} (zebrad ${ZEBRAD_VERSION})"
+              --title "Zeal ${VERSION} (zebrad ${ZEBRAD_VERSION})"
               --notes-file "${RUNNER_TEMP}/notes.md")
             if [ "${PRERELEASE}" = true ]; then
               args+=(--prerelease)
@@ -335,7 +335,7 @@ jobs:
         with:
           name: zebrad-${{ matrix.target }}
           path: src-tauri/binaries
-      - run: chmod +x "src-tauri/binaries/zebra-launcher-zebrad-${TARGET}${EXE_SUFFIX}"
+      - run: chmod +x "src-tauri/binaries/zeal-zebrad-${TARGET}${EXE_SUFFIX}"
 
       - name: Check Cargo.lock is up to date
         run: cargo fetch --locked
@@ -348,7 +348,7 @@ jobs:
         run: |
           scripts/check-glibc.sh --floor "${GLIBC_FLOOR}" \
             "target/${TARGET}/release/${APP_BIN}" \
-            "src-tauri/binaries/zebra-launcher-zebrad-${TARGET}"
+            "src-tauri/binaries/zeal-zebrad-${TARGET}"
 
       - name: Stage the compiled app
         run: |
@@ -434,7 +434,7 @@ jobs:
       - name: Place the compiled app
         run: |
           set -euo pipefail
-          chmod +x "src-tauri/binaries/zebra-launcher-zebrad-${TARGET}${EXE_SUFFIX}"
+          chmod +x "src-tauri/binaries/zeal-zebrad-${TARGET}${EXE_SUFFIX}"
           out="target/${TARGET}/release"
           mkdir -p "${out}" ui/dist
           cp "${RUNNER_TEMP}/build/bin/${APP_BIN}${EXE_SUFFIX}" "${out}/"
@@ -512,7 +512,7 @@ jobs:
               cmd: $signtool,
               args: ["sign", "/v", "/fd", "SHA256",
                      "/tr", "http://timestamp.acs.microsoft.com", "/td", "SHA256",
-                     "/d", "Zebra Launcher",
+                     "/d", "Zeal",
                      "/dlib", $dlib, "/dmdf", $metadata, "%1"]
             } } }
           }' > "${config}"
@@ -664,7 +664,7 @@ jobs:
           set -euo pipefail
           scripts/assemble-latest-json.sh --dir assets --version "${VERSION}" --tag "${TAG}" \
             --repo "${GITHUB_REPOSITORY}" --out assets/latest.json \
-            --notes "Zebra Launcher ${VERSION} (zebrad ${ZEBRAD_VERSION}). Release notes: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+            --notes "Zeal ${VERSION} (zebrad ${ZEBRAD_VERSION}). Release notes: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
 
       - name: Write and sign SHA256SUMS
         shell: bash

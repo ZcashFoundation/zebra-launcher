@@ -58,7 +58,7 @@ Usage: build-zebrad.sh [--version X.Y.Z] [--commit SHA] [--target TRIPLE] [--out
                 with --version or --commit
   --target      Rust target triple (default: the host)
   --out         where to install the binary
-                (default: src-tauri/binaries/zebra-launcher-zebrad-<target>)
+                (default: src-tauri/binaries/zeal-zebrad-<target>)
   --src-dir     where Zebra is checked out; cloned at tag v<version> (or
                 fetched at --ref) if missing, kept afterwards (default: a
                 temporary directory, removed on exit). An existing checkout
@@ -138,7 +138,7 @@ host=""
 
 exe=""
 case "${target}" in *-windows-*) exe=".exe" ;; esac
-[ -n "${out}" ] || out="${repo_root}/src-tauri/binaries/zebra-launcher-zebrad-${target}${exe}"
+[ -n "${out}" ] || out="${repo_root}/src-tauri/binaries/zeal-zebrad-${target}${exe}"
 
 if [ -z "${src}" ]; then
     src="$(mktemp -d)/zebra"

@@ -1,6 +1,6 @@
 # Architecture
 
-Zebra Launcher is a Tauri 2 desktop app that supervises a bundled `zebrad`, streams its
+Zeal is a Tauri 2 desktop app that supervises a bundled `zebrad`, streams its
 logs, edits its config, and shows node status. A small Rust team must be able to
 maintain it for years, so the rules are: Rust only (no Node toolchain), a thin Tauri
 layer over testable crates, and no mutexes.
@@ -11,7 +11,7 @@ kept as the historical design record; where the two differ, this file describes 
 ## Overview
 
 ```text
-+--------------------------- Zebra Launcher (one process) ---------------------------+
++-------------------------------- Zeal (one process) --------------------------------+
 |                                                                                    |
 |  ui/  Leptos CSR (wasm) --- invoke / Channel<Vec<LogLine>> ---> src-tauri/         |
 |   |   Dashboard, Logs, Grafana, Configure, Settings              commands, tray,   |
@@ -26,7 +26,7 @@ kept as the historical design record; where the two differ, this file describes 
 +------|-----------------------------------------------------------------------------+
        | stdin pipe (closed = stop), stdout/stderr drained
        v
-   zebrad (sidecar "zebra-launcher-zebrad")
+   zebrad (sidecar "zeal-zebrad")
        RPC      127.0.0.1:8232  <-- cookie-auth JSON-RPC poll every 5 s (status strip)
        metrics  127.0.0.1:9999  <-- Prometheus <-- Grafana 127.0.0.1:3000 (optional)
        P2P      [::]:8233
@@ -104,12 +104,12 @@ the rest of the launcher (a configuration applied or rolled back, an update chec
 stale process handled, startup), which the layer in `src-tauri/src/logging.rs` forwards
 through `SupervisorHandle::note`. Such a line has a `timestamp` from the launcher's clock
 in zebrad's RFC 3339 UTC format, a `level`, the `tracing` `target`
-(`launcher_core::supervisor` for the supervisor's notes, `zebra_launcher::updater` and so
+(`launcher_core::supervisor` for the supervisor's notes, `zeal::updater` and so
 on for the rest) and the `message` with the event's fields appended as `key=value`;
 `spans` is empty. Forwarding never blocks a logging call: the layer puts the event on a
 bounded queue with `try_send` and the queue feeds the actor the same way, so a flood
 drops the newest launcher lines instead of stalling. Targets that log per batch
-forwarded to the UI (`zebra_launcher::bridge`) are left out, or each line would log
+forwarded to the UI (`zeal::bridge`) are left out, or each line would log
 another. The launcher log file on disk is unchanged (it keeps everything its `RUST_LOG`
 filter admits); the zebrad log file gets the launcher lines in zebrad's line format
 behind its `[launcher] ` marker. A message of several lines (a TOML parse error, a panic)
@@ -591,8 +591,8 @@ Recorded by the maintainer on 2026-10-23:
 - Five targets, with separate per-arch macOS builds.
 - A long-lived minisign updater key, documented as an exception to Zebra's ADR 0008
   (Tauri's updater has no keyless mode).
-- Identifier `org.zfnd.zebra-launcher`; the launcher has its own semver; About shows
-  "Zebra Launcher X.Y.Z (zebrad A.B.C)".
+- Identifier `org.zfnd.zeal`; the launcher has its own semver; About shows
+  "Zeal X.Y.Z (zebrad A.B.C)".
 - AppImage and deb on Linux (deb is Notify-only); NSIS only on Windows.
 - No mutexes in Rust code, enforced by [`clippy.toml`](../clippy.toml).
 - No history rewrite; the browser demo is deleted.

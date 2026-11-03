@@ -1,6 +1,6 @@
 [package]
 name = "launcher-types"
-description = "Types shared by the Zebra Launcher backend and UI"
+description = "Types shared by the Zeal backend and UI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

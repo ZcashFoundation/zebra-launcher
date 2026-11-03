@@ -1,4 +1,4 @@
-# Prometheus + Grafana for a zebrad run by Zebra Launcher. README.md in this directory
+# Prometheus + Grafana for a zebrad run by Zeal. README.md in this directory
 # is the guide (start, stop, update, checks, where the data lives, dashboards, known
 # gaps); the launcher's Grafana tab is described in docs/GRAFANA.md and problems in
 # docs/TROUBLESHOOTING.md.
@@ -27,7 +27,7 @@
 # are bound to 127.0.0.1 only (and busybox wget takes only the first address a name
 # such as localhost resolves to).
 
-name: zebra-launcher-observability
+name: zeal-observability
 
 services:
   prometheus:

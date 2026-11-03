@@ -6334,7 +6334,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zebra-launcher"
+name = "zeal"
 version = "0.1.0"
 dependencies = [
  "launcher-core",

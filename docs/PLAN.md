@@ -2,7 +2,9 @@
 
 # Zebra Launcher: plan to make it a stable, maintained product
 
-> **Historical.** This is the plan as approved on 2026-10-23, kept as the design record.
+> **Historical.** This is the plan as approved on 2026-10-23, kept as the design record. It
+> uses the project's name at the time, Zebra Launcher; the project was renamed Zeal on
+> 2026-11-02 (app identifier `org.zfnd.zeal`, binary `zeal`).
 > [ARCHITECTURE.md](ARCHITECTURE.md) describes what was built; where the two differ (for
 > example, CI runs on the `ubuntu-24.04` runner rather than in an `ubuntu:22.04` container,
 > the build tools come from sha256-pinned release binaries rather than `cargo binstall`, and

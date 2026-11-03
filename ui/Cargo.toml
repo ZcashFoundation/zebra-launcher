@@ -1,6 +1,6 @@
 [package]
 name = "ui"
-description = "The Zebra Launcher user interface (Leptos, client-side rendered, built with trunk)"
+description = "The Zeal user interface (Leptos, client-side rendered, built with trunk)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

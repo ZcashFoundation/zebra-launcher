@@ -168,7 +168,7 @@ pub fn UpdateBanner() -> impl IntoView {
                 current,
                 pub_date,
             } => view! {
-                <strong>{format!("Zebra Launcher {version} is available")}</strong>
+                <strong>{format!("Zeal {version} is available")}</strong>
                 {format!(" (this is {current}")}
                 {pub_date
                     .map(|date| move || format!(", published {}", relative(date, state.now.get())))}
@@ -176,7 +176,7 @@ pub fn UpdateBanner() -> impl IntoView {
             }
             .into_any(),
             Headline::Downloading { version } => view! {
-                <strong>{format!("Downloading Zebra Launcher {version}")}</strong>
+                <strong>{format!("Downloading Zeal {version}")}</strong>
                 {move || {
                     with_info(state, |info| match info.map(|info| &info.state) {
                         Some(UpdateState::Downloading {
@@ -188,13 +188,13 @@ pub fn UpdateBanner() -> impl IntoView {
             }
             .into_any(),
             Headline::Ready { version } => view! {
-                <strong>{format!("Zebra Launcher {version} is ready to install.")}</strong>
+                <strong>{format!("Zeal {version} is ready to install.")}</strong>
                 " It is downloaded and its signature verified. Installing stops the node and restarts the launcher."
             }
             .into_any(),
             Headline::Countdown { version } => view! {
                 <strong>
-                    {format!("Zebra Launcher {version} installs automatically in ")}
+                    {format!("Zeal {version} installs automatically in ")}
                     <span class="countdown" aria-live="polite">
                         {move || {
                             with_info(state, |info| match info.map(|info| &info.state) {
@@ -212,7 +212,7 @@ pub fn UpdateBanner() -> impl IntoView {
             }
             .into_any(),
             Headline::Installing { version } => view! {
-                <strong>{format!("Installing Zebra Launcher {version}…")}</strong>
+                <strong>{format!("Installing Zeal {version}…")}</strong>
                 " The node is being stopped; the launcher restarts next."
             }
             .into_any(),
@@ -501,7 +501,7 @@ pub fn UpdateStatus() -> impl IntoView {
             view! {
                 <p class="muted">
                     {format!(
-                        "This is Zebra Launcher {}. Last successful check: ",
+                        "This is Zeal {}. Last successful check: ",
                         info.current_version,
                     )}
                     {move || {
@@ -588,7 +588,7 @@ pub fn HealthFailureBanner() -> impl IntoView {
                 <span>
                     <strong>
                         {format!(
-                            "The update to Zebra Launcher {} did not come back healthy. ",
+                            "The update to Zeal {} did not come back healthy. ",
                             failure.expected_version,
                         )}
                     </strong>

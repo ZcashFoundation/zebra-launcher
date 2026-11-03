@@ -1,4 +1,4 @@
-//! Build script for the Zebra Launcher app.
+//! Build script for the Zeal app.
 //!
 //! Besides the usual Tauri build steps, it generates `allow-<command>` and
 //! `deny-<command>` permissions for each app command, so the capability file

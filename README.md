@@ -1,6 +1,8 @@
-# Zebra Launcher
+# Zeal
 
-A Desktop app for installing and running Zebra.
+A desktop app for installing and running [Zebra](https://github.com/ZcashFoundation/zebra),
+the Zcash Foundation's Zcash node. A group of zebras is called a zeal. The project was
+called Zebra Launcher until November 2026.
 
 ## Installation
 
@@ -15,6 +17,9 @@ A Desktop app for installing and running Zebra.
 | Linux x86_64 and arm64, glibc 2.35 or newer (Ubuntu 22.04, Debian 12 and later) | `.AppImage` (updates itself) or `.deb` (notifies about updates) |
 | macOS 12 or later, Apple Silicon and Intel | `.dmg` |
 | Windows 10 or 11, x64 | `-setup.exe` (installs for the current user) |
+
+On Linux the `.deb` package and the command are `zeal-app`, because Debian and Ubuntu already
+have a `zeal` package (the Zeal documentation browser); the menu entry says Zeal.
 
 All builds are 64-bit. On Windows, stopping the node (Stop, Restart, a config change, or
 quitting the launcher) terminates zebrad at once instead of asking it to shut down, so it

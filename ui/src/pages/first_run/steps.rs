@@ -21,7 +21,7 @@ use crate::{
 pub(super) fn welcome_step() -> impl IntoView {
     view! {
         <p>
-            "Zebra Launcher runs zebrad, the Zcash Foundation's Zcash full node, on this computer. It starts and stops the node, restarts it if it crashes, shows its sync progress and logs, and lets you edit its configuration."
+            "Zeal runs zebrad, the Zcash Foundation's Zcash full node, on this computer. It starts and stops the node, restarts it if it crashes, shows its sync progress and logs, and lets you edit its configuration."
         </p>
         <p>
             "A full node downloads and verifies the whole Zcash chain. On Mainnet that is hundreds of GB, and the first sync can take a day or more."
@@ -377,9 +377,9 @@ pub(super) fn notes_step(wizard: Wizard) -> impl IntoView {
         <h3>"Logs"</h3>
         <p>
             "The launcher and zebrad logs are in the launcher's log folder: "
-            <code>"~/.local/share/org.zfnd.zebra-launcher/logs"</code>" (Linux), "
-            <code>"~/Library/Logs/org.zfnd.zebra-launcher"</code>" (macOS), "
-            <code>"%LOCALAPPDATA%\\org.zfnd.zebra-launcher\\logs"</code>
+            <code>"~/.local/share/org.zfnd.zeal/logs"</code>" (Linux), "
+            <code>"~/Library/Logs/org.zfnd.zeal"</code>" (macOS), "
+            <code>"%LOCALAPPDATA%\\org.zfnd.zeal\\logs"</code>
             " (Windows). If something goes wrong, Settings → Copy diagnostics collects what a bug report needs."
         </p>
         <div class="buttons">

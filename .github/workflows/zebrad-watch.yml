@@ -13,8 +13,8 @@
 # The pull request is pushed with a GitHub App installation token, because
 # pushes and pull requests made with GITHUB_TOKEN do not trigger other
 # workflows, so CI would never run on the bump PR. Secrets:
-#   ZEBRA_LAUNCHER_APP_ID           the App's ID
-#   ZEBRA_LAUNCHER_APP_PRIVATE_KEY  a PEM private key of the App
+#   ZEAL_APP_ID           the App's ID
+#   ZEAL_APP_PRIVATE_KEY  a PEM private key of the App
 # The App must be installed on this repository with Contents and Pull
 # requests read/write. Without these secrets the workflow falls back to an
 # issue "Bump zebrad to <ver>" labelled release-blocker, opened with
@@ -184,22 +184,22 @@ jobs:
       # `secrets` cannot appear in a step's `if`, so test them through env.
       - id: secrets
         env:
-          APP_ID: ${{ secrets.ZEBRA_LAUNCHER_APP_ID }}
-          APP_KEY: ${{ secrets.ZEBRA_LAUNCHER_APP_PRIVATE_KEY }}
+          APP_ID: ${{ secrets.ZEAL_APP_ID }}
+          APP_KEY: ${{ secrets.ZEAL_APP_PRIVATE_KEY }}
         run: |
           if [ -n "${APP_ID}" ] && [ -n "${APP_KEY}" ]; then
             echo "app=true" >> "${GITHUB_OUTPUT}"
           else
             echo "app=false" >> "${GITHUB_OUTPUT}"
-            echo "::warning::ZEBRA_LAUNCHER_APP_ID / ZEBRA_LAUNCHER_APP_PRIVATE_KEY are not set; opening an issue instead of a pull request"
+            echo "::warning::ZEAL_APP_ID / ZEAL_APP_PRIVATE_KEY are not set; opening an issue instead of a pull request"
           fi
 
       - id: app-token
         if: steps.secrets.outputs.app == 'true'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          app-id: ${{ secrets.ZEBRA_LAUNCHER_APP_ID }}
-          private-key: ${{ secrets.ZEBRA_LAUNCHER_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.ZEAL_APP_ID }}
+          private-key: ${{ secrets.ZEAL_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
 
@@ -286,7 +286,7 @@ jobs:
           fi
           {
             echo
-            echo "_No bump pull request was opened: the \`ZEBRA_LAUNCHER_APP_ID\` and \`ZEBRA_LAUNCHER_APP_PRIVATE_KEY\` secrets are not set (see docs/SIDECARS.md). Run \`scripts/bump-zebrad.sh ${VERSION} ${COMMIT}\` and open the PR by hand._"
+            echo "_No bump pull request was opened: the \`ZEAL_APP_ID\` and \`ZEAL_APP_PRIVATE_KEY\` secrets are not set (see docs/SIDECARS.md). Run \`scripts/bump-zebrad.sh ${VERSION} ${COMMIT}\` and open the PR by hand._"
           } >> "${RUNNER_TEMP}/body.md"
           # Lists by label (no search index), so a re-run right after the
           # first one still finds the issue.

@@ -1,4 +1,4 @@
-//! Types shared by the Zebra Launcher backend and its UI.
+//! Types shared by the Zeal backend and its UI.
 //!
 //! This crate is compiled both natively and to WebAssembly, so it stays free of
 //! async runtimes, Tauri, and platform-specific code.
