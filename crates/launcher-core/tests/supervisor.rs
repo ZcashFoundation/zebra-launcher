@@ -14,9 +14,11 @@ use launcher_core::{
     logfile::RotatingLogConfig,
     logs::Detector,
     pidfile,
-    supervisor::{self, Note, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle},
+    supervisor::{
+        self, Listener, Note, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle,
+    },
 };
-use launcher_types::{ExitClass, LogEvent, LogLevel, LogStream, Phase};
+use launcher_types::{ExitClass, LogEvent, LogLevel, LogStream, Phase, PortRole};
 use tokio::time::timeout;
 
 #[path = "support/helpers.rs"]
@@ -492,6 +494,58 @@ async fn database_lock_and_port_conflicts_are_deterministic_failures() {
             class: ExitClass::PortInUse
         }
     );
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_port_another_program_holds_fails_the_start_before_zebrad_runs() {
+    let mut fx = fixture("ok");
+    let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
+    let taken = holder.local_addr().expect("bound address");
+    let (listeners, receiver) = tokio::sync::watch::channel(vec![Listener {
+        role: PortRole::Rpc,
+        addr: taken,
+    }]);
+    fx.config.listeners = receiver;
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+
+    let err = within(handle.start()).await.expect_err("the port is taken");
+    assert!(
+        matches!(&err, SupervisorError::PortInUse(message) if message.contains(&taken.to_string())),
+        "{err}"
+    );
+    let status = handle.status();
+    assert_eq!(
+        status.phase,
+        Phase::Failed {
+            class: ExitClass::PortInUse
+        }
+    );
+    assert_eq!(status.pid, None, "zebrad never ran");
+    let exit = status.last_exit.expect("the failure is recorded");
+    assert_eq!(exit.class, ExitClass::PortInUse);
+    assert!(
+        exit.detail.as_deref().unwrap_or_default().contains("RPC"),
+        "{exit:?}"
+    );
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(
+        contains(&history, "not starting zebrad: the RPC port"),
+        "{:#?}",
+        messages(&history)
+    );
+    assert!(!contains(&history, "zebrad started"));
+
+    // The ports follow the watch: once they are free the start goes ahead.
+    drop(holder);
+    listeners.send_replace(vec![Listener {
+        role: PortRole::Metrics,
+        addr: taken,
+    }]);
+    within(handle.start())
+        .await
+        .expect("start once the port is free");
+    assert_eq!(handle.status().phase, Phase::Running);
     within(handle.shutdown()).await.expect("shutdown");
 }
 

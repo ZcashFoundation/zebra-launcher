@@ -19,7 +19,9 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::{Cmd, LogSubscription, Note, StartOptions, SupervisorConfig, SupervisorError};
+use super::{
+    Cmd, Listener, LogSubscription, Note, StartOptions, SupervisorConfig, SupervisorError,
+};
 use crate::{
     clock,
     logfile::LogFileWriter,
@@ -419,9 +421,37 @@ impl Actor {
         self.launch(pending.start_replies).await;
     }
 
-    /// Spawns zebrad; the stale check has passed.
+    /// Spawns zebrad; the stale check has passed. A listener address that
+    /// another program holds fails the start first.
     async fn launch(&mut self, start_replies: Vec<oneshot::Sender<Result<(), SupervisorError>>>) {
         self.status.send_modify(|s| s.stale = None);
+
+        let taken = first_taken(&self.config.listeners.borrow());
+        if let Some(taken) = taken {
+            let detail = format!(
+                "the {} port {} is already in use by another program",
+                taken.role.label(),
+                taken.addr
+            );
+            self.note(format!("not starting zebrad: {detail}"));
+            let info = ExitInfo {
+                code: None,
+                class: ExitClass::PortInUse,
+                detail: Some(detail.clone()),
+                at: SystemTime::now(),
+                requested: false,
+            };
+            self.status.send_modify(|s| {
+                s.phase = Phase::Failed {
+                    class: ExitClass::PortInUse,
+                };
+                s.last_exit = Some(info);
+            });
+            for reply in start_replies {
+                let _ = reply.send(Err(SupervisorError::PortInUse(detail.clone())));
+            }
+            return;
+        }
 
         match self.spawner.spawn(self.config.command.clone()).await {
             Ok(spawned) => self.install_run(spawned, start_replies),
@@ -912,6 +942,18 @@ impl Actor {
             message: text,
         });
     }
+}
+
+/// The first of `listeners` whose address another program holds: binding it
+/// fails with `AddrInUse`. Any other failure (no IPv6, a port the system
+/// reserves) is left for zebrad to report.
+fn first_taken(listeners: &[Listener]) -> Option<Listener> {
+    listeners.iter().copied().find(|listener| {
+        matches!(
+            std::net::TcpListener::bind(listener.addr),
+            Err(err) if err.kind() == io::ErrorKind::AddrInUse
+        )
+    })
 }
 
 async fn sleep_until_or_never(deadline: Option<Instant>) {
