@@ -3,12 +3,15 @@
 //! node list on disk.
 //!
 //! The nodes get ports that were free a moment before (bound and released),
-//! so the tests run beside each other and beside a real zebrad. Every await
-//! is bounded by [`within`].
+//! so the tests run beside each other and beside a real zebrad; no port is
+//! handed out twice. Every await is bounded by [`within`].
 
 use std::{
     fs,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -31,14 +34,33 @@ use launcher_types::{
 mod support;
 use support::{LIMIT, contains, fake_zebrad, messages, within};
 
-/// `n` ports that were free a moment ago.
+/// The ports [`free_ports`] has handed out in this test binary, a bit each: a
+/// port one test freed again is never another test's, as the system may hand
+/// it out again.
+static HANDED_OUT: [AtomicU64; 1024] = [const { AtomicU64::new(0) }; 1024];
+
+/// Claims `port` for a test; false when it was handed out before.
+fn claim(port: u16) -> bool {
+    let bit = 1u64 << (port % 64);
+    HANDED_OUT[usize::from(port / 64)].fetch_or(bit, Ordering::SeqCst) & bit == 0
+}
+
+/// `n` ports that were free a moment ago and that no other test of this
+/// binary got.
 fn free_ports(n: usize) -> Vec<u16> {
-    let held: Vec<std::net::TcpListener> = (0..n)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port"))
-        .collect();
-    held.iter()
-        .map(|listener| listener.local_addr().expect("address").port())
-        .collect()
+    // Every port bound here stays bound until the end, so the system hands
+    // out a new one each time.
+    let mut held = Vec::new();
+    let mut ports = Vec::new();
+    while ports.len() < n {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
+        let port = listener.local_addr().expect("address").port();
+        if claim(port) {
+            ports.push(port);
+        }
+        held.push(listener);
+    }
+    ports
 }
 
 /// A zebrad node's three ports, free a moment ago.
