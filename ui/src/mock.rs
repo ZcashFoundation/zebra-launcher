@@ -28,6 +28,8 @@
 //! | `?nopeers` | zebrad finds no peers: 0 peers in every sample and gauge, an empty peer list, the initial connections fail and the log waits for ready peers (the verdict's "No peers" once two minutes of samples agree). |
 //! | `?crashloop` | zebrad panics about 15 s after every start and the launcher restarts it after a backoff that doubles (5, 10, 20 s): "zebrad crashed", then "Crash loop" from the third crash, with the exits and restarts in the log and on the timeline. |
 //! | `?os=macos`, `?os=windows` | The resource samples report that platform's figures: memory pressure on macOS; commit, handles and no thread counts on Windows ([`resources`]). Linux is the default. |
+//! | `?children` | zebrad runs a `block_notify_command` in cycles of three resource samples: an `sh` with `notify-block` under it, then also 40 `curl`s, more than a sample lists ("and 11 more"), then `notify-block` alone, orphaned ([`resources::block_notify`]). |
+//! | `?unreadable` | The resource samples report CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk tile "the system does not report them". |
 //! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). |
 //!
 //! The launcher's own notes (`zebrad started (pid N)`, `stop requested (stdin closed)`,
@@ -168,6 +170,10 @@ struct Flags {
     crash_loop: bool,
     /// `?os=…`.
     os: OsFlag,
+    /// `?children`.
+    children: bool,
+    /// `?unreadable`.
+    unreadable: bool,
 }
 
 impl Flags {
@@ -203,6 +209,8 @@ impl Flags {
             no_peers: flag("nopeers"),
             crash_loop: flag("crashloop"),
             os: OsFlag::parse(value("os")),
+            children: flag("children"),
+            unreadable: flag("unreadable"),
         }
     }
 
@@ -1022,7 +1030,7 @@ mod tests {
         // Every flag in the module doc's table, combined.
         assert_eq!(
             Flags::parse(
-                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&os=windows"
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&os=windows&children&unreadable"
             ),
             Flags {
                 first_run: true,
@@ -1038,6 +1046,8 @@ mod tests {
                 no_peers: true,
                 crash_loop: true,
                 os: OsFlag::Windows,
+                children: true,
+                unreadable: true,
             }
         );
         assert_eq!(Flags::parse("?stalled").scenario(), Scenario::Stalled);

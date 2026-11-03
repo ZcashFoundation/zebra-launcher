@@ -1398,6 +1398,10 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      averages of the computer wait for `MachineHistory` (phase 4).
    - The mock has no flag for the tip: its sync reaches the tip after about 47 minutes, when
      the card shows the tip's figures.
+   - Two mock flags the design did not plan show the card's other states: `?children`, a
+     `block_notify_command` under the primary zebrad whose processes come and go (indented
+     rows, an orphan on a line of its own, and "and 11 more"), and `?unreadable`, CPU and
+     I/O refused by the OS ("not available", "the system does not report them").
    - The node card's "State memory (of 6.1 GiB in use)" cross-check is in no phase yet and is
      not built.
 2. **Live on Linux.**

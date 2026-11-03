@@ -83,7 +83,12 @@ backend that makes every page demoable:
   the node to see the card's last-run line. The computer has 8 CPUs and 16 GiB, of which other
   programs use 0.6 to 0.9 cores and 5.2 GiB. `?os=macos` and `?os=windows` show those
   platforms' figures and labels (memory pressure on macOS; commit, handles and no thread
-  counts on Windows); Linux is the default;
+  counts on Windows); Linux is the default. `?children` gives zebrad a `block_notify_command`
+  that runs in cycles of three samples: an `sh` with `notify-block` under it, indented under
+  their parents; then 40 `curl`s as well, more than a sample lists, so the table ends with
+  "and 11 more"; then `notify-block` alone, orphaned, on a line of its own. `?unreadable`
+  reports CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk
+  tile "—" with "the system does not report them";
 - several nodes: `?herd` adds five nodes beside the mock's zebrad: on Mainnet, Zakura catching
   up from a snapshot, Zaino reading the Mainnet Zebra, and the zcashd compatibility build,
   stopped; on Testnet, a Zebra and a pruned Zakura at the tip. The window shows the sidebar

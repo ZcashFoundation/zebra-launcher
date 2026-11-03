@@ -17,15 +17,17 @@
 //! has 8 logical CPUs and 16 GiB; other programs use 0.6 to 0.9 cores and 5.2 GiB, and swap
 //! holds 0.3 of 2 GiB. `?os=macos` and `?os=windows` switch the figures to those platforms'
 //! (memory pressure on macOS; commit, handles and no thread counts on Windows).
+//! `?children` gives zebrad a `block_notify_command` that runs in cycles of three samples
+//! ([`block_notify`]), and `?unreadable` reports CPU and I/O as refused by the OS.
 
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
-    MachineResources, MemoryPressure, NodeResources, Phase, Platform, ProcessUsage,
+    MAX_MEMBERS, MachineResources, MemoryPressure, NodeResources, Phase, Platform, ProcessUsage,
 };
 use leptos::prelude::*;
 
-use super::{Scenario, mock, sleep};
+use super::{Flags, Scenario, mock, sleep};
 use crate::clock;
 
 /// `?os=`: the OS whose figures the mock reports.
@@ -57,6 +59,7 @@ impl OsFlag {
 }
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const MIB: f64 = 1024.0 * 1024.0;
 const MB: f64 = 1_000_000.0;
 
 /// How often the samplers read, like the backend's.
@@ -85,6 +88,12 @@ const COMMIT_RATIO: f64 = 1.15;
 const THREADS: u32 = 68;
 const OPEN_FILES: u32 = 412;
 const HANDLES: u32 = 1204;
+
+/// `?children`: the `curl`s `notify-block` starts, more than a sample lists, and the open
+/// files (handles on Windows) of each child.
+const CURLS: u32 = 40;
+const CHILD_FILES: u32 = 3;
+const CHILD_HANDLES: u32 = 30;
 
 fn gib(value: f64) -> u64 {
     (value * GIB).round() as u64
@@ -160,6 +169,85 @@ pub(super) fn load(state: &RunState) -> Load {
     }
 }
 
+/// A process under the mock's zebrad, for `?children`. It does no disk I/O.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct MockChild {
+    pub pid: u32,
+    /// Its parent, when that one is in the tree.
+    pub parent: Option<u32>,
+    pub name: &'static str,
+    pub started_at: SystemTime,
+    pub cores: f64,
+    pub memory: u64,
+}
+
+/// `?children`: what zebrad's `block_notify_command`, `sh -c notify-block`, has running at a
+/// run's sample `count`, taken `at`, given what it had at the sample before; in tree order.
+/// Each cycle of three samples: a new `sh` with `notify-block` under it; then the 40 `curl`s
+/// `notify-block` started, so the tree has more processes than a sample lists; then
+/// `notify-block` alone, orphaned when `sh` exited, so it has no parent in the tree. A run's
+/// first sample has none.
+pub(super) fn block_notify(
+    previous: &[MockChild],
+    zebrad: u32,
+    count: u64,
+    at: SystemTime,
+    os: OsFlag,
+) -> Vec<MockChild> {
+    let [shell, notify, curl] = if os == OsFlag::Windows {
+        ["cmd.exe", "notify-block.exe", "curl.exe"]
+    } else {
+        ["sh", "notify-block", "curl"]
+    };
+    let started_at = at.checked_sub(Duration::from_secs(1)).unwrap_or(at);
+    match count % 3 {
+        1 => {
+            // Pids from the cycle, so a new cycle never reuses the last one's.
+            let sh = zebrad.wrapping_add(1 + 50 * (count / 3 % 1000) as u32);
+            vec![
+                MockChild {
+                    pid: sh,
+                    parent: Some(zebrad),
+                    name: shell,
+                    started_at,
+                    cores: 0.0,
+                    memory: (1.5 * MIB) as u64,
+                },
+                MockChild {
+                    pid: sh.wrapping_add(1),
+                    parent: Some(sh),
+                    name: notify,
+                    started_at,
+                    cores: 0.05,
+                    memory: (9.0 * MIB) as u64,
+                },
+            ]
+        }
+        2 => {
+            let mut children = previous.to_vec();
+            if let Some(parent) = previous.iter().find(|child| child.name == notify) {
+                children.extend((1..=CURLS).map(|i| MockChild {
+                    pid: parent.pid.wrapping_add(i),
+                    parent: Some(parent.pid),
+                    name: curl,
+                    started_at,
+                    cores: 0.01,
+                    memory: (6.0 * MIB) as u64,
+                }));
+            }
+            children
+        }
+        _ => previous
+            .iter()
+            .filter(|child| child.name == notify)
+            .map(|child| MockChild {
+                parent: None,
+                ..child.clone()
+            })
+            .collect(),
+    }
+}
+
 /// One run of the mock's zebrad, as the backend's fold would see it: counters since the
 /// spawn and the peak.
 #[derive(Clone, Debug, PartialEq)]
@@ -168,10 +256,15 @@ pub(super) struct MockTree {
     pub pid: u32,
     pub started_at: SystemTime,
     run_secs: f64,
+    /// zebrad's own CPU.
     cpu_secs: f64,
+    /// The CPU of its children, those that exited included (`?children`).
+    children_cpu_secs: f64,
     read: f64,
     written: f64,
     peak: u64,
+    /// The processes under zebrad at the last sample (`?children`).
+    children: Vec<MockChild>,
     /// Samples taken so far.
     pub count: u64,
 }
@@ -184,59 +277,105 @@ impl MockTree {
             started_at,
             run_secs: 0.0,
             cpu_secs: 0.0,
+            children_cpu_secs: 0.0,
             read: 0.0,
             written: 0.0,
             peak: 0,
+            children: Vec::new(),
             count: 0,
         }
     }
 
-    /// Advances the run to `run_secs` under `load` and returns the sample taken `at` then.
+    /// Advances the run to `run_secs` under `load` and returns the sample taken `at` then,
+    /// with what `?os=`, `?children` and `?unreadable` ask for.
     pub(super) fn sample(
         &mut self,
         at: SystemTime,
         run_secs: f64,
         load: &Load,
-        os: OsFlag,
+        flags: Flags,
     ) -> NodeResources {
+        let os = flags.os;
+        if flags.children {
+            self.children = block_notify(&self.children, self.pid, self.count, at, os);
+        }
+        let children_cores: f64 = self.children.iter().map(|child| child.cores).sum();
+        let children_memory: u64 = self.children.iter().map(|child| child.memory).sum();
         let secs = (run_secs - self.run_secs).max(0.0);
         self.run_secs = self.run_secs.max(run_secs);
         self.cpu_secs += load.cores * secs;
+        self.children_cpu_secs += children_cores * secs;
         self.read += load.read_per_sec * secs;
         self.written += load.written_per_sec * secs;
-        self.peak = self.peak.max(load.memory);
+        let memory = load.memory + children_memory;
+        self.peak = self.peak.max(memory);
         self.count += 1;
         let windows = os == OsFlag::Windows;
-        let threads = (!windows).then_some(THREADS);
+        let children = u32::try_from(self.children.len()).unwrap_or(u32::MAX);
         let read = self.read.round() as u64;
         let written = self.written.round() as u64;
-        NodeResources {
+        let zebrad = ProcessUsage {
+            pid: self.pid,
+            parent: None,
+            name: if windows { "zebrad.exe" } else { "zebrad" }.to_owned(),
+            started_at: self.started_at,
+            cpu_secs: self.cpu_secs,
+            memory_bytes: Some(load.memory),
+            read_bytes: Some(read),
+            written_bytes: Some(written),
+            threads: (!windows).then_some(THREADS),
+        };
+        let members = std::iter::once(zebrad)
+            .chain(self.children.iter().map(|child| {
+                let age = at.duration_since(child.started_at).unwrap_or_default();
+                ProcessUsage {
+                    pid: child.pid,
+                    parent: child.parent,
+                    name: child.name.to_owned(),
+                    started_at: child.started_at,
+                    cpu_secs: child.cores * age.as_secs_f64(),
+                    memory_bytes: Some(child.memory),
+                    read_bytes: Some(0),
+                    written_bytes: Some(0),
+                    threads: (!windows).then_some(1),
+                }
+            }))
+            .take(MAX_MEMBERS)
+            .collect();
+        let mut sample = NodeResources {
             run: self.run,
             at,
             run_secs: self.run_secs,
             platform: os.platform(),
-            cpu_secs: self.cpu_secs,
-            cpu_cores: Some(load.cores),
-            memory_bytes: load.memory,
+            cpu_secs: self.cpu_secs + self.children_cpu_secs,
+            cpu_cores: Some(load.cores + children_cores),
+            memory_bytes: memory,
             peak_memory_bytes: self.peak,
-            committed_bytes: windows.then(|| (load.memory as f64 * COMMIT_RATIO).round() as u64),
+            committed_bytes: windows.then(|| (memory as f64 * COMMIT_RATIO).round() as u64),
             read_bytes: Some(read),
             written_bytes: Some(written),
-            processes: 1,
-            threads,
-            descriptors: Some(if windows { HANDLES } else { OPEN_FILES }),
-            members: vec![ProcessUsage {
-                pid: self.pid,
-                parent: None,
-                name: if windows { "zebrad.exe" } else { "zebrad" }.to_owned(),
-                started_at: self.started_at,
-                cpu_secs: self.cpu_secs,
-                memory_bytes: Some(load.memory),
-                read_bytes: Some(read),
-                written_bytes: Some(written),
-                threads,
-            }],
+            processes: 1 + children,
+            threads: (!windows).then_some(THREADS + children),
+            descriptors: Some(if windows {
+                HANDLES + CHILD_HANDLES * children
+            } else {
+                OPEN_FILES + CHILD_FILES * children
+            }),
+            members,
+        };
+        if flags.unreadable {
+            // As the backend reports a tree whose CPU and I/O the OS refuses to read.
+            sample.cpu_secs = 0.0;
+            sample.cpu_cores = None;
+            sample.read_bytes = None;
+            sample.written_bytes = None;
+            for member in &mut sample.members {
+                member.cpu_secs = 0.0;
+                member.read_bytes = None;
+                member.written_bytes = None;
+            }
         }
+        sample
     }
 }
 
@@ -316,7 +455,7 @@ impl super::Mock {
                         scenario: self.flags.scenario(),
                         count: tree.count,
                     };
-                    let sample = tree.sample(now, run_secs, &load(&state), self.flags.os);
+                    let sample = tree.sample(now, run_secs, &load(&state), self.flags);
                     self.tree.set(Some(tree));
                     self.resources.set(Some(sample));
                 }
@@ -449,7 +588,7 @@ mod tests {
         let start = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
         let mut tree = MockTree::new(3, 4242, start);
         let opening = load(&state(0.5, false, Scenario::Normal));
-        let first = tree.sample(start, 0.5, &opening, OsFlag::Linux);
+        let first = tree.sample(start, 0.5, &opening, Flags::default());
         assert_eq!(first.run, 3);
         assert_eq!(first.platform, Platform::Linux);
         assert_eq!(first.processes, 1);
@@ -458,7 +597,12 @@ mod tests {
         assert_eq!(first.threads, Some(THREADS));
         assert_eq!(first.committed_bytes, None);
         let syncing = load(&state(5.5, false, Scenario::Normal));
-        let second = tree.sample(start + Duration::from_secs(5), 5.5, &syncing, OsFlag::Linux);
+        let second = tree.sample(
+            start + Duration::from_secs(5),
+            5.5,
+            &syncing,
+            Flags::default(),
+        );
         assert!(second.cpu_secs > first.cpu_secs);
         assert!(second.written_bytes > first.written_bytes);
         assert!(second.peak_memory_bytes >= second.memory_bytes);
@@ -468,13 +612,110 @@ mod tests {
             start + Duration::from_secs(10),
             10.5,
             &syncing,
-            OsFlag::Windows,
+            Flags {
+                os: OsFlag::Windows,
+                ..Flags::default()
+            },
         );
         assert_eq!(windows.platform, Platform::Windows);
         assert_eq!(windows.threads, None);
         assert_eq!(windows.descriptors, Some(HANDLES));
         assert_eq!(windows.members[0].name, "zebrad.exe");
         assert!(windows.committed_bytes.unwrap() > windows.memory_bytes);
+    }
+
+    #[test]
+    fn children_come_and_go_in_cycles_of_three() {
+        let start = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let flags = Flags {
+            children: true,
+            ..Flags::default()
+        };
+        let syncing = load(&state(600.0, false, Scenario::Normal));
+        let mut tree = MockTree::new(1, 4242, start);
+        let samples: Vec<NodeResources> = (0..5u32)
+            .map(|i| {
+                let at = start + Duration::from_secs(5 * u64::from(i));
+                tree.sample(at, 5.0 * f64::from(i), &syncing, flags)
+            })
+            .collect();
+        let tree_of = |sample: &NodeResources| -> Vec<(String, Option<u32>)> {
+            sample
+                .members
+                .iter()
+                .map(|member| (member.name.clone(), member.parent))
+                .collect()
+        };
+        let owned = |rows: &[(&str, Option<u32>)]| -> Vec<(String, Option<u32>)> {
+            rows.iter()
+                .map(|(name, parent)| ((*name).to_owned(), *parent))
+                .collect()
+        };
+        assert_eq!(samples[0].processes, 1, "none at the run's first sample");
+        assert_eq!(
+            tree_of(&samples[1]),
+            owned(&[
+                ("zebrad", None),
+                ("sh", Some(4242)),
+                ("notify-block", Some(4243))
+            ])
+        );
+        // notify-block's curls: more than a sample lists.
+        assert_eq!(samples[2].processes, 3 + CURLS);
+        assert_eq!(samples[2].members.len(), MAX_MEMBERS);
+        assert!(
+            samples[2].members[3..]
+                .iter()
+                .all(|member| member.name == "curl" && member.parent == Some(4244))
+        );
+        // sh exited: notify-block stays, with no parent in the tree.
+        assert_eq!(
+            tree_of(&samples[3]),
+            owned(&[("zebrad", None), ("notify-block", None)])
+        );
+        assert_eq!(samples[3].members[1].pid, samples[1].members[2].pid);
+        assert_eq!(
+            samples[3].members[1].started_at,
+            samples[1].members[2].started_at
+        );
+        // The next cycle starts new processes.
+        assert_eq!(samples[4].members[1].name, "sh");
+        assert_ne!(samples[4].members[1].pid, samples[1].members[1].pid);
+
+        // The tree's figures hold the children's; zebrad's row holds its own.
+        let busy = &samples[2];
+        assert!(busy.cpu_cores.unwrap() > syncing.cores);
+        assert!(busy.memory_bytes > syncing.memory);
+        assert_eq!(busy.members[0].memory_bytes, Some(syncing.memory));
+        assert!(busy.cpu_secs > busy.members[0].cpu_secs);
+        assert_eq!(busy.threads, Some(THREADS + 2 + CURLS));
+        assert_eq!(
+            busy.descriptors,
+            Some(OPEN_FILES + CHILD_FILES * (2 + CURLS))
+        );
+        // Windows names its shell and programs as Windows does.
+        let windows = block_notify(&[], 4242, 1, start, OsFlag::Windows);
+        let names: Vec<&str> = windows.iter().map(|child| child.name).collect();
+        assert_eq!(names, vec!["cmd.exe", "notify-block.exe"]);
+    }
+
+    #[test]
+    fn unreadable_counters_are_reported_as_none() {
+        let start = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let flags = Flags {
+            unreadable: true,
+            ..Flags::default()
+        };
+        let mut tree = MockTree::new(1, 4242, start);
+        let syncing = load(&state(600.0, false, Scenario::Normal));
+        let sample = tree.sample(start + Duration::from_secs(5), 5.0, &syncing, flags);
+        assert_eq!(sample.cpu_cores, None);
+        assert_eq!(sample.cpu_secs, 0.0);
+        assert_eq!((sample.read_bytes, sample.written_bytes), (None, None));
+        let zebrad = &sample.members[0];
+        assert_eq!(zebrad.cpu_secs, 0.0);
+        assert_eq!((zebrad.read_bytes, zebrad.written_bytes), (None, None));
+        assert_eq!(sample.memory_bytes, syncing.memory, "memory stays readable");
     }
 
     #[test]
@@ -492,7 +733,7 @@ mod tests {
             at,
             600.0,
             &load(&state(600.0, false, Scenario::Normal)),
-            OsFlag::Linux,
+            Flags::default(),
         );
         let linux = machine(at, 3, OsFlag::Linux, Some(&node));
         let busy = linux.cpu_busy_cores.unwrap();
