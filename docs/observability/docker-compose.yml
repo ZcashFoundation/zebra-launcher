@@ -53,7 +53,7 @@ services:
       start_period: 15s
 
   grafana:
-    image: grafana/grafana:13.2.4
+    image: grafana/grafana:13.3.0
     restart: unless-stopped
     depends_on:
       prometheus:
