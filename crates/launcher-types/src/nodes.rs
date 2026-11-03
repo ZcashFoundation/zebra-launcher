@@ -190,6 +190,12 @@ impl NodeKind {
         self == NodeKind::Zebrad
     }
 
+    /// Whether the node gets an Explorer: it keeps the chain and answers zebrad's RPC
+    /// methods. The zcashd compatibility build waits until its RPC has been checked.
+    pub fn has_explorer(self) -> bool {
+        matches!(self, NodeKind::Zebrad | NodeKind::Zakura)
+    }
+
     /// One sentence for the add-node dialog: what the kind is.
     pub fn summary(self) -> &'static str {
         match self {
@@ -425,6 +431,11 @@ mod tests {
             }
         }
         assert!(NodeKind::Zebrad.bundled());
+        let explorers: Vec<NodeKind> = NodeKind::ALL
+            .into_iter()
+            .filter(|kind| kind.has_explorer())
+            .collect();
+        assert_eq!(explorers, [NodeKind::Zebrad, NodeKind::Zakura]);
         assert_eq!(
             NodeKind::ALL.iter().filter(|kind| kind.bundled()).count(),
             1

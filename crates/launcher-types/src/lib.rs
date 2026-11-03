@@ -15,6 +15,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+pub mod explorer;
 mod nodes;
 
 pub use nodes::{NodeId, NodeInfo, NodeKind, NodePort, NodeRole, PortRole, assign_ports};
@@ -46,6 +47,9 @@ pub mod events {
     /// ([`MetricsSnapshot`](crate::MetricsSnapshot)): zebrad's Prometheus
     /// metrics, read every 10 s while it runs.
     pub const METRICS: &str = "metrics";
+    /// A node's explorer changed what it publishes on its own: an
+    /// [`ExplorerLiveEvent`](crate::explorer::ExplorerLiveEvent), at most four a second.
+    pub const EXPLORER_LIVE: &str = "explorer_live";
 }
 
 /// A location the `open_path` command opens with the system's default
