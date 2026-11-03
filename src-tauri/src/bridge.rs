@@ -1,10 +1,15 @@
 //! Forwards launcher-core's channels to the webview.
 //!
-//! Status, node statistics and metrics change rarely, so every change is
-//! emitted as a Tauri event ([`events::STATUS`], [`events::NODE_STATS`],
-//! [`events::NODE_DETAILS`], [`events::METRICS`]). Logs can arrive by the thousand per second, so they
-//! go through a `tauri::ipc::Channel` in batches. The explorer's live state is an event too
-//! ([`events::EXPLORER_LIVE`]), at most four a second.
+//! The node list and each node's status, statistics, details, metrics and
+//! resources change rarely, so every change is emitted as a Tauri event
+//! ([`events::NODES`], and for each node [`events::STATUS`],
+//! [`events::NODE_STATS`], [`events::NODE_DETAILS`], [`events::METRICS`],
+//! [`events::NODE_RESOURCES`] with the node's id in a [`NodeEvent`]); so are
+//! the computer's resources, without an id ([`events::MACHINE_RESOURCES`]).
+//! Logs can arrive by the thousand per second, so they go through a
+//! `tauri::ipc::Channel` in batches, one subscription per node.
+//! The explorer's live state is an event too ([`events::EXPLORER_LIVE`]), at most four a
+//! second.
 
 use std::{
     sync::{
@@ -14,12 +19,15 @@ use std::{
     time::Duration,
 };
 
-use launcher_core::supervisor::LogSubscription;
+use launcher_core::{
+    registry::{NodeHandle, NodeSummary, RegistryHandle},
+    supervisor::LogSubscription,
+};
 use launcher_types::{
-    LogLine, MetricsSnapshot, NodeDetails, NodeStats, Status, events, explorer::ExplorerLiveEvent,
+    LogLine, MachineResources, NodeEvent, NodeId, NodeInfo, events, explorer::ExplorerLiveEvent,
 };
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Runtime, ipc::Channel};
+use tauri::{AppHandle, Emitter, Runtime, async_runtime::JoinHandle, ipc::Channel};
 use tokio::{
     sync::{broadcast::error::RecvError, watch},
     time::MissedTickBehavior,
@@ -30,33 +38,113 @@ pub const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(100);
 /// A batch is sent early once it holds this many lines.
 pub const MAX_LOG_BATCH: usize = 1000;
 
-/// Emits [`events::STATUS`] now and on every change, until the supervisor ends.
-pub fn forward_status<R: Runtime>(app: AppHandle<R>, rx: watch::Receiver<Status>) {
-    tauri::async_runtime::spawn(forward_watch(app, events::STATUS, rx));
+/// Emits [`events::NODES`] now and whenever the nodes' infos change, and
+/// each node's events now and on every change, for as long as the node is in
+/// the list. A node that leaves, or gets a new id during the first run,
+/// takes its forwarders with it.
+pub fn forward_nodes<R: Runtime>(app: AppHandle<R>, registry: RegistryHandle) {
+    tauri::async_runtime::spawn(forward_list(app.clone(), registry.watch_summaries()));
+    tauri::async_runtime::spawn(async move {
+        let mut nodes = registry.watch_nodes();
+        // The forwarders of each published handle, by its serial.
+        let mut running: Vec<(u64, Vec<JoinHandle<()>>)> = Vec::new();
+        loop {
+            let current = nodes.borrow_and_update().clone();
+            running.retain(|(serial, tasks)| {
+                let keep = current.iter().any(|node| node.serial == *serial);
+                if !keep {
+                    for task in tasks {
+                        task.abort();
+                    }
+                }
+                keep
+            });
+            for node in current.iter() {
+                if !running.iter().any(|(serial, _)| *serial == node.serial) {
+                    running.push((node.serial, forward_node(&app, node)));
+                }
+            }
+            if nodes.changed().await.is_err() {
+                return;
+            }
+        }
+    });
 }
 
-/// Emits [`events::NODE_STATS`] now and on every change, until the monitor ends.
-pub fn forward_node_stats<R: Runtime>(app: AppHandle<R>, rx: watch::Receiver<Option<NodeStats>>) {
-    tauri::async_runtime::spawn(forward_watch(app, events::NODE_STATS, rx));
+/// Starts the forwarders of one node's events.
+fn forward_node<R: Runtime>(app: &AppHandle<R>, node: &NodeHandle) -> Vec<JoinHandle<()>> {
+    use tauri::async_runtime::spawn;
+    let id = || node.id.clone();
+    vec![
+        spawn(forward_watch(
+            app.clone(),
+            events::STATUS,
+            id(),
+            node.supervisor.watch_status(),
+        )),
+        spawn(forward_watch(
+            app.clone(),
+            events::NODE_STATS,
+            id(),
+            node.stats.clone(),
+        )),
+        spawn(forward_watch(
+            app.clone(),
+            events::NODE_DETAILS,
+            id(),
+            node.details.clone(),
+        )),
+        spawn(forward_watch(
+            app.clone(),
+            events::METRICS,
+            id(),
+            node.metrics.clone(),
+        )),
+        spawn(forward_watch(
+            app.clone(),
+            events::NODE_RESOURCES,
+            id(),
+            node.resources.clone(),
+        )),
+    ]
 }
 
-/// Emits [`events::NODE_DETAILS`] now and on every change, until the monitor ends.
-pub fn forward_node_details<R: Runtime>(
+/// Emits the list whenever the nodes' infos change; a change of a phase
+/// alone travels as that node's `status`.
+async fn forward_list<R: Runtime>(
     app: AppHandle<R>,
-    rx: watch::Receiver<Option<NodeDetails>>,
+    mut summaries: watch::Receiver<Vec<NodeSummary>>,
 ) {
-    tauri::async_runtime::spawn(forward_watch(app, events::NODE_DETAILS, rx));
+    let mut last: Option<Vec<NodeInfo>> = None;
+    loop {
+        let infos: Vec<NodeInfo> = summaries
+            .borrow_and_update()
+            .iter()
+            .map(|summary| summary.info.clone())
+            .collect();
+        if last.as_ref() != Some(&infos) {
+            if let Err(err) = app.emit(events::NODES, &infos) {
+                tracing::warn!(%err, "could not emit the node list to the UI");
+            }
+            last = Some(infos);
+        }
+        if summaries.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
-/// Emits [`events::METRICS`] now and on every change, until the poller ends.
-pub fn forward_metrics<R: Runtime>(
+/// Emits [`events::MACHINE_RESOURCES`] now and on every change (a sample every
+/// 5 s), until the sampler ends.
+pub fn forward_machine_resources<R: Runtime>(
     app: AppHandle<R>,
-    rx: watch::Receiver<Option<MetricsSnapshot>>,
+    rx: watch::Receiver<Option<MachineResources>>,
 ) {
-    tauri::async_runtime::spawn(forward_watch(app, events::METRICS, rx));
+    tauri::async_runtime::spawn(forward_value(app, events::MACHINE_RESOURCES, rx));
 }
 
-async fn forward_watch<R: Runtime, T: Clone + Serialize>(
+/// Like [`forward_watch`], for a value that carries no node's id.
+async fn forward_value<R: Runtime, T: Clone + Serialize>(
     app: AppHandle<R>,
     event: &'static str,
     mut rx: watch::Receiver<T>,
@@ -64,6 +152,27 @@ async fn forward_watch<R: Runtime, T: Clone + Serialize>(
     loop {
         let value = rx.borrow_and_update().clone();
         if let Err(err) = app.emit(event, value) {
+            tracing::warn!(%err, event, "could not emit an event to the UI");
+        }
+        if rx.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn forward_watch<R: Runtime, T: Clone + Serialize>(
+    app: AppHandle<R>,
+    event: &'static str,
+    node: NodeId,
+    mut rx: watch::Receiver<T>,
+) {
+    loop {
+        let value = rx.borrow_and_update().clone();
+        let payload = NodeEvent {
+            node: node.clone(),
+            value,
+        };
+        if let Err(err) = app.emit(event, payload) {
             tracing::warn!(%err, event, "could not emit an event to the UI");
         }
         if rx.changed().await.is_err() {

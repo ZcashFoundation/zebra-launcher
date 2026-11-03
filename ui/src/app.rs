@@ -1,10 +1,11 @@
-//! The app shell: shared state, backend subscriptions, the header, the six pages and the
-//! first-run wizard.
+//! The app shell: shared state, backend subscriptions, the header or the sidebar, the pages
+//! and the first-run wizard.
 
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
-    ApplyOutcome, LogLine, Network, Settings, Theme, UpdateHealthFailure, UpdateInfo, UpdateState,
+    ApplyOutcome, LogLine, MAX_NODES, MachineResources, Network, NodeId, NodeInfo, Settings, Theme,
+    UpdateHealthFailure, UpdateInfo, UpdateState,
 };
 use leptos::{ev, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
@@ -28,14 +29,14 @@ use crate::{
     node_state::{self, NodeState},
     pages::{
         configure::Configure, dashboard::Dashboard, first_run::FirstRun, grafana::Grafana,
-        logs::Logs, overview::Overview, settings::SettingsPage,
+        logs::Logs, node_settings::NodeSettings, overview::Overview, settings::SettingsPage,
     },
     theme,
     update_text::update_needs_attention,
 };
 
-/// The pages: the six of the tab bar, and the overview of a launcher that runs several nodes,
-/// which the sidebar shows instead of the tab bar.
+/// The pages: the six of the tab bar, and the overview and a node's settings of a launcher
+/// that runs several nodes, which the sidebar and the node header show instead of the tab bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Overview,
@@ -44,6 +45,7 @@ pub enum Tab {
     Explorer,
     Grafana,
     Configure,
+    NodeSettings,
     Settings,
 }
 
@@ -86,7 +88,15 @@ impl Tab {
     ];
 
     /// The pages about the selected node, as opposed to the overview and the launcher's own.
-    pub const NODE: [Tab; 4] = [Tab::Dashboard, Tab::Logs, Tab::Explorer, Tab::Configure];
+    /// Node settings has a tab in the node header of several nodes only: with one node,
+    /// Settings holds what it would.
+    pub const NODE: [Tab; 5] = [
+        Tab::Dashboard,
+        Tab::Logs,
+        Tab::Explorer,
+        Tab::Configure,
+        Tab::NodeSettings,
+    ];
 
     pub fn is_node_tab(self) -> bool {
         Tab::NODE.contains(&self)
@@ -100,6 +110,7 @@ impl Tab {
             Tab::Explorer => "Explorer",
             Tab::Grafana => "Grafana",
             Tab::Configure => "Configure",
+            Tab::NodeSettings => "Node settings",
             Tab::Settings => "Settings",
         }
     }
@@ -126,6 +137,7 @@ impl Tab {
             Tab::Explorer => "explorer",
             Tab::Grafana => "grafana",
             Tab::Configure => "configure",
+            Tab::NodeSettings => "node-settings",
             Tab::Settings => "settings",
         }
     }
@@ -170,7 +182,12 @@ impl Tab {
                     .with(|insights| insights.unseen_problems());
                 (unseen > 0).then_some(Badge::Count(unseen))
             }
-            Tab::Overview | Tab::Dashboard | Tab::Explorer | Tab::Grafana | Tab::Configure => None,
+            Tab::Overview
+            | Tab::Dashboard
+            | Tab::Explorer
+            | Tab::Grafana
+            | Tab::Configure
+            | Tab::NodeSettings => None,
         }
     }
 }
@@ -179,15 +196,17 @@ impl Tab {
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub tab: RwSignal<Tab>,
-    /// The nodes the backend runs, in its order. One until it runs several.
+    /// The nodes the backend runs, in its order: until its list arrives, a placeholder for the
+    /// first ([`node_state::placeholder`]).
     pub nodes: RwSignal<Vec<NodeState>>,
-    /// The node the node pages (Dashboard, Logs, Configure) show; read it with
-    /// [`AppState::node`].
+    /// Whether the backend's node list has arrived.
+    pub nodes_loaded: RwSignal<bool>,
+    /// The launcher's own data folder (`FirstRunInfo::default_data_dir`), where the first
+    /// node keeps its chain unless another folder was chosen; `None` until read.
+    pub default_data_dir: RwSignal<Option<String>>,
+    /// The node the node pages (Dashboard, Logs, Configure, Node settings) show and the node
+    /// commands act on; read it with [`AppState::node`].
     pub selected: RwSignal<NodeState>,
-    /// The node the backend's single-node commands control (`start_zebrad`, `reset_config`,
-    /// the data folder): what the launcher's own pages and banners are about, whichever node
-    /// is selected.
-    pub primary: NodeState,
     /// The network the shell shows when it runs several nodes: the sidebar, the overview and
     /// the node pages list only that network's nodes, and Testnet is marked everywhere.
     pub network: RwSignal<Network>,
@@ -211,6 +230,11 @@ pub struct AppState {
     /// A text filter another page asks the Logs page to apply (a problem picked on the
     /// dashboard). The Logs page takes it and clears it.
     pub log_filter_request: RwSignal<Option<String>>,
+    /// The computer's CPU and memory, read every 5 s; `None` until the first reading, and on
+    /// platforms the backend cannot read.
+    pub machine: RwSignal<Option<MachineResources>>,
+    /// Opens the add-node dialog: the sidebar, the overview and Settings → Nodes.
+    pub add_node: Callback<()>,
 }
 
 impl AppState {
@@ -233,6 +257,28 @@ impl AppState {
     /// selected node.
     pub fn node(&self) -> NodeState {
         self.selected.get()
+    }
+
+    /// The node with `id`, untracked.
+    pub fn find(&self, id: &NodeId) -> Option<NodeState> {
+        self.nodes
+            .with_untracked(|nodes| nodes.iter().copied().find(|node| node.id() == *id))
+    }
+
+    /// Whether the backend runs several nodes, tracked: the sidebar then replaces the tab bar.
+    pub fn herd(&self) -> bool {
+        self.nodes.with(|nodes| nodes.len() > 1)
+    }
+
+    /// Why no node can be added now, tracked: at most [`MAX_NODES`].
+    pub fn add_refused(&self) -> Option<String> {
+        (self.nodes.with(Vec::len) >= MAX_NODES)
+            .then(|| format!("Zeal runs at most {MAX_NODES} nodes."))
+    }
+
+    /// The first node, tracked: the one the first run sets up.
+    pub fn first_node(&self) -> NodeState {
+        self.nodes.with(|nodes| nodes[0])
     }
 
     /// The nodes on `network`, in the backend's order, tracked.
@@ -292,11 +338,83 @@ impl AppState {
         }
     }
 
-    /// The Configure page saved the selected node's config: the outcome joins its timeline
+    /// The Configure page saved `node`'s config: the outcome joins its timeline
     /// ("Configuration applied", or rolled back when zebrad rejected it).
-    pub fn record_config_outcome(&self, outcome: &ApplyOutcome) {
-        self.primary
-            .record_event(config_outcome_event(outcome, clock::now()));
+    pub fn record_config_outcome(&self, node: NodeState, outcome: &ApplyOutcome) {
+        node.record_event(config_outcome_event(outcome, clock::now()));
+    }
+
+    /// Brings the node list in line with the backend's `list`. A node keeps its state (its
+    /// histories, log and analysis) by id; a node whose id the first run changed keeps it by
+    /// its place in the list; a new node gets a fresh state, its snapshots and its log; a node
+    /// that left the list leaves. The first list fills the placeholder.
+    pub fn apply_nodes(self, list: Vec<NodeInfo>) {
+        if list.is_empty() {
+            return;
+        }
+        let current = self.nodes.get_untracked();
+        let first_load = !self.nodes_loaded.get_untracked();
+        let current_ids: Vec<NodeId> = current.iter().map(NodeState::id).collect();
+        let ids: Vec<NodeId> = list.iter().map(|info| info.id.clone()).collect();
+        let plan = reuse_plan(&current_ids, &ids, first_load);
+        let mut next: Vec<NodeState> = Vec::with_capacity(list.len());
+        for (info, reuse) in list.into_iter().zip(plan) {
+            match reuse {
+                Some(index) => {
+                    let node = current[index];
+                    if node.info.with_untracked(|known| *known != info) {
+                        node.info.set(info);
+                    }
+                    // The placeholder had no subscriptions yet.
+                    if first_load && index == 0 {
+                        subscribe_node(self, node);
+                    }
+                    next.push(node);
+                }
+                None => {
+                    let node = NodeState::new(info);
+                    subscribe_node(self, node);
+                    next.push(node);
+                }
+            }
+        }
+        let several = next.len() > 1;
+        let selected = self.selected.get_untracked();
+        self.nodes.set(next.clone());
+        self.nodes_loaded.set(true);
+        if !next.contains(&selected) {
+            let networks: Vec<Network> = next
+                .iter()
+                .map(|node| node.info.with_untracked(|info| info.network))
+                .collect();
+            let index = pick_in_scope(None, &networks, self.network.get_untracked()).unwrap_or(0);
+            self.selected.set(next[index]);
+            if several && self.tab.get_untracked().is_node_tab() {
+                self.tab.set(Tab::Overview);
+            }
+        }
+        // Several nodes open on the overview; one node opens on its dashboard, as before.
+        if first_load && several && self.tab.get_untracked() == Tab::Dashboard {
+            self.tab.set(Tab::Overview);
+        }
+    }
+
+    /// `node`'s data folder as the pages name it: `None` for the launcher's own data folder,
+    /// tracked.
+    pub fn chosen_data_dir(&self, node: NodeState) -> Option<String> {
+        let dir = node.info.with(|info| info.data_dir.clone());
+        let default = self.default_data_dir.get();
+        (default.as_deref() != Some(dir.as_str())).then_some(dir)
+    }
+
+    /// Reads the node list again, after a change this window made.
+    pub fn refresh_nodes(self) {
+        spawn_local(async move {
+            match api::list_nodes().await {
+                Ok(list) => self.apply_nodes(list),
+                Err(error) => self.report("Reading the nodes", Err(error)),
+            }
+        });
     }
 
     /// Folds a batch of `node`'s log lines into its state; problems in it count as seen when
@@ -315,6 +433,28 @@ impl AppState {
     }
 }
 
+/// For each node of the backend's list (`new`, its ids in order), the index in `current` of
+/// the state it keeps: the one with its id, or, for a node whose id the first run changed, the
+/// one in its place whose id left the list (on the first list, the placeholder in the first
+/// place). `None`: a fresh state.
+pub fn reuse_plan(current: &[NodeId], new: &[NodeId], first_load: bool) -> Vec<Option<usize>> {
+    let mut used = vec![false; current.len()];
+    new.iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let by_id = current.iter().position(|known| known == id);
+            let by_place = (index < current.len()
+                && ((first_load && index == 0) || !new.contains(&current[index])))
+            .then_some(index);
+            let pick = by_id.or(by_place).filter(|&pick| !used[pick]);
+            if let Some(pick) = pick {
+                used[pick] = true;
+            }
+            pick
+        })
+        .collect()
+}
+
 /// The node to show on `scope`: the selected one (`current`, an index into `networks`, the
 /// nodes' networks) while it is on that network, else the first node that is, else none.
 pub fn pick_in_scope(
@@ -327,21 +467,87 @@ pub fn pick_in_scope(
         .or_else(|| networks.iter().position(|network| *network == scope))
 }
 
+/// Where the shell's network goes when the first node's network is `first` (`None` until the
+/// backend's list arrives) and was `last` before: to the first node's for the first list, and
+/// while it is the only node, when that changes (the first-run wizard or Settings). With
+/// several nodes the user picks the network with the tabs, and the first node may be another
+/// one after a removal, so its network moves nothing.
+fn follow_first_node(
+    last: Option<Network>,
+    first: Option<Network>,
+    several: bool,
+) -> Option<Network> {
+    let first = first?;
+    (last.is_none() || !several)
+        .then_some(first)
+        .filter(|&network| last != Some(network))
+}
+
 /// The network the window shows: the chosen scope with several nodes, the node's own with one.
 fn shown_network(state: AppState, herd: bool) -> Network {
     if herd {
         state.network.get()
     } else {
-        state.primary.info.with(|info| info.network)
+        state.first_node().info.with(|info| info.network)
     }
 }
 
-/// Feeds an extra node's state from its events (the mock's `?herd` nodes).
-pub fn subscribe_extra(state: AppState, extra: NodeState) {
-    let id = extra.id();
-    api::on_extra_node_status(&id, move |status| extra.record_status(status));
-    api::on_extra_node_stats(&id, move |stats| extra.record_stats(stats));
-    api::subscribe_extra_node_logs(&id, move |batch| state.record_logs(extra, batch));
+/// Feeds a node's state: its snapshots (unless an event newer than them arrived meanwhile, see
+/// [`subscribe_then_fetch`]; the listeners for every node's events are already in place), its
+/// log, and the run events that a replaced config adds.
+fn subscribe_node(state: AppState, node: NodeState) {
+    let id = node.id();
+    {
+        let id = id.clone();
+        spawn_local(async move {
+            match api::get_status(&id).await {
+                Ok(status) if !node.has_seen(|seen| seen.status) => node.record_status(status),
+                Ok(_) => {}
+                Err(error) => state.report("Reading status", Err(error)),
+            }
+            match api::get_node_stats(&id).await {
+                Ok(stats) if !node.has_seen(|seen| seen.stats) => node.record_stats(stats),
+                Ok(_) => {}
+                Err(error) => state.report("Reading node stats", Err(error)),
+            }
+            match api::get_node_details(&id).await {
+                Ok(details) if !node.has_seen(|seen| seen.details) => node.record_details(details),
+                Ok(_) => {}
+                Err(error) => state.report("Reading node details", Err(error)),
+            }
+            match api::get_metrics(&id).await {
+                Ok(metrics) if !node.has_seen(|seen| seen.metrics) => node.record_metrics(metrics),
+                Ok(_) => {}
+                Err(error) => state.report("Reading metrics", Err(error)),
+            }
+            match api::get_node_resources(&id).await {
+                Ok(sample) if !node.has_seen(|seen| seen.resources) => {
+                    node.record_resources(sample)
+                }
+                Ok(_) => {}
+                Err(error) => state.report("Reading node resources", Err(error)),
+            }
+        });
+    }
+    // The subscription streams the retained history before the live lines, so no separate
+    // history request is needed.
+    spawn_local(async move {
+        let result = api::subscribe_logs(
+            &id,
+            move |batch| state.record_logs(node, batch),
+            state.payload_error(),
+        )
+        .await;
+        state.report("Subscribing to logs", result);
+    });
+    // A reset of the node's config from any page is an event of its run.
+    Effect::new(move |previous: Option<u64>| {
+        let changed = node.config_changed.get();
+        if previous.is_some_and(|previous| previous != changed) {
+            node.record_event(config_replaced_event(clock::now()));
+        }
+        changed
+    });
 }
 
 /// Whether a subscription of [`subscribe_then_fetch`] has delivered an event yet.
@@ -380,24 +586,28 @@ async fn subscribe_then_fetch<T, F>(
 
 #[component]
 pub fn App() -> impl IntoView {
-    // The backend's own node: every single-node event below is about it. The mock's `?herd`
-    // adds more, which come with their own subscriptions.
-    let node = NodeState::new(node_state::placeholder_primary(), true);
-    let extra: Vec<NodeState> = api::extra_nodes()
-        .into_iter()
-        .map(|info| NodeState::new(info, false))
-        .collect();
-    // Several nodes open on the overview; one node opens on its dashboard, as before.
-    let first_tab = if extra.is_empty() {
-        Tab::Dashboard
-    } else {
-        Tab::Overview
-    };
+    // A placeholder for the first node until the backend's list arrives: the pages render it
+    // while connecting, and the list fills it in.
+    let node = NodeState::new(node_state::placeholder());
+    // The add-node dialog, opened from the sidebar, the overview and Settings → Nodes. What had
+    // focus before it opened: the app turns inert under it, which takes focus away, so the
+    // opener notes it first.
+    let adding = RwSignal::new(false);
+    let return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
+    let open_add = Callback::new(move |()| {
+        let active = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+        return_focus.set_value(active);
+        adding.set(true);
+    });
     let state = AppState {
-        tab: RwSignal::new(first_tab),
-        nodes: RwSignal::new(std::iter::once(node).chain(extra.iter().copied()).collect()),
+        tab: RwSignal::new(Tab::Dashboard),
+        nodes: RwSignal::new(vec![node]),
+        nodes_loaded: RwSignal::new(false),
+        default_data_dir: RwSignal::new(None),
         selected: RwSignal::new(node),
-        primary: node,
         network: RwSignal::new(Network::Mainnet),
         settings: RwSignal::new(None),
         resolved_dark: RwSignal::new(true),
@@ -407,87 +617,119 @@ pub fn App() -> impl IntoView {
         update: RwSignal::new(None),
         update_health: RwSignal::new(None),
         log_filter_request: RwSignal::new(None),
+        machine: RwSignal::new(None),
+        add_node: open_add,
     };
     provide_context(state);
     theme::init(&state);
 
     set_interval(move || state.now.set(clock::now()), Duration::from_secs(1));
 
-    // The status, the node stats and the updater each come as a stream plus a snapshot; see
-    // `subscribe_then_fetch` for the order.
+    // Every node's events are listened to before any snapshot is read: the node list (with its
+    // own snapshot, see `subscribe_then_fetch`), then each node's status, statistics, details,
+    // metrics and resources, which go to the node they name. An event for a node the list has
+    // not brought yet is dropped: that node's snapshots are read once it appears.
     spawn_local(subscribe_then_fetch(
         state,
         async move |seen| {
-            let result = api::on_status(
-                move |status| {
+            let result = api::on_nodes(
+                move |list| {
                     seen.mark();
-                    node.record_status(status);
+                    state.apply_nodes(list);
+                },
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for nodes", result);
+            let result = api::on_status(
+                move |event| {
+                    if let Some(node) = state.find(&event.node) {
+                        node.mark_seen(|seen| &mut seen.status);
+                        node.record_status(event.value);
+                    }
                 },
                 state.payload_error(),
             )
             .await;
             state.report("Listening for status", result);
             // `stale_process` may have been emitted before this listener existed; the
-            // snapshot's `stale` covers that case.
-            let result =
-                api::on_stale_process(move |stale| node.record_stale(stale), state.payload_error())
-                    .await;
+            // status snapshot's `stale` covers that case.
+            let result = api::on_stale_process(
+                move |event| {
+                    if let Some(node) = state.find(&event.node) {
+                        node.record_stale(event.value);
+                    }
+                },
+                state.payload_error(),
+            )
+            .await;
             state.report("Listening for stale processes", result);
-        },
-        api::get_status,
-        "Reading status",
-        move |status| node.record_status(status),
-    ));
-    spawn_local(subscribe_then_fetch(
-        state,
-        async move |seen| {
             let result = api::on_node_stats(
-                move |stats| {
-                    seen.mark();
-                    node.record_stats(stats);
+                move |event| {
+                    if let Some(node) = state.find(&event.node) {
+                        node.mark_seen(|seen| &mut seen.stats);
+                        node.record_stats(event.value);
+                    }
                 },
                 state.payload_error(),
             )
             .await;
             state.report("Listening for node stats", result);
-        },
-        api::get_node_stats,
-        "Reading node stats",
-        move |stats| node.record_stats(stats),
-    ));
-    spawn_local(subscribe_then_fetch(
-        state,
-        async move |seen| {
             let result = api::on_node_details(
-                move |details| {
-                    seen.mark();
-                    node.record_details(details);
+                move |event| {
+                    if let Some(node) = state.find(&event.node) {
+                        node.mark_seen(|seen| &mut seen.details);
+                        node.record_details(event.value);
+                    }
                 },
                 state.payload_error(),
             )
             .await;
             state.report("Listening for node details", result);
-        },
-        api::get_node_details,
-        "Reading node details",
-        move |details| node.record_details(details),
-    ));
-    spawn_local(subscribe_then_fetch(
-        state,
-        async move |seen| {
             let result = api::on_metrics(
-                move |snapshot| {
-                    seen.mark();
-                    node.record_metrics(snapshot);
+                move |event| {
+                    if let Some(node) = state.find(&event.node) {
+                        node.mark_seen(|seen| &mut seen.metrics);
+                        node.record_metrics(event.value);
+                    }
                 },
                 state.payload_error(),
             )
             .await;
             state.report("Listening for metrics", result);
+            let result = api::on_node_resources(
+                move |event| {
+                    if let Some(node) = state.find(&event.node) {
+                        node.mark_seen(|seen| &mut seen.resources);
+                        node.record_resources(event.value);
+                    }
+                },
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for node resources", result);
         },
-        api::get_metrics,
-        "Reading metrics",
-        move |snapshot| node.record_metrics(snapshot),
+        api::list_nodes,
+        "Reading the nodes",
+        move |list| state.apply_nodes(list),
+    ));
+    // The computer's resources, which are about no node, come as a stream plus a snapshot too.
+    spawn_local(subscribe_then_fetch(
+        state,
+        async move |seen| {
+            let result = api::on_machine_resources(
+                move |machine| {
+                    seen.mark();
+                    state.machine.set(machine);
+                },
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for the computer's resources", result);
+        },
+        api::get_machine_resources,
+        "Reading the computer's resources",
+        move |machine| state.machine.set(machine),
     ));
     // `update_info` carries the state too, and the backend sends it right after each
     // `update_state`, so the info event and the snapshot are enough. An `update_state` only
@@ -527,15 +769,10 @@ pub fn App() -> impl IntoView {
             Err(error) => state.report("Reading settings", Err(error)),
         }
     });
-    // The subscription streams the retained history before the live lines, so no separate
-    // history request is needed.
     spawn_local(async move {
-        let result = api::subscribe_logs(
-            move |batch| state.record_logs(node, batch),
-            state.payload_error(),
-        )
-        .await;
-        state.report("Subscribing to logs", result);
+        if let Ok(info) = api::get_first_run_info().await {
+            state.default_data_dir.set(Some(info.default_data_dir));
+        }
     });
 
     // Ctrl (or Cmd) + 1..6 switch tabs. The modifier keeps the shortcut out of the way of typing,
@@ -561,19 +798,26 @@ pub fn App() -> impl IntoView {
         }
     });
 
-    // The shell shows the backend node's network once the settings say which it is, and moves
-    // with it when the first-run wizard or Settings changes it. A save that keeps the network
-    // leaves the network the user picked.
+    // The shell shows the first node's network once the backend's list says which it is, and
+    // while it is the only node moves with it when the first-run wizard or Settings changes it
+    // ([`follow_first_node`]).
     Effect::new(move |last: Option<Option<Network>>| {
         let network = state
-            .settings
-            .with(|settings| settings.as_ref().map(|settings| settings.network));
-        if let Some(network) = network
-            && last.flatten() != Some(network)
-        {
+            .nodes_loaded
+            .get()
+            .then(|| state.first_node().info.with(|info| info.network));
+        if let Some(network) = follow_first_node(last.flatten(), network, state.herd()) {
             state.network.set(network);
         }
         network
+    });
+    // With one node left there is no overview and no node header: its pages are the tab
+    // bar's.
+    Effect::new(move |_| {
+        let tab = state.tab.get();
+        if !state.herd() && matches!(tab, Tab::Overview | Tab::NodeSettings) {
+            state.tab.set(Tab::Dashboard);
+        }
     });
     // A change of network keeps the shell on that network: the selected node becomes the
     // first node there, or the overview shows its empty state.
@@ -611,55 +855,18 @@ pub fn App() -> impl IntoView {
         }
     });
 
-    // The backend's node is named after the network and folder in the settings.
-    Effect::new(move |_| {
-        let named = state.settings.with(|settings| {
-            settings.as_ref().map(|settings| {
-                node_state::primary_info(settings.network, settings.data_dir.as_deref())
-            })
-        });
-        if let Some(info) = named {
-            node.info.set(info);
-        }
-    });
-
-    for extra in extra {
-        subscribe_extra(state, extra);
-    }
-
-    // A reset of the node's config from any page is an event of its run.
-    Effect::new(move |previous: Option<u64>| {
-        let changed = node.config_changed.get();
-        if previous.is_some_and(|previous| previous != changed) {
-            node.record_event(config_replaced_event(clock::now()));
-        }
-        changed
-    });
-
     // Pages stay mounted while hidden, so a half-edited config or the log scroll position
     // survive switching tabs. Each page is the tab panel of its tab button in the header.
     let hidden = move |tab: Tab| move || state.tab.get() != tab;
     // While the first-run wizard is open, the app behind it takes no input.
     let first_run_open = RwSignal::new(false);
     // Several nodes: a sidebar of nodes replaces the tab bar (docs/MULTI-NODE.md).
-    let herd = Memo::new(move |_| state.nodes.with(|nodes| nodes.len() > 1));
-    let adding = RwSignal::new(false);
+    let herd = Memo::new(move |_| state.herd());
     // The launcher's own pages are tab panels of the tab bar; with several nodes the sidebar
     // opens them instead, so they are named regions without a tab.
     let panel_role = move || if herd.get() { "region" } else { "tabpanel" };
     let labelled_by = move |tab: Tab| move || (!herd.get()).then(|| tab.button_id());
     let labelled = move |tab: Tab| move || herd.get().then(|| tab.label());
-    // What had focus before the add-node dialog opened: the app turns inert under it, which
-    // takes focus away, so the opener notes it first.
-    let return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
-    let open_add = Callback::new(move |()| {
-        let active = web_sys::window()
-            .and_then(|window| window.document())
-            .and_then(|document| document.active_element())
-            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
-        return_focus.set_value(active);
-        adding.set(true);
-    });
 
     view! {
         <div
@@ -755,6 +962,15 @@ pub fn App() -> impl IntoView {
                 </section>
                 <section
                     class="page"
+                    role="tabpanel"
+                    id=Tab::NodeSettings.page_id()
+                    aria-labelledby=Tab::NodeSettings.button_id()
+                    hidden=hidden(Tab::NodeSettings)
+                >
+                    <NodeSettings />
+                </section>
+                <section
+                    class="page"
                     role=panel_role
                     id=Tab::Settings.page_id()
                     aria-labelledby=labelled_by(Tab::Settings)
@@ -786,6 +1002,89 @@ mod tests {
         assert_eq!(pick_in_scope(None, &networks, Mainnet), Some(0));
         // A network without nodes has nothing to show.
         assert_eq!(pick_in_scope(Some(1), &[Mainnet, Mainnet], Testnet), None);
+    }
+
+    #[test]
+    fn the_shell_follows_the_first_nodes_network_for_the_first_list_and_one_node() {
+        use Network::{Mainnet, Testnet};
+        // Nothing to follow before the list arrives.
+        assert_eq!(follow_first_node(None, None, false), None);
+        // The first list: the first node's network, also with several nodes (a herd of
+        // Testnet nodes opens on Testnet).
+        assert_eq!(follow_first_node(None, Some(Testnet), true), Some(Testnet));
+        assert_eq!(follow_first_node(None, Some(Mainnet), false), Some(Mainnet));
+        // One node: the first-run wizard or Settings moved it.
+        assert_eq!(
+            follow_first_node(Some(Mainnet), Some(Testnet), false),
+            Some(Testnet)
+        );
+        assert_eq!(follow_first_node(Some(Mainnet), Some(Mainnet), false), None);
+        // Several nodes: removing the first one makes a Testnet node first, and the window
+        // stays on the network the user picked.
+        assert_eq!(follow_first_node(Some(Mainnet), Some(Testnet), true), None);
+    }
+
+    #[test]
+    fn a_node_keeps_its_state_by_id_or_by_its_place_when_the_first_run_renamed_it() {
+        let id = |text: &str| NodeId::new(text).unwrap();
+        let (main, test, other) = (
+            id("zebrad-mainnet"),
+            id("zebrad-testnet"),
+            id("zebrad-mainnet-2"),
+        );
+        // The same nodes keep their states, whatever their order.
+        assert_eq!(
+            reuse_plan(
+                &[main.clone(), test.clone()],
+                &[test.clone(), main.clone()],
+                false
+            ),
+            [Some(1), Some(0)]
+        );
+        // A new node gets a fresh state; a gone one is not reused for it while its place is
+        // taken by a node that stays.
+        assert_eq!(
+            reuse_plan(
+                &[main.clone(), test.clone()],
+                &[test.clone(), other.clone()],
+                false
+            ),
+            [Some(1), None]
+        );
+        assert_eq!(
+            reuse_plan(
+                &[main.clone(), test.clone()],
+                &[other.clone(), main.clone()],
+                false
+            ),
+            [None, Some(0)]
+        );
+        // The first run gave the first node its network's id: the same place keeps the state.
+        assert_eq!(
+            reuse_plan(
+                std::slice::from_ref(&main),
+                std::slice::from_ref(&test),
+                false
+            ),
+            [Some(0)]
+        );
+        // The first list fills the placeholder whatever the first node's id.
+        assert_eq!(
+            reuse_plan(
+                std::slice::from_ref(&main),
+                &[test.clone(), other.clone()],
+                true
+            ),
+            [Some(0), None]
+        );
+        assert_eq!(
+            reuse_plan(
+                std::slice::from_ref(&main),
+                std::slice::from_ref(&main),
+                true
+            ),
+            [Some(0)]
+        );
     }
 
     #[test]

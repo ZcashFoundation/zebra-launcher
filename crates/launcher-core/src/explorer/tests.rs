@@ -14,7 +14,7 @@ use std::{
 
 use explorer_model::synth::SynthChain;
 use launcher_types::{
-    EosInfo, Network, NodeDetails, NodeId, NodeStats, Phase, Settings, Status,
+    EosInfo, Network, NodeDetails, NodeId, NodeStats, Phase, Status,
     explorer::{
         BlockId, ExplorerCall, ExplorerErrorKind, ExplorerReply, ExplorerRequest, ExplorerResponse,
         ExplorerRoute, Hash32, LedgerCheck, LiveState, NotFoundHint, PageKind, Resolution,
@@ -23,6 +23,8 @@ use launcher_types::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::watch;
+
+use crate::nodes::NodeSpec;
 
 use super::{
     ExplorerConfig, ExplorerHandle, ExplorerInputs,
@@ -97,7 +99,7 @@ struct Harness {
     status: watch::Sender<Status>,
     stats: watch::Sender<Option<NodeStats>>,
     _details: watch::Sender<Option<NodeDetails>>,
-    _settings: watch::Sender<Settings>,
+    _spec: watch::Sender<NodeSpec>,
 }
 
 fn stats_for(chain: &SynthChain) -> NodeStats {
@@ -152,7 +154,7 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
     let (status_tx, status) = watch::channel(running());
     let (stats_tx, stats) = watch::channel(Some(stats));
     let (details_tx, details) = watch::channel(Some(details));
-    let (settings_tx, settings) = watch::channel(Settings::default());
+    let (spec_tx, spec) = watch::channel(NodeSpec::first(Network::Mainnet));
     let source = Synth {
         chain: chain_rx,
         gate: gate_rx,
@@ -165,7 +167,7 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
             status,
             stats,
             details,
-            settings,
+            spec,
         },
         explorer_config,
         move |_, _| Ok(source.clone()),
@@ -178,7 +180,7 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
         status: status_tx,
         stats: stats_tx,
         _details: details_tx,
-        _settings: settings_tx,
+        _spec: spec_tx,
     }
 }
 

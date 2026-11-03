@@ -306,7 +306,7 @@ pub(super) fn start<S: ChainSource>(
     config: ExplorerConfig,
     new_source: impl Fn(SocketAddr, PathBuf) -> Result<S, RpcError> + Send + 'static,
 ) -> (mpsc::Sender<Command>, watch::Receiver<ExplorerLiveEvent>) {
-    let network = inputs.settings.borrow().network;
+    let network = inputs.spec.borrow().network;
     let (live, live_rx) = watch::channel(ExplorerLiveEvent {
         node: node_id(network),
         live: ExplorerLive::default(),
@@ -370,7 +370,7 @@ where
     ) {
         let mut tick = tokio::time::interval(self.config.tip_poll);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        let (mut stats_open, mut details_open, mut settings_open) = (true, true, true);
+        let (mut stats_open, mut details_open, mut spec_open) = (true, true, true);
         self.refresh();
         loop {
             tokio::select! {
@@ -392,8 +392,8 @@ where
                 changed = self.inputs.details.changed(), if details_open => {
                     details_open = changed.is_ok();
                 }
-                changed = self.inputs.settings.changed(), if settings_open => {
-                    settings_open = changed.is_ok();
+                changed = self.inputs.spec.changed(), if spec_open => {
+                    spec_open = changed.is_ok();
                     self.refresh();
                 }
                 _ = tick.tick() => self.on_tick(),
@@ -435,7 +435,7 @@ where
         }
     }
 
-    /// Follows a change of the status, the statistics or the settings: the source, the
+    /// Follows a change of the status, the statistics or the node's spec: the source, the
     /// network, the limits and what the explorer publishes.
     fn refresh(&mut self) {
         let status = self.inputs.status.borrow().clone();
@@ -485,7 +485,7 @@ where
         }
         let network = self
             .reported
-            .unwrap_or_else(|| self.inputs.settings.borrow().network);
+            .unwrap_or_else(|| self.inputs.spec.borrow().network);
         if network != self.network {
             // Another chain: nothing known about this one applies.
             self.network = network;

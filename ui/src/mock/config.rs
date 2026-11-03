@@ -3,7 +3,9 @@
 
 use std::sync::atomic::Ordering;
 
-use launcher_types::{ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, Network};
+use launcher_types::{
+    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, Network, NodeInfo, PortRole,
+};
 use leptos::prelude::*;
 
 use super::{DEFAULT_DATA_DIR, mock, sleep};
@@ -30,36 +32,46 @@ cache_dir = "/home/user/.local/share/org.zfnd.zeal/zebra"
 use_color = false
 "#;
 
-/// What `reset_config` writes: the launcher's minimal file for the network and the state
-/// directory, like `config::render_minimal`.
-fn minimal_config(network: Network, state_dir: &str) -> String {
-    let rpc_port = match network {
-        Network::Mainnet => 8232,
-        Network::Testnet => 18232,
+/// What `reset_config` writes for a node, like the backend's `config::render_minimal`: the
+/// managed keys for its network, ports, cookie and state folder. The P2P port is written only
+/// when it is not the one zebrad uses without it.
+pub(super) fn minimal_config(info: &NodeInfo, cookie_dir: &str) -> String {
+    let port = |role| info.port(role).unwrap_or_default();
+    let default_p2p = match info.network {
+        Network::Mainnet => 8233,
+        Network::Testnet => 18233,
+    };
+    let p2p = match port(PortRole::P2p) {
+        p2p if p2p == default_p2p => String::new(),
+        p2p => format!("listen_addr = \"[::]:{p2p}\"\n"),
     };
     format!(
         r#"# zebrad configuration managed by Zeal.
 #
-# The launcher keeps network.network, rpc.listen_addr, rpc.enable_cookie_auth,
-# rpc.cookie_dir, metrics.endpoint_addr and state.cache_dir up to date.
+# The launcher keeps network.network, the port of network.listen_addr,
+# rpc.listen_addr, rpc.enable_cookie_auth, rpc.cookie_dir,
+# metrics.endpoint_addr and state.cache_dir up to date.
 # Add your own settings below; the reference shows every option with its
 # default. Keys you do not set use zebrad's defaults.
 
 [network]
 network = "{network}"
-
+{p2p}
 [rpc]
-listen_addr = "127.0.0.1:{rpc_port}"
+listen_addr = "127.0.0.1:{rpc}"
 enable_cookie_auth = true
-cookie_dir = "{DEFAULT_DATA_DIR}/rpc"
+cookie_dir = "{cookie_dir}"
 
 [metrics]
-endpoint_addr = "127.0.0.1:9999"
+endpoint_addr = "127.0.0.1:{metrics}"
 
 [state]
-cache_dir = "{state_dir}"
+cache_dir = "{state}"
 "#,
-        network = network.as_str(),
+        network = info.network.as_str(),
+        rpc = port(PortRole::Rpc),
+        metrics = port(PortRole::Metrics),
+        state = crate::format::state_dir(&info.data_dir),
     )
 }
 
@@ -112,11 +124,56 @@ pub async fn reset_config() -> Result<ConfigDocument, String> {
     sleep(300).await;
     let mock = mock();
     mock.require_stopped()?;
-    let network = mock.settings.with_untracked(|settings| settings.network);
-    let text = minimal_config(network, &mock.state_dir());
+    let info = mock.info.get_untracked();
+    let text = minimal_config(&info, &format!("{DEFAULT_DATA_DIR}/rpc"));
     mock.config.update(|config| {
         config.text = text;
         config.token = format!("mock-{}", js_sys::Date::now());
     });
     Ok(mock.config.get_untracked())
+}
+
+#[cfg(test)]
+mod tests {
+    use launcher_types::NodePort;
+
+    use super::{super::nodes::first_node, *};
+
+    #[test]
+    fn the_minimal_config_carries_the_nodes_own_ports_and_folders() {
+        let first = first_node(DEFAULT_DATA_DIR);
+        let text = minimal_config(&first, &format!("{DEFAULT_DATA_DIR}/rpc"));
+        assert!(text.contains("network = \"Mainnet\"\n\n[rpc]"), "{text}");
+        assert!(text.contains("listen_addr = \"127.0.0.1:8232\""), "{text}");
+        assert!(
+            text.contains("endpoint_addr = \"127.0.0.1:9999\""),
+            "{text}"
+        );
+        let second = NodeInfo {
+            network: Network::Testnet,
+            data_dir: format!("{DEFAULT_DATA_DIR}/nodes/zebrad-testnet"),
+            ports: vec![
+                NodePort {
+                    role: PortRole::P2p,
+                    port: 28233,
+                },
+                NodePort {
+                    role: PortRole::Rpc,
+                    port: 18232,
+                },
+                NodePort {
+                    role: PortRole::Metrics,
+                    port: 19999,
+                },
+            ],
+            ..first
+        };
+        let text = minimal_config(&second, "/nodes/zebrad-testnet/rpc");
+        assert!(text.contains("listen_addr = \"[::]:28233\""), "{text}");
+        assert!(
+            text.contains("endpoint_addr = \"127.0.0.1:19999\""),
+            "{text}"
+        );
+        assert!(text.contains("nodes/zebrad-testnet/state"), "{text}");
+    }
 }

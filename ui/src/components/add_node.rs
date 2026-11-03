@@ -1,16 +1,33 @@
 //! The add-node dialog (docs/MULTI-NODE.md): pick a kind, fill in its details (network, name,
-//! program, the node a service uses), and review what Zeal will set up, with the ports moved
-//! out of the way of the nodes that exist. Only the mock can add nodes until the backend runs
-//! several.
+//! program, the node a service uses, the data folder with its free space), and review what
+//! Zeal will set up, with the ports moved out of the way of the nodes that exist. This release
+//! adds zebrad nodes, which run the bundled zebrad; the other kinds show what they will need
+//! and cannot be picked yet.
 
-use launcher_types::{Network, NodeId, NodeInfo, NodeKind, NodePort, NodeRole, assign_ports};
+use launcher_types::{
+    DEFAULT_STOP_GRACE_SECS, MAX_NODES, Network, NodeDraft, NodeId, NodeInfo, NodeKind, NodePort,
+    NodeProgram, NodeRole, node_ports,
+};
 use leptos::{ev, html, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
 
-use crate::{api, app::AppState, node_state::NodeState};
+use crate::{
+    api,
+    app::AppState,
+    pages::settings::{free_space_text, free_space_view},
+};
 
-/// Where a node's data goes by default: its own folder under the launcher's data folder.
-const NODES_DIR: &str = "~/.local/share/org.zfnd.zeal/nodes";
+/// A new node's own folder in the launcher's data folder `base`, `<base>/nodes/<id>`, with the
+/// separator `base` uses.
+pub fn node_folder(base: &str, id: &NodeId) -> String {
+    let separator = if base.contains('\\') && !base.contains('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    let base = base.trim_end_matches(separator);
+    format!("{base}{separator}nodes{separator}{id}")
+}
 
 /// What a kind needs that Zeal does not ship, and where it runs, for its card.
 fn requirement(kind: NodeKind) -> &'static str {
@@ -70,6 +87,24 @@ fn caveat(kind: NodeKind) -> Option<&'static str> {
     }
 }
 
+/// The warning for a new node of `kind` on `network` when `existing` already has a node there
+/// that peers would count as the same: two zebrad nodes on one network. Peers accept one
+/// connection from each IP address, so the two compete for them.
+fn same_network_warning(kind: NodeKind, network: Network, existing: &[NodeInfo]) -> Option<String> {
+    if kind != NodeKind::Zebrad {
+        return None;
+    }
+    let other = existing
+        .iter()
+        .find(|node| node.kind == NodeKind::Zebrad && node.network == network)?;
+    Some(format!(
+        "{} is already on {network}. Peers accept one connection from each IP address, so two \
+         nodes on one network behind this computer's address compete for the same peers. A \
+         second node of a network is mainly for testing a build.",
+        other.name
+    ))
+}
+
 /// "P2P 18233 · RPC 18232": a node's ports in a line.
 pub fn ports_line(ports: &[NodePort]) -> String {
     if ports.is_empty() {
@@ -104,6 +139,9 @@ pub fn AddNode(
     let name_edited = RwSignal::new(false);
     let program = RwSignal::new(String::new());
     let uses = RwSignal::new(None::<NodeId>);
+    // The data folder picked with Change…; `None`: a folder of its own in Zeal's data folder.
+    let chosen_dir = RwSignal::new(None::<String>);
+    let picking = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
 
@@ -116,6 +154,7 @@ pub fn AddNode(
             name_edited.set(false);
             program.set(String::new());
             uses.set(None);
+            chosen_dir.set(None);
             error.set(None);
         }
     });
@@ -178,10 +217,16 @@ pub fn AddNode(
             .iter()
             .flat_map(|info| info.ports.iter().map(|port| port.port))
             .collect();
-        let wanted = kind.default_ports(network);
-        let ports = assign_ports(&wanted, &taken_ports);
+        let ports = node_ports(kind, network, &taken_ports);
+        let own_folder = state
+            .default_data_dir
+            .with(|base| base.as_deref().map(|base| node_folder(base, &id)));
         NodeInfo {
-            data_dir: format!("{NODES_DIR}/{id}"),
+            data_dir: chosen_dir
+                .get()
+                .or_else(|| own_folder.clone())
+                .unwrap_or_else(|| "a folder of its own in Zeal's data folder".to_owned()),
+            own_folder,
             id,
             name: name.get().trim().to_owned(),
             kind,
@@ -192,8 +237,61 @@ pub fn AddNode(
                 uses.get()
             },
             ports,
+            program: NodeProgram::Bundled,
+            autostart: true,
+            stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
         }
     });
+    // Where the chain would go, once it is known: the folder picked, or the node's own.
+    let target_dir = Memo::new(move |_| {
+        chosen_dir
+            .get()
+            .or_else(|| draft.with(|info| info.own_folder.clone()))
+    });
+    // The free space there (`Some(None)` when it cannot be read), read whenever the folder
+    // changes; a folder that does not exist yet is measured on the drive it would be on.
+    let free_at = RwSignal::new(None::<(String, Option<u64>)>);
+    Effect::new(move |_| {
+        let Some(dir) = target_dir.get().filter(|_| open.get()) else {
+            return;
+        };
+        spawn_local(async move {
+            let free = api::free_space(dir.clone()).await.ok().flatten();
+            // Unless the folder changed meanwhile.
+            if target_dir.with_untracked(|current| current.as_ref() == Some(&dir)) {
+                free_at.set(Some((dir, free)));
+            }
+        });
+    });
+    let free_here = move || {
+        let target = target_dir.get()?;
+        free_at.with(|read| {
+            read.as_ref()
+                .filter(|(dir, _)| *dir == target)
+                .map(|(_, free)| *free)
+        })
+    };
+    // The free space, with the warning when Mainnet would not fit; Testnet's chain is smaller.
+    let free_view = move || match free_here() {
+        None => view! { <span class="muted">"Checking the free space…"</span> }.into_any(),
+        Some(free) if network.get() == Network::Mainnet => free_space_view(free).into_any(),
+        Some(free) => view! { <span class="muted">{free_space_text(free)}</span> }.into_any(),
+    };
+    let change_dir = move |_| {
+        picking.set(true);
+        error.set(None);
+        spawn_local(async move {
+            match api::pick_data_dir().await {
+                Ok(Some(path)) => chosen_dir.set(Some(path)),
+                Ok(None) => {}
+                Err(failure) => {
+                    error.set(Some(format!("Could not open the folder picker: {failure}")));
+                }
+            }
+            picking.set(false);
+        });
+    };
+
     // Ports that moved, and who has the one they wanted.
     let moved = move || {
         let info = draft.get();
@@ -220,12 +318,29 @@ pub fn AddNode(
     // Why Next or Add is off, if it is.
     let problem = move || -> Option<String> {
         let info = draft.get();
+        if state.nodes.with(Vec::len) >= MAX_NODES {
+            return Some(format!("Zeal runs at most {MAX_NODES} nodes."));
+        }
+        if !info.kind.addable() {
+            return Some(format!(
+                "{} nodes come in a later release.",
+                info.kind.label()
+            ));
+        }
         if info.name.is_empty() {
             return Some("Give the node a name.".into());
         }
         if program_prompt(info.kind).is_some() && program.with(|p| p.trim().is_empty()) {
             let (what, _) = program_prompt(info.kind).unwrap_or_default();
             return Some(format!("Choose the {what}."));
+        }
+        if let Some(chosen) = chosen_dir.get()
+            && let Some(holder) = existing().into_iter().find(|node| node.data_dir == chosen)
+        {
+            return Some(format!(
+                "{chosen} is {}'s data folder: choose another.",
+                holder.name
+            ));
         }
         if !info.kind.uses().is_empty() && info.depends_on.is_none() {
             let wanted: Vec<&str> = info.kind.uses().iter().map(|kind| kind.label()).collect();
@@ -283,22 +398,41 @@ pub fn AddNode(
             });
         }
     });
+    // The backend checks the draft and fills in the id, the ports (out of the way of every
+    // node's and of ports in use on this computer) and the folder; the node comes back as it
+    // was set up.
     let add = move |start: bool| {
         let info = draft.get_untracked();
+        let request = NodeDraft {
+            kind: info.kind,
+            network: info.network,
+            name: info.name,
+            id: None,
+            ports: None,
+            data_dir: chosen_dir.get_untracked(),
+            program: NodeProgram::Bundled,
+            autostart: true,
+        };
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            match api::add_node(info.clone()).await {
-                Ok(()) => {
-                    let node = NodeState::new(info, false);
-                    state.nodes.update(|nodes| nodes.push(node));
-                    crate::app::subscribe_extra(state, node);
-                    state.selected.set(node);
-                    state.tab.set(crate::app::Tab::Dashboard);
+            match api::add_node(request).await {
+                Ok(added) => {
+                    if let Ok(list) = api::list_nodes().await {
+                        state.apply_nodes(list);
+                    }
+                    let node = state.find(&added.id);
+                    if let Some(node) = node {
+                        state.selected.set(node);
+                        state.tab.set(crate::app::Tab::Dashboard);
+                    }
                     busy.set(false);
                     open.set(false);
                     restore_focus();
-                    if start && let Err(failure) = node.start().await {
+                    if start
+                        && let Some(node) = node
+                        && let Err(failure) = node.start().await
+                    {
                         state.backend_error.set(Some(failure.to_string()));
                     }
                 }
@@ -317,20 +451,27 @@ pub fn AddNode(
                 {NodeKind::ALL
                     .into_iter()
                     .map(|choice| {
+                        // A kind this release cannot add stays in view, with what it will need.
+                        let later = !choice.addable();
                         view! {
                             <button
                                 type="button"
                                 role="radio"
                                 class="kind-card"
+                                class:kind-card-later=later
                                 class:selected=move || kind.get() == choice
                                 aria-checked=move || (kind.get() == choice).to_string()
+                                disabled=later
                                 on:click=move |_| kind.set(choice)
                                 on:dblclick=move |_| {
                                     kind.set(choice);
                                     step.set(Step::Details);
                                 }
                             >
-                                <span class="kind-card-name">{choice.label()}</span>
+                                <span class="kind-card-name">
+                                    {choice.label()}
+                                    {later.then(|| view! { <span class="chip kind-card-soon">"Coming later"</span> })}
+                                </span>
                                 <span class="kind-card-role muted">{role_text(choice.role())}</span>
                                 <span class="kind-card-summary">{choice.summary()}</span>
                                 <span class="kind-card-needs muted">{requirement(choice)}</span>
@@ -452,7 +593,30 @@ pub fn AddNode(
                         }
                     })}
                 <span class="form-label">"Data folder"</span>
-                <code class="form-value">{move || draft.with(|info| info.data_dir.clone())}</code>
+                <div class="form-value">
+                    <code>{move || draft.with(|info| info.data_dir.clone())}</code>
+                    <p class="form-note">{free_view}</p>
+                    <div class="buttons">
+                        <button type="button" disabled=move || picking.get() on:click=change_dir>
+                            "Change…"
+                        </button>
+                        {move || {
+                            chosen_dir
+                                .get()
+                                .is_some()
+                                .then(|| {
+                                    view! {
+                                        <button type="button" on:click=move |_| chosen_dir.set(None)>
+                                            "Use a folder of its own"
+                                        </button>
+                                    }
+                                })
+                        }}
+                    </div>
+                    <p class="muted form-note">
+                        "The chain state goes into its state folder; its configuration and log stay in its own folder."
+                    </p>
+                </div>
                 <span class="form-label">"Ports"</span>
                 <div class="form-value">
                     <span>{move || draft.with(|info| ports_line(&info.ports))}</span>
@@ -462,8 +626,15 @@ pub fn AddNode(
                             .map(|line| view! { <p class="muted form-note">{line}</p> })
                             .collect_view()
                     }}
+                    <p class="muted form-note">
+                        "Checked again when the node is added: a port another program holds moves too."
+                    </p>
                 </div>
             </div>
+            {move || {
+                same_network_warning(current, network.get(), &existing())
+                    .map(|text| view! { <div class="banner banner-warn">{text}</div> })
+            }}
             {caveat(current).map(|text| view! { <div class="banner banner-warn">{text}</div> })}
         }
     };
@@ -494,7 +665,11 @@ pub fn AddNode(
                 <dd><code>{program_text}</code></dd>
                 {uses_name.map(|used| view! { <dt>"Uses"</dt><dd>{used}</dd> })}
                 <dt>"Data folder"</dt>
-                <dd><code>{info.data_dir.clone()}</code></dd>
+                <dd>
+                    <code>{info.data_dir.clone()}</code>
+                    <br />
+                    {free_view}
+                </dd>
                 <dt>"Ports"</dt>
                 <dd>{ports_line(&info.ports)}</dd>
                 <dt>"Id"</dt>
@@ -622,6 +797,53 @@ mod tests {
         ];
         assert_eq!(ports_line(&ports), "P2P 18233 · RPC 18232");
         assert_eq!(ports_line(&[]), "none");
+    }
+
+    #[test]
+    fn a_new_node_gets_a_folder_in_the_launchers_data_folder() {
+        let id = NodeId::new("zebrad-testnet").unwrap();
+        assert_eq!(
+            node_folder("/home/me/.local/share/org.zfnd.zeal", &id),
+            "/home/me/.local/share/org.zfnd.zeal/nodes/zebrad-testnet"
+        );
+        assert_eq!(
+            node_folder("C:\\Users\\me\\AppData\\Local\\org.zfnd.zeal\\", &id),
+            "C:\\Users\\me\\AppData\\Local\\org.zfnd.zeal\\nodes\\zebrad-testnet"
+        );
+    }
+
+    #[test]
+    fn a_second_zebrad_node_on_a_network_is_warned_about() {
+        let info = |name: &str, network| NodeInfo {
+            id: NodeId::new("zebrad-mainnet").unwrap(),
+            name: name.into(),
+            kind: NodeKind::Zebrad,
+            network,
+            depends_on: None,
+            data_dir: String::new(),
+            own_folder: None,
+            ports: Vec::new(),
+            program: NodeProgram::Bundled,
+            autostart: true,
+            stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
+        };
+        let existing = [info("Zebra · Mainnet", Network::Mainnet)];
+        let warning = same_network_warning(NodeKind::Zebrad, Network::Mainnet, &existing)
+            .expect("a second Mainnet node");
+        assert!(
+            warning.starts_with("Zebra · Mainnet is already on Mainnet."),
+            "{warning}"
+        );
+        assert_eq!(
+            same_network_warning(NodeKind::Zebrad, Network::Testnet, &existing),
+            None,
+            "Testnet next to Mainnet"
+        );
+        assert_eq!(
+            same_network_warning(NodeKind::Zaino, Network::Mainnet, &existing),
+            None,
+            "a service makes no peer connections"
+        );
     }
 
     #[test]

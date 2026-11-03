@@ -1,12 +1,14 @@
 //! The dashboard: the gated end-of-support banners, the status card (health verdict and sync
-//! progress), the range row, the six stat tiles, the two charts, the activity row (recent
-//! problems, this run, peers), the node and chain details and the Grafana line, in the page
-//! specification's order. The cards live in the `dashboard/` modules; this file holds the
-//! signals they share, the chart data and the page order. Every slot renders in every state:
-//! loading, running, stopped and refetching replace values in place.
+//! progress), the range row, the six stat tiles, the two charts, the Resources card, the
+//! activity row (recent problems, this run, peers), the node and chain details and the Grafana
+//! line, in the page specification's order. The cards live in the `dashboard/` modules; this
+//! file holds the signals they share, the chart data and the page order. Every slot but the
+//! Resources card renders in every state: loading, running, stopped and refetching replace
+//! values in place; the card appears with the node's first sample.
 
 mod activity;
 mod details;
+mod resources;
 mod status_card;
 mod tiles;
 
@@ -31,7 +33,8 @@ use crate::{
 };
 
 use self::{
-    activity::ActivityRow, details::Details, status_card::StatusCard, tiles::RangeRow, tiles::Tiles,
+    activity::ActivityRow, details::Details, resources::ResourcesCard, status_card::StatusCard,
+    tiles::RangeRow, tiles::Tiles,
 };
 
 /// The icons a state is carried by, beside its word; the status colour sits on the icon. The
@@ -459,6 +462,7 @@ pub fn Dashboard() -> impl IntoView {
                     area=true
                 />
             </div>
+            <ResourcesCard dash />
             <ActivityRow dash />
             <Details dash />
             <p class="dash-grafana muted">

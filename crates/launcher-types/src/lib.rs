@@ -17,24 +17,38 @@ use serde::{Deserialize, Serialize};
 
 pub mod explorer;
 mod nodes;
+mod resources;
 
-pub use nodes::{NodeId, NodeInfo, NodeKind, NodePort, NodeRole, PortRole, assign_ports};
+pub use nodes::{
+    MAX_NODES, NodeDraft, NodeEvent, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram, NodeRole,
+    NodeUpdate, PortRole, assign_ports, node_ports,
+};
+pub use resources::{
+    MAX_MEMBERS, MachineResources, MemoryPressure, NodeResources, Platform, ProcessUsage,
+};
 
 /// The names of the events the backend emits and the UI listens to. Logs do
 /// not go through an event: they take a `tauri::ipc::Channel` of
-/// `Vec<LogLine>` batches, set up by the `subscribe_logs` command.
+/// `Vec<LogLine>` batches, set up by the `subscribe_logs` command for one
+/// node.
+///
+/// An event about one node carries a [`NodeEvent`](crate::NodeEvent): the
+/// node's id and the value, `{"node": "zebrad-mainnet", "value": ...}`.
 pub mod events {
-    /// Every [`Status`](crate::Status) change.
+    /// Every change of the node list: a `Vec<NodeInfo>`
+    /// ([`NodeInfo`](crate::NodeInfo)), in the list's order.
+    pub const NODES: &str = "nodes";
+    /// Every [`Status`](crate::Status) change of a node.
     pub const STATUS: &str = "status";
-    /// Every `Option<NodeStats>` change ([`NodeStats`](crate::NodeStats)).
+    /// Every `Option<NodeStats>` change of a node ([`NodeStats`](crate::NodeStats)).
     pub const NODE_STATS: &str = "node_stats";
-    /// Every `Option<NodeDetails>` change
+    /// Every `Option<NodeDetails>` change of a node
     /// ([`NodeDetails`](crate::NodeDetails)): the details behind the node
     /// statistics, from the same RPC poll.
     pub const NODE_DETAILS: &str = "node_details";
-    /// zebrad was to start at launch, but a zebrad from an earlier launcher
+    /// A node was to start at launch, but a zebrad from an earlier launcher
     /// run is still alive: a [`StaleProcessInfo`](crate::StaleProcessInfo).
-    /// The UI offers `start_zebrad_killing_stale`.
+    /// The UI offers `start_node_killing_stale`.
     pub const STALE_PROCESS: &str = "stale_process";
     /// Every [`UpdateState`](crate::UpdateState) change.
     pub const UPDATE_STATE: &str = "update_state";
@@ -43,13 +57,22 @@ pub mod events {
     /// The launcher did not come back healthy after an update: an
     /// [`UpdateHealthFailure`](crate::UpdateHealthFailure).
     pub const UPDATE_HEALTH_FAILED: &str = "update_health_failed";
-    /// Every `Option<MetricsSnapshot>` change
+    /// Every `Option<MetricsSnapshot>` change of a node
     /// ([`MetricsSnapshot`](crate::MetricsSnapshot)): zebrad's Prometheus
     /// metrics, read every 10 s while it runs.
     pub const METRICS: &str = "metrics";
     /// A node's explorer changed what it publishes on its own: an
     /// [`ExplorerLiveEvent`](crate::explorer::ExplorerLiveEvent), at most four a second.
     pub const EXPLORER_LIVE: &str = "explorer_live";
+    /// Every `Option<NodeResources>` change of a node
+    /// ([`NodeResources`](crate::NodeResources)): what its processes use, read
+    /// every 5 s from the spawn until the run ends.
+    pub const NODE_RESOURCES: &str = "node_resources";
+    /// Every `Option<MachineResources>` change
+    /// ([`MachineResources`](crate::MachineResources)): the computer's CPU and
+    /// memory, read every 5 s. Not about one node: the value alone, without a
+    /// `NodeEvent`.
+    pub const MACHINE_RESOURCES: &str = "machine_resources";
 }
 
 /// A location the `open_path` command opens with the system's default
@@ -481,7 +504,9 @@ impl Theme {
     }
 }
 
-/// The launcher's own settings, stored in `launcher.json`.
+/// The launcher's own settings, stored in `launcher.json` next to the node list. Each node's
+/// network, data folder, start at launch and stop grace are in its spec
+/// ([`NodeInfo`]).
 ///
 /// Missing fields take their default, so older files keep loading.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,25 +514,18 @@ impl Theme {
 pub struct Settings {
     /// The file format version. Files older than version 2 predate
     /// `first_run_done` and are migrated when loaded (see
-    /// [`Settings::first_run_done`]).
+    /// [`Settings::first_run_done`]); files older than version 3 ran a single
+    /// node, whose settings become the first node of the node list.
     pub schema_version: u32,
     /// How launcher updates are handled.
     pub update_mode: UpdateMode,
     /// Closing the window hides it to the tray instead of quitting.
     pub close_to_tray: bool,
-    /// Start zebrad when the launcher starts.
-    pub start_node_on_launch: bool,
     /// The Grafana dashboard URL to embed: `http://127.0.0.1` or
     /// `http://localhost` with any port and path, see [`is_loopback_http_url`].
     pub grafana_url: Option<String>,
-    /// The directory chosen for the chain state, if not the default.
-    pub data_dir: Option<String>,
-    /// The network zebrad runs on.
-    pub network: Network,
-    /// How long a graceful stop may take before zebrad is killed, in seconds.
-    pub stop_grace_secs: u64,
     /// The first-run flow was completed (`complete_first_run`). Until then
-    /// the UI shows it and zebrad is not started.
+    /// the UI shows it and no node is started.
     ///
     /// New installs start with `false`. A `launcher.json` written before
     /// schema version 2 belongs to a user who already ran the launcher, so
@@ -520,11 +538,13 @@ pub struct Settings {
 
 impl Settings {
     /// The current [`Settings::schema_version`].
-    pub const SCHEMA_VERSION: u32 = 2;
+    pub const SCHEMA_VERSION: u32 = 3;
 }
 
+/// The stop grace period a node gets unless the user sets another, in seconds.
+pub const DEFAULT_STOP_GRACE_SECS: u64 = 60;
 /// The shortest stop grace period that can be saved, in seconds
-/// ([`Settings::stop_grace_secs`]). The backend validates against these
+/// ([`NodeInfo::stop_grace_secs`]). The backend validates against these
 /// bounds and the settings form applies them to its field.
 pub const MIN_STOP_GRACE_SECS: u64 = 5;
 /// The longest stop grace period that can be saved, in seconds.
@@ -539,11 +559,7 @@ impl Default for Settings {
             schema_version: Self::SCHEMA_VERSION,
             update_mode: UpdateMode::Off,
             close_to_tray: true,
-            start_node_on_launch: true,
             grafana_url: None,
-            data_dir: None,
-            network: Network::Mainnet,
-            stop_grace_secs: 60,
             first_run_done: false,
             theme: Theme::System,
         }
@@ -1030,11 +1046,11 @@ pub struct ImportOutcome {
     pub to: String,
 }
 
-/// The result of `choose_data_dir`.
+/// The result of `choose_data_dir` for a node.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DataDirChoice {
-    /// The saved settings, with the new `data_dir`.
-    pub settings: Settings,
+pub struct NodeDataDirChoice {
+    /// The node, with its new data folder.
+    pub node: NodeInfo,
     /// Free space on the chosen volume, if it could be read. Warning about
     /// too little space is up to the UI.
     pub free_bytes: Option<u64>,
@@ -1398,21 +1414,27 @@ mod tests {
     #[test]
     fn settings_defaults_fill_missing_fields() {
         let settings: Settings =
-            serde_json::from_str(r#"{"network":"testnet"}"#).expect("partial settings parse");
+            serde_json::from_str(r#"{"close_to_tray":false}"#).expect("partial settings parse");
         assert_eq!(
             settings,
             Settings {
-                network: Network::Testnet,
+                close_to_tray: false,
                 ..Settings::default()
             }
         );
         assert_eq!(settings.theme, Theme::System);
+        // A file of a single-node launcher still reads; its node's fields are not settings.
+        let old: Settings = serde_json::from_str(
+            r#"{"schema_version":2,"network":"testnet","data_dir":"/big","stop_grace_secs":90}"#,
+        )
+        .expect("a version 2 file parses");
+        assert_eq!(old.schema_version, 2);
     }
 
     #[test]
     fn stop_grace_bounds_hold_the_default() {
         assert_eq!(STOP_GRACE_SECS, MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS);
-        assert!(STOP_GRACE_SECS.contains(&Settings::default().stop_grace_secs));
+        assert!(STOP_GRACE_SECS.contains(&DEFAULT_STOP_GRACE_SECS));
         assert!(!STOP_GRACE_SECS.contains(&(MIN_STOP_GRACE_SECS - 1)));
         assert!(!STOP_GRACE_SECS.contains(&(MAX_STOP_GRACE_SECS + 1)));
     }

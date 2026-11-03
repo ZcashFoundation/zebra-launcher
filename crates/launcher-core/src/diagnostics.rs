@@ -1,6 +1,7 @@
-//! The "Copy diagnostics" text: versions, OS, the zebrad binary, the stop
-//! grace, status, settings, node statistics, the updater's records, the
-//! managed `zebrad.toml` and the tails of both logs, ready to paste into an
+//! The "Copy diagnostics" text: versions, OS, the zebrad binary, settings,
+//! the updater's records and the launcher log, then for every node its spec,
+//! stop grace, status, statistics, process tree, managed `zebrad.toml` and the
+//! tail of its log, and last the computer's resources, ready to paste into an
 //! issue.
 //!
 //! The RPC cookie is a credential and is never read here. URLs in the
@@ -14,9 +15,13 @@ use std::{
     time::Duration,
 };
 
-use launcher_types::{NodeStats, Settings, Status};
+use launcher_types::{MachineResources, NodeInfo, NodeResources, NodeStats, Settings, Status};
 
-use crate::{paths::Paths, updates};
+use crate::{
+    clock,
+    paths::{NodePaths, Paths},
+    updates,
+};
 
 /// The launcher version.
 pub const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -110,22 +115,36 @@ pub fn redact_url(url: &str) -> String {
     }
 }
 
-/// Builds the diagnostics text, reading everything it includes from `paths`:
-/// the managed `zebrad.toml`, the updater record and the pending-update
-/// marker (see [`updates`]), and the tails of the newest launcher log and of
-/// the zebrad log (see [`log_tail`]).
+/// One node's part of the bundle.
+pub struct NodeReport<'a> {
+    /// The node as the UI sees it.
+    pub info: &'a NodeInfo,
+    /// Its files: its `zebrad.toml` and log are read from them.
+    pub paths: &'a NodePaths,
+    /// Its supervisor's status.
+    pub status: &'a Status,
+    /// Its last statistics, if zebrad has answered.
+    pub stats: Option<&'a NodeStats>,
+    /// The newest sample of its process tree, if it has a run that is
+    /// measured.
+    pub resources: Option<&'a NodeResources>,
+    /// The grace period its supervisor applies, which the node's settings
+    /// may have changed since launch.
+    pub stop_grace: Duration,
+}
+
+/// Builds the diagnostics text, reading what it includes from `paths` (the
+/// updater record and the pending-update marker, see [`updates`], and the
+/// tail of the newest launcher log) and from each node's files (its managed
+/// `zebrad.toml` and the tail of its log, see [`log_tail`]). The computer's
+/// part is [`machine_section`].
 ///
-/// `stats` are the last node statistics, if zebrad has answered; `sidecar`
-/// is the zebrad binary the launcher resolved, if known; `stop_grace` is the
-/// grace period the running supervisor applies, which the settings may have
-/// changed since launch.
+/// `sidecar` is the zebrad binary the launcher resolved, if known.
 pub fn bundle(
     paths: &Paths,
-    status: &Status,
     settings: &Settings,
-    stats: Option<&NodeStats>,
+    nodes: &[NodeReport<'_>],
     sidecar: Option<&Path>,
-    stop_grace: Duration,
 ) -> String {
     let mut out = String::new();
     let section = |out: &mut String, title: &str| {
@@ -157,31 +176,7 @@ pub fn bundle(
             None => "(unknown)".to_string(),
         }
     );
-    // The supervisor's grace is fixed at launch; a changed setting applies
-    // to the next one.
-    let _ = writeln!(
-        out,
-        "Stop grace: {} s in effect, {} s in the settings",
-        stop_grace.as_secs(),
-        settings.stop_grace_secs
-    );
-
-    section(&mut out, "Status");
-    out.push_str(&to_json(status));
-
-    section(&mut out, "Stale zebrad from an earlier launcher run");
-    match &status.stale {
-        Some(stale) => {
-            let _ = writeln!(out, "pid {} ({})", stale.pid, stale.binary);
-        }
-        None => out.push_str("(none)\n"),
-    }
-
-    section(&mut out, "Node stats");
-    match stats {
-        Some(stats) => out.push_str(&to_json(stats)),
-        None => out.push_str("(none: zebrad is not running or has not answered yet)\n"),
-    }
+    let _ = writeln!(out, "Nodes: {}", nodes.len());
 
     section(&mut out, "Settings");
     let redacted = Settings {
@@ -206,23 +201,187 @@ pub fn bundle(
         }
     }
 
-    section(&mut out, "zebrad.toml");
-    let config = paths.zebrad_config();
-    let _ = writeln!(out, "# {}", config.display());
-    match fs::read_to_string(&config) {
-        Ok(text) => push_block(&mut out, &text),
-        Err(err) => {
-            let _ = writeln!(out, "(could not read it: {err})");
-        }
-    }
-
     section(&mut out, &format!("launcher log, last {TAIL_LINES} lines"));
     push_block(
         &mut out,
         &log_tail(latest_launcher_log(&paths.launcher_log())),
     );
-    section(&mut out, &format!("zebrad log, last {TAIL_LINES} lines"));
-    push_block(&mut out, &log_tail(Some(paths.zebrad_log())));
+
+    for node in nodes {
+        let name = format!("{} ({})", node.info.name, node.info.id);
+        section(&mut out, &name);
+        out.push_str(&to_json(node.info));
+        // The supervisor's grace is fixed at launch; a changed setting applies
+        // to the next one.
+        let _ = writeln!(
+            out,
+            "Stop grace: {} s in effect, {} s in the node's settings",
+            node.stop_grace.as_secs(),
+            node.info.stop_grace_secs
+        );
+
+        section(&mut out, &format!("{name}: status"));
+        out.push_str(&to_json(node.status));
+
+        section(
+            &mut out,
+            &format!("{name}: stale zebrad from an earlier launcher run"),
+        );
+        match &node.status.stale {
+            Some(stale) => {
+                let _ = writeln!(out, "pid {} ({})", stale.pid, stale.binary);
+            }
+            None => out.push_str("(none)\n"),
+        }
+
+        section(&mut out, &format!("{name}: node stats"));
+        match node.stats {
+            Some(stats) => out.push_str(&to_json(stats)),
+            None => out.push_str("(none: zebrad is not running or has not answered yet)\n"),
+        }
+
+        section(&mut out, &format!("{name}: resources"));
+        push_tree(&mut out, node.resources);
+
+        section(&mut out, &format!("{name}: zebrad.toml"));
+        let config = node.paths.zebrad_config();
+        let _ = writeln!(out, "# {}", config.display());
+        match fs::read_to_string(&config) {
+            Ok(text) => push_block(&mut out, &text),
+            Err(err) => {
+                let _ = writeln!(out, "(could not read it: {err})");
+            }
+        }
+
+        section(
+            &mut out,
+            &format!("{name}: zebrad log, last {TAIL_LINES} lines"),
+        );
+        push_block(&mut out, &log_tail(Some(node.paths.zebrad_log())));
+    }
+    out
+}
+
+/// `bytes` as GiB with two decimals, beside the exact count.
+fn gib(bytes: u64) -> String {
+    format!("{:.2} GiB", bytes as f64 / f64::from(1u32 << 30))
+}
+
+/// A byte count that may be missing.
+fn byte_count(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| "unknown".to_owned(), |bytes| format!("{bytes} bytes"))
+}
+
+/// The newest sample of a node's process tree, one line per process; `None` while there is
+/// none.
+fn push_tree(out: &mut String, node: Option<&NodeResources>) {
+    match node {
+        Some(node) => {
+            let _ = writeln!(
+                out,
+                "Process tree ({:?}): run {}, read {}, {:.1} s after the spawn",
+                node.platform,
+                node.run,
+                clock::rfc3339(node.at),
+                node.run_secs
+            );
+            let rate = node
+                .cpu_cores
+                .map_or_else(|| "unknown".to_owned(), |cores| format!("{cores:.2}"));
+            let _ = writeln!(
+                out,
+                "CPU: {:.2} s in total, {rate} cores over the last interval",
+                node.cpu_secs
+            );
+            let _ = writeln!(
+                out,
+                "Memory: {} bytes ({}), peak {} bytes ({}){}",
+                node.memory_bytes,
+                gib(node.memory_bytes),
+                node.peak_memory_bytes,
+                gib(node.peak_memory_bytes),
+                node.committed_bytes
+                    .map(|committed| format!(", committed {committed} bytes"))
+                    .unwrap_or_default()
+            );
+            let _ = writeln!(
+                out,
+                "{}: {} read, {} written",
+                node.platform.io_label(),
+                byte_count(node.read_bytes),
+                byte_count(node.written_bytes)
+            );
+            let count =
+                |value: Option<u32>| value.map_or_else(|| "unknown".to_owned(), |v| v.to_string());
+            let _ = writeln!(
+                out,
+                "Processes: {}, threads {}, {} {}",
+                node.processes,
+                count(node.threads),
+                node.platform.descriptors_label(),
+                count(node.descriptors)
+            );
+            for member in &node.members {
+                let parent = member
+                    .parent
+                    .map(|parent| format!(" (parent {parent})"))
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    out,
+                    "  pid {}{parent} {}: started {}, CPU {:.2} s, memory {}, read {}, written {}, threads {}",
+                    member.pid,
+                    member.name,
+                    clock::rfc3339(member.started_at),
+                    member.cpu_secs,
+                    byte_count(member.memory_bytes),
+                    byte_count(member.read_bytes),
+                    byte_count(member.written_bytes),
+                    count(member.threads)
+                );
+            }
+            let listed = u32::try_from(node.members.len()).unwrap_or(u32::MAX);
+            if node.processes > listed {
+                let _ = writeln!(out, "  and {} more", node.processes - listed);
+            }
+        }
+        None => {
+            out.push_str("(none: zebrad is not running, or this platform is not measured yet)\n")
+        }
+    }
+}
+
+/// The "Computer" section that `copy_diagnostics` appends after the nodes' parts: the
+/// computer's newest sample, `None` while there is none.
+pub fn machine_section(machine: Option<&MachineResources>) -> String {
+    let mut out = String::from("\n== Computer ==\n");
+    match machine {
+        Some(machine) => {
+            let busy = machine
+                .cpu_busy_cores
+                .map_or_else(|| "unknown".to_owned(), |busy| format!("{busy:.2}"));
+            let available = machine
+                .memory_available_bytes
+                .map_or_else(|| "unknown".to_owned(), gib);
+            let _ = write!(
+                out,
+                "{} logical CPUs, {busy} busy over the last interval; memory {}, {available} available",
+                machine.logical_cpus,
+                gib(machine.memory_total_bytes)
+            );
+            if let (Some(used), Some(total)) = (machine.swap_used_bytes, machine.swap_total_bytes) {
+                let _ = write!(out, "; swap {} of {}", gib(used), gib(total));
+            }
+            if let (Some(commit), Some(limit)) = (machine.commit_bytes, machine.commit_limit_bytes)
+            {
+                let _ = write!(out, "; committed {} of {}", gib(commit), gib(limit));
+            }
+            if let Some(pressure) = machine.pressure {
+                let _ = write!(out, "; memory pressure {}", pressure.as_str());
+            }
+            out.push('\n');
+        }
+        None => out.push_str("(none: this platform is not measured yet)\n"),
+    }
     out
 }
 
@@ -251,9 +410,10 @@ fn push_block(out: &mut String, text: &str) {
 mod tests {
     use std::time::SystemTime;
 
-    use launcher_types::{EosInfo, StaleProcessInfo};
+    use launcher_types::{EosInfo, Network, NodeId, Platform, ProcessUsage, StaleProcessInfo};
 
     use super::*;
+    use crate::nodes::{NodeLayout, NodeSpec};
 
     #[test]
     fn versions_are_filled_in() {
@@ -380,13 +540,57 @@ mod tests {
         }
     }
 
+    /// A sample of a tree of three processes, two of them listed.
+    fn sample() -> NodeResources {
+        let member = |pid, parent, name: &str| ProcessUsage {
+            pid,
+            parent,
+            name: name.into(),
+            started_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_799_996_400),
+            cpu_secs: 12.5,
+            memory_bytes: Some(1 << 30),
+            read_bytes: Some(1000),
+            written_bytes: None,
+            threads: Some(68),
+        };
+        NodeResources {
+            run: 2,
+            at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+            run_secs: 3600.0,
+            platform: Platform::Linux,
+            cpu_secs: 7200.0,
+            cpu_cores: Some(2.0),
+            memory_bytes: 3 << 30,
+            peak_memory_bytes: 4 << 30,
+            committed_bytes: None,
+            read_bytes: Some(5000),
+            written_bytes: Some(6000),
+            processes: 3,
+            threads: Some(70),
+            descriptors: Some(412),
+            members: vec![member(4242, None, "zebrad"), member(4300, Some(4242), "sh")],
+        }
+    }
+
     #[test]
     fn bundle_has_every_section_and_no_cookie() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = Paths::under(dir.path());
         paths.ensure_dirs().expect("dirs");
-        fs::write(paths.zebrad_config(), "[network]\nnetwork = \"Mainnet\"\n").expect("config");
-        fs::write(paths.rpc_cookie_file(), "__cookie__:supersecretcookie").expect("cookie");
+        let first = NodeSpec {
+            stop_grace_secs: 90,
+            ..NodeSpec::first(Network::Mainnet)
+        };
+        let second = NodeSpec {
+            id: NodeId::new("zebrad-testnet").unwrap(),
+            layout: NodeLayout::Folder,
+            ..NodeSpec::first(Network::Testnet)
+        };
+        let (main, test) = (first.paths(&paths), second.paths(&paths));
+        test.ensure_dirs().expect("node dirs");
+        fs::write(main.zebrad_config(), "[network]\nnetwork = \"Mainnet\"\n").expect("config");
+        fs::write(test.zebrad_config(), "[network]\nnetwork = \"Testnet\"\n").expect("config");
+        fs::write(main.rpc_cookie_file(), "__cookie__:supersecretcookie").expect("cookie");
         // The newest dated launcher log is the one included, not the plain file.
         fs::write(paths.launcher_log(), "plain launcher line\n").expect("launcher log");
         fs::write(
@@ -394,7 +598,8 @@ mod tests {
             "dated launcher line\n",
         )
         .expect("dated launcher log");
-        fs::write(paths.zebrad_log(), "zebrad line").expect("zebrad log");
+        fs::write(main.zebrad_log(), "zebrad line").expect("zebrad log");
+        fs::write(test.zebrad_log(), "testnet line").expect("zebrad log");
         updates::save_record(
             &updates::record_path(&paths),
             &updates::UpdaterRecord {
@@ -410,6 +615,7 @@ mod tests {
                 from_version: "0.1.0".into(),
                 to_version: "0.2.0".into(),
                 zebrad_was_running: true,
+                running_nodes: Vec::new(),
                 written_at: SystemTime::UNIX_EPOCH,
             },
         )
@@ -419,7 +625,6 @@ mod tests {
 
         let settings = Settings {
             grafana_url: Some("http://user:pw@127.0.0.1:3000/d/zebra".into()),
-            stop_grace_secs: 90,
             ..Settings::default()
         };
         let status = Status {
@@ -429,13 +634,32 @@ mod tests {
             }),
             ..Status::default()
         };
+        let (info_a, info_b) = (first.info(&paths), second.info(&paths));
+        let stats = stats();
+        let resources = sample();
+        let idle = Status::default();
         let text = bundle(
             &paths,
-            &status,
             &settings,
-            Some(&stats()),
+            &[
+                NodeReport {
+                    info: &info_a,
+                    paths: &main,
+                    status: &status,
+                    stats: Some(&stats),
+                    resources: Some(&resources),
+                    stop_grace: Duration::from_secs(60),
+                },
+                NodeReport {
+                    info: &info_b,
+                    paths: &test,
+                    status: &idle,
+                    stats: None,
+                    resources: None,
+                    stop_grace: Duration::from_secs(60),
+                },
+            ],
             Some(&sidecar),
-            Duration::from_secs(60),
         );
         for needle in [
             &format!(
@@ -444,7 +668,9 @@ mod tests {
             ),
             std::env::consts::OS,
             &format!("zebrad binary: {}", sidecar.display()),
-            "Stop grace: 60 s in effect, 90 s in the settings",
+            "Nodes: 2",
+            "== Zebra · Mainnet (zebrad-mainnet) ==",
+            "Stop grace: 60 s in effect, 90 s in the node's settings",
             "\"phase\": \"stopped\"",
             "pid 4242 (/old/zebrad)",
             "\"height\": 2500000",
@@ -454,6 +680,13 @@ mod tests {
             "network = \"Mainnet\"",
             "dated launcher line",
             "zebrad line",
+            "== Zebra · Testnet (zebrad-testnet): zebrad.toml ==",
+            "network = \"Testnet\"",
+            "testnet line",
+            "== Zebra · Testnet (zebrad-testnet): node stats ==\n(none: zebrad is not running",
+            "== Zebra · Mainnet (zebrad-mainnet): resources ==\nProcess tree (Linux): run 2,",
+            "  pid 4300 (parent 4242) sh: started",
+            "== Zebra · Testnet (zebrad-testnet): resources ==\n(none: zebrad is not running",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }
@@ -464,22 +697,75 @@ mod tests {
     }
 
     #[test]
+    fn the_process_tree_lists_each_process_and_the_computer_has_a_section() {
+        let mut text = String::new();
+        push_tree(&mut text, Some(&sample()));
+        assert_eq!(
+            text,
+            "Process tree (Linux): run 2, read 2027-01-15T08:00:00.000000Z, 3600.0 s after the spawn\n\
+             CPU: 7200.00 s in total, 2.00 cores over the last interval\n\
+             Memory: 3221225472 bytes (3.00 GiB), peak 4294967296 bytes (4.00 GiB)\n\
+             Disk: 5000 bytes read, 6000 bytes written\n\
+             Processes: 3, threads 70, open files 412\n  \
+             pid 4242 zebrad: started 2027-01-15T07:00:00.000000Z, CPU 12.50 s, memory 1073741824 bytes, read 1000 bytes, written unknown, threads 68\n  \
+             pid 4300 (parent 4242) sh: started 2027-01-15T07:00:00.000000Z, CPU 12.50 s, memory 1073741824 bytes, read 1000 bytes, written unknown, threads 68\n  \
+             and 1 more\n"
+        );
+        let mut empty = String::new();
+        push_tree(&mut empty, None);
+        assert!(empty.starts_with("(none: "), "{empty}");
+
+        let machine = MachineResources {
+            at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+            logical_cpus: 8,
+            cpu_busy_cores: Some(2.5),
+            memory_total_bytes: 16 << 30,
+            memory_available_bytes: Some(4 << 30),
+            swap_total_bytes: Some(2 << 30),
+            swap_used_bytes: Some(0),
+            commit_bytes: None,
+            commit_limit_bytes: None,
+            pressure: None,
+        };
+        assert_eq!(
+            machine_section(Some(&machine)),
+            "\n== Computer ==\n\
+             8 logical CPUs, 2.50 busy over the last interval; memory 16.00 GiB, 4.00 GiB available; swap 0.00 GiB of 2.00 GiB\n"
+        );
+        assert_eq!(
+            machine_section(None),
+            "\n== Computer ==\n(none: this platform is not measured yet)\n"
+        );
+    }
+
+    #[test]
     fn bundle_says_what_is_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = Paths::under(dir.path());
         let missing_sidecar = dir.path().join("zeal-zebrad");
+        let first = NodeSpec::first(Network::Mainnet);
+        let info = first.info(&paths);
+        let node = first.paths(&paths);
+        let status = Status::default();
+        let report = || NodeReport {
+            info: &info,
+            paths: &node,
+            status: &status,
+            stats: None,
+            resources: None,
+            stop_grace: Duration::from_secs(60),
+        };
         let text = bundle(
             &paths,
-            &Status::default(),
             &Settings::default(),
-            None,
+            &[report()],
             Some(&missing_sidecar),
-            Duration::from_secs(60),
         );
         for needle in [
             &format!("zebrad binary: {} (missing)", missing_sidecar.display()),
-            "== Stale zebrad from an earlier launcher run ==\n(none)",
-            "== Node stats ==\n(none: zebrad is not running or has not answered yet)",
+            "== Zebra · Mainnet (zebrad-mainnet): stale zebrad from an earlier launcher run ==\n(none)",
+            "== Zebra · Mainnet (zebrad-mainnet): node stats ==\n(none: zebrad is not running or has not answered yet)",
+            "== Zebra · Mainnet (zebrad-mainnet): resources ==\n(none: zebrad is not running, or this platform is not measured yet)",
             "\"last_successful_check\": null",
             "== Pending update marker ==",
             "(no log file yet)",
@@ -491,7 +777,7 @@ mod tests {
         assert!(
             text.contains(&format!(
                 "(could not read {}: ",
-                paths.zebrad_log().display()
+                paths.launcher_node().zebrad_log().display()
             )),
             "{text}"
         );
@@ -500,17 +786,13 @@ mod tests {
             2,
             "stale and marker: {text}"
         );
-        assert!(text.contains("== zebrad.toml ==\n#"), "{text}");
+        assert!(
+            text.contains("== Zebra · Mainnet (zebrad-mainnet): zebrad.toml ==\n#"),
+            "{text}"
+        );
         assert!(text.contains("(could not read it: "), "{text}");
 
-        let text = bundle(
-            &paths,
-            &Status::default(),
-            &Settings::default(),
-            None,
-            None,
-            Duration::from_secs(60),
-        );
+        let text = bundle(&paths, &Settings::default(), &[report()], None);
         assert!(text.contains("zebrad binary: (unknown)"), "{text}");
     }
 }

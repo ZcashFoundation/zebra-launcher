@@ -111,7 +111,7 @@ fn primary_view() -> NodeView {
     let network = stats
         .as_ref()
         .and_then(|stats| network_of(&stats.chain))
-        .unwrap_or_else(|| mock.settings.with_untracked(|settings| settings.network));
+        .unwrap_or_else(|| mock.info.with_untracked(|info| info.network));
     NodeView {
         id: NodeId::suggest(NodeKind::Zebrad, network, &Vec::new()),
         network,

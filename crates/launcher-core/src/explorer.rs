@@ -4,7 +4,7 @@
 //! ```text
 //!   ExplorerHandle ──Command──▶ actor ──▶ watch<ExplorerLiveEvent> ──▶ event explorer_live
 //!   watch<Status>, watch<NodeStats>,       │  ▲
-//!   watch<NodeDetails>, watch<Settings> ─▶ │  │ reads (merged, cached, scheduled)
+//!   watch<NodeDetails>, watch<NodeSpec> ─▶ │  │ reads (merged, cached, scheduled)
 //!                                          ▼  │
 //!                    request tasks ──▶ fetch tasks ──▶ ChainSource (zebrad's RPC)
 //! ```
@@ -34,12 +34,12 @@ mod tests;
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use launcher_types::{
-    NodeDetails, NodeId, NodeStats, Settings, Status,
+    NodeDetails, NodeId, NodeStats, Status,
     explorer::{ExplorerCall, ExplorerError, ExplorerErrorKind, ExplorerLiveEvent, ExplorerReply},
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::rpc::RpcError;
+use crate::{nodes::NodeSpec, rpc::RpcError};
 use source::{ChainSource, RpcSource};
 
 /// What the explorer follows.
@@ -51,8 +51,8 @@ pub struct ExplorerInputs {
     pub stats: watch::Receiver<Option<NodeStats>>,
     /// The monitor's details: the network upgrades' heights.
     pub details: watch::Receiver<Option<NodeDetails>>,
-    /// The settings: the network, before zebrad reports one.
-    pub settings: watch::Receiver<Settings>,
+    /// The node's spec: its network, before zebrad reports one.
+    pub spec: watch::Receiver<NodeSpec>,
 }
 
 /// How the explorer runs.

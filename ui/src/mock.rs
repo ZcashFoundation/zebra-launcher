@@ -3,7 +3,8 @@
 //!
 //! The fake state lives in reference-counted signals; commands change it after short delays to
 //! mimic zebrad starting and stopping. The log corpus is in [`log_lines`], the updater in
-//! [`updates`] and the `zebrad.toml` simulation in [`config`].
+//! [`updates`], the `zebrad.toml` simulation in [`config`] and the resource samples in
+//! [`resources`].
 //!
 //! # URL flags
 //!
@@ -26,7 +27,12 @@
 //! | `?stalled` | The sync stalls: the height stops moving while the tip estimate creeps on, no blocks are committed, and zebrad's progress lines report the stall (the verdict's "Sync stalled"). |
 //! | `?nopeers` | zebrad finds no peers: 0 peers in every sample and gauge, an empty peer list, the initial connections fail and the log waits for ready peers (the verdict's "No peers" once two minutes of samples agree). |
 //! | `?crashloop` | zebrad panics about 15 s after every start and the launcher restarts it after a backoff that doubles (5, 10, 20 s): "zebrad crashed", then "Crash loop" from the third crash, with the exits and restarts in the log and on the timeline. |
-//! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). |
+//! | `?os=macos`, `?os=windows` | The resource samples report that platform's figures: memory pressure on macOS; commit, handles and no thread counts on Windows ([`resources`]). Linux is the default. |
+//! | `?children` | zebrad runs a `block_notify_command` in cycles of three resource samples: an `sh` with `notify-block` under it, then also 40 `curl`s, more than a sample lists ("and 11 more"), then `notify-block` alone, orphaned ([`resources::block_notify`]). |
+//! | `?unreadable` | The resource samples report CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk tile "the system does not report them". |
+//! | `?readerpanic` | The resource reader panics 30 s into the first run: the samples stop while zebrad keeps running, so the Resources card says it is not measured until zebrad's next run, which Restart starts ([`resources::reader_panicked`]). |
+//! | `?leftover` | Removing a node with its chain state deleted takes it off the list but leaves its folder behind, as when the backend cannot delete a file: the error banner names the folder. |
+//! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). Each node's process tree has samples of its own, and the computer has 16 CPUs and 32 GiB ([`resources`]). |
 //! | `?attip` | zebrad is at the tip near 3,551,000 (past NU7) and mines a block every 25 s, so the Explorer shows Ironwood, the burn and the shielded budget. The end of support keeps its distance above the tip. |
 //! | `?tip=<h>` | Like `?attip`, at height `h`, a block per the era's target spacing. |
 //! | `?explorer=slow` | Every Explorer answer takes 300 to 800 ms ([`explorer`]). |
@@ -42,10 +48,12 @@ mod config;
 mod details;
 mod log_lines;
 mod metrics;
+mod resources;
 mod updates;
 
 pub mod explorer;
 pub mod herd;
+pub mod nodes;
 
 use std::{
     sync::{
@@ -56,20 +64,20 @@ use std::{
 };
 
 use launcher_types::{
-    ConfigDocument, DataDirChoice, EosInfo, ExitClass, ExitInfo, FirstRunInfo, ImportOutcome,
-    LegacyInstall, LogLevel, LogLine, LogStream, MetricsSnapshot, NodeDetails, NodeStats,
-    OpenTarget, Phase, Settings, StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo,
-    UpdateMode, UpdateState,
+    ConfigDocument, EosInfo, ExitClass, ExitInfo, FirstRunInfo, ImportOutcome, LegacyInstall,
+    LogLevel, LogLine, LogStream, MachineResources, MetricsSnapshot, NodeDataDirChoice,
+    NodeDetails, NodeId, NodeInfo, NodeResources, NodeStats, OpenTarget, Phase, Settings,
+    StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo, UpdateMode, UpdateState,
 };
 use leptos::prelude::*;
 
 use crate::{clock, format};
 
 use config::SAMPLE_CONFIG;
-pub use config::{apply_config, read_config, reset_config};
 use log_lines::sample_line;
 use metrics::MetricsInput;
-pub use metrics::{get_metrics, on_metrics};
+use resources::{MockTree, OsFlag};
+pub use resources::{get_machine_resources, on_machine_resources};
 use updates::{MOCK_RELEASES_URL, MOCK_VERSION, UpdateFlag, health_failure};
 pub use updates::{
     cancel_update, check_for_update, get_update_info, install_update, on_update_health_failed,
@@ -176,6 +184,18 @@ struct Flags {
     explorer: ExplorerFlag,
     /// `?reorg`.
     reorg: bool,
+    /// `?os=…`.
+    os: OsFlag,
+    /// `?children`.
+    children: bool,
+    /// `?unreadable`.
+    unreadable: bool,
+    /// `?readerpanic`.
+    reader_panic: bool,
+    /// `?leftover`.
+    leftover: bool,
+    /// `?herd`.
+    herd: bool,
 }
 
 impl Flags {
@@ -210,6 +230,12 @@ impl Flags {
             stalled: flag("stalled"),
             no_peers: flag("nopeers"),
             crash_loop: flag("crashloop"),
+            os: OsFlag::parse(value("os")),
+            children: flag("children"),
+            unreadable: flag("unreadable"),
+            reader_panic: flag("readerpanic"),
+            leftover: flag("leftover"),
+            herd: flag("herd"),
             tip: value("tip")
                 .and_then(|tip| tip.parse().ok())
                 .or_else(|| flag("attip").then_some(AT_TIP_HEIGHT)),
@@ -302,12 +328,22 @@ impl EosFlag {
 
 #[derive(Clone)]
 struct Mock {
+    /// The main node: who it is and where it keeps its files.
+    info: ArcRwSignal<NodeInfo>,
     status: ArcRwSignal<Status>,
     stats: ArcRwSignal<Option<NodeStats>>,
     /// The details behind the statistics, published with every stats tick.
     details: ArcRwSignal<Option<NodeDetails>>,
     /// zebrad's metrics page, refreshed every tenth stats tick while running.
     metrics: ArcRwSignal<Option<MetricsSnapshot>>,
+    /// zebrad's process tree, every 5 s while it has a pid ([`resources`]).
+    resources: ArcRwSignal<Option<NodeResources>>,
+    /// The current or last run behind `resources`.
+    tree: ArcRwSignal<Option<MockTree>>,
+    /// The computer, every 5 s.
+    machine: ArcRwSignal<Option<MachineResources>>,
+    /// Seconds of resource ticks so far, for their 5 s cadence.
+    resource_seconds: Arc<AtomicU64>,
     /// Stats ticks so far, for the metrics cadence and its moving values.
     ticks: Arc<AtomicU64>,
     settings: ArcRwSignal<Settings>,
@@ -361,14 +397,22 @@ impl Mock {
         let first_run = flags.first_run;
         let update_mode = flags.update.map_or(UpdateMode::Off, UpdateFlag::mode);
         let mock = Self {
+            info: ArcRwSignal::new(nodes::first_node(if flags.stored_dir {
+                STORED_DATA_DIR
+            } else {
+                DEFAULT_DATA_DIR
+            })),
             status: ArcRwSignal::new(Status::default()),
             stats: ArcRwSignal::new(None),
             details: ArcRwSignal::new(None),
             metrics: ArcRwSignal::new(None),
+            resources: ArcRwSignal::new(None),
+            tree: ArcRwSignal::new(None),
+            machine: ArcRwSignal::new(None),
+            resource_seconds: Arc::new(AtomicU64::new(0)),
             ticks: Arc::new(AtomicU64::new(0)),
             settings: ArcRwSignal::new(Settings {
                 first_run_done: !first_run,
-                data_dir: flags.stored_dir.then(|| STORED_DATA_DIR.into()),
                 update_mode,
                 ..Settings::default()
             }),
@@ -428,6 +472,9 @@ impl Mock {
         }
         let ticker = mock.clone();
         set_interval(move || ticker.tick_stats(), Duration::from_secs(1));
+        mock.tick_resources();
+        let ticker = mock.clone();
+        set_interval(move || ticker.tick_resources(), Duration::from_secs(1));
         match flags.update {
             Some(UpdateFlag::Downloading) => mock.download(),
             Some(UpdateFlag::Countdown) => mock.count_down(),
@@ -465,13 +512,10 @@ impl Mock {
         }
     }
 
-    /// The current state directory, as the backend derives it.
+    /// The main node's state directory, as the backend derives it.
     fn state_dir(&self) -> String {
-        let data_dir = self
-            .settings
-            .with_untracked(|settings| settings.data_dir.clone())
-            .unwrap_or_else(|| DEFAULT_DATA_DIR.into());
-        format::state_dir(&data_dir)
+        self.info
+            .with_untracked(|info| format::state_dir(&info.data_dir))
     }
 
     /// Runs `step` after `delay` unless another command was issued in between.
@@ -799,35 +843,17 @@ async fn sleep(millis: i32) {
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
-/// Calls `handler` with every status change, starting with the current one.
-pub fn on_status(handler: impl Fn(Status) + 'static) {
-    let status = mock().status;
-    Effect::new(move |_| handler(status.get()));
-}
-
-/// Calls `handler` with every node stats change, starting with the current value.
-pub fn on_node_stats(handler: impl Fn(Option<NodeStats>) + 'static) {
-    let stats = mock().stats;
-    Effect::new(move |_| handler(stats.get()));
-}
-
-/// Calls `handler` with every node details change, starting with the current value.
-pub fn on_node_details(handler: impl Fn(Option<NodeDetails>) + 'static) {
-    let details = mock().details;
-    Effect::new(move |_| handler(details.get()));
-}
-
-pub async fn get_node_details() -> Option<NodeDetails> {
+async fn get_node_details() -> Option<NodeDetails> {
     sleep(50).await;
     mock().details.get_untracked()
 }
 
-pub async fn get_status() -> Status {
+async fn get_status() -> Status {
     sleep(50).await;
     mock().status.get_untracked()
 }
 
-pub async fn start_zebrad() -> Result<(), String> {
+async fn start_zebrad() -> Result<(), String> {
     sleep(100).await;
     let mock = mock();
     if let Some(stale) = mock.status.with_untracked(|status| status.stale.clone()) {
@@ -845,7 +871,7 @@ pub async fn start_zebrad() -> Result<(), String> {
     Ok(())
 }
 
-pub async fn start_zebrad_killing_stale() {
+async fn start_zebrad_killing_stale() {
     sleep(500).await;
     let mock = mock();
     mock.status.update(|status| status.stale = None);
@@ -854,12 +880,12 @@ pub async fn start_zebrad_killing_stale() {
     }
 }
 
-pub async fn stop_zebrad() {
+async fn stop_zebrad() {
     sleep(100).await;
     mock().stop(false);
 }
 
-pub async fn restart_zebrad() {
+async fn restart_zebrad() {
     sleep(100).await;
     mock().stop(true);
 }
@@ -867,7 +893,7 @@ pub async fn restart_zebrad() {
 /// Streams batches of sample lines while zebrad is "running", skipping a few sequence numbers
 /// now and then to show the dropped-lines marker. The launcher's notes and zebrad's shutdown
 /// and panic lines, queued by the commands, go out with the next batch, whatever the phase.
-pub fn subscribe_logs(on_batch: impl Fn(Vec<LogLine>) + 'static) {
+fn subscribe_logs(on_batch: impl Fn(Vec<LogLine>) + 'static) {
     let mock = mock();
     let batches = AtomicU64::new(0);
     set_interval(
@@ -904,12 +930,10 @@ pub async fn get_settings() -> Settings {
 pub async fn set_settings(settings: Settings) -> Settings {
     sleep(200).await;
     let mock = mock();
-    // Like the real backend: `first_run_done` is only set by `complete_first_run` and
-    // `data_dir` only by `choose_data_dir`.
+    // Like the real backend: `first_run_done` is only set by `complete_first_run`.
     let stored = mock.settings.with_untracked(|current| Settings {
         first_run_done: current.first_run_done,
         schema_version: current.schema_version,
-        data_dir: current.data_dir.clone(),
         ..settings
     });
     mock.settings.set(stored.clone());
@@ -927,7 +951,7 @@ pub async fn set_settings(settings: Settings) -> Settings {
     stored
 }
 
-pub async fn get_node_stats() -> Option<NodeStats> {
+async fn get_node_stats() -> Option<NodeStats> {
     sleep(50).await;
     mock().stats.get_untracked()
 }
@@ -949,19 +973,18 @@ pub async fn pick_data_dir() -> Option<String> {
     Some(PICKED_DATA_DIR.into())
 }
 
-pub async fn choose_data_dir(path: String) -> Result<DataDirChoice, String> {
+/// The main node's data folder, as `choose_data_dir` sets it.
+async fn choose_data_dir(path: String) -> Result<NodeDataDirChoice, String> {
     sleep(200).await;
     let mock = mock();
     mock.require_stopped()?;
     let chosen = path.trim().trim_end_matches('/').to_string();
     if chosen.is_empty() {
-        return Err("cannot use \"\" as the data directory: no such directory".into());
+        return Err("cannot use \"\" as the data folder: no such directory".into());
     }
-    let is_default = chosen == DEFAULT_DATA_DIR;
-    mock.settings
-        .update(|settings| settings.data_dir = (!is_default).then(|| chosen.clone()));
-    Ok(DataDirChoice {
-        settings: mock.settings.get_untracked(),
+    mock.info.update(|info| info.data_dir = chosen.clone());
+    Ok(NodeDataDirChoice {
+        node: mock.info.get_untracked(),
         free_bytes: Some(match chosen.as_str() {
             DEFAULT_DATA_DIR => FREE_AT_DEFAULT,
             PICKED_DATA_DIR => FREE_AT_PICKED,
@@ -974,12 +997,17 @@ pub async fn free_space(path: String) -> Option<u64> {
     // Slower than `get_first_run_info`, so the wizard's data step shows "checking" while Next
     // is already enabled.
     sleep(1500).await;
-    let path = path.trim().trim_end_matches('/');
-    match path {
-        DEFAULT_DATA_DIR => Some(FREE_AT_DEFAULT),
-        PICKED_DATA_DIR => Some(FREE_AT_PICKED),
-        _ if path.starts_with('/') => Some(FREE_ELSEWHERE),
-        _ => None,
+    // A folder inside one of the mock's folders is on the same drive, as a new node's own
+    // folder in the launcher's data folder is.
+    let path = std::path::Path::new(path.trim());
+    if path.starts_with(DEFAULT_DATA_DIR) {
+        Some(FREE_AT_DEFAULT)
+    } else if path.starts_with(PICKED_DATA_DIR) {
+        Some(FREE_AT_PICKED)
+    } else if path.is_absolute() {
+        Some(FREE_ELSEWHERE)
+    } else {
+        None
     }
 }
 
@@ -1025,7 +1053,7 @@ pub async fn delete_legacy_state() -> Result<u64, String> {
     Ok(state_bytes)
 }
 
-pub async fn delete_node_data() -> Result<u64, String> {
+async fn delete_node_data() -> Result<u64, String> {
     sleep(700).await;
     let mock = mock();
     mock.require_stopped()?;
@@ -1041,18 +1069,28 @@ pub async fn copy_diagnostics() -> String {
         .and_then(|window| window.navigator().user_agent().ok())
         .unwrap_or_default();
     let config = mock.config.with_untracked(|config| config.text.clone());
+    let nodes: Vec<String> = nodes::list_nodes()
+        .await
+        .into_iter()
+        .map(|node| format!("{} ({}, {})", node.name, node.id, node.network))
+        .collect();
     format!(
         "Zeal 0.1.0 (zebrad 7.0.0) [mock]\n\
          OS: {user_agent}\n\
-         Phase: {phase:?}\n\
+         Nodes: {}\n\
          Settings: {settings:?}\n\
          \n\
-         --- zebrad.toml ---\n\
+         --- {}: phase ---\n\
+         {phase:?}\n\
+         --- {}: zebrad.toml ---\n\
          {config}\n\
          --- launcher log (last lines) ---\n\
          (mock) INFO zeal: started\n\
          --- zebrad log (last lines) ---\n\
-         (mock) INFO zebrad::commands::start: Starting zebrad\n"
+         (mock) INFO zebrad::commands::start: Starting zebrad\n",
+        nodes.join(", "),
+        nodes.first().map_or("", String::as_str),
+        nodes.first().map_or("", String::as_str),
     )
 }
 
@@ -1063,9 +1101,9 @@ pub async fn complete_first_run() {
         .update(|settings| settings.first_run_done = true);
 }
 
-pub async fn open_path(target: OpenTarget) {
+pub async fn open_path(target: OpenTarget, node: Option<&NodeId>) {
     sleep(50).await;
-    leptos::logging::log!("(mock) open_path({target:?})");
+    leptos::logging::log!("(mock) open_path({target:?}, {node:?})");
 }
 
 #[cfg(test)]
@@ -1086,7 +1124,7 @@ mod tests {
         // Every flag in the module doc's table, combined.
         assert_eq!(
             Flags::parse(
-                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg"
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&os=windows&children&unreadable&readerpanic&leftover&herd"
             ),
             Flags {
                 first_run: true,
@@ -1104,6 +1142,12 @@ mod tests {
                 tip: Some(AT_TIP_HEIGHT),
                 explorer: ExplorerFlag::NoBlockInfo,
                 reorg: true,
+                os: OsFlag::Windows,
+                children: true,
+                unreadable: true,
+                reader_panic: true,
+                leftover: true,
+                herd: true,
             }
         );
         assert_eq!(Flags::parse("?tip=3100000").at_tip(), Some(3_100_000));
@@ -1120,9 +1164,10 @@ mod tests {
         );
         assert_eq!(Flags::parse("?crashloop").scenario(), Scenario::Normal);
         assert_eq!(Flags::parse("?eos=soon").eos, EosFlag::Soon);
+        assert_eq!(Flags::parse("?os=macos").os, OsFlag::Macos);
         // Unknown values and flags are ignored.
         assert_eq!(
-            Flags::parse("?eos=never&update=bogus&other"),
+            Flags::parse("?eos=never&update=bogus&os=plan9&other"),
             Flags::default()
         );
         for (value, flag) in [
