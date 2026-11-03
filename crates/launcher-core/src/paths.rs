@@ -9,6 +9,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use launcher_types::NodeId;
+
 /// The launcher's file layout under its per-user directories.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Paths {
@@ -61,6 +63,23 @@ impl Paths {
             config_dir: self.config_dir.clone(),
             data_dir: self.data_dir.clone(),
             log_dir: self.log_dir.clone(),
+        }
+    }
+
+    /// The folder that holds the nodes kept in a folder of their own.
+    pub fn nodes_dir(&self) -> PathBuf {
+        self.data_dir.join("nodes")
+    }
+
+    /// The files of a node kept in a folder of its own, `<data>/nodes/<id>`:
+    /// its `zebrad.toml`, pid file, RPC cookie, default chain state and log
+    /// all go there.
+    pub fn node_folder(&self, id: &NodeId) -> NodePaths {
+        let dir = self.nodes_dir().join(id.as_str());
+        NodePaths {
+            config_dir: dir.clone(),
+            data_dir: dir.clone(),
+            log_dir: dir,
         }
     }
 
@@ -157,6 +176,20 @@ impl NodePaths {
     pub fn zebrad_log(&self) -> PathBuf {
         self.log_dir.join("zebrad.log")
     }
+
+    /// Creates the node's directories: config, data, log and the RPC
+    /// cookie's.
+    pub fn ensure_dirs(&self) -> io::Result<()> {
+        for dir in [
+            self.config_dir.as_path(),
+            self.data_dir.as_path(),
+            self.log_dir.as_path(),
+            &self.rpc_cookie_dir(),
+        ] {
+            std::fs::create_dir_all(dir)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -192,6 +225,33 @@ mod tests {
                 "{path:?} is outside the base directories"
             );
         }
+    }
+
+    #[test]
+    fn a_node_folder_holds_all_of_its_files_and_nothing_of_the_launcher() {
+        let paths = Paths::under("/root");
+        let id = NodeId::new("zebrad-testnet").expect("valid id");
+        let node = paths.node_folder(&id);
+        let folder = paths.data_dir().join("nodes").join("zebrad-testnet");
+        for path in [
+            node.zebrad_config(),
+            node.zebrad_config_backup(),
+            node.pending_apply_marker(),
+            node.pidfile(),
+            node.rpc_cookie_file(),
+            node.default_state_dir(),
+            node.zebrad_log(),
+        ] {
+            assert!(path.starts_with(&folder), "{path:?}");
+        }
+        let first = paths.launcher_node();
+        assert_ne!(node.rpc_cookie_dir(), first.rpc_cookie_dir());
+        assert_ne!(node.default_state_dir(), first.default_state_dir());
+        assert!(
+            !node
+                .default_state_dir()
+                .starts_with(first.default_state_dir())
+        );
     }
 
     #[test]

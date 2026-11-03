@@ -500,7 +500,8 @@ impl Theme {
 pub struct Settings {
     /// The file format version. Files older than version 2 predate
     /// `first_run_done` and are migrated when loaded (see
-    /// [`Settings::first_run_done`]).
+    /// [`Settings::first_run_done`]); files older than version 3 ran a single
+    /// node, whose settings become the first node of the node list.
     pub schema_version: u32,
     /// How launcher updates are handled.
     pub update_mode: UpdateMode,
@@ -531,7 +532,7 @@ pub struct Settings {
 
 impl Settings {
     /// The current [`Settings::schema_version`].
-    pub const SCHEMA_VERSION: u32 = 2;
+    pub const SCHEMA_VERSION: u32 = 3;
 }
 
 /// The stop grace period a node gets unless the user sets another, in seconds.

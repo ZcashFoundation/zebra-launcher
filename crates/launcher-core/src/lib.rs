@@ -15,6 +15,7 @@ pub mod logfile;
 pub mod logs;
 pub mod metrics;
 pub mod monitor;
+pub mod nodes;
 pub mod paths;
 pub mod pidfile;
 pub mod policy;
