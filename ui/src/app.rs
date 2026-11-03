@@ -453,6 +453,22 @@ pub fn pick_in_scope(
         .or_else(|| networks.iter().position(|network| *network == scope))
 }
 
+/// Where the shell's network goes when the first node's network is `first` (`None` until the
+/// backend's list arrives) and was `last` before: to the first node's for the first list, and
+/// while it is the only node, when that changes (the first-run wizard or Settings). With
+/// several nodes the user picks the network with the tabs, and the first node may be another
+/// one after a removal, so its network moves nothing.
+fn follow_first_node(
+    last: Option<Network>,
+    first: Option<Network>,
+    several: bool,
+) -> Option<Network> {
+    let first = first?;
+    (last.is_none() || !several)
+        .then_some(first)
+        .filter(|&network| last != Some(network))
+}
+
 /// The network the window shows: the chosen scope with several nodes, the node's own with one.
 fn shown_network(state: AppState, herd: bool) -> Network {
     if herd {
@@ -769,16 +785,14 @@ pub fn App() -> impl IntoView {
     });
 
     // The shell shows the first node's network once the backend's list says which it is, and
-    // moves with it when the first-run wizard or Settings changes it. A change that keeps the
-    // network leaves the network the user picked.
+    // while it is the only node moves with it when the first-run wizard or Settings changes it
+    // ([`follow_first_node`]).
     Effect::new(move |last: Option<Option<Network>>| {
         let network = state
             .nodes_loaded
             .get()
             .then(|| state.first_node().info.with(|info| info.network));
-        if let Some(network) = network
-            && last.flatten() != Some(network)
-        {
+        if let Some(network) = follow_first_node(last.flatten(), network, state.herd()) {
             state.network.set(network);
         }
         network
@@ -965,6 +979,26 @@ mod tests {
         assert_eq!(pick_in_scope(None, &networks, Mainnet), Some(0));
         // A network without nodes has nothing to show.
         assert_eq!(pick_in_scope(Some(1), &[Mainnet, Mainnet], Testnet), None);
+    }
+
+    #[test]
+    fn the_shell_follows_the_first_nodes_network_for_the_first_list_and_one_node() {
+        use Network::{Mainnet, Testnet};
+        // Nothing to follow before the list arrives.
+        assert_eq!(follow_first_node(None, None, false), None);
+        // The first list: the first node's network, also with several nodes (a herd of
+        // Testnet nodes opens on Testnet).
+        assert_eq!(follow_first_node(None, Some(Testnet), true), Some(Testnet));
+        assert_eq!(follow_first_node(None, Some(Mainnet), false), Some(Mainnet));
+        // One node: the first-run wizard or Settings moved it.
+        assert_eq!(
+            follow_first_node(Some(Mainnet), Some(Testnet), false),
+            Some(Testnet)
+        );
+        assert_eq!(follow_first_node(Some(Mainnet), Some(Mainnet), false), None);
+        // Several nodes: removing the first one makes a Testnet node first, and the window
+        // stays on the network the user picked.
+        assert_eq!(follow_first_node(Some(Mainnet), Some(Testnet), true), None);
     }
 
     #[test]
