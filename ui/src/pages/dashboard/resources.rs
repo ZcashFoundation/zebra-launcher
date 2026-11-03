@@ -94,12 +94,18 @@ pub fn memory_detail(memory: u64, total: Option<u64>, peak: u64, committed: Opti
 }
 
 /// The Disk (or I/O) tile's value over the last minute, on two lines: `35.0 MB/s read`,
-/// `95.0 MB/s written`.
+/// `95.0 MB/s written`. A no-break space joins each figure to its unit, so a narrow tile
+/// breaks before the word, never inside the figure; the Processes tile does the same.
 pub fn io_value(read: Option<f64>, written: Option<f64>) -> String {
     match (read, written) {
         (None, None) => "—".to_owned(),
         (read, written) => {
-            let rate = |rate: Option<f64>| rate.map_or_else(|| "—".to_owned(), byte_rate);
+            let rate = |rate: Option<f64>| {
+                rate.map_or_else(
+                    || "—".to_owned(),
+                    |rate| byte_rate(rate).replace(' ', "\u{a0}"),
+                )
+            };
             format!("{} read\n{} written", rate(read), rate(written))
         }
     }
@@ -124,12 +130,15 @@ pub fn io_detail(read: Option<u64>, written: Option<u64>, platform: Platform) ->
 /// without a thread count.
 pub fn processes_value(processes: u32, threads: Option<u32>) -> String {
     let processes = match processes {
-        1 => "1 process".to_owned(),
-        n => format!("{} processes", thousands(u64::from(n))),
+        1 => "1\u{a0}process".to_owned(),
+        n => format!("{}\u{a0}processes", thousands(u64::from(n))),
     };
     match threads {
-        Some(1) => format!("{processes}\n1 thread"),
-        Some(threads) => format!("{processes}\n{} threads", thousands(u64::from(threads))),
+        Some(1) => format!("{processes}\n1\u{a0}thread"),
+        Some(threads) => format!(
+            "{processes}\n{}\u{a0}threads",
+            thousands(u64::from(threads))
+        ),
         None => processes,
     }
 }
@@ -620,9 +629,12 @@ mod tests {
         );
         assert_eq!(
             io_value(Some(35_000_000.0), Some(95_000_000.0)),
-            "35.0 MB/s read\n95.0 MB/s written"
+            "35.0\u{a0}MB/s read\n95.0\u{a0}MB/s written"
         );
-        assert_eq!(io_value(None, Some(1_000.0)), "— read\n1.0 kB/s written");
+        assert_eq!(
+            io_value(None, Some(1_000.0)),
+            "— read\n1.0\u{a0}kB/s written"
+        );
         assert_eq!(io_value(None, None), "—");
         assert_eq!(
             io_detail(Some(12_300_000_000), Some(40_100_000_000), Platform::Linux),
@@ -640,9 +652,16 @@ mod tests {
             io_detail(None, None, Platform::Linux),
             "the system does not report them"
         );
-        assert_eq!(processes_value(1, Some(68)), "1 process\n68 threads");
-        assert_eq!(processes_value(2, None), "2 processes");
-        assert_eq!(processes_value(1, Some(1)), "1 process\n1 thread");
+        assert_eq!(
+            processes_value(1, Some(68)),
+            "1\u{a0}process\n68\u{a0}threads"
+        );
+        assert_eq!(processes_value(2, None), "2\u{a0}processes");
+        assert_eq!(processes_value(1, Some(1)), "1\u{a0}process\n1\u{a0}thread");
+        assert_eq!(
+            processes_value(1_204, Some(12_000)),
+            "1,204\u{a0}processes\n12,000\u{a0}threads"
+        );
         assert_eq!(
             descriptors_detail(Some(412), Platform::Linux),
             "412 open files"

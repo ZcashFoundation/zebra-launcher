@@ -1380,6 +1380,9 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - The Disk and Processes tiles show their value on two lines, as in the sketch. The Disk
      tile's sparkline plots the write rate. While stopped, the tiles keep the last run's
      sparklines.
+   - The tiles stand four across on a page of 1200 px or more, two across under it and one
+     under 640 px, so each of the Disk tile's figures keeps a line. A no-break space joins
+     each figure to its unit, so a wider font breaks before the word, not inside the figure.
    - A rate since the spawn, or since a process started, is averaged over at least 1 s,
      like the backend's first CPU rate: the first sample comes within milliseconds of the
      spawn, when the exec may already have read from disk.

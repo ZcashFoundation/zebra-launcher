@@ -668,9 +668,10 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Resources card: four tiles in a row (two under 640 px), the process table, and the line
-   about the computer. Under 640 px the table keeps Process, CPU and Memory. The tile rule
-   comes after the tile row's, so it wins at every width. */
+/* Resources card: four tiles in a row, two across under 1200 px and stacked under 640 px, so
+   the Disk tile's two long figures keep a line each; the process table, which keeps Process,
+   CPU and Memory under 640 px; and the line about the computer. The tile rules come after the
+   tile row's, so they win at every width. */
 
 .dash-resources {
   margin-bottom: 12px;
@@ -706,9 +707,15 @@
   white-space: pre-line;
 }
 
-@container page (max-width: 640px) {
+@container page (max-width: 1200px) {
   .dash-resources-tiles {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container page (max-width: 640px) {
+  .dash-resources-tiles {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .dash-resources-processes .dash-resources-wide {
