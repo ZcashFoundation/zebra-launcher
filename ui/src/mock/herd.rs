@@ -484,6 +484,21 @@ pub fn add_node(info: NodeInfo) {
     HERD.with_borrow_mut(|herd| herd.push(node));
 }
 
+/// Takes a node off the list, once stopped; `delete_data` frees its chain. The bytes freed.
+pub fn remove(node: &NodeId, delete_data: bool) -> Option<u64> {
+    let removed = HERD.with_borrow_mut(|herd| {
+        let index = herd.iter().position(|candidate| &candidate.id() == node)?;
+        Some(herd.remove(index))
+    })?;
+    // The simulation stops with the node: it ticks only while running.
+    removed.generation.fetch_add(1, Ordering::Relaxed);
+    Some(if delete_data {
+        removed.height.load(Ordering::Relaxed) * 50_000
+    } else {
+        0
+    })
+}
+
 /// Replaces a node's info, as `update_node` does.
 pub fn set_info(node: &NodeId, info: NodeInfo) {
     if let Some(found) = find(node) {

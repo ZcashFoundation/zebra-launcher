@@ -28,14 +28,14 @@ use crate::{
     node_state::{self, NodeState},
     pages::{
         configure::Configure, dashboard::Dashboard, first_run::FirstRun, grafana::Grafana,
-        logs::Logs, overview::Overview, settings::SettingsPage,
+        logs::Logs, node_settings::NodeSettings, overview::Overview, settings::SettingsPage,
     },
     theme,
     update_text::update_needs_attention,
 };
 
-/// The pages: the five of the tab bar, and the overview of a launcher that runs several nodes,
-/// which the sidebar shows instead of the tab bar.
+/// The pages: the five of the tab bar, and the overview and a node's settings of a launcher
+/// that runs several nodes, which the sidebar and the node header show instead of the tab bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Overview,
@@ -43,6 +43,7 @@ pub enum Tab {
     Logs,
     Grafana,
     Configure,
+    NodeSettings,
     Settings,
 }
 
@@ -84,7 +85,9 @@ impl Tab {
     ];
 
     /// The pages about the selected node, as opposed to the overview and the launcher's own.
-    pub const NODE: [Tab; 3] = [Tab::Dashboard, Tab::Logs, Tab::Configure];
+    /// Node settings has a tab in the node header of several nodes only: with one node,
+    /// Settings holds what it would.
+    pub const NODE: [Tab; 4] = [Tab::Dashboard, Tab::Logs, Tab::Configure, Tab::NodeSettings];
 
     pub fn is_node_tab(self) -> bool {
         Tab::NODE.contains(&self)
@@ -97,6 +100,7 @@ impl Tab {
             Tab::Logs => "Logs",
             Tab::Grafana => "Grafana",
             Tab::Configure => "Configure",
+            Tab::NodeSettings => "Node settings",
             Tab::Settings => "Settings",
         }
     }
@@ -122,6 +126,7 @@ impl Tab {
             Tab::Logs => "logs",
             Tab::Grafana => "grafana",
             Tab::Configure => "configure",
+            Tab::NodeSettings => "node-settings",
             Tab::Settings => "settings",
         }
     }
@@ -166,7 +171,9 @@ impl Tab {
                     .with(|insights| insights.unseen_problems());
                 (unseen > 0).then_some(Badge::Count(unseen))
             }
-            Tab::Overview | Tab::Dashboard | Tab::Grafana | Tab::Configure => None,
+            Tab::Overview | Tab::Dashboard | Tab::Grafana | Tab::Configure | Tab::NodeSettings => {
+                None
+            }
         }
     }
 }
@@ -183,8 +190,8 @@ pub struct AppState {
     /// The launcher's own data folder (`FirstRunInfo::default_data_dir`), where the first
     /// node keeps its chain unless another folder was chosen; `None` until read.
     pub default_data_dir: RwSignal<Option<String>>,
-    /// The node the node pages (Dashboard, Logs, Configure) show and the node commands act on;
-    /// read it with [`AppState::node`].
+    /// The node the node pages (Dashboard, Logs, Configure, Node settings) show and the node
+    /// commands act on; read it with [`AppState::node`].
     pub selected: RwSignal<NodeState>,
     /// The network the shell shows when it runs several nodes: the sidebar, the overview and
     /// the node pages list only that network's nodes, and Testnet is marked everywhere.
@@ -776,9 +783,11 @@ pub fn App() -> impl IntoView {
         }
         network
     });
-    // With one node left there is no overview: its pages are the tab bar's.
+    // With one node left there is no overview and no node header: its pages are the tab
+    // bar's.
     Effect::new(move |_| {
-        if !state.herd() && state.tab.get() == Tab::Overview {
+        let tab = state.tab.get();
+        if !state.herd() && matches!(tab, Tab::Overview | Tab::NodeSettings) {
             state.tab.set(Tab::Dashboard);
         }
     });
@@ -913,6 +922,15 @@ pub fn App() -> impl IntoView {
                     hidden=hidden(Tab::Configure)
                 >
                     <Configure />
+                </section>
+                <section
+                    class="page"
+                    role="tabpanel"
+                    id=Tab::NodeSettings.page_id()
+                    aria-labelledby=Tab::NodeSettings.button_id()
+                    hidden=hidden(Tab::NodeSettings)
+                >
+                    <NodeSettings />
                 </section>
                 <section
                     class="page"

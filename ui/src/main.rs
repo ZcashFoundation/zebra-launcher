@@ -59,6 +59,7 @@ mod pages {
     pub mod first_run;
     pub mod grafana;
     pub mod logs;
+    pub mod node_settings;
     pub mod overview;
     pub mod settings;
 }

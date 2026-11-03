@@ -143,6 +143,26 @@ pub async fn update_node(node: &NodeId, update: NodeUpdate) -> ApiResult<NodeInf
     .await?)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveNodeArgs<'a> {
+    node: &'a NodeId,
+    delete_data: bool,
+}
+
+/// Stops and removes a node, deleting its chain state with `delete_data`, and returns the
+/// bytes freed (0 when kept or unknown). Refused for the last node.
+pub async fn remove_node(node: &NodeId, delete_data: bool) -> ApiResult<u64> {
+    if !is_tauri() {
+        return Ok(wire(
+            mock::nodes::remove_node(node, delete_data)
+                .await
+                .map_err(ApiError)?,
+        )?);
+    }
+    Ok(tauri::invoke("remove_node", &RemoveNodeArgs { node, delete_data }).await?)
+}
+
 pub async fn get_status(node: &NodeId) -> ApiResult<Status> {
     if !is_tauri() {
         return Ok(wire(

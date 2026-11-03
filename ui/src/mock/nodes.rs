@@ -400,6 +400,27 @@ pub async fn update_node(node: &NodeId, update: NodeUpdate) -> Result<NodeInfo, 
     Ok(next)
 }
 
+pub async fn remove_node(node: &NodeId, delete_data: bool) -> Result<u64, String> {
+    sleep(300).await;
+    if list().len() == 1 {
+        let name = mock().info.with_untracked(|info| info.name.clone());
+        return Err(format!(
+            "Zeal needs a node: add another before removing {name}"
+        ));
+    }
+    if is_main(node) {
+        return Err("(mock) the demo keeps its main node; remove one of the others".into());
+    }
+    herd::stop_node(node).await.ok_or_else(|| not_found(node))?;
+    sleep(800).await;
+    let freed = herd::remove(node, delete_data).ok_or_else(|| not_found(node))?;
+    if !delete_data {
+        KEPT.with_borrow_mut(|kept| kept.push(node.clone()));
+    }
+    emit_nodes();
+    Ok(freed)
+}
+
 /// The main node at first: Zebra on Mainnet in the launcher's own folders, with zebrad's
 /// default ports.
 pub(super) fn first_node(data_dir: &str) -> NodeInfo {
