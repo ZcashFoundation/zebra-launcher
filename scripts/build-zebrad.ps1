@@ -104,6 +104,23 @@ function Invoke-Git {
     $result.Stdout
 }
 
+# Moves the built binary into place. Right after it ran its version check, Windows can hold a
+# fresh executable for a moment (an antivirus scan): "The process cannot access the file because
+# it is being used by another process". Tries again for up to 30 s before giving up.
+function Move-Binary {
+    param([string]$Path, [string]$Destination)
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            Move-Item -Force -ErrorAction Stop $Path $Destination
+            return
+        } catch {
+            if ($attempt -ge 10) { throw }
+            Write-Host "$Path is in use ($($_.Exception.Message)); trying again in 3 s"
+            Start-Sleep -Seconds 3
+        }
+    }
+}
+
 $isSha = $false
 if ($Ref) {
     # A development build: no version, and the commit is whatever the ref
@@ -337,7 +354,7 @@ try {
             Write-Host "Skipping the --version smoke test: $Target does not run on $hostTriple"
             $versionString = "unknown (not run: $Target does not run on $hostTriple)"
         }
-        Move-Item -Force $tmp $Out
+        Move-Binary $tmp $Out
         Write-Host "zebrad ($Target): built from $Ref ($Commit) with $toolchain, installed at $Out"
         Write-Host "zebrad --version: $versionString"
         Write-Host $banner
@@ -360,7 +377,7 @@ try {
     } else {
         Write-Host "Skipping the --version smoke test: $Target does not run on $hostTriple"
     }
-    Move-Item -Force $tmp $Out
+    Move-Binary $tmp $Out
 
     Write-Host "zebrad $Version ($Target): built from $tag ($Commit) with $toolchain, installed at $Out"
 } finally {
