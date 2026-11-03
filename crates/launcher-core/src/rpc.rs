@@ -3,7 +3,8 @@
 //! zebrad writes `__cookie__:<secret>` to `<rpc.cookie_dir>/.cookie` on every
 //! start and expects it back as HTTP Basic credentials. The cookie changes on
 //! each start, so [`RpcClient`] reads the file before every call; a batch of
-//! calls shares one read through an [`RpcSession`].
+//! calls shares one read through an [`RpcSession`], and spawned tasks share one
+//! through an [`OwnedSession`].
 //!
 //! Only the fields the launcher shows are decoded; zebrad may add others.
 //! Beyond the handful of required fields every field is optional, so a field
@@ -13,6 +14,7 @@ use std::{
     collections::BTreeMap,
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -261,7 +263,7 @@ pub struct EndOfService {
 #[derive(Clone, Debug)]
 pub struct RpcClient {
     http: reqwest::Client,
-    url: String,
+    url: Arc<str>,
     cookie_file: PathBuf,
 }
 
@@ -276,7 +278,7 @@ impl RpcClient {
             .build()?;
         Ok(Self {
             http,
-            url: format!("http://{addr}/"),
+            url: Arc::from(format!("http://{addr}/")),
             cookie_file,
         })
     }
@@ -292,6 +294,17 @@ impl RpcClient {
         Ok(RpcSession {
             client: self,
             authorization: read_authorization(&self.cookie_file).await?,
+        })
+    }
+
+    /// Reads the cookie once and returns a session that owns what it needs, for
+    /// calls from spawned tasks. Clones share the HTTP client, the URL and the
+    /// credentials.
+    pub async fn owned_session(&self) -> Result<OwnedSession, RpcError> {
+        Ok(OwnedSession {
+            http: self.http.clone(),
+            url: self.url.clone(),
+            authorization: Arc::from(read_authorization(&self.cookie_file).await?),
         })
     }
 
@@ -389,6 +402,35 @@ impl RpcSession<'_> {
             params,
         )
         .await
+    }
+}
+
+/// An [`RpcClient`] with the cookie read once, from [`RpcClient::owned_session`]:
+/// like an [`RpcSession`], but `'static`, for spawned tasks.
+#[derive(Clone)]
+pub struct OwnedSession {
+    http: reqwest::Client,
+    url: Arc<str>,
+    authorization: Arc<str>,
+}
+
+impl std::fmt::Debug for OwnedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The credentials are left out on purpose.
+        f.debug_struct("OwnedSession")
+            .field("url", &self.url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OwnedSession {
+    /// Calls `method` with `params` and decodes the result.
+    pub async fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<T, RpcError> {
+        exchange(&self.http, &self.url, &self.authorization, method, params).await
     }
 }
 
@@ -518,6 +560,18 @@ mod tests {
         );
         let info: MempoolInfo = decode(body.as_bytes()).expect("ok");
         assert_eq!(info.size, 2);
+    }
+
+    #[test]
+    fn sessions_do_not_print_the_credentials() {
+        let session = OwnedSession {
+            http: reqwest::Client::new(),
+            url: Arc::from("http://127.0.0.1:8232/"),
+            authorization: Arc::from("Basic c2VjcmV0"),
+        };
+        let printed = format!("{session:?}");
+        assert!(printed.contains("127.0.0.1:8232"), "{printed}");
+        assert!(!printed.contains("c2VjcmV0"), "{printed}");
     }
 
     #[test]

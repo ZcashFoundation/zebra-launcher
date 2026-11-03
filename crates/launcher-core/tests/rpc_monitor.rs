@@ -224,6 +224,36 @@ async fn a_session_reads_the_cookie_once() {
     assert!(matches!(err, RpcError::Cookie { .. }), "{err:?}");
 }
 
+#[tokio::test]
+async fn an_owned_session_serves_spawned_tasks() {
+    let fake = spawn_fake().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cookie_file = dir.path().join(".cookie");
+    std::fs::copy(&fake.cookie_file, &cookie_file).expect("copy cookie");
+    let client = RpcClient::new(fake.addr, cookie_file.clone()).expect("client");
+    let session = timeout(T, client.owned_session())
+        .await
+        .expect("in time")
+        .expect("session");
+    // The session keeps the cookie it read; the tasks outlive the client.
+    std::fs::remove_file(&cookie_file).expect("remove cookie");
+    drop(client);
+    let tasks: Vec<_> = (0..3)
+        .map(|_| {
+            let session = session.clone();
+            tokio::spawn(async move { session.call::<Value>("getinfo", json!([])).await })
+        })
+        .collect();
+    for task in tasks {
+        let info = timeout(T, task)
+            .await
+            .expect("in time")
+            .expect("the task did not panic")
+            .expect("getinfo");
+        assert_eq!(info["subversion"], "/Zebra:7.0.0/");
+    }
+}
+
 async fn wait_for<T: Clone>(
     output: &mut watch::Receiver<Option<T>>,
     what: &str,
