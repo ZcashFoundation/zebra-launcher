@@ -18,13 +18,24 @@ use launcher_core::{
     settings::SettingsHandle,
     supervisor::SupervisorHandle,
 };
-use launcher_types::{MetricsSnapshot, NodeDetails, NodeStats, Settings};
+use launcher_types::{
+    MachineResources, MetricsSnapshot, NodeDetails, NodeResources, NodeStats, Settings,
+};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::exit::ExitGuard;
 
 /// The permits in [`AppState::data_gate`]: how many starts may run at once.
 const DATA_GATE_PERMITS: u32 = 64;
+
+/// The resource samplers' outputs, for [`AppState::new`].
+#[derive(Clone, Debug)]
+pub struct ResourceWatches {
+    /// The node's process tree, `None` while it has no run.
+    pub node: watch::Receiver<Option<NodeResources>>,
+    /// The computer, `None` until the first reading and where it cannot be read.
+    pub machine: watch::Receiver<Option<MachineResources>>,
+}
 
 /// Managed with `app.manage` once startup succeeds.
 #[derive(Clone, Debug)]
@@ -42,6 +53,11 @@ pub struct AppState {
     /// The latest read of zebrad's Prometheus metrics page, `None` while
     /// zebrad is not running or the page stopped answering.
     pub metrics: watch::Receiver<Option<MetricsSnapshot>>,
+    /// The newest sample of zebrad's process tree, `None` while it has no
+    /// run or on a platform that is not measured yet.
+    pub node_resources: watch::Receiver<Option<NodeResources>>,
+    /// The newest sample of the computer's CPU and memory.
+    pub machine: watch::Receiver<Option<MachineResources>>,
     /// One permit: held while `zebrad.toml` is being written, so a config
     /// apply and a settings change never interleave.
     ///
@@ -79,6 +95,7 @@ impl AppState {
         node_stats: watch::Receiver<Option<NodeStats>>,
         node_details: watch::Receiver<Option<NodeDetails>>,
         metrics: watch::Receiver<Option<MetricsSnapshot>>,
+        resources: ResourceWatches,
     ) -> Self {
         Self {
             paths,
@@ -87,6 +104,8 @@ impl AppState {
             node_stats,
             node_details,
             metrics,
+            node_resources: resources.node,
+            machine: resources.machine,
             config_writer: Arc::new(Semaphore::new(1)),
             log_generation: Arc::new(AtomicU64::new(0)),
             exit: Arc::new(ExitGuard::default()),

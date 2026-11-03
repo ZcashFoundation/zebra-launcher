@@ -74,6 +74,24 @@ backend that makes every page demoable:
   instead of Install) and `&stalecheck` for the stale-check warning (no successful check for
   20 days). Saving the Off mode returns the updater to Idle, like the backend.
 
+- the dashboard's Resources card: zebrad's process tree is sampled every 5 s while it has a pid
+  (Starting, Running and Stopping). It opens its database for the first 10 s of every run (1.1
+  cores, 180 MB/s read), then syncs at about 5.6 cores with 35 MB/s read and 95 MB/s written
+  while its memory climbs from 2.4 to 6.4 GiB over 30 minutes; once the node reaches the tip
+  (after about 47 minutes in the mock) it settles at 0.25 cores and 3.2 GiB. `?stalled` and
+  `?nopeers` keep it at 0.1 cores, and `?crashloop` restarts the counters with every run. Stop
+  the node to see the card's last-run line. The computer has 8 CPUs and 16 GiB, of which other
+  programs use 0.6 to 0.9 cores and 5.2 GiB. `?os=macos` and `?os=windows` show those
+  platforms' figures and labels (memory pressure on macOS; commit, handles and no thread
+  counts on Windows); Linux is the default. `?children` gives zebrad a `block_notify_command`
+  that runs in cycles of three samples: an `sh` with `notify-block` under it, indented under
+  their parents; then 40 `curl`s as well, more than a sample lists, so the table ends with
+  "and 11 more"; then `notify-block` alone, orphaned, on a line of its own. `?unreadable`
+  reports CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk
+  tile "—" with "the system does not report them". `?readerpanic` makes the resource reader
+  panic 30 s into the first run, as the backend's can: the samples stop while zebrad keeps
+  running, and the card says it is not measured until zebrad's next run, which Restart
+  starts;
 - several nodes: `?herd` adds five nodes beside the mock's zebrad: on Mainnet, Zakura catching
   up from a snapshot, Zaino reading the Mainnet Zebra, and the zcashd compatibility build,
   stopped; on Testnet, a Zebra and a pruned Zakura at the tip. The window shows the sidebar
@@ -124,7 +142,7 @@ to the CSP when it serves the bundled assets.
 | `src/main.rs` | Entry point: mounts the app in the browser; the native build only prints a hint |
 | `src/tauri.rs` | `#[wasm_bindgen]` externs to `window.__TAURI__`, JSON-compatible (de)serialization |
 | `src/api.rs` | One typed function per backend command or event, Tauri or mock |
-| `src/mock.rs` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads |
+| `src/mock.rs`, `src/mock/` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads. `mock/resources.rs` holds the resource samples, pure and tested natively |
 | `src/app.rs` | Shared state (`AppState`), backend subscriptions, the shell: header, the five tabs and the first-run wizard |
 | `src/theme.rs` | Light and dark appearance: resolves the setting against the system preference and applies it to the document |
 | `src/clock.rs` | The current time from JavaScript's `Date` (`SystemTime::now()` panics on wasm) |
@@ -133,6 +151,7 @@ to the CSP when it serves the bundled assets.
 | `src/log_view.rs` | The Logs page's data model: a capped, de-duplicated buffer in `seq` order, dropped-line markers, level and text filters. Pure, tested natively |
 | `src/insights.rs`, `src/insights/fields.rs` | Log analysis: sync stage, problems, startup milestones and activity counts folded from the log stream; tolerant readers for the fields of a zebrad line. Pure, tested natively |
 | `src/stats_history.rs` | The `NodeStats` samples since the launcher opened, for the dashboard's charts and rates. Pure, tested natively |
+| `src/resource_history.rs` | The samples of the node's process tree since the launcher opened, for the Resources card's one-minute rates, sparklines and last-run line. Pure, tested natively |
 | `src/charts.rs`, `src/charts/line_chart.rs`, `src/charts/widgets.rs` | Inline SVG line charts (crosshair, keyboard navigation, table view), stat tiles with sparklines, the sync meter and the range control; the geometry is pure and tested natively |
 | `src/grafana_url.rs` | Builds the URL the Grafana tab embeds from the saved Grafana URL, the picked dashboard, time range, refresh and theme. Pure, tested natively |
 | `src/config_form.rs`, `src/config_form/schema.rs` | zebrad's configuration as a form: the schema of every key the bundled zebrad accepts, values read from `zebrad.toml` with `toml_edit`, validation, and edits written back into the same document. Pure, tested natively; a test pins the schema to the `zebrad generate` fixture |

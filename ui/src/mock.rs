@@ -3,7 +3,8 @@
 //!
 //! The fake state lives in reference-counted signals; commands change it after short delays to
 //! mimic zebrad starting and stopping. The log corpus is in [`log_lines`], the updater in
-//! [`updates`] and the `zebrad.toml` simulation in [`config`].
+//! [`updates`], the `zebrad.toml` simulation in [`config`] and the resource samples in
+//! [`resources`].
 //!
 //! # URL flags
 //!
@@ -26,6 +27,10 @@
 //! | `?stalled` | The sync stalls: the height stops moving while the tip estimate creeps on, no blocks are committed, and zebrad's progress lines report the stall (the verdict's "Sync stalled"). |
 //! | `?nopeers` | zebrad finds no peers: 0 peers in every sample and gauge, an empty peer list, the initial connections fail and the log waits for ready peers (the verdict's "No peers" once two minutes of samples agree). |
 //! | `?crashloop` | zebrad panics about 15 s after every start and the launcher restarts it after a backoff that doubles (5, 10, 20 s): "zebrad crashed", then "Crash loop" from the third crash, with the exits and restarts in the log and on the timeline. |
+//! | `?os=macos`, `?os=windows` | The resource samples report that platform's figures: memory pressure on macOS; commit, handles and no thread counts on Windows ([`resources`]). Linux is the default. |
+//! | `?children` | zebrad runs a `block_notify_command` in cycles of three resource samples: an `sh` with `notify-block` under it, then also 40 `curl`s, more than a sample lists ("and 11 more"), then `notify-block` alone, orphaned ([`resources::block_notify`]). |
+//! | `?unreadable` | The resource samples report CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk tile "the system does not report them". |
+//! | `?readerpanic` | The resource reader panics 30 s into the first run: the samples stop while zebrad keeps running, so the Resources card says it is not measured until zebrad's next run, which Restart starts ([`resources::reader_panicked`]). |
 //! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). |
 //!
 //! The launcher's own notes (`zebrad started (pid N)`, `stop requested (stdin closed)`,
@@ -36,6 +41,7 @@ mod config;
 mod details;
 mod log_lines;
 mod metrics;
+mod resources;
 mod updates;
 
 pub mod herd;
@@ -50,9 +56,9 @@ use std::{
 
 use launcher_types::{
     ConfigDocument, DataDirChoice, EosInfo, ExitClass, ExitInfo, FirstRunInfo, ImportOutcome,
-    LegacyInstall, LogLevel, LogLine, LogStream, MetricsSnapshot, NodeDetails, NodeStats,
-    OpenTarget, Phase, Settings, StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo,
-    UpdateMode, UpdateState,
+    LegacyInstall, LogLevel, LogLine, LogStream, MachineResources, MetricsSnapshot, NodeDetails,
+    NodeResources, NodeStats, OpenTarget, Phase, Settings, StaleProcessInfo, Status,
+    UpdateHealthFailure, UpdateInfo, UpdateMode, UpdateState,
 };
 use leptos::prelude::*;
 
@@ -63,6 +69,10 @@ pub use config::{apply_config, read_config, reset_config};
 use log_lines::sample_line;
 use metrics::MetricsInput;
 pub use metrics::{get_metrics, on_metrics};
+use resources::{MockTree, OsFlag};
+pub use resources::{
+    get_machine_resources, get_node_resources, on_machine_resources, on_node_resources,
+};
 use updates::{MOCK_RELEASES_URL, MOCK_VERSION, UpdateFlag, health_failure};
 pub use updates::{
     cancel_update, check_for_update, get_update_info, install_update, on_update_health_failed,
@@ -159,6 +169,14 @@ struct Flags {
     no_peers: bool,
     /// `?crashloop`.
     crash_loop: bool,
+    /// `?os=…`.
+    os: OsFlag,
+    /// `?children`.
+    children: bool,
+    /// `?unreadable`.
+    unreadable: bool,
+    /// `?readerpanic`.
+    reader_panic: bool,
 }
 
 impl Flags {
@@ -193,6 +211,10 @@ impl Flags {
             stalled: flag("stalled"),
             no_peers: flag("nopeers"),
             crash_loop: flag("crashloop"),
+            os: OsFlag::parse(value("os")),
+            children: flag("children"),
+            unreadable: flag("unreadable"),
+            reader_panic: flag("readerpanic"),
         }
     }
 
@@ -253,6 +275,14 @@ struct Mock {
     details: ArcRwSignal<Option<NodeDetails>>,
     /// zebrad's metrics page, refreshed every tenth stats tick while running.
     metrics: ArcRwSignal<Option<MetricsSnapshot>>,
+    /// zebrad's process tree, every 5 s while it has a pid ([`resources`]).
+    resources: ArcRwSignal<Option<NodeResources>>,
+    /// The current or last run behind `resources`.
+    tree: ArcRwSignal<Option<MockTree>>,
+    /// The computer, every 5 s.
+    machine: ArcRwSignal<Option<MachineResources>>,
+    /// Seconds of resource ticks so far, for their 5 s cadence.
+    resource_seconds: Arc<AtomicU64>,
     /// Stats ticks so far, for the metrics cadence and its moving values.
     ticks: Arc<AtomicU64>,
     settings: ArcRwSignal<Settings>,
@@ -310,6 +340,10 @@ impl Mock {
             stats: ArcRwSignal::new(None),
             details: ArcRwSignal::new(None),
             metrics: ArcRwSignal::new(None),
+            resources: ArcRwSignal::new(None),
+            tree: ArcRwSignal::new(None),
+            machine: ArcRwSignal::new(None),
+            resource_seconds: Arc::new(AtomicU64::new(0)),
             ticks: Arc::new(AtomicU64::new(0)),
             settings: ArcRwSignal::new(Settings {
                 first_run_done: !first_run,
@@ -373,6 +407,9 @@ impl Mock {
         }
         let ticker = mock.clone();
         set_interval(move || ticker.tick_stats(), Duration::from_secs(1));
+        mock.tick_resources();
+        let ticker = mock.clone();
+        set_interval(move || ticker.tick_resources(), Duration::from_secs(1));
         match flags.update {
             Some(UpdateFlag::Downloading) => mock.download(),
             Some(UpdateFlag::Countdown) => mock.count_down(),
@@ -997,7 +1034,7 @@ mod tests {
         // Every flag in the module doc's table, combined.
         assert_eq!(
             Flags::parse(
-                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop"
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&os=windows&children&unreadable&readerpanic"
             ),
             Flags {
                 first_run: true,
@@ -1012,6 +1049,10 @@ mod tests {
                 stalled: true,
                 no_peers: true,
                 crash_loop: true,
+                os: OsFlag::Windows,
+                children: true,
+                unreadable: true,
+                reader_panic: true,
             }
         );
         assert_eq!(Flags::parse("?stalled").scenario(), Scenario::Stalled);
@@ -1021,9 +1062,10 @@ mod tests {
         );
         assert_eq!(Flags::parse("?crashloop").scenario(), Scenario::Normal);
         assert_eq!(Flags::parse("?eos=soon").eos, EosFlag::Soon);
+        assert_eq!(Flags::parse("?os=macos").os, OsFlag::Macos);
         // Unknown values and flags are ignored.
         assert_eq!(
-            Flags::parse("?eos=never&update=bogus&other"),
+            Flags::parse("?eos=never&update=bogus&os=plan9&other"),
             Flags::default()
         );
         for (value, flag) in [

@@ -16,8 +16,12 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 mod nodes;
+mod resources;
 
 pub use nodes::{NodeId, NodeInfo, NodeKind, NodePort, NodeRole, PortRole, assign_ports};
+pub use resources::{
+    MAX_MEMBERS, MachineResources, MemoryPressure, NodeResources, Platform, ProcessUsage,
+};
 
 /// The names of the events the backend emits and the UI listens to. Logs do
 /// not go through an event: they take a `tauri::ipc::Channel` of
@@ -46,6 +50,14 @@ pub mod events {
     /// ([`MetricsSnapshot`](crate::MetricsSnapshot)): zebrad's Prometheus
     /// metrics, read every 10 s while it runs.
     pub const METRICS: &str = "metrics";
+    /// Every `Option<NodeResources>` change
+    /// ([`NodeResources`](crate::NodeResources)): what the node's processes use,
+    /// read every 5 s from the spawn until the run ends.
+    pub const NODE_RESOURCES: &str = "node_resources";
+    /// Every `Option<MachineResources>` change
+    /// ([`MachineResources`](crate::MachineResources)): the computer's CPU and
+    /// memory, read every 5 s.
+    pub const MACHINE_RESOURCES: &str = "machine_resources";
 }
 
 /// A location the `open_path` command opens with the system's default

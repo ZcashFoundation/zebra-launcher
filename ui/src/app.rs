@@ -4,7 +4,8 @@
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
-    ApplyOutcome, LogLine, Network, Settings, Theme, UpdateHealthFailure, UpdateInfo, UpdateState,
+    ApplyOutcome, LogLine, MachineResources, Network, Settings, Theme, UpdateHealthFailure,
+    UpdateInfo, UpdateState,
 };
 use leptos::{ev, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
@@ -206,6 +207,9 @@ pub struct AppState {
     /// A text filter another page asks the Logs page to apply (a problem picked on the
     /// dashboard). The Logs page takes it and clears it.
     pub log_filter_request: RwSignal<Option<String>>,
+    /// The computer's CPU and memory, read every 5 s; `None` until the first reading, and on
+    /// platforms the backend cannot read.
+    pub machine: RwSignal<Option<MachineResources>>,
 }
 
 impl AppState {
@@ -402,14 +406,15 @@ pub fn App() -> impl IntoView {
         update: RwSignal::new(None),
         update_health: RwSignal::new(None),
         log_filter_request: RwSignal::new(None),
+        machine: RwSignal::new(None),
     };
     provide_context(state);
     theme::init(&state);
 
     set_interval(move || state.now.set(clock::now()), Duration::from_secs(1));
 
-    // The status, the node stats and the updater each come as a stream plus a snapshot; see
-    // `subscribe_then_fetch` for the order.
+    // The status, the node stats, the resources and the updater each come as a stream plus a
+    // snapshot; see `subscribe_then_fetch` for the order.
     spawn_local(subscribe_then_fetch(
         state,
         async move |seen| {
@@ -483,6 +488,40 @@ pub fn App() -> impl IntoView {
         api::get_metrics,
         "Reading metrics",
         move |snapshot| node.record_metrics(snapshot),
+    ));
+    spawn_local(subscribe_then_fetch(
+        state,
+        async move |seen| {
+            let result = api::on_node_resources(
+                move |sample| {
+                    seen.mark();
+                    node.record_resources(sample);
+                },
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for node resources", result);
+        },
+        api::get_node_resources,
+        "Reading node resources",
+        move |sample| node.record_resources(sample),
+    ));
+    spawn_local(subscribe_then_fetch(
+        state,
+        async move |seen| {
+            let result = api::on_machine_resources(
+                move |machine| {
+                    seen.mark();
+                    state.machine.set(machine);
+                },
+                state.payload_error(),
+            )
+            .await;
+            state.report("Listening for the computer's resources", result);
+        },
+        api::get_machine_resources,
+        "Reading the computer's resources",
+        move |machine| state.machine.set(machine),
     ));
     // `update_info` carries the state too, and the backend sends it right after each
     // `update_state`, so the info event and the snapshot are enough. An `update_state` only

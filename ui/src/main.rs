@@ -26,6 +26,7 @@ mod metrics_history;
 mod mock;
 mod node_state;
 mod node_summary;
+mod resource_history;
 mod stats_history;
 mod tauri;
 mod theme;

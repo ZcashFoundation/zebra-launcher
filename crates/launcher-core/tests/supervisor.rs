@@ -136,6 +136,50 @@ async fn starts_streams_logs_and_stops_cleanly() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_probe_names_each_run_until_it_is_finalized() {
+    let fx = fixture("ok");
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    let mut probe = handle.watch_probe();
+    assert!(probe.borrow().is_none(), "no run yet");
+
+    within(handle.start()).await.expect("start");
+    let status = handle.status();
+    let first = probe
+        .borrow_and_update()
+        .clone()
+        .expect("a probe while zebrad runs");
+    assert_eq!(Some(first.pid), status.pid);
+    assert_eq!(
+        Some(first.spawned_at),
+        status.started_at,
+        "the probe and the status read the clock once"
+    );
+
+    within(handle.stop()).await.expect("stop");
+    assert_eq!(handle.status().pid, None);
+    assert!(
+        probe.borrow().is_none(),
+        "cleared once the run is finalized"
+    );
+
+    within(handle.start()).await.expect("start again");
+    let second = probe.borrow().clone().expect("a probe for the next run");
+    assert!(
+        second.run > first.run,
+        "run {} after {}",
+        second.run,
+        first.run
+    );
+    assert_eq!(Some(second.pid), handle.status().pid);
+    assert!(second.spawned > first.spawned);
+
+    within(handle.shutdown()).await.expect("shutdown");
+    assert!(probe.borrow().is_none());
+    // The sender goes with the actor.
+    within(async { while probe.changed().await.is_ok() {} }).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stdin_close_mode_stops_gracefully_on_every_platform() {
     let mut fx = fixture("ok");
     fx.config.command.shutdown_on_stdin_close = true;

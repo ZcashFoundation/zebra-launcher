@@ -26,7 +26,7 @@ use crate::{
     logs::{Detector, classify_event, classify_exit, parse_line},
     pidfile::{self, StaleProcess},
     policy::{Decision, RestartTracker},
-    process::{ChildHandle, SpawnedChild, Spawner, StopMethod},
+    process::{ChildHandle, SpawnedChild, Spawner, StopMethod, TreeProbe},
 };
 
 /// Longer lines are truncated; zebrad's are a few hundred bytes.
@@ -174,6 +174,9 @@ pub(super) struct Actor {
     cmd_rx: mpsc::Receiver<Cmd>,
     cmd_closed: bool,
     status: watch::Sender<Status>,
+    /// The current run's tree, for the resource sampler: set in `install_run`, cleared in
+    /// `finalize`.
+    probe: watch::Sender<Option<TreeProbe>>,
     logs: broadcast::Sender<Arc<LogLine>>,
     history: VecDeque<Arc<LogLine>>,
     next_seq: u64,
@@ -198,6 +201,7 @@ impl Actor {
         config: SupervisorConfig,
         cmd_rx: mpsc::Receiver<Cmd>,
         status: watch::Sender<Status>,
+        probe: watch::Sender<Option<TreeProbe>>,
     ) -> io::Result<Self> {
         let spawner = Spawner::new(Handle::current())?;
         let log_file = config
@@ -214,6 +218,7 @@ impl Actor {
             cmd_rx,
             cmd_closed: false,
             status,
+            probe,
             logs,
             next_seq: 0,
             spawner,
@@ -459,6 +464,10 @@ impl Actor {
         let id = self.next_run_id;
         self.next_run_id += 1;
         let pid = handle.pid();
+        // One reading of each clock, so the status, the run and the probe agree on the spawn.
+        let spawned_at = SystemTime::now();
+        let spawned = Instant::now();
+        let probe = handle.probe(id, spawned_at, spawned);
 
         let tasks = vec![
             tokio::spawn(pump(stdout, id, LogStream::Stdout, self.child_tx.clone())),
@@ -482,13 +491,14 @@ impl Actor {
             stderr_eof: false,
             state: RunState::Starting,
             start_replies,
-            started_at: Instant::now(),
+            started_at: spawned,
             tasks,
         });
+        self.probe.send_replace(Some(probe));
         self.status.send_modify(|s| {
             s.phase = Phase::Starting;
             s.pid = Some(pid);
-            s.started_at = Some(SystemTime::now());
+            s.started_at = Some(spawned_at);
             s.rpc_addr = None;
             s.metrics_addr = None;
         });
@@ -658,6 +668,7 @@ impl Actor {
         let Some(run) = self.run.take() else {
             return;
         };
+        self.probe.send_replace(None);
         for task in &run.tasks {
             task.abort();
         }

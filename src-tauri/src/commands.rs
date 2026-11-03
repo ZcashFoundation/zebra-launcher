@@ -20,7 +20,8 @@ use launcher_core::{
 };
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
-    ImportOutcome, LogLine, MetricsSnapshot, NodeDetails, NodeStats, OpenTarget, Settings, Status,
+    ImportOutcome, LogLine, MachineResources, MetricsSnapshot, NodeDetails, NodeResources,
+    NodeStats, OpenTarget, Settings, Status,
 };
 use tauri::{AppHandle, Runtime, State, ipc::Channel};
 use tauri_plugin_dialog::DialogExt;
@@ -276,6 +277,22 @@ pub fn get_metrics(state: State<'_, AppState>) -> Option<MetricsSnapshot> {
     state.metrics.borrow().clone()
 }
 
+/// The newest sample of zebrad's process tree (CPU, memory, disk I/O and
+/// processes), `None` while it has no run or on a platform that is not
+/// measured yet. Every change is also sent as the `node_resources` event.
+#[tauri::command]
+pub fn get_node_resources(state: State<'_, AppState>) -> Option<NodeResources> {
+    state.node_resources.borrow().clone()
+}
+
+/// The newest sample of the computer's CPU and memory, `None` before the
+/// first reading and on a platform that is not measured yet. Every change is
+/// also sent as the `machine_resources` event.
+#[tauri::command]
+pub fn get_machine_resources(state: State<'_, AppState>) -> Option<MachineResources> {
+    state.machine.borrow().clone()
+}
+
 fn path_arg(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -491,24 +508,32 @@ pub async fn delete_node_data(state: State<'_, AppState>) -> Result<u64, String>
 /// The diagnostics text for a bug report ([`diagnostics::bundle`]): versions,
 /// OS, the zebrad binary, the stop grace in effect and in the settings,
 /// status, settings, node statistics, the updater's records, `zebrad.toml`
-/// and the last lines of both logs. The UI copies it to the clipboard.
+/// and the last lines of both logs, then the newest resource samples
+/// ([`diagnostics::resources_section`]). The UI copies it to the clipboard.
 #[tauri::command]
 pub async fn copy_diagnostics(state: State<'_, AppState>) -> Result<String, String> {
     let paths = state.paths.clone();
     let status = state.supervisor.status();
     let settings = state.settings.current();
     let stats = state.node_stats.borrow().clone();
+    let resources = state.node_resources.borrow().clone();
+    let machine = state.machine.borrow().clone();
     let stop_grace = state.supervisor.stop_grace();
     blocking(move || {
         let sidecar = sidecar::resolve(&paths);
-        diagnostics::bundle(
+        let mut text = diagnostics::bundle(
             &paths,
             &status,
             &settings,
             stats.as_ref(),
             Some(&sidecar),
             stop_grace,
-        )
+        );
+        text.push_str(&diagnostics::resources_section(
+            resources.as_ref(),
+            machine.as_ref(),
+        ));
+        text
     })
     .await
 }

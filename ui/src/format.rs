@@ -149,6 +149,86 @@ pub fn bytes(value: u64) -> String {
     }
 }
 
+const KIB: u128 = 1024;
+const MIB: u128 = KIB * 1024;
+const GIB: u128 = MIB * 1024;
+
+/// Tenths as `6.1`, or `16` when the decimal is zero.
+fn tenths_text(tenths: u128) -> String {
+    let whole = thousands(u64::try_from(tenths / 10).unwrap_or(u64::MAX));
+    match tenths % 10 {
+        0 => whole,
+        decimal => format!("{whole}.{decimal}"),
+    }
+}
+
+/// `value` in tenths of `unit`, rounded.
+fn in_tenths(value: u64, unit: u128) -> u128 {
+    (u128::from(value) * 10 + unit / 2) / unit
+}
+
+/// A memory size in binary units, as the OS tools count it: `6.1 GiB`, `16 GiB`, `650 MiB`,
+/// `512 KiB`, `300 bytes`. One decimal from 1 GiB up, without a `.0`, so 16 GiB of RAM reads
+/// `16 GiB`; whole MiB and KiB below. Disk sizes stay decimal ([`bytes`]).
+pub fn mem_bytes(value: u64) -> String {
+    if in_tenths(value, GIB) >= 10 {
+        return format!("{} GiB", tenths_text(in_tenths(value, GIB)));
+    }
+    for (unit, name) in [(MIB, "MiB"), (KIB, "KiB")] {
+        let whole = (u128::from(value) + unit / 2) / unit;
+        if whole >= 1 {
+            return format!("{whole} {name}");
+        }
+    }
+    match value {
+        1 => "1 byte".to_owned(),
+        _ => format!("{value} bytes"),
+    }
+}
+
+/// A part of a memory size, both in the whole's unit: `0.3 of 2 GiB`, `14.1 of 24 GiB`,
+/// `300 of 900 MiB`.
+pub fn mem_of(part: u64, whole: u64) -> String {
+    if in_tenths(whole, GIB) >= 10 {
+        return format!(
+            "{} of {} GiB",
+            tenths_text(in_tenths(part, GIB)),
+            tenths_text(in_tenths(whole, GIB))
+        );
+    }
+    let mib = |value: u64| (u128::from(value) + MIB / 2) / MIB;
+    format!("{} of {} MiB", mib(part), mib(whole))
+}
+
+/// [`cores`] without the unit: one decimal (`2.4`), two below 0.1 (`0.05`).
+pub fn cores_number(value: f64) -> String {
+    let value = if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    };
+    if value < 0.095 {
+        format!("{value:.2}")
+    } else {
+        format!("{value:.1}")
+    }
+}
+
+/// Logical CPUs kept busy: `2.4 cores`; 1.0 is one CPU fully busy.
+pub fn cores(value: f64) -> String {
+    format!("{} cores", cores_number(value))
+}
+
+/// A share as a whole percentage, in [`percent`]'s style: `30 %`.
+pub fn share(fraction: f64) -> String {
+    let fraction = if fraction.is_finite() {
+        fraction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    format!("{:.0} %", fraction * 100.0)
+}
+
 /// True when the free space is known and below [`LOW_SPACE_BYTES`].
 pub fn is_low_space(free_bytes: Option<u64>) -> bool {
     free_bytes.is_some_and(|free| free < LOW_SPACE_BYTES)
@@ -376,6 +456,44 @@ mod tests {
         assert_eq!(bytes(299_960_000_000), "300.0 GB");
         assert_eq!(bytes(1_834_512_000_000), "1,834.5 GB");
         assert_eq!(bytes(u64::MAX), "18,446,744,073.7 GB");
+    }
+
+    #[test]
+    fn memory_sizes_are_binary() {
+        const GIB: u64 = 1 << 30;
+        assert_eq!(mem_bytes(16 * GIB), "16 GiB");
+        assert_eq!(mem_bytes(6_549_000_000), "6.1 GiB");
+        assert_eq!(mem_bytes(GIB + GIB / 2), "1.5 GiB");
+        assert_eq!(mem_bytes(1_234 * GIB), "1,234 GiB");
+        assert_eq!(mem_bytes(650 << 20), "650 MiB");
+        assert_eq!(mem_bytes(40 << 20), "40 MiB");
+        // Just under 1 GiB rounds to it rather than to 1,024 MiB.
+        assert_eq!(mem_bytes(GIB - 1), "1 GiB");
+        assert_eq!(mem_bytes(300 << 10), "300 KiB");
+        assert_eq!(mem_bytes(300), "300 bytes");
+        assert_eq!(mem_bytes(1), "1 byte");
+        assert_eq!(mem_bytes(0), "0 bytes");
+        assert_eq!(mem_of(GIB * 3 / 10, 2 * GIB), "0.3 of 2 GiB");
+        assert_eq!(mem_of(14 * GIB + GIB / 10, 24 * GIB), "14.1 of 24 GiB");
+        assert_eq!(mem_of(0, 2 * GIB), "0 of 2 GiB");
+        assert_eq!(mem_of(300 << 20, 900 << 20), "300 of 900 MiB");
+    }
+
+    #[test]
+    fn cores_and_shares() {
+        assert_eq!(cores(5.62), "5.6 cores");
+        assert_eq!(cores(2.0), "2.0 cores");
+        assert_eq!(cores(0.26), "0.3 cores");
+        assert_eq!(cores(0.05), "0.05 cores");
+        assert_eq!(cores(0.099), "0.1 cores");
+        assert_eq!(cores(0.0), "0.00 cores");
+        assert_eq!(cores(-1.0), "0.00 cores");
+        assert_eq!(cores(f64::NAN), "0.00 cores");
+        assert_eq!(cores_number(2.1), "2.1");
+        assert_eq!(share(0.3), "30 %");
+        assert_eq!(share(0.704), "70 %");
+        assert_eq!(share(1.5), "100 %");
+        assert_eq!(share(f64::NAN), "0 %");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The "Copy diagnostics" text: versions, OS, the zebrad binary, the stop
 //! grace, status, settings, node statistics, the updater's records, the
-//! managed `zebrad.toml` and the tails of both logs, ready to paste into an
-//! issue.
+//! managed `zebrad.toml`, the tails of both logs and the resources section,
+//! ready to paste into an issue.
 //!
 //! The RPC cookie is a credential and is never read here. URLs in the
 //! settings lose any user info before they are printed.
@@ -14,9 +14,9 @@ use std::{
     time::Duration,
 };
 
-use launcher_types::{NodeStats, Settings, Status};
+use launcher_types::{MachineResources, NodeResources, NodeStats, Settings, Status};
 
-use crate::{paths::Paths, updates};
+use crate::{clock, paths::Paths, updates};
 
 /// The launcher version.
 pub const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -226,6 +226,128 @@ pub fn bundle(
     out
 }
 
+/// `bytes` as GiB with two decimals, beside the exact count.
+fn gib(bytes: u64) -> String {
+    format!("{:.2} GiB", bytes as f64 / f64::from(1u32 << 30))
+}
+
+/// A byte count that may be missing.
+fn byte_count(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| "unknown".to_owned(), |bytes| format!("{bytes} bytes"))
+}
+
+/// The "Resources" section that `copy_diagnostics` appends: the newest sample of the node's
+/// process tree, one line per process, and the computer's newest sample. Either is `None`
+/// while there is none.
+pub fn resources_section(
+    node: Option<&NodeResources>,
+    machine: Option<&MachineResources>,
+) -> String {
+    let mut out = String::from("\n== Resources ==\n");
+    match node {
+        Some(node) => {
+            let _ = writeln!(
+                out,
+                "Process tree ({:?}): run {}, read {}, {:.1} s after the spawn",
+                node.platform,
+                node.run,
+                clock::rfc3339(node.at),
+                node.run_secs
+            );
+            let rate = node
+                .cpu_cores
+                .map_or_else(|| "unknown".to_owned(), |cores| format!("{cores:.2}"));
+            let _ = writeln!(
+                out,
+                "CPU: {:.2} s in total, {rate} cores over the last interval",
+                node.cpu_secs
+            );
+            let _ = writeln!(
+                out,
+                "Memory: {} bytes ({}), peak {} bytes ({}){}",
+                node.memory_bytes,
+                gib(node.memory_bytes),
+                node.peak_memory_bytes,
+                gib(node.peak_memory_bytes),
+                node.committed_bytes
+                    .map(|committed| format!(", committed {committed} bytes"))
+                    .unwrap_or_default()
+            );
+            let _ = writeln!(
+                out,
+                "{}: {} read, {} written",
+                node.platform.io_label(),
+                byte_count(node.read_bytes),
+                byte_count(node.written_bytes)
+            );
+            let count =
+                |value: Option<u32>| value.map_or_else(|| "unknown".to_owned(), |v| v.to_string());
+            let _ = writeln!(
+                out,
+                "Processes: {}, threads {}, {} {}",
+                node.processes,
+                count(node.threads),
+                node.platform.descriptors_label(),
+                count(node.descriptors)
+            );
+            for member in &node.members {
+                let parent = member
+                    .parent
+                    .map(|parent| format!(" (parent {parent})"))
+                    .unwrap_or_default();
+                let _ = writeln!(
+                    out,
+                    "  pid {}{parent} {}: started {}, CPU {:.2} s, memory {}, read {}, written {}, threads {}",
+                    member.pid,
+                    member.name,
+                    clock::rfc3339(member.started_at),
+                    member.cpu_secs,
+                    byte_count(member.memory_bytes),
+                    byte_count(member.read_bytes),
+                    byte_count(member.written_bytes),
+                    count(member.threads)
+                );
+            }
+            let listed = u32::try_from(node.members.len()).unwrap_or(u32::MAX);
+            if node.processes > listed {
+                let _ = writeln!(out, "  and {} more", node.processes - listed);
+            }
+        }
+        None => out.push_str(
+            "Process tree: (none: zebrad is not running, or this platform is not measured yet)\n",
+        ),
+    }
+    match machine {
+        Some(machine) => {
+            let busy = machine
+                .cpu_busy_cores
+                .map_or_else(|| "unknown".to_owned(), |busy| format!("{busy:.2}"));
+            let available = machine
+                .memory_available_bytes
+                .map_or_else(|| "unknown".to_owned(), gib);
+            let _ = write!(
+                out,
+                "Computer: {} logical CPUs, {busy} busy over the last interval; memory {}, {available} available",
+                machine.logical_cpus,
+                gib(machine.memory_total_bytes)
+            );
+            if let (Some(used), Some(total)) = (machine.swap_used_bytes, machine.swap_total_bytes) {
+                let _ = write!(out, "; swap {} of {}", gib(used), gib(total));
+            }
+            if let (Some(commit), Some(limit)) = (machine.commit_bytes, machine.commit_limit_bytes)
+            {
+                let _ = write!(out, "; committed {} of {}", gib(commit), gib(limit));
+            }
+            if let Some(pressure) = machine.pressure {
+                let _ = write!(out, "; memory pressure {}", pressure.as_str());
+            }
+            out.push('\n');
+        }
+        None => out.push_str("Computer: (none: this platform is not measured yet)\n"),
+    }
+    out
+}
+
 fn to_json(value: &impl serde::Serialize) -> String {
     match serde_json::to_string_pretty(value) {
         Ok(mut json) => {
@@ -251,7 +373,7 @@ fn push_block(out: &mut String, text: &str) {
 mod tests {
     use std::time::SystemTime;
 
-    use launcher_types::{EosInfo, StaleProcessInfo};
+    use launcher_types::{EosInfo, Platform, ProcessUsage, StaleProcessInfo};
 
     use super::*;
 
@@ -461,6 +583,68 @@ mod tests {
         assert!(!text.contains("supersecretcookie"));
         assert!(!text.contains("user:pw"));
         assert!(!text.contains(".cookie"), "{text}");
+    }
+
+    #[test]
+    fn the_resources_section_lists_each_process() {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let member = |pid, parent, name: &str| ProcessUsage {
+            pid,
+            parent,
+            name: name.into(),
+            started_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_799_996_400),
+            cpu_secs: 12.5,
+            memory_bytes: Some(1 << 30),
+            read_bytes: Some(1000),
+            written_bytes: None,
+            threads: Some(68),
+        };
+        let node = NodeResources {
+            run: 2,
+            at,
+            run_secs: 3600.0,
+            platform: Platform::Linux,
+            cpu_secs: 7200.0,
+            cpu_cores: Some(2.0),
+            memory_bytes: 3 << 30,
+            peak_memory_bytes: 4 << 30,
+            committed_bytes: None,
+            read_bytes: Some(5000),
+            written_bytes: Some(6000),
+            processes: 3,
+            threads: Some(70),
+            descriptors: Some(412),
+            members: vec![member(4242, None, "zebrad"), member(4300, Some(4242), "sh")],
+        };
+        let machine = MachineResources {
+            at,
+            logical_cpus: 8,
+            cpu_busy_cores: Some(2.5),
+            memory_total_bytes: 16 << 30,
+            memory_available_bytes: Some(4 << 30),
+            swap_total_bytes: Some(2 << 30),
+            swap_used_bytes: Some(0),
+            commit_bytes: None,
+            commit_limit_bytes: None,
+            pressure: None,
+        };
+        let text = resources_section(Some(&node), Some(&machine));
+        assert_eq!(
+            text,
+            "\n== Resources ==\n\
+             Process tree (Linux): run 2, read 2027-01-15T08:00:00.000000Z, 3600.0 s after the spawn\n\
+             CPU: 7200.00 s in total, 2.00 cores over the last interval\n\
+             Memory: 3221225472 bytes (3.00 GiB), peak 4294967296 bytes (4.00 GiB)\n\
+             Disk: 5000 bytes read, 6000 bytes written\n\
+             Processes: 3, threads 70, open files 412\n  \
+             pid 4242 zebrad: started 2027-01-15T07:00:00.000000Z, CPU 12.50 s, memory 1073741824 bytes, read 1000 bytes, written unknown, threads 68\n  \
+             pid 4300 (parent 4242) sh: started 2027-01-15T07:00:00.000000Z, CPU 12.50 s, memory 1073741824 bytes, read 1000 bytes, written unknown, threads 68\n  \
+             and 1 more\n\
+             Computer: 8 logical CPUs, 2.50 busy over the last interval; memory 16.00 GiB, 4.00 GiB available; swap 0.00 GiB of 2.00 GiB\n"
+        );
+        let empty = resources_section(None, None);
+        assert!(empty.contains("Process tree: (none: "), "{empty}");
+        assert!(empty.contains("Computer: (none: "), "{empty}");
     }
 
     #[test]
