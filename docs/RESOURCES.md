@@ -2,10 +2,9 @@
 
 > **Status, 2026-11-03: phases 1 and 2 are built (the Resources card, live on Linux);
 > phases 3 to 7 are the design.** [Phases](#phases) says what each built phase changed from
-> this design. It answers the maintainer's question "can we also monitor resource usage of each
-> node or child process?". [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what
-> is built and is updated phase by phase as this lands. [MULTI-NODE.md](MULTI-NODE.md) is
-> the plan it fits into.
+> this design. [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built and
+> is updated phase by phase as this lands. [MULTI-NODE.md](MULTI-NODE.md) is the plan it fits
+> into.
 
 Yes, for each node and for every process a node starts. Zeal already draws the boundary of
 each node's process tree:
