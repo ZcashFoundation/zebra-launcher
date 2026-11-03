@@ -113,8 +113,12 @@ from the node's spec (`NodeSpec`, `crates/launcher-core/src/nodes.rs`).
 - **Ports at every start.** The supervisor tries binding each of the node's addresses
   (P2P on `0.0.0.0`, RPC and metrics on loopback) before it spawns zebrad: one that
   another program holds fails the start as `PortInUse`, naming the port, before zebrad
-  runs; zebrad's own report of a port in use stays the backstop. The addresses come from a watch, so a network change needs no new supervisor (a
-  new one would restart the log's sequence numbers, which the UI merges by).
+  runs; zebrad's own report of a port in use stays the backstop. The probe
+  (`supervisor::addr_in_use`, also behind the ports a new node gets) binds a socket
+  without listening on it, so Zeal itself never listens on a non-loopback address and
+  the firewall prompt stays zebrad's. The addresses come from a watch, so a network
+  change needs no new supervisor (a new one would restart the log's sequence numbers,
+  which the UI merges by).
 - **Launcher lines** go to the node they are about: an event with a `node` field, or
   inside a tracing span that has one (each node command that changes something runs in
   one, blocking work and a removal's task included), goes to that node's log; any other

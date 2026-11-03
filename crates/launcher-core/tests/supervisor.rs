@@ -497,6 +497,22 @@ async fn database_lock_and_port_conflicts_are_deterministic_failures() {
     within(handle.shutdown()).await.expect("shutdown");
 }
 
+#[test]
+fn the_port_probe_sees_a_socket_that_holds_the_address() {
+    let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
+    let taken = holder.local_addr().expect("bound address");
+    assert!(supervisor::addr_in_use(taken));
+    // A UDP socket on a port does not hold it for zebrad's TCP listeners.
+    let bound = std::net::UdpSocket::bind("127.0.0.1:0").expect("a UDP socket");
+    let udp = bound.local_addr().expect("bound address");
+    assert!(!supervisor::addr_in_use(udp), "only TCP counts");
+    // Port 0 always binds: nothing holds it.
+    assert!(!supervisor::addr_in_use(
+        "127.0.0.1:0".parse().expect("an address")
+    ));
+    drop(holder);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_port_another_program_holds_fails_the_start_before_zebrad_runs() {
     let mut fx = fixture("ok");

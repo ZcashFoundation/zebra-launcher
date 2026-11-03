@@ -944,16 +944,13 @@ impl Actor {
     }
 }
 
-/// The first of `listeners` whose address another program holds: binding it
-/// fails with `AddrInUse`. Any other failure (no IPv6, a port the system
-/// reserves) is left for zebrad to report.
+/// The first of `listeners` whose address another program holds
+/// ([`super::addr_in_use`]).
 fn first_taken(listeners: &[Listener]) -> Option<Listener> {
-    listeners.iter().copied().find(|listener| {
-        matches!(
-            std::net::TcpListener::bind(listener.addr),
-            Err(err) if err.kind() == io::ErrorKind::AddrInUse
-        )
-    })
+    listeners
+        .iter()
+        .copied()
+        .find(|listener| super::addr_in_use(listener.addr))
 }
 
 async fn sleep_until_or_never(deadline: Option<Instant>) {

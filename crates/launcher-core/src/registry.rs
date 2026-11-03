@@ -105,12 +105,9 @@ pub fn listen_addr(role: PortRole, port: u16) -> SocketAddr {
 }
 
 /// Whether another program holds `port`: binding [`listen_addr`] fails with
-/// `AddrInUse`.
+/// `AddrInUse` ([`supervisor::addr_in_use`], which never listens).
 pub fn port_in_use(role: PortRole, port: u16) -> bool {
-    matches!(
-        std::net::TcpListener::bind(listen_addr(role, port)),
-        Err(err) if err.kind() == io::ErrorKind::AddrInUse
-    )
+    supervisor::addr_in_use(listen_addr(role, port))
 }
 
 /// The addresses a node's supervisor checks before every start.
