@@ -159,10 +159,12 @@ pub fn Configure() -> impl IntoView {
             })
     };
     // Also while the file cannot be read, the main case a reset is for; not over an unsaved
-    // draft, which Discard clears first. A forbidden key the draft drops is not such a draft.
+    // draft or rejected text typed into a field, which Discard clears first. A forbidden key
+    // the draft drops is not such a draft.
     let reset_blocked = Signal::derive(move || {
         editor.saving.get()
             || editor.edited.get()
+            || editor.has_invalid_edit()
             || editor.load.with(|load| *load == Load::Loading)
     });
     // The file pane's height budget: the scrolling page's height minus the stuck footer's (and

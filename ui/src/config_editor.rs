@@ -492,13 +492,15 @@ impl ConfigEditor {
             }
             changed
         });
-        // Opening the page re-reads the file while there is nothing to lose.
+        // Opening the page re-reads the file while there is nothing to lose: no draft edit, and
+        // no rejected text typed into a field, which the draft does not hold.
         Effect::new(move |previous: Option<Tab>| {
             let tab = state.tab.get();
             if tab == Tab::Configure
                 && previous.is_some_and(|previous| previous != tab)
                 && !editor.saving.get_untracked()
                 && !editor.edited.get_untracked()
+                && !untrack(|| editor.has_invalid_edit())
                 && editor.load.with_untracked(|load| *load == Load::Ready)
             {
                 spawn_local(editor.reload(Reload::Replace));
