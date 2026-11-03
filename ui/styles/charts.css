@@ -2,7 +2,9 @@
    details rows and the Grafana line (see ui/src/pages/dashboard.rs, ui/src/charts.rs). The
    grid, axis, tooltip, key and table classes are shared with the log activity chart
    (ui/src/components/log_insights.rs). Colours come from the tokens in styles.css only. No
-   transitions: data changes must not move. */
+   transitions: data changes must not move. Widths in the breakpoints are the page's
+   (`@container page`, set on .app-main in styles.css), so the sidebar of several nodes narrows
+   them as it narrows the page; with one node the page is as wide as the window. */
 
 /* Status card: the verdict (3fr) beside the sync progress (2fr); stacked under 900 px. The
    level's status colour sits on the card's left edge and the chip's icon, nowhere else. */
@@ -17,7 +19,7 @@
   min-height: 120px;
 }
 
-@media (max-width: 900px) {
+@container page (max-width: 900px) {
   .dash-status {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -297,13 +299,13 @@
   margin-bottom: 12px;
 }
 
-@media (max-width: 1100px) {
+@container page (max-width: 1100px) {
   .tile-row {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
-@media (max-width: 640px) {
+@container page (max-width: 640px) {
   .tile-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -395,7 +397,7 @@
   margin-bottom: 12px;
 }
 
-@media (max-width: 900px) {
+@container page (max-width: 900px) {
   .chart-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -667,7 +669,7 @@
 }
 
 /* Activity row (styled by insights.css): Recent problems, This run and Peers, three across
-   from 1360 px, the narrowest window where a third of the row holds the peer table; two across
+   from 1360 px, the narrowest page where a third of the row holds the peer table; two across
    with Peers full width under them between 900 and 1360 px; stacked below. The two list cards
    keep one height and scroll inside. */
 
@@ -688,7 +690,7 @@
   min-height: 0;
 }
 
-@media (min-width: 1360px) {
+@container page (min-width: 1360px) {
   .dash-activity {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -698,7 +700,7 @@
   }
 }
 
-@media (max-width: 900px) {
+@container page (max-width: 900px) {
   .dash-activity {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -728,7 +730,7 @@
 /* The peer table: text columns left, the ping right, the address in the mono face, the agent
    clipped with its full text in the title. It needs about 390 px without the Version column
    and 450 px with it; a third of the row is 400 px at 1360 px, so the cells are tight and the
-   Version column shows only where the card is wider (full width under 1360 px, or a window
+   Version column shows only where the card is wider (full width under 1360 px, or a page
    from 1600 px). Under 1360 px the card is collapsed to its caption until "Show peers". */
 
 .dash-peers-table {
@@ -766,7 +768,7 @@
   text-overflow: ellipsis;
 }
 
-@media (min-width: 1360px) and (max-width: 1599.98px) {
+@container page (min-width: 1360px) and (max-width: 1599.98px) {
   .dash-peer-list .dash-peer-version {
     display: none;
   }
@@ -783,7 +785,7 @@
   font-weight: 500;
 }
 
-@media (max-width: 1359.98px) {
+@container page (max-width: 1359.98px) {
   .dash-peers-toggle {
     display: inline;
   }
@@ -796,7 +798,7 @@
 
 /* Details: Node and Chain; the Node card's rows in two columns from 1100 px. */
 
-@media (min-width: 1100px) {
+@container page (min-width: 1100px) {
   .dash-node .rows {
     grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
   }

@@ -58,7 +58,7 @@
   overflow: hidden;
 }
 
-@media (max-width: 900px) {
+@container page (max-width: 900px) {
   .cfg-panes {
     grid-template-columns: minmax(0, 1fr);
   }
