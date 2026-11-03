@@ -510,14 +510,18 @@ pub async fn copy_diagnostics(state: State<'_, AppState>) -> Result<String, Stri
     let stop_grace = state.supervisor.stop_grace();
     blocking(move || {
         let sidecar = sidecar::resolve(&paths);
-        let mut text = diagnostics::bundle(
-            &paths,
-            &status,
-            &settings,
-            stats.as_ref(),
-            Some(&sidecar),
+        let mut node = launcher_core::nodes::NodeSpec::first(settings.network);
+        node.stop_grace_secs = settings.stop_grace_secs;
+        let info = node.info(&paths);
+        let files = paths.launcher_node();
+        let report = diagnostics::NodeReport {
+            info: &info,
+            paths: &files,
+            status: &status,
+            stats: stats.as_ref(),
             stop_grace,
-        );
+        };
+        let mut text = diagnostics::bundle(&paths, &settings, &[report], Some(&sidecar));
         text.push_str(&diagnostics::resources_section(
             resources.as_ref(),
             machine.as_ref(),
