@@ -536,17 +536,19 @@ async fn a_port_another_program_holds_fails_the_start_before_zebrad_runs() {
     );
     assert!(!contains(&history, "zebrad started"));
 
-    // The ports follow the watch: once they are free the start goes ahead.
-    drop(holder);
+    // The ports follow the watch: with a port nobody holds the start goes
+    // ahead. (Port 0 always binds; the port just freed could already be
+    // another test's.)
     listeners.send_replace(vec![Listener {
         role: PortRole::Metrics,
-        addr: taken,
+        addr: "127.0.0.1:0".parse().expect("an address"),
     }]);
     within(handle.start())
         .await
         .expect("start once the port is free");
     assert_eq!(handle.status().phase, Phase::Running);
     within(handle.shutdown()).await.expect("shutdown");
+    drop(holder);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
