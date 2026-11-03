@@ -1,8 +1,9 @@
 # Block explorer
 
-> **Status: proposal, 2026-11-03.** A design for review before any code. It builds on
+> **Status: P0 and P1 built, 2026-11-03; P2 onward is a proposal.** It builds on
 > [MULTI-NODE.md](MULTI-NODE.md). [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of
-> what is built and is updated phase by phase as this lands.
+> what is built and is updated phase by phase as this lands. [Built so far](#built-so-far)
+> says what P0 and P1 built and where the code differs from this design.
 
 The maintainer asked for "a block explorer too, a highly performant one that offers highly
 functional, flexible, and intuitive visualizations, search features, and UX". This document
@@ -1158,22 +1159,22 @@ CI through fake-zebrad's `fakegetcallcounts`.
 
 Each phase is one PR that leaves the app working, with screenshots from the mock.
 
-1. **P0, groundwork.** Move-only commits: `short_hash`, `zec_text`, `pools_text` to format.rs;
-   `spawn_fake_with` to tests/support/helpers.rs; fake-zebrad into a folder; the at-tip rule's
-   body to launcher-types. Then rpc.rs's typed decode, `OwnedSession`, timeouts and cookie
-   re-read; `NodeDetails` gains `upgrades` and `consensus` (rpc.rs already decodes `upgrades`,
-   :89-91); the bench, the Tauri spike, the fixture script. Ships a faster monitor and the
-   measurements that set the thresholds. Screenshots: none; the PR carries the measurement
-   table.
-2. **P1, chain, blocks and a first transaction page.** explorer-model (shapes, ledger, budget,
-   pools, upgrades, the classifier for heights, hashes and refusals, synth); the actor
-   (scheduler, L2, merging, `ChainIndex`, tip follower, `Interest`); `explorer` and
-   `explorer_live`; the tab, gate and shell; Chain (V1 without the next-block tile, tiles, V9,
-   recent blocks); Block (V2, V3, V4, details, txids 200 a page); future heights; Transaction
-   without input values (status, V7, outputs, shielded cards, kind); pool tokens; `?attip`,
-   `?tip=`, `?explorer=slow|empty|nobi`, `?reorg`; details.rs reads synth; fake-zebrad's
-   synthetic mode; CI call budgets. Screenshots: Chain, Block, Transaction, light and dark, with
-   `?attip`, `?attip&reorg`, `?explorer=nobi`, `?herd`.
+1. **P0, groundwork. Built, without the measurements.** Move-only commits: `short_hash`,
+   `zec_text`, `pools_text` to format.rs; the at-tip rule's body to launcher-types. Then
+   rpc.rs's typed decode, `OwnedSession`, timeouts and cookie re-read; `NodeDetails` gains
+   `upgrades` and `consensus`. Not yet: `spawn_fake_with`'s move and fake-zebrad's folder (other
+   branches change fake-zebrad; the move comes with the end-to-end tests that need it), and the
+   bench, the Tauri spike and the fixture script, which need a synced Mainnet zebrad (open
+   question 11). Until they run, the thresholds below are the design's targets.
+2. **P1, chain, blocks and a first transaction page. Built.** explorer-model (shapes, ledger,
+   budget, upgrades, views, the classifier, synth); the actor (scheduler, L2, merging,
+   `ChainIndex`, tip follower, `Interest`); `explorer` and `explorer_live`; the tab, gate and
+   shell; Chain (V1 without the next-block tile, tiles, recent blocks); Block (V2, V3, V4,
+   details, txids 200 a page); future heights; Transaction without input values (status, V7,
+   inputs and outputs, shielded cards, kind); pool tokens; `?attip`, `?tip=`,
+   `?explorer=slow|empty|nobi`, `?reorg`; details.rs reads synth; call budgets as tests. Not
+   yet: V9 and the Sol/s tile, and fake-zebrad's synthetic mode. Screenshots: Chain, Block,
+   Transaction, light and dark, with `?attip`, `?attip&reorg`, `?explorer=nobi`, `?herd`.
 3. **P2, transaction detail.** The Block page's table on `VirtualList` (v3, visible rows first
    for big blocks); prevouts; V6 with its conservation line; the fee card; outpoints; hover
    cards; Show RPC; prefetching. Screenshots: fully shielded, shielding with change, Orchard →
@@ -1202,11 +1203,85 @@ Each phase is one PR that leaves the app working, with screenshots from the mock
    aggregates; This node (V13, arrival latency, mempool overlap); opt-in labels and a watchlist;
    the opt-in history index; push updates over the indexer gRPC; `zeal://` links.
 
+## Built so far
+
+P0 and P1, for the one node the backend runs (see [Several nodes](#several-nodes)). Where the
+code differs from the design above:
+
+- **RPC client.** The typed decode, `OwnedSession`, per-call timeouts (`call_timeout`, with
+  `HEAVY_REQUEST_TIMEOUT` at 60 s) and the cookie re-read are in rpc.rs. A call reads the cookie
+  again after an HTTP status, an empty body or an HTTP error other than a timeout, and repeats
+  itself only if the file changed, so a stopped zebrad costs a file read, not a second request.
+  Keep-alive settings and `call_batch` wait for the bench.
+- **`NodeDetails`** carries `upgrades` as a list ordered by height, each with its branch id, and
+  the `consensus` branches of the tip and the next block.
+- **Moves.** `short_hash`, `zec_text`, `pools_text` and the at-tip rule moved as planned.
+  `spawn_fake_with` stays in rpc_monitor.rs and fake-zebrad in one file: nothing in this phase
+  needs them elsewhere, and two other branches change fake-zebrad.
+- **Wire types** in `launcher_types::explorer` carry P1's requests only: `Status`, `Interest`,
+  `Chain`, `Block`, `BlockTxs`, `Tx` and `Resolve`. `ExplorerCall` has no `scope` (cancelling
+  paged requests) or `trace` (Show RPC, P2) yet, and there is no `explorer_job` command until
+  the first job (P4).
+- **explorer-model's modules** are `shapes`, `upgrades`, `ledger` (with the ZIP 218 budget from
+  the note trees), `views`, `classify` and `synth`. The pool rules the pages show sit with the
+  pages; `zip317`, `pools`, `query`, `filter`, `flow`, `m4`, `template` and `glossary` come with
+  the phases that use them. Testnet's NU6.2, NU6.3 and NU7 heights are zebra-chain 7.0.0's:
+  4,052,000, 4,134,000 and 4,465,026.
+- **The classifier** looks up heights (with `tip`, `latest`, `tip-N` and `-N`), hashes and
+  outpoints, and refuses keys and phrases, a search route's query included. It takes a pasted
+  URL's last segment, `?q=` or fragment, but not an id inside JSON, and it names a `zcash:`
+  request instead of opening its address. The other classes are recognised for the hint and
+  answered "a later version".
+- **Tauri.** The explorer's handle is Tauri state of its own, as the updater's is, not an
+  `AppState` field, and the node-id rule is the actor's, behind `ExplorerHandle::call(node,
+  call)`: it answers the id of the network zebrad runs on, and calls the other network's id not
+  running until zebrad's next start. Hiding the window to the tray does not send `Interest`
+  yet: the tab and the document's visibility do.
+- **The actor.** Two lanes, interactive and prefetch (the follower); every P1 read weighs one,
+  since P1 makes no heavy call, and the background lane comes with the store (P5). Six permits,
+  four while the node syncs; no HTTP 429 back-off yet, since six reads never come near zebrad's
+  100. A new network clears everything, where the design says a new genesis hash. Hashes above
+  the final 1,000 are trusted for 10 s after a tip check, else a block asked for by height is
+  read again; headers above them are cached per epoch.
+- **The follower** polls `getbestblockheightandhash` every 2 s while the page is shown and the
+  node is at the tip, and a page that needs the tip checks it when the last check is older than
+  it can use; the monitor's `best_block_hash` is not used. It reads the new tip's block: one on
+  top is a push; otherwise a `getblockhash` at the old tip tells a jump from a reorganisation,
+  whose fork a binary search of the known heights finds in at most ten calls. It does not walk
+  back three parents first. `ChainIndex` is one `BTreeMap` of the heights it knows, and there is
+  no fork log yet: `ExplorerLive` carries the last reorganisation.
+- **After a reorganisation** the Chain page, Block pages opened by height and Transaction pages
+  ask again. A Block page opened by hash keeps its block, without the "no longer in your node's
+  best chain" line.
+- **Not yet:** the store, stale replies while the node is stopped (the explorer answers "not
+  running"), the search's 150 ms previews, suggestions and recent searches, the "3 new blocks"
+  pill, V9, the Sol/s tile, the route cache (back and forward ask the explorer again, which
+  answers from its cache) and hover cards.
+- **Call budgets** are pinned by launcher-core's actor tests over an in-memory synthetic source
+  that counts its calls: the Chain page costs 1 tip, 25 coinbases, 1 header, at most 27 blocks
+  (26, and the one before NU7 once past it) and at most 2 subsidies; a revisit costs nothing; a
+  Block page 2 blocks, its coinbase and its subsidy; a Transaction page one read; two pages
+  asking for one block share its reads; a reorganisation takes at most ten `getblockhash`. A
+  test also checks that no log field carries a requested hash, txid or height. fake-zebrad's
+  synthetic mode and the end-to-end tests through `fakegetcallcounts` wait with the move above.
+- **The UI** is `ui/src/explorer.rs` (the shell) and `ui/src/explorer/` (`chain`, `block`, `tx`,
+  `search`, `parts`, `state`, `history`, `text`), with `ui/styles/explorer.css`. Each node's
+  place lives in the Explorer tab (`Explorers`), not in `NodeState`. Nothing is read before the
+  tab is first opened. The Transaction page lists transparent inputs as links to the outputs
+  they spend, without values, and shows the fee only for a transaction without transparent
+  inputs.
+- **The mock** is one file, `ui/src/mock/explorer.rs`, with the flags `?attip`, `?tip=`,
+  `?explorer=slow|empty|nobi` and `?reorg`; the other flags come with their phases. Every
+  `?herd` zebrad and Zakura node has its own chain (Zakura's pruning is P6). The synthetic
+  chain's subsidy leaves out the slow start; the explorer reads the real one from
+  `getblocksubsidy`.
+
 ## Open questions for the maintainer
 
 1. Explorer after Logs as Ctrl/Cmd+3 (moving Grafana, Configure and Settings by one), or
-   appended as Ctrl/Cmd+6?
-2. A new workspace crate `explorer-model` (pure, serde only), or modules in launcher-types?
+   appended as Ctrl/Cmd+6? P1 places it after Logs, as Ctrl/Cmd+3.
+2. A new workspace crate `explorer-model` (pure, serde only), or modules in launcher-types? P1
+   builds the crate.
 3. TEX: a hand-written bech32m decoder with `bs58` and `sha2` (in Cargo.lock), or the `bech32`
    or `zcash_address` crate (new to `cargo deny`)?
 4. ZIP references: Copy only, or open zips.z.cash after a confirmation?
@@ -1218,7 +1293,8 @@ Each phase is one PR that leaves the app working, with screenshots from the mock
 9. `zeal://` links other apps can open: later, or never?
 10. Push updates through the indexer gRPC, which has no authentication and opens a loopback
     port: later, or never?
-11. Who runs the P0 bench on a synced Mainnet zebrad, and the IPC spike per platform?
+11. Who runs the P0 bench on a synced Mainnet zebrad, the IPC spike per platform, and the
+    fixture script? All three are still to run.
 12. Build the projection only if the store shows that blocks fill up?
 
 ## Not confirmed
