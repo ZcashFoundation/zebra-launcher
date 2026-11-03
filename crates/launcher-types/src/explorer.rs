@@ -826,12 +826,17 @@ pub enum LiveState {
     AtTip,
 }
 
-/// A reorganisation the explorer followed: the blocks above `fork_height` were replaced.
+/// A reorganisation the explorer followed, as far as its checks of the node showed it: the
+/// chains share `fork_height` and differ at `first_replaced`, so they part at a height between
+/// the two. When `first_replaced` is `fork_height + 1`, the explorer knows where.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReorgNotice {
-    /// The last height both chains share.
+    /// The highest height both chains were seen to share.
     pub fork_height: u32,
-    /// How many blocks were replaced.
+    /// The lowest height the chains were seen to differ at.
+    pub first_replaced: u32,
+    /// How many blocks were replaced at least: the old tip's height less `first_replaced`,
+    /// plus one. Exact when the explorer knows where the chains part.
     pub replaced: u32,
     /// The epoch the reorganisation started.
     pub epoch: u64,

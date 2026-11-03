@@ -298,6 +298,7 @@ fn tick() {
                 explorer.epoch += 1;
                 explorer.reorg = Some(ReorgNotice {
                     fork_height: fork,
+                    first_replaced: fork + 1,
                     replaced: 2,
                     epoch: explorer.epoch,
                     at: now,

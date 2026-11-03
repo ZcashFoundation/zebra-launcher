@@ -1,8 +1,8 @@
 //! What the explorer knows of the node's best chain: its tip and the hashes at the heights it
 //! has read, so a block asked for by height can come from the cache. Hashes at final heights
 //! (1,000 below the tip, zebrad's reorg limit) are trusted as they are; hashes above are
-//! trusted only while the tip was checked a moment ago. A reorganisation drops what it
-//! replaced and bumps the epoch once.
+//! trusted only while the tip was checked a moment ago. A reorganisation drops every height
+//! above the highest one its check proved shared, and bumps the epoch once.
 
 use std::{
     collections::BTreeMap,
@@ -20,19 +20,30 @@ const MAX_KNOWN: usize = 50_000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TipUpdate {
     pub(crate) tip: (u32, BlockHash),
-    /// The last height the old and the new chain share, when the node replaced blocks.
-    pub(crate) fork: Option<u32>,
-    /// The tip jumped further than the reorg window: the old tip's unchecked heights (within
-    /// the window below it) are dropped, since nothing compared them with the node.
-    pub(crate) reset: bool,
-    /// Hashes learned on the way.
+    pub(crate) change: Change,
+    /// The node's hashes at the heights the check read on the way.
     pub(crate) learned: Vec<(u32, BlockHash)>,
 }
 
-/// A reorganisation [`ChainIndex::apply`] found.
+/// What a check of the tip found about the chain the index knew.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Change {
+    /// The same tip, or one that builds on it.
+    Follows,
+    /// The tip moved further ahead than the reorg window: nothing compared the old tip's
+    /// heights within the window below it with the node, so they are dropped.
+    Jumped,
+    /// The node replaced blocks: the chains share `shared` and differ at `first_replaced`, so
+    /// they part at a height between the two. The heights above `shared` are dropped.
+    Replaced { shared: u32, first_replaced: u32 },
+}
+
+/// A reorganisation [`ChainIndex::apply`] found: the chains share `shared`, differ at
+/// `first_replaced`, and at least `blocks` blocks of the old chain were replaced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Replaced {
-    pub(crate) fork: u32,
+    pub(crate) shared: u32,
+    pub(crate) first_replaced: u32,
     pub(crate) blocks: u32,
 }
 
@@ -114,19 +125,25 @@ impl ChainIndex {
     pub(crate) fn apply(&mut self, update: TipUpdate, now: Instant) -> Option<Replaced> {
         let old_tip = self.tip.map(|(height, _)| height);
         let mut replaced = None;
-        if let Some(fork) = update.fork {
-            self.known.split_off(&(fork + 1));
-            self.epoch += 1;
-            replaced = Some(Replaced {
-                fork,
-                blocks: old_tip.map_or(0, |tip| tip.saturating_sub(fork)),
-            });
-        }
-        if update.reset
-            && let Some(old_tip) = old_tip
-        {
-            self.known
-                .split_off(&(old_tip.saturating_sub(REORG_WINDOW) + 1));
+        match update.change {
+            Change::Follows => {}
+            Change::Jumped => {
+                if let Some(old_tip) = old_tip {
+                    self.drop_above(old_tip.saturating_sub(REORG_WINDOW));
+                }
+            }
+            Change::Replaced {
+                shared,
+                first_replaced,
+            } => {
+                self.drop_above(shared);
+                self.epoch += 1;
+                replaced = Some(Replaced {
+                    shared,
+                    first_replaced,
+                    blocks: old_tip.map_or(0, |tip| (tip + 1).saturating_sub(first_replaced)),
+                });
+            }
         }
         self.tip = Some(update.tip);
         for (height, hash) in update.learned {
@@ -141,11 +158,19 @@ impl ChainIndex {
     pub(crate) fn clear(&mut self) {
         *self = Self::new(self.fresh);
     }
+
+    /// Forgets the hashes above `height`.
+    fn drop_above(&mut self, height: u32) {
+        self.known.split_off(&height.saturating_add(1));
+    }
 }
 
-/// A binary search for the last height two chains share, over the heights the index knows:
-/// the chains agree up to the fork and nowhere above it, so each probe ("does the node still
-/// have this hash here?") halves what is left. A thousand heights take at most ten probes.
+/// A binary search for where two chains part, over the heights the index knows: the chains
+/// agree up to the fork and nowhere above it, so each probe ("does the node still have this
+/// hash here?") halves what is left. A thousand heights take at most ten probes. It proves only
+/// what it probed: the chains part at or above the highest height that matched and below the
+/// lowest that did not, which are next to each other only when the index knew every height
+/// between.
 #[derive(Debug)]
 pub(crate) struct ForkSearch {
     candidates: Vec<(u32, BlockHash)>,
@@ -181,17 +206,25 @@ impl ForkSearch {
         }
     }
 
-    /// The last shared height, once the search is over: the highest candidate that matched,
-    /// or the height below the lowest candidate when none did.
-    pub(crate) fn fork(&self) -> u32 {
-        match self.low {
-            0 => self
-                .candidates
-                .first()
-                .map_or(0, |(height, _)| height.saturating_sub(1)),
-            low => self.candidates[low - 1].0,
+    /// What the search proved, once it is over.
+    pub(crate) fn bounds(&self) -> ForkBounds {
+        ForkBounds {
+            shared: self
+                .low
+                .checked_sub(1)
+                .map(|index| self.candidates[index].0),
+            first_replaced: self.candidates.get(self.high).map(|(height, _)| *height),
         }
     }
+}
+
+/// What a finished [`ForkSearch`] proved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ForkBounds {
+    /// The highest candidate the node still has.
+    pub(crate) shared: Option<u32>,
+    /// The lowest candidate the node no longer has.
+    pub(crate) first_replaced: Option<u32>,
 }
 
 #[cfg(test)]
@@ -211,8 +244,7 @@ mod tests {
     fn update(tip: u32, branch: u8) -> TipUpdate {
         TipUpdate {
             tip: (tip, hash(tip, branch)),
-            fork: None,
-            reset: false,
+            change: Change::Follows,
             learned: Vec::new(),
         }
     }
@@ -247,7 +279,10 @@ mod tests {
         }
         let replaced = index.apply(
             TipUpdate {
-                fork: Some(98),
+                change: Change::Replaced {
+                    shared: 98,
+                    first_replaced: 99,
+                },
                 ..update(101, 1)
             },
             now,
@@ -255,7 +290,8 @@ mod tests {
         assert_eq!(
             replaced,
             Some(Replaced {
-                fork: 98,
+                shared: 98,
+                first_replaced: 99,
                 blocks: 2
             })
         );
@@ -277,7 +313,7 @@ mod tests {
         index.learn(9_999, hash(9_999, 0));
         index.apply(
             TipUpdate {
-                reset: true,
+                change: Change::Jumped,
                 ..update(20_000, 0)
             },
             now,
@@ -300,14 +336,77 @@ mod tests {
                 search.answer(height <= fork);
             }
             assert!(probes <= 10, "{probes} probes");
-            assert_eq!(search.fork(), fork);
+            let bounds = search.bounds();
+            assert_eq!(bounds.shared, Some(fork));
+            assert_eq!(bounds.first_replaced, (fork < 999).then_some(fork + 1));
         }
-        // Nothing matches: the fork is below the lowest candidate.
-        let mut search = ForkSearch::new(vec![(50, hash(50, 0)), (60, hash(60, 0))]);
-        while search.probe().is_some() {
-            search.answer(false);
-        }
-        assert_eq!(search.fork(), 49);
-        assert_eq!(ForkSearch::new(Vec::new()).fork(), 0);
+    }
+
+    #[test]
+    fn the_fork_search_proves_only_what_it_probed() {
+        let finish = |mut search: ForkSearch, fork: u32| {
+            while let Some((height, _)) = search.probe() {
+                search.answer(height <= fork);
+            }
+            search.bounds()
+        };
+        // Nothing matches: the chains part somewhere below the lowest candidate.
+        let candidates = vec![(50, hash(50, 0)), (60, hash(60, 0))];
+        assert_eq!(
+            finish(ForkSearch::new(candidates.clone()), 10),
+            ForkBounds {
+                shared: None,
+                first_replaced: Some(50)
+            }
+        );
+        // Far apart: the chains part between the two.
+        assert_eq!(
+            finish(ForkSearch::new(candidates), 55),
+            ForkBounds {
+                shared: Some(50),
+                first_replaced: Some(60)
+            }
+        );
+        assert_eq!(
+            finish(ForkSearch::new(Vec::new()), 55),
+            ForkBounds {
+                shared: None,
+                first_replaced: None
+            }
+        );
+    }
+
+    #[test]
+    fn a_reorganisation_counts_only_the_blocks_seen_replaced() {
+        let now = Instant::now();
+        let mut index = ChainIndex::new(FRESH);
+        index.apply(update(5_000, 0), now);
+        index.learn(3_000, hash(3_000, 0));
+        index.learn(4_990, hash(4_990, 0));
+        // The chains share 4,000 at least and differ at 4,990: at least 11 blocks were replaced.
+        let replaced = index.apply(
+            TipUpdate {
+                change: Change::Replaced {
+                    shared: 4_000,
+                    first_replaced: 4_990,
+                },
+                ..update(5_001, 1)
+            },
+            now,
+        );
+        assert_eq!(
+            replaced,
+            Some(Replaced {
+                shared: 4_000,
+                first_replaced: 4_990,
+                blocks: 11
+            })
+        );
+        assert_eq!(index.hash_at(3_000, now), Some(hash(3_000, 0)));
+        assert_eq!(
+            index.hash_at(4_990, now),
+            None,
+            "above what was proved shared"
+        );
     }
 }

@@ -548,6 +548,7 @@ async fn a_reorganisation_at_the_tip_is_followed_once() {
         .clone();
     let reorg = event.live.reorg.unwrap();
     assert_eq!(reorg.fork_height, TIP - 2);
+    assert_eq!(reorg.first_replaced, TIP - 1, "where exactly");
     assert_eq!(reorg.replaced, 2);
     assert_eq!(reorg.epoch, 1);
     let tip = event.live.tip.unwrap();
@@ -572,6 +573,110 @@ async fn a_reorganisation_at_the_tip_is_followed_once() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(delta(harness.counts(), quiet), [0; 6]);
     assert_eq!(harness.explorer.live().borrow().live.tip.unwrap().epoch, 1);
+}
+
+impl Harness {
+    /// Changes the node's chain and reports the new tip in the statistics, as the monitor
+    /// would. Returns what `change` returns.
+    fn change_chain<R>(&self, change: impl FnOnce(&mut SynthChain) -> R) -> R {
+        let mut out = None;
+        self.chain.send_modify(|chain| out = Some(change(chain)));
+        let stats = stats_for(&self.chain.borrow());
+        self.stats.send_replace(Some(stats));
+        out.expect("changed")
+    }
+
+    async fn show(&self, page: PageKind) {
+        self.reply(ExplorerRequest::Interest {
+            visible: true,
+            page,
+        })
+        .await;
+    }
+
+    async fn next_reorg(&self) -> launcher_types::explorer::ReorgNotice {
+        let mut live = self.explorer.live();
+        tokio::time::timeout(LIMIT, live.wait_for(|event| event.live.reorg.is_some()))
+            .await
+            .expect("the reorganisation is noticed")
+            .expect("the explorer runs")
+            .live
+            .reorg
+            .expect("a notice")
+    }
+}
+
+#[tokio::test]
+async fn without_a_known_height_below_it_a_reorganisation_is_a_lower_bound() {
+    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
+        config.tip_poll = Duration::from_millis(30);
+    });
+    let txid = harness
+        .chain
+        .borrow()
+        .block(BlockId::Height(TIP - 2))
+        .unwrap()
+        .tx[1];
+    let ExplorerResponse::Tx(before) = harness.reply(ExplorerRequest::Tx { txid }).await else {
+        panic!("a transaction page");
+    };
+    assert!(matches!(before.status, TxStatus::Mined { .. }));
+    // The follower knows only the tip.
+    harness.show(PageKind::Tx).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let fork = harness.change_chain(|chain| {
+        let fork = chain.reorg(3);
+        chain.mine(1);
+        fork
+    });
+    let reorg = harness.next_reorg().await;
+    assert!(
+        reorg.fork_height <= fork && fork < reorg.first_replaced,
+        "{reorg:?}, fork {fork}"
+    );
+    assert!((1..=3).contains(&reorg.replaced), "{reorg:?}");
+    // The transaction's block was replaced: the page says so instead of the cached status.
+    let ExplorerResponse::Tx(after) = harness.reply(ExplorerRequest::Tx { txid }).await else {
+        panic!("a transaction page");
+    };
+    assert!(
+        matches!(after.status, TxStatus::SideChain { .. }),
+        "{:?}",
+        after.status
+    );
+}
+
+#[tokio::test]
+async fn far_apart_known_heights_bound_a_reorganisation() {
+    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
+        config.tip_poll = Duration::from_millis(30);
+    });
+    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    // 144 blocks arrive while the Explorer is hidden; shown again, the follower moves on.
+    harness.change_chain(|chain| chain.mine(144));
+    harness.show(PageKind::Tx).await;
+    let mut live = harness.explorer.live();
+    tokio::time::timeout(
+        LIMIT,
+        live.wait_for(|event| event.live.tip.is_some_and(|tip| tip.height == TIP + 144)),
+    )
+    .await
+    .expect("moved on")
+    .expect("the explorer runs");
+    // One block is replaced: not the 144 the follower did not see one by one.
+    let fork = harness.change_chain(|chain| {
+        let fork = chain.reorg(1);
+        chain.mine(1);
+        fork
+    });
+    let reorg = harness.next_reorg().await;
+    assert!(
+        reorg.fork_height <= fork && fork < reorg.first_replaced,
+        "{reorg:?}, fork {fork}"
+    );
+    assert_eq!(reorg.replaced, 1, "{reorg:?}");
 }
 
 #[tokio::test]

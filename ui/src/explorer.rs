@@ -335,13 +335,9 @@ fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
                     Some(reorg) => view! {
                         <div class="banner banner-warn ex-banner" role="status">
                             <span>
-                                {format!(
-                                    "{} block{} replaced at {}: the node switched to another \
-                                     branch above {}.",
-                                    reorg.replaced,
-                                    if reorg.replaced == 1 { " was" } else { "s were" },
-                                    local_datetime_short(UNIX_EPOCH + Duration::from_secs(reorg.at)),
-                                    thousands(u64::from(reorg.fork_height))
+                                {text::reorg_text(
+                                    &reorg,
+                                    &local_datetime_short(UNIX_EPOCH + Duration::from_secs(reorg.at)),
                                 )}
                             </span>
                         </div>

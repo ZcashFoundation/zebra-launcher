@@ -6,8 +6,8 @@ use explorer_model::classify::{Classified, Later};
 use launcher_types::{
     Network,
     explorer::{
-        BlockSummary, Budget, LedgerCheck, NotFoundHint, PerPool, Pool, SecretKind, Shown, TxKind,
-        TxPage, UnknownWhy,
+        BlockSummary, Budget, LedgerCheck, NotFoundHint, PerPool, Pool, ReorgNotice, SecretKind,
+        Shown, TxKind, TxPage, UnknownWhy,
     },
 };
 
@@ -346,6 +346,29 @@ pub fn interval_text(secs: i64) -> String {
     }
 }
 
+/// The banner's words for a reorganisation the explorer noticed at `at`: how many blocks were
+/// replaced, or at least how many when its checks could not tell where the chains part, and
+/// above which height.
+pub fn reorg_text(reorg: &ReorgNotice, at: &str) -> String {
+    let blocks = match reorg.replaced {
+        1 => "1 block was".to_owned(),
+        n => format!("{} blocks were", thousands(u64::from(n))),
+    };
+    let shared = thousands(u64::from(reorg.fork_height));
+    if reorg.first_replaced <= reorg.fork_height.saturating_add(1) {
+        format!(
+            "{} replaced at {at}: the node switched to another branch above {shared}.",
+            capitalise(&blocks)
+        )
+    } else {
+        format!(
+            "At least {blocks} replaced at {at}: the node switched to another branch above a \
+             height between {shared} and {}.",
+            thousands(u64::from(reorg.first_replaced - 1))
+        )
+    }
+}
+
 /// The hint under the search box, as the query is typed.
 pub fn hint(classified: &Classified, tip: Option<u32>, network: Network) -> String {
     match classified {
@@ -595,6 +618,32 @@ mod tests {
         assert_eq!(eta_text(7_500), "about 2 h 5 min");
         assert_eq!(interval_text(75), "1 min 15 s");
         assert_eq!(interval_text(-5), "-5 s");
+    }
+
+    #[test]
+    fn reorganisations_say_only_what_the_checks_showed() {
+        let exact = ReorgNotice {
+            fork_height: 3_550_998,
+            first_replaced: 3_550_999,
+            replaced: 2,
+            epoch: 1,
+            at: 0,
+        };
+        assert_eq!(
+            reorg_text(&exact, "14:02"),
+            "2 blocks were replaced at 14:02: the node switched to another branch above 3,550,998."
+        );
+        let bounded = ReorgNotice {
+            fork_height: 3_550_000,
+            first_replaced: 3_551_000,
+            replaced: 1,
+            ..exact
+        };
+        assert_eq!(
+            reorg_text(&bounded, "14:02"),
+            "At least 1 block was replaced at 14:02: the node switched to another branch above a \
+             height between 3,550,000 and 3,550,999."
+        );
     }
 
     #[test]

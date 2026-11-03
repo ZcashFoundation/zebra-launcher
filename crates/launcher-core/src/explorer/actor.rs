@@ -30,7 +30,7 @@ use tokio::{
 use super::{
     ExplorerConfig, ExplorerInputs, assemble,
     cache::Lru,
-    chain_index::{ChainIndex, ForkSearch, REORG_WINDOW, TipUpdate},
+    chain_index::{ChainIndex, Change, ForkSearch, REORG_WINDOW, TipUpdate},
     sched::{Lane, Limits, Scheduler},
     source::{ChainSource, ReadCall, ReadResult, SourceError},
 };
@@ -867,17 +867,18 @@ where
         });
     }
 
-    /// Applies a checked tip; a reorganisation drops the transactions of the replaced blocks
-    /// from the cache and is published.
+    /// Applies a checked tip; a reorganisation drops from the cache the transactions above the
+    /// highest height its check proved shared, and is published.
     fn apply(&mut self, update: TipUpdate) -> ChainView {
         if let Some(replaced) = self.index.apply(update, Instant::now()) {
-            let fork = i64::from(replaced.fork);
+            let shared = i64::from(replaced.shared);
             self.cache.retain(|_, value| match value {
-                ReadResult::Tx(tx) => tx.height.is_none_or(|height| height <= fork),
+                ReadResult::Tx(tx) => tx.height.is_none_or(|height| height <= shared),
                 _ => true,
             });
             self.reorg = Some(ReorgNotice {
-                fork_height: replaced.fork,
+                fork_height: replaced.shared,
+                first_replaced: replaced.first_replaced,
                 replaced: replaced.blocks,
                 epoch: self.index.epoch(),
                 at: unix_now(),
@@ -892,7 +893,8 @@ where
 }
 
 /// Checks the node's tip against what the index knew: a block on top, a jump, or a
-/// reorganisation, whose fork a binary search of the known heights finds.
+/// reorganisation, which a binary search of the known heights bounds: the chains share the
+/// highest height that still matches and differ at the lowest that does not.
 async fn follow(
     fetch: Fetcher,
     old: Option<(u32, BlockHash)>,
@@ -900,60 +902,79 @@ async fn follow(
 ) -> Result<TipUpdate, ExplorerError> {
     let best = fetch.request(ReadCall::Best, Lane::Prefetch).best().await?;
     let tip = (best.height, best.hash);
-    let plain = |learned| TipUpdate {
+    let update = |change, learned| TipUpdate {
         tip,
-        fork: None,
-        reset: false,
+        change,
         learned,
     };
     let Some((height, hash)) = old else {
-        return Ok(plain(Vec::new()));
+        return Ok(update(Change::Follows, Vec::new()));
     };
     if tip == (height, hash) {
-        return Ok(plain(Vec::new()));
+        return Ok(update(Change::Follows, Vec::new()));
     }
-    if best.height > height {
+    let hash_at = |at: u32| {
+        fetch
+            .request(ReadCall::BlockHash(at), Lane::Prefetch)
+            .hash()
+    };
+    // Every answer is the node's own hash at its height, so all of them hold.
+    let mut learned = Vec::new();
+    // The lowest height known to hold another block than the index has.
+    let first_replaced = if best.height > height {
         if best.height - height > REORG_WINDOW {
-            return Ok(TipUpdate {
-                reset: true,
-                ..plain(Vec::new())
-            });
+            return Ok(update(Change::Jumped, learned));
         }
         let block = fetch
             .request(ReadCall::Block(BlockId::Hash(best.hash)), Lane::Prefetch)
             .block()
             .await?;
         if best.height == height + 1 && block.previous == Some(hash) {
-            return Ok(plain(vec![(height, hash)]));
+            return Ok(update(Change::Follows, vec![(height, hash)]));
         }
-        let at_old = fetch
-            .request(ReadCall::BlockHash(height), Lane::Prefetch)
-            .hash()
-            .await?;
+        let at_old = hash_at(height).await?;
+        learned.push((height, at_old));
         if at_old == hash {
-            return Ok(plain(Vec::new()));
+            return Ok(update(Change::Follows, learned));
         }
+        height
     } else if window.contains(&tip) {
         // The node went back to a block the index knows: what was above it is gone.
-        return Ok(TipUpdate {
-            fork: Some(best.height),
-            ..plain(Vec::new())
-        });
-    }
-    let shared = height.min(best.height);
-    let mut search = ForkSearch::new(window.into_iter().filter(|(at, _)| *at <= shared).collect());
-    let mut learned = Vec::new();
+        return Ok(update(
+            Change::Replaced {
+                shared: best.height,
+                first_replaced: best.height + 1,
+            },
+            learned,
+        ));
+    } else if best.height == height {
+        height
+    } else {
+        best.height + 1
+    };
+    let mut search = ForkSearch::new(
+        window
+            .into_iter()
+            .filter(|(at, _)| *at < first_replaced)
+            .collect(),
+    );
     while let Some((at, known)) = search.probe() {
-        let found = fetch
-            .request(ReadCall::BlockHash(at), Lane::Prefetch)
-            .hash()
-            .await?;
+        let found = hash_at(at).await?;
         search.answer(found == known);
         learned.push((at, found));
     }
-    // Every answer is the node's own hash at its height, so all of them hold.
-    Ok(TipUpdate {
-        fork: Some(search.fork()),
-        ..plain(learned)
-    })
+    let bounds = search.bounds();
+    let first_replaced = bounds.first_replaced.unwrap_or(first_replaced);
+    // With no height left that matched, the chains share at least the final heights: Zebra
+    // does not replace blocks deeper than its reorg window.
+    let floor = height
+        .saturating_sub(REORG_WINDOW)
+        .min(first_replaced.saturating_sub(1));
+    Ok(update(
+        Change::Replaced {
+            shared: bounds.shared.unwrap_or(floor),
+            first_replaced,
+        },
+        learned,
+    ))
 }
