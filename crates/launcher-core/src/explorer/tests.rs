@@ -778,6 +778,100 @@ async fn far_apart_known_heights_bound_a_reorganisation() {
     assert_eq!(reorg.replaced, 1, "{reorg:?}");
 }
 
+/// zebrad running since `secs` after the Unix epoch: a run of its own.
+fn running_since(secs: u64) -> Status {
+    Status {
+        started_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
+        ..running()
+    }
+}
+
+impl Harness {
+    /// zebrad stops, and starts again on `chain`.
+    async fn restart_on(&self, chain: SynthChain) {
+        self.status.send_replace(Status::default());
+        self.stats.send_replace(None);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        self.stats.send_replace(Some(stats_for(&chain)));
+        self.chain.send_replace(chain);
+        self.status.send_replace(running_since(100));
+    }
+}
+
+#[tokio::test]
+async fn a_restart_a_block_lower_replaces_nothing() {
+    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
+        config.tip_poll = Duration::from_millis(30);
+    });
+    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    harness.show(PageKind::Chain).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // zebrad comes back without its newest block, which had not reached the disk.
+    harness
+        .restart_on(SynthChain::new(Network::Mainnet, TIP - 1, NOW - 25))
+        .await;
+    let mut live = harness.explorer.live();
+    let event = tokio::time::timeout(
+        LIMIT,
+        live.wait_for(|event| event.live.tip.is_some_and(|tip| tip.height == TIP - 1)),
+    )
+    .await
+    .expect("the tip went back")
+    .expect("the explorer runs")
+    .clone();
+    assert_eq!(event.live.reorg, None, "no block was replaced");
+    assert_eq!(event.live.tip.unwrap().epoch, 1, "pages read again");
+}
+
+#[tokio::test]
+async fn a_restart_lower_on_another_branch_replaced_blocks() {
+    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
+        config.tip_poll = Duration::from_millis(30);
+    });
+    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    harness.show(PageKind::Chain).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // zebrad comes back one block lower, on a branch that parts above TIP - 3.
+    let mut lower = SynthChain::new(Network::Mainnet, TIP - 1, NOW - 25);
+    let fork = lower.reorg(2);
+    harness.restart_on(lower).await;
+    let reorg = harness.next_reorg().await;
+    assert_eq!(
+        (reorg.fork_height, reorg.first_replaced, reorg.replaced),
+        (fork, fork + 1, 3),
+        "{reorg:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_new_run_is_checked_before_heights_near_its_tip_are_trusted() {
+    let harness = harness();
+    // The Chain page checks the tip, and the blocks near it then come from the cache.
+    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    let id = BlockId::Height(TIP - 5);
+    harness.reply(ExplorerRequest::Block { id }).await;
+    let before = harness.counts();
+    harness.reply(ExplorerRequest::Block { id }).await;
+    assert_eq!(delta(harness.counts(), before), [0; 6], "from the cache");
+    harness
+        .restart_on(SynthChain::new(Network::Mainnet, TIP, NOW))
+        .await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let before = harness.counts();
+    harness.reply(ExplorerRequest::Block { id }).await;
+    assert_eq!(
+        delta(harness.counts(), before)[1],
+        1,
+        "the block is read again; its parent comes from the cache"
+    );
+}
+
 #[tokio::test]
 async fn the_follower_checks_the_tip_at_every_poll() {
     let poll = Duration::from_millis(100);

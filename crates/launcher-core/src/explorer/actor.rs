@@ -458,6 +458,11 @@ where
                                 started_at: status.started_at,
                                 source,
                             });
+                            // The old run's tip and the hashes above the final heights wait for
+                            // a check of the new run's tip, and a check of the old one is
+                            // ignored: zebrad may come back lower, or on another branch.
+                            self.index.uncheck();
+                            self.generation += 1;
                         }
                         Err(err) => {
                             tracing::warn!(%err, "the explorer could not create its RPC client");
@@ -899,34 +904,39 @@ where
         });
     }
 
-    /// Applies a checked tip; a reorganisation drops from the cache the transactions above the
-    /// highest height its check proved shared, and is published.
+    /// Applies a checked tip. When it undid blocks, the cache drops the transactions above the
+    /// highest height the check proved still in the chain; a reorganisation is published.
     fn apply(&mut self, update: TipUpdate) -> ChainView {
-        if let Some(replaced) = self.index.apply(update, Instant::now()) {
-            let shared = i64::from(replaced.shared);
+        if let Some(undone) = self.index.apply(update, Instant::now()) {
+            let above = i64::from(undone.above);
             self.cache.retain(|_, value| match value {
-                ReadResult::Tx(tx) => tx.height.is_none_or(|height| height <= shared),
+                ReadResult::Tx(tx) => tx.height.is_none_or(|height| height <= above),
                 _ => true,
             });
-            self.reorg = Some(ReorgNotice {
-                fork_height: replaced.shared,
-                first_replaced: replaced.first_replaced,
-                replaced: replaced.blocks,
-                epoch: self.index.epoch(),
-                at: unix_now(),
-            });
-            tracing::info!(
-                blocks = replaced.blocks,
-                "the explorer followed a reorganisation"
-            );
+            match undone.replaced {
+                Some(replaced) => {
+                    self.reorg = Some(ReorgNotice {
+                        fork_height: replaced.shared,
+                        first_replaced: replaced.first_replaced,
+                        replaced: replaced.blocks,
+                        epoch: self.index.epoch(),
+                        at: unix_now(),
+                    });
+                    tracing::info!(
+                        blocks = replaced.blocks,
+                        "the explorer followed a reorganisation"
+                    );
+                }
+                None => tracing::debug!("the explorer followed zebrad's tip back"),
+            }
         }
         self.chain_view().expect("a checked tip was just applied")
     }
 }
 
-/// Checks the node's tip against what the index knew: a block on top, a jump, or a
-/// reorganisation, which a binary search of the known heights bounds: the chains share the
-/// highest height that still matches and differ at the lowest that does not.
+/// Checks the node's tip against what the index knew: a block on top, a jump, a tip that went
+/// back, or a reorganisation, which a binary search of the vouched heights bounds: the chains
+/// share the highest height that still matches and differ at the lowest that does not.
 async fn follow(
     fetch: Fetcher,
     old: Option<(u32, BlockHash)>,
@@ -972,19 +982,27 @@ async fn follow(
             return Ok(update(Change::Follows, learned));
         }
         height
-    } else if window.contains(&tip) {
-        // The node went back to a block the index knows: what was above it is gone.
-        return Ok(update(
-            Change::Replaced {
-                shared: best.height,
-                first_replaced: best.height + 1,
-            },
-            learned,
-        ));
     } else if best.height == height {
         height
     } else {
-        best.height + 1
+        // The node went back, as zebrad does when it restarts before its last blocks reached
+        // the disk. Only a height at or below its tip that differs shows blocks replaced.
+        let Some(&(at, known)) = window.iter().rev().find(|(at, _)| *at <= best.height) else {
+            // Nothing to compare, as after a long jump.
+            let floor = height.saturating_sub(REORG_WINDOW).min(best.height);
+            return Ok(update(Change::WentBack { shared: floor }, learned));
+        };
+        let found = if at == best.height {
+            best.hash
+        } else {
+            let found = hash_at(at).await?;
+            learned.push((at, found));
+            found
+        };
+        if found == known {
+            return Ok(update(Change::WentBack { shared: at }, learned));
+        }
+        at
     };
     let mut search = ForkSearch::new(
         window

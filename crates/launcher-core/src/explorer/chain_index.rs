@@ -45,13 +45,25 @@ pub(crate) enum Change {
     /// The tip moved further ahead than the reorg window: nothing compared the old tip's
     /// heights within the window below it with the node, so they are dropped.
     Jumped,
+    /// The tip went back, and the highest vouched height at or below it, `shared`, still holds
+    /// (with none to compare, the window's floor), so nothing shows that blocks were replaced:
+    /// zebrad restarted a block or two lower, say. The heights above `shared` are dropped.
+    WentBack { shared: u32 },
     /// The node replaced blocks: the chains share `shared` and differ at `first_replaced`, so
     /// they part at a height between the two. The heights above `shared` are dropped.
     Replaced { shared: u32, first_replaced: u32 },
 }
 
-/// A reorganisation [`ChainIndex::apply`] found: the chains share `shared`, differ at
-/// `first_replaced`, and at least `blocks` blocks of the old chain were replaced.
+/// What [`ChainIndex::apply`] undid: the heights above `above` are no longer known and the
+/// epoch moved on. `replaced` when the node replaced blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Undone {
+    pub(crate) above: u32,
+    pub(crate) replaced: Option<Replaced>,
+}
+
+/// A reorganisation: the chains share `shared`, differ at `first_replaced`, and at least
+/// `blocks` blocks of the old chain were replaced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Replaced {
     pub(crate) shared: u32,
@@ -107,6 +119,12 @@ impl ChainIndex {
     /// Whether the last check of the tip still vouches for the heights above the final ones.
     pub(crate) fn is_fresh(&self, now: Instant) -> bool {
         self.checked_within(self.fresh, now)
+    }
+
+    /// Takes the tip as unchecked: nothing above the final heights is trusted until the next
+    /// check.
+    pub(crate) fn uncheck(&mut self) {
+        self.checked = None;
     }
 
     /// The hash at `height`, when it can be trusted now.
@@ -193,29 +211,36 @@ impl ChainIndex {
             .collect()
     }
 
-    /// Applies a checked tip. Returns the reorganisation it reveals, if any.
-    pub(crate) fn apply(&mut self, update: TipUpdate, now: Instant) -> Option<Replaced> {
+    /// Applies a checked tip. Returns what it undid, if anything: then the epoch moved on.
+    pub(crate) fn apply(&mut self, update: TipUpdate, now: Instant) -> Option<Undone> {
         let old_tip = self.tip.map(|(height, _)| height);
-        let mut replaced = None;
-        match update.change {
-            Change::Follows => {}
+        let undone = match update.change {
+            Change::Follows => None,
             Change::Jumped => {
                 if let Some(old_tip) = old_tip {
                     self.drop_above(old_tip.saturating_sub(REORG_WINDOW));
                 }
+                None
             }
+            Change::WentBack { shared } => Some(Undone {
+                above: shared,
+                replaced: None,
+            }),
             Change::Replaced {
                 shared,
                 first_replaced,
-            } => {
-                self.drop_above(shared);
-                self.epoch += 1;
-                replaced = Some(Replaced {
+            } => Some(Undone {
+                above: shared,
+                replaced: Some(Replaced {
                     shared,
                     first_replaced,
                     blocks: old_tip.map_or(0, |tip| (tip + 1).saturating_sub(first_replaced)),
-                });
-            }
+                }),
+            }),
+        };
+        if let Some(undone) = undone {
+            self.drop_above(undone.above);
+            self.epoch += 1;
         }
         self.tip = Some(update.tip);
         for (height, hash) in update.learned {
@@ -223,7 +248,7 @@ impl ChainIndex {
         }
         self.vouch(update.tip.0, update.tip.1);
         self.checked = Some(now);
-        replaced
+        undone
     }
 
     /// Forgets everything: the node now runs another chain.
@@ -477,7 +502,7 @@ mod tests {
             now,
         );
         assert_eq!(
-            replaced,
+            replaced.and_then(|undone| undone.replaced),
             Some(Replaced {
                 shared: 98,
                 first_replaced: 99,
@@ -491,6 +516,35 @@ mod tests {
         // Following on is no reorganisation.
         assert_eq!(index.apply(update(102, 1), now), None);
         assert_eq!(index.epoch(), 1);
+    }
+
+    #[test]
+    fn a_tip_that_went_back_drops_what_was_above_it_but_replaced_nothing() {
+        let now = Instant::now();
+        let mut index = ChainIndex::new(FRESH);
+        index.apply(update(100, 0), now);
+        index.learn_block(100, hash(100, 0), Some(hash(99, 0)));
+        let undone = index.apply(
+            TipUpdate {
+                change: Change::WentBack { shared: 99 },
+                ..update(99, 0)
+            },
+            now,
+        );
+        assert_eq!(
+            undone,
+            Some(Undone {
+                above: 99,
+                replaced: None
+            })
+        );
+        assert_eq!(index.epoch(), 1, "pages read again");
+        assert_eq!(index.tip(), Some((99, hash(99, 0))));
+        assert_eq!(index.hash_at(99, now), Some(hash(99, 0)));
+        assert_eq!(index.hash_at(100, now), None);
+        // A new run of zebrad: nothing near the tip is trusted until the next check.
+        index.uncheck();
+        assert_eq!(index.hash_at(99, now), None);
     }
 
     #[test]
@@ -585,10 +639,13 @@ mod tests {
         );
         assert_eq!(
             replaced,
-            Some(Replaced {
-                shared: 4_000,
-                first_replaced: 4_990,
-                blocks: 11
+            Some(Undone {
+                above: 4_000,
+                replaced: Some(Replaced {
+                    shared: 4_000,
+                    first_replaced: 4_990,
+                    blocks: 11
+                })
             })
         );
         assert_eq!(index.hash_at(3_000, now), Some(hash(3_000, 0)));
