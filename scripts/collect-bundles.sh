@@ -2,20 +2,19 @@
 # Copies the Tauri bundles for one target out of target/<triple>/release/bundle
 # into one directory, under fixed release asset names without spaces:
 #
-#   zebra-launcher_<ver>_<arch>.AppImage      Linux (updater artifact)
-#   zebra-launcher_<ver>_<debarch>.deb        Linux (Notify-only)
-#   zebra-launcher_<ver>_<arch>.dmg           macOS installer
-#   zebra-launcher_<ver>_<arch>.app.tar.gz    macOS updater artifact
-#   zebra-launcher_<ver>_<arch>-setup.exe     Windows NSIS (installer and updater artifact)
+#   zeal_<ver>_<arch>.AppImage      Linux (updater artifact)
+#   zeal_<ver>_<debarch>.deb        Linux (Notify-only)
+#   zeal_<ver>_<arch>.dmg           macOS installer
+#   zeal_<ver>_<arch>.app.tar.gz    macOS updater artifact
+#   zeal_<ver>_<arch>-setup.exe     Windows NSIS (installer and updater artifact)
 #
 # plus `<name>.sig` next to each file that has an updater signature. <arch> is
 # the first component of the target triple (x86_64, aarch64); <debarch> is
 # Debian's name (amd64, arm64).
 #
-# Tauri's own names contain the product name with a space ("Zebra Launcher"),
-# which GitHub rewrites to a dot on upload, and the two macOS architectures
-# would both produce "Zebra Launcher.app.tar.gz". Fixed names keep the release
-# assets and the URLs in latest.json predictable.
+# Tauri's own names are not unique across targets: the two macOS architectures
+# would both produce "Zeal.app.tar.gz". Fixed names keep the release assets and
+# the URLs in latest.json predictable.
 #
 # Every bundle type expected for the target must be present exactly once.
 #
@@ -55,7 +54,7 @@ bundle_dir="${repo_root}/target/${target}/release/bundle"
 mkdir -p "${out}"
 
 arch="${target%%-*}"
-prefix="zebra-launcher_${version}"
+prefix="zeal_${version}"
 
 # copy_one GLOB DEST UPDATER: copies the single file matching GLOB (relative
 # to the bundle directory) to DEST in the output directory, with its .sig.

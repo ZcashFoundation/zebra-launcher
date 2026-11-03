@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Type-checks the app crate for Windows from a Linux or macOS host:
 #
-#   cargo clippy -p zebra-launcher --target x86_64-pc-windows-msvc --all-targets
+#   cargo clippy -p zeal --target x86_64-pc-windows-msvc --all-targets
 #
 # so `cfg(windows)` code is checked without a Windows machine, and without the
 # WebKitGTK packages the Linux build of the app needs. Three things the bare
@@ -10,7 +10,7 @@
 #   1. The target: `rustup target add x86_64-pc-windows-msvc` when it is not
 #      installed (rust-toolchain.toml lists only wasm32).
 #   2. The sidecar file tauri-build requires: an empty
-#      src-tauri/binaries/zebra-launcher-zebrad-x86_64-pc-windows-msvc.exe,
+#      src-tauri/binaries/zeal-zebrad-x86_64-pc-windows-msvc.exe,
 #      created when missing and removed again afterwards (the directory is
 #      git-ignored).
 #   3. A C compiler and archiver for the target: the build scripts of `ring`,
@@ -47,7 +47,7 @@ if ! rustup target list --installed | grep -qx "${TARGET}"; then
     rustup target add "${TARGET}"
 fi
 
-sidecar="${repo_root}/src-tauri/binaries/zebra-launcher-zebrad-${TARGET}.exe"
+sidecar="${repo_root}/src-tauri/binaries/zeal-zebrad-${TARGET}.exe"
 created_sidecar=false
 if [ ! -e "${sidecar}" ]; then
     mkdir -p "$(dirname "${sidecar}")"
@@ -104,5 +104,5 @@ export AR_x86_64_pc_windows_msvc="${stubs}/ar"
 export RUSTFLAGS="${RUSTFLAGS-"-D warnings"}"
 
 cd "${repo_root}"
-echo "RUSTFLAGS=${RUSTFLAGS} cargo clippy -p zebra-launcher --target ${TARGET} --all-targets $*"
-cargo clippy -p zebra-launcher --target "${TARGET}" --all-targets "$@"
+echo "RUSTFLAGS=${RUSTFLAGS} cargo clippy -p zeal --target ${TARGET} --all-targets $*"
+cargo clippy -p zeal --target "${TARGET}" --all-targets "$@"

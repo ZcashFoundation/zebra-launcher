@@ -54,7 +54,7 @@ Usage: fetch-zebrad-linux.sh [--target TRIPLE] [--version X.Y.Z] [--commit SHA] 
               ZEBRAD_COMMIT when the version is ZEBRAD_VERSION; for any
               other version the commit is not pinned unless given)
   --out       where to install the binary
-              (default: src-tauri/binaries/zebra-launcher-zebrad-<target>)
+              (default: src-tauri/binaries/zeal-zebrad-<target>)
   --from-dir  verify and install the three release files from DIR instead of
               downloading them (the same checks apply)
 EOF
@@ -98,7 +98,7 @@ esac
 [ -z "${commit}" ] || check_commit "${commit}"
 check_zebrad_version "${version}" "(asset names are zebrad-<X.Y.Z>-<target>.tar.gz)"
 
-[ -n "${out}" ] || out="${repo_root}/src-tauri/binaries/zebra-launcher-zebrad-${target}"
+[ -n "${out}" ] || out="${repo_root}/src-tauri/binaries/zeal-zebrad-${target}"
 
 for tool in curl cosign tar gzip sha256sum; do
     command -v "${tool}" >/dev/null 2>&1 || die "${tool} is required but not on PATH"

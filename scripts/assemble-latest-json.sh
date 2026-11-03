@@ -3,11 +3,11 @@
 # updater artifacts and their .sig files, named as scripts/collect-bundles.sh
 # names them, and fails unless all five platform keys are present:
 #
-#   linux-x86_64    zebra-launcher_<ver>_x86_64.AppImage
-#   linux-aarch64   zebra-launcher_<ver>_aarch64.AppImage
-#   darwin-aarch64  zebra-launcher_<ver>_aarch64.app.tar.gz
-#   darwin-x86_64   zebra-launcher_<ver>_x86_64.app.tar.gz
-#   windows-x86_64  zebra-launcher_<ver>_x86_64-setup.exe
+#   linux-x86_64    zeal_<ver>_x86_64.AppImage
+#   linux-aarch64   zeal_<ver>_aarch64.AppImage
+#   darwin-aarch64  zeal_<ver>_aarch64.app.tar.gz
+#   darwin-x86_64   zeal_<ver>_x86_64.app.tar.gz
+#   windows-x86_64  zeal_<ver>_x86_64-setup.exe
 #
 # Each entry's `url` is the release download URL
 # https://github.com/<repo>/releases/download/<tag>/<asset>, which works once
@@ -47,7 +47,7 @@ for arg in dir version tag repo out; do
     [ -n "${!arg}" ] || die "--${arg} is required"
 done
 
-prefix="zebra-launcher_${version}"
+prefix="zeal_${version}"
 platforms=(
     "linux-x86_64=${prefix}_x86_64.AppImage"
     "linux-aarch64=${prefix}_aarch64.AppImage"

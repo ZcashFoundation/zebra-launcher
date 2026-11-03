@@ -306,16 +306,14 @@ mod tests {
     #[test]
     fn app_bundle_detection() {
         assert!(is_in_app_bundle(Path::new(
-            "/Applications/Zebra Launcher.app/Contents/MacOS/zebra-launcher"
+            "/Applications/Zeal.app/Contents/MacOS/zeal"
         )));
         assert!(!is_in_app_bundle(Path::new(
-            "/Users/me/zebra-launcher/target/debug/zebra-launcher"
+            "/Users/me/zeal/target/debug/zeal"
         )));
         assert!(!is_in_app_bundle(Path::new(
-            "/Applications/Zebra Launcher.app/Contents/Resources/zebra-launcher"
+            "/Applications/Zeal.app/Contents/Resources/zeal"
         )));
-        assert!(!is_in_app_bundle(Path::new(
-            "/Contents/MacOS/zebra-launcher"
-        )));
+        assert!(!is_in_app_bundle(Path::new("/Contents/MacOS/zeal")));
     }
 }

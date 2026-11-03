@@ -1,7 +1,7 @@
 //! Finds the bundled zebrad.
 //!
 //! The bundler installs the sidecar next to the launcher executable as
-//! `zebra-launcher-zebrad` (`.exe` on Windows); `cargo tauri dev` copies it
+//! `zeal-zebrad` (`.exe` on Windows); `cargo tauri dev` copies it
 //! there too. Inside an AppImage the executable lives on a FUSE mount that
 //! disappears when the launcher exits or is replaced by an update, so the
 //! sidecar is copied into the data directory first and zebrad runs from the
@@ -16,7 +16,7 @@ use std::{
 use launcher_core::paths::Paths;
 
 /// The sidecar's file name without the platform suffix, as installed.
-pub const SIDECAR_NAME: &str = "zebra-launcher-zebrad";
+pub const SIDECAR_NAME: &str = "zeal-zebrad";
 
 /// The zebrad binary to run. Never fails: when something is wrong the
 /// supervisor reports the spawn failure to the user.
@@ -53,7 +53,7 @@ fn sidecar_file_name() -> String {
     format!("{SIDECAR_NAME}{}", std::env::consts::EXE_SUFFIX)
 }
 
-/// `zebra-launcher-zebrad[.exe]` next to the running executable.
+/// `zeal-zebrad[.exe]` next to the running executable.
 fn bundled_path() -> io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let dir = exe

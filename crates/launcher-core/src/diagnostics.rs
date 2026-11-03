@@ -132,10 +132,10 @@ pub fn bundle(
         let _ = write!(out, "\n== {title} ==\n");
     };
 
-    let _ = writeln!(out, "Zebra Launcher diagnostics");
+    let _ = writeln!(out, "Zeal diagnostics");
     let _ = writeln!(
         out,
-        "Zebra Launcher {LAUNCHER_VERSION} (zebrad {})",
+        "Zeal {LAUNCHER_VERSION} (zebrad {})",
         bundled_zebrad_version()
     );
     let _ = writeln!(
@@ -414,7 +414,7 @@ mod tests {
             },
         )
         .expect("marker");
-        let sidecar = dir.path().join("zebra-launcher-zebrad");
+        let sidecar = dir.path().join("zeal-zebrad");
         fs::write(&sidecar, b"zebrad").expect("sidecar");
 
         let settings = Settings {
@@ -439,7 +439,7 @@ mod tests {
         );
         for needle in [
             &format!(
-                "Zebra Launcher {LAUNCHER_VERSION} (zebrad {})",
+                "Zeal {LAUNCHER_VERSION} (zebrad {})",
                 bundled_zebrad_version()
             ),
             std::env::consts::OS,
@@ -467,7 +467,7 @@ mod tests {
     fn bundle_says_what_is_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = Paths::under(dir.path());
-        let missing_sidecar = dir.path().join("zebra-launcher-zebrad");
+        let missing_sidecar = dir.path().join("zeal-zebrad");
         let text = bundle(
             &paths,
             &Status::default(),

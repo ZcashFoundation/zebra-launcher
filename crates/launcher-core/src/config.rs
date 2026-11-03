@@ -48,7 +48,7 @@ pub const METRICS_PORT: u16 = 9999;
 
 /// The comment at the top of a newly created `zebrad.toml`.
 const HEADER: &str = "\
-# zebrad configuration managed by Zebra Launcher.
+# zebrad configuration managed by Zeal.
 #
 # The launcher keeps network.network, rpc.listen_addr, rpc.enable_cookie_auth,
 # rpc.cookie_dir, metrics.endpoint_addr and state.cache_dir up to date.

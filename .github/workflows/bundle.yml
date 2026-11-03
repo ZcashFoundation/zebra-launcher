@@ -184,7 +184,7 @@ jobs:
         if: needs.sidecars.outputs.zebrad_ref == ''
         run: |
           set -euo pipefail
-          sidecar="src-tauri/binaries/zebra-launcher-zebrad-${TARGET}${EXE_SUFFIX}"
+          sidecar="src-tauri/binaries/zeal-zebrad-${TARGET}${EXE_SUFFIX}"
           chmod +x "${sidecar}"
           "${sidecar}" --version | tee "${RUNNER_TEMP}/zebrad-version.txt"
           grep -q "zebrad ${ZEBRAD_VERSION}" "${RUNNER_TEMP}/zebrad-version.txt" \
@@ -201,7 +201,7 @@ jobs:
         if: needs.sidecars.outputs.zebrad_ref != ''
         run: |
           set -euo pipefail
-          sidecar="src-tauri/binaries/zebra-launcher-zebrad-${TARGET}${EXE_SUFFIX}"
+          sidecar="src-tauri/binaries/zeal-zebrad-${TARGET}${EXE_SUFFIX}"
           info=src-tauri/binaries/zebrad-build-info.txt
           chmod +x "${sidecar}"
           test -s "${info}" || { echo "::error::the zebrad-${TARGET} artifact has no zebrad-build-info.txt"; exit 1; }
@@ -268,7 +268,7 @@ jobs:
         run: |
           scripts/check-glibc.sh --floor "${GLIBC_FLOOR}" \
             "target/${TARGET}/release/${APP_BIN}" \
-            "src-tauri/binaries/zebra-launcher-zebrad-${TARGET}"
+            "src-tauri/binaries/zeal-zebrad-${TARGET}"
 
       # Development build: the launcher binary is still held to the floor; the
       # sidecar, built on the ubuntu-24.04 runner, is not.
@@ -298,7 +298,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist/raw
           cp "target/${TARGET}/release/${APP_BIN}${EXE_SUFFIX}" "dist/raw/${APP_BIN}${EXE_SUFFIX}"
-          cp "src-tauri/binaries/zebra-launcher-zebrad-${TARGET}${EXE_SUFFIX}" "dist/raw/zebra-launcher-zebrad${EXE_SUFFIX}"
+          cp "src-tauri/binaries/zeal-zebrad-${TARGET}${EXE_SUFFIX}" "dist/raw/zeal-zebrad${EXE_SUFFIX}"
           cp src-tauri/binaries/zebrad-build-info.txt dist/zebrad-build-info.txt
           ls -lR dist
 
@@ -345,9 +345,9 @@ jobs:
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
-          apt-get install -y ./dist/zebra-launcher_*_amd64.deb
-          dpkg -L zebra-launcher | grep -E '/usr/bin/'
-          /usr/bin/zebra-launcher-zebrad --version | grep -q "zebrad ${ZEBRAD_VERSION}"
+          apt-get install -y ./dist/zeal_*_amd64.deb
+          dpkg -L zeal | grep -E '/usr/bin/'
+          /usr/bin/zeal-zebrad --version | grep -q "zebrad ${ZEBRAD_VERSION}"
 
       - name: "Smoke: run the .deb install"
         if: steps.smoke.outputs.run == 'true'
@@ -355,4 +355,4 @@ jobs:
 
       - name: "Smoke: run the AppImage"
         if: steps.smoke.outputs.run == 'true'
-        run: scripts/smoke-linux.sh --appimage dist/zebra-launcher_*_x86_64.AppImage
+        run: scripts/smoke-linux.sh --appimage dist/zeal_*_x86_64.AppImage

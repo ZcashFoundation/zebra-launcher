@@ -136,7 +136,7 @@ pub fn check_writable_dir(dir: &Path) -> io::Result<()> {
         ));
     }
     fs::create_dir_all(dir)?;
-    let probe = dir.join(format!(".zebra-launcher-probe-{}", std::process::id()));
+    let probe = dir.join(format!(".zeal-probe-{}", std::process::id()));
     fs::write(&probe, b"probe")?;
     fs::remove_file(&probe)
 }

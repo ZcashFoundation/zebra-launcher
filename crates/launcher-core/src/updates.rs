@@ -412,7 +412,7 @@ pub async fn health_gate(
             current_version,
             releases_url,
             format!(
-                "The update to {} did not complete; Zebra Launcher {current_version} is still running.",
+                "The update to {} did not complete; Zeal {current_version} is still running.",
                 pending.to_version
             ),
             vec![RecoveryAction::OpenLogs, RecoveryAction::OpenReleasesPage],

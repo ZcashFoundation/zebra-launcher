@@ -41,7 +41,7 @@
 #               with -Version or -Commit
 #   -Target     Rust target triple (default: the host)
 #   -Out        where to install the binary
-#               (default: src-tauri\binaries\zebra-launcher-zebrad-<target>.exe)
+#               (default: src-tauri\binaries\zeal-zebrad-<target>.exe)
 #   -SrcDir     where Zebra is checked out; cloned at tag v<version> (or
 #               fetched at -Ref) if missing, kept afterwards (default: a
 #               temporary directory, removed on exit). An existing checkout
@@ -157,7 +157,7 @@ if (-not $FetchOnly) {
 if (-not $Target) { $Target = $hostTriple }
 $exe = if ($Target -like '*-windows-*') { '.exe' } else { '' }
 if (-not $Out) {
-    $Out = Join-Path $repoRoot "src-tauri\binaries\zebra-launcher-zebrad-$Target$exe"
+    $Out = Join-Path $repoRoot "src-tauri\binaries\zeal-zebrad-$Target$exe"
 }
 
 $tempRoot = $null

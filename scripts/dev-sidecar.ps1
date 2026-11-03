@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
 $hostTriple = ((rustc -vV) | Select-String '^host: (.+)$').Matches[0].Groups[1].Value
-$out = Join-Path $root "src-tauri/binaries/zebra-launcher-zebrad-$hostTriple.exe"
+$out = Join-Path $root "src-tauri/binaries/zeal-zebrad-$hostTriple.exe"
 
 # Take the binary's path from cargo, which knows about build.target-dir,
 # CARGO_TARGET_DIR and CARGO_BUILD_TARGET. Diagnostics still go to stderr.

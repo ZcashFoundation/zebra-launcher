@@ -1,6 +1,6 @@
 [package]
 name = "launcher-core"
-description = "Zebra Launcher logic that does not depend on Tauri: zebrad supervision, logs, config, paths"
+description = "Zeal logic that does not depend on Tauri: zebrad supervision, logs, config, paths"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

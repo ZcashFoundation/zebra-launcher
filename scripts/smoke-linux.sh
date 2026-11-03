@@ -4,12 +4,12 @@
 # it run for a while, then checks that it was still running when stopped, that
 # its log says the bundled zebrad started, and that no zebrad is left over.
 #
-#   --deb      runs the installed /usr/bin/zebra-launcher (install the .deb first)
+#   --deb      runs the installed /usr/bin/zeal (install the .deb first)
 #   --appimage PATH runs the AppImage (set APPIMAGE_EXTRACT_AND_RUN=1 where
 #              there is no FUSE, as in containers)
 #
 # The launcher's log is expected in Tauri's app_log_dir, which on Linux is
-# $XDG_DATA_HOME/org.zfnd.zebra-launcher/logs (~/.local/share/... by default).
+# $XDG_DATA_HOME/org.zfnd.zeal/logs (~/.local/share/... by default).
 # The script searches the whole fresh home for the line, so a different log
 # location still passes, and prints where it found it.
 #
@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-readonly IDENTIFIER="org.zfnd.zebra-launcher"
+readonly IDENTIFIER="org.zfnd.zeal"
 readonly EXPECTED="zebrad started"
 
 die() {
@@ -31,7 +31,7 @@ cmd=()
 seconds=15
 while [ $# -gt 0 ]; do
     case "$1" in
-        --deb) cmd=(/usr/bin/zebra-launcher); shift ;;
+        --deb) cmd=(/usr/bin/zeal); shift ;;
         --appimage)
             [ $# -ge 2 ] || die "--appimage needs a path"
             chmod +x "$2"
@@ -97,10 +97,10 @@ fi
 # The launcher stops zebrad when it exits (PDEATHSIG / graceful stop); give it
 # a moment, then report and clean up any leftover.
 sleep 5
-if pgrep -f zebra-launcher-zebrad > /dev/null; then
-    echo "::error::a zebra-launcher-zebrad process outlived the launcher"
-    pgrep -af zebra-launcher-zebrad || true
-    pkill -KILL -f zebra-launcher-zebrad || true
+if pgrep -f zeal-zebrad > /dev/null; then
+    echo "::error::a zeal-zebrad process outlived the launcher"
+    pgrep -af zeal-zebrad || true
+    pkill -KILL -f zeal-zebrad || true
     failed=true
 fi
 

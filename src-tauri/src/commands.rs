@@ -360,7 +360,7 @@ pub async fn pick_data_dir<R: Runtime>(app: AppHandle<R>) -> Result<Option<Strin
     let (tx, rx) = oneshot::channel();
     app.dialog()
         .file()
-        .set_title("Choose where Zebra Launcher keeps the chain state")
+        .set_title("Choose where Zeal keeps the chain state")
         .set_can_create_directories(true)
         .pick_folder(move |folder| {
             let _ = tx.send(folder);
