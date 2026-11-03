@@ -15,6 +15,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+mod nodes;
+
+pub use nodes::{NodeId, NodeInfo, NodeKind, NodeRole};
+
 /// The names of the events the backend emits and the UI listens to. Logs do
 /// not go through an event: they take a `tauri::ipc::Channel` of
 /// `Vec<LogLine>` batches, set up by the `subscribe_logs` command.
