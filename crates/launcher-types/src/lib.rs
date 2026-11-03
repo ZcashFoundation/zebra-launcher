@@ -60,14 +60,14 @@ pub mod events {
     /// ([`MetricsSnapshot`](crate::MetricsSnapshot)): zebrad's Prometheus
     /// metrics, read every 10 s while it runs.
     pub const METRICS: &str = "metrics";
-    /// Every `Option<NodeResources>` change of the first node
+    /// Every `Option<NodeResources>` change of a node
     /// ([`NodeResources`](crate::NodeResources)): what its processes use, read
-    /// every 5 s from the spawn until the run ends. The value alone, without a
-    /// `NodeEvent`.
+    /// every 5 s from the spawn until the run ends.
     pub const NODE_RESOURCES: &str = "node_resources";
     /// Every `Option<MachineResources>` change
     /// ([`MachineResources`](crate::MachineResources)): the computer's CPU and
-    /// memory, read every 5 s.
+    /// memory, read every 5 s. Not about one node: the value alone, without a
+    /// `NodeEvent`.
     pub const MACHINE_RESOURCES: &str = "machine_resources";
 }
 

@@ -3,10 +3,10 @@
 //! Startup (in [`run`]'s setup hook): resolve the per-user directories,
 //! start the launcher log, roll back an interrupted config change of the
 //! first node, load the settings and the node list, start the node registry
-//! (each node's supervisor, RPC monitor and metrics poller, with its managed
-//! `zebrad.toml` keys brought up to date) and the resource samplers, forward
-//! their state to the UI, and start the nodes that start at launch. Quitting
-//! stops every node first; see [`exit`].
+//! (each node's supervisor, RPC monitor, metrics poller and resource sampler,
+//! with its managed `zebrad.toml` keys brought up to date) and the computer's
+//! sampler, forward their state to the UI, and start the nodes that start at
+//! launch. Quitting stops every node first; see [`exit`].
 
 pub mod app_state;
 pub mod bridge;
@@ -25,17 +25,16 @@ use launcher_core::{
     firstrun::{self, SizeCache},
     pidfile::StaleProcess,
     registry::{self, NodeHandle, RegistryConfig, StartError},
-    resources::{MachineSampler, ResourceSampler},
+    resources::MachineSampler,
     settings::SettingsStore,
     supervisor::{StartOptions, SupervisorError},
 };
 use launcher_types::{NodeEvent, NodeId, NodeInfo, StaleProcessInfo, events};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-use tokio::sync::watch;
 use tracing::Instrument;
 
-use crate::app_state::{AppState, ResourceWatches};
+use crate::app_state::AppState;
 
 /// Set to `1` to run zebrad with `--shutdown-on-stdin-close`, for testing
 /// with a zebrad that has the upstream change.
@@ -146,7 +145,6 @@ fn setup(app: &AppHandle) {
             let plan = launch_plan(&state.settings.current(), &state.registry.infos());
             app.manage(updater::start(app, &state, &plan));
             bridge::forward_nodes(app.clone(), state.registry.clone());
-            bridge::forward_node_resources(app.clone(), state.node_resources.clone());
             bridge::forward_machine_resources(app.clone(), state.machine.clone());
             tray::install(app, &state);
             for id in &plan.start_now {
@@ -269,15 +267,10 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     if let Some(notes) = notes {
         logging::forward_notes(notes, registry.clone());
     }
-    // One process tree is sampled, the first node's, as the one node's was.
-    let resources = ResourceWatches {
-        node: match registry.first() {
-            Some(node) => ResourceSampler::spawn(node.supervisor.watch_probe()),
-            None => watch::channel(None).1,
-        },
-        machine: MachineSampler::spawn(),
-    };
-    Ok(AppState::new(paths, registry, settings, sizes, resources))
+    // Each node's runtime samples its own process tree; the computer is the
+    // app's.
+    let machine = MachineSampler::spawn();
+    Ok(AppState::new(paths, registry, settings, sizes, machine))
 }
 
 /// Who starts which node at launch. Decided once, from one snapshot of the

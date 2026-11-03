@@ -1,14 +1,13 @@
 //! Forwards launcher-core's channels to the webview.
 //!
-//! The node list and each node's status, statistics, details and metrics
-//! change rarely, so every change is emitted as a Tauri event
+//! The node list and each node's status, statistics, details, metrics and
+//! resources change rarely, so every change is emitted as a Tauri event
 //! ([`events::NODES`], and for each node [`events::STATUS`],
-//! [`events::NODE_STATS`], [`events::NODE_DETAILS`], [`events::METRICS`] with
-//! the node's id in a [`NodeEvent`]). So are the resources, without an id:
-//! [`events::NODE_RESOURCES`] for the first node and
-//! [`events::MACHINE_RESOURCES`] for the computer. Logs can arrive by the
-//! thousand per second, so they go through a `tauri::ipc::Channel` in
-//! batches, one subscription per node.
+//! [`events::NODE_STATS`], [`events::NODE_DETAILS`], [`events::METRICS`],
+//! [`events::NODE_RESOURCES`] with the node's id in a [`NodeEvent`]); so are
+//! the computer's resources, without an id ([`events::MACHINE_RESOURCES`]).
+//! Logs can arrive by the thousand per second, so they go through a
+//! `tauri::ipc::Channel` in batches, one subscription per node.
 
 use std::{
     sync::{
@@ -22,9 +21,7 @@ use launcher_core::{
     registry::{NodeHandle, NodeSummary, RegistryHandle},
     supervisor::LogSubscription,
 };
-use launcher_types::{
-    LogLine, MachineResources, NodeEvent, NodeId, NodeInfo, NodeResources, events,
-};
+use launcher_types::{LogLine, MachineResources, NodeEvent, NodeId, NodeInfo, events};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, async_runtime::JoinHandle, ipc::Channel};
 use tokio::{
@@ -99,6 +96,12 @@ fn forward_node<R: Runtime>(app: &AppHandle<R>, node: &NodeHandle) -> Vec<JoinHa
             id(),
             node.metrics.clone(),
         )),
+        spawn(forward_watch(
+            app.clone(),
+            events::NODE_RESOURCES,
+            id(),
+            node.resources.clone(),
+        )),
     ]
 }
 
@@ -125,15 +128,6 @@ async fn forward_list<R: Runtime>(
             return;
         }
     }
-}
-
-/// Emits [`events::NODE_RESOURCES`] now and on every change (a sample every
-/// 5 s while the first node's zebrad has a run), until the sampler ends.
-pub fn forward_node_resources<R: Runtime>(
-    app: AppHandle<R>,
-    rx: watch::Receiver<Option<NodeResources>>,
-) {
-    tauri::async_runtime::spawn(forward_value(app, events::NODE_RESOURCES, rx));
 }
 
 /// Emits [`events::MACHINE_RESOURCES`] now and on every change (a sample every

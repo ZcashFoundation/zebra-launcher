@@ -15,19 +15,10 @@ use launcher_core::{
     registry::{NodeHandle, RegistryHandle},
     settings::SettingsHandle,
 };
-use launcher_types::{MachineResources, NodeId, NodeResources};
+use launcher_types::{MachineResources, NodeId};
 use tokio::sync::watch;
 
 use crate::exit::ExitGuard;
-
-/// The resource samplers' outputs, for [`AppState::new`].
-#[derive(Clone, Debug)]
-pub struct ResourceWatches {
-    /// The first node's process tree, `None` while it has no run.
-    pub node: watch::Receiver<Option<NodeResources>>,
-    /// The computer, `None` until the first reading and where it cannot be read.
-    pub machine: watch::Receiver<Option<MachineResources>>,
-}
 
 /// Managed with `app.manage` once startup succeeds.
 #[derive(Clone, Debug)]
@@ -38,11 +29,9 @@ pub struct AppState {
     pub registry: RegistryHandle,
     /// The launcher settings actor.
     pub settings: SettingsHandle,
-    /// The newest sample of the first node's process tree, `None` while it
-    /// has no run or on a platform that is not measured yet: the node the
-    /// launcher started with, sampled from its first run on.
-    pub node_resources: watch::Receiver<Option<NodeResources>>,
-    /// The newest sample of the computer's CPU and memory.
+    /// The newest sample of the computer's CPU and memory, `None` until the
+    /// first reading and on a platform that is not measured yet. Each node's
+    /// process tree is in the registry, with its other handles.
     pub machine: watch::Receiver<Option<MachineResources>>,
     /// Makes the exit flow run once.
     pub exit: Arc<ExitGuard>,
@@ -62,14 +51,13 @@ impl AppState {
         registry: RegistryHandle,
         settings: SettingsHandle,
         sizes: Arc<SizeCache>,
-        resources: ResourceWatches,
+        machine: watch::Receiver<Option<MachineResources>>,
     ) -> Self {
         Self {
             paths,
             registry,
             settings,
-            node_resources: resources.node,
-            machine: resources.machine,
+            machine,
             exit: Arc::new(ExitGuard::default()),
             tray_ready: Arc::new(AtomicBool::new(false)),
             sizes,

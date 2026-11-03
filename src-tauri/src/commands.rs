@@ -352,12 +352,15 @@ pub fn get_metrics(
     Ok(state.node(&node)?.metrics.borrow().clone())
 }
 
-/// The newest sample of the first node's process tree (CPU, memory, disk I/O
-/// and processes), `None` while it has no run or on a platform that is not
+/// The newest sample of the node's process tree (CPU, memory, disk I/O and
+/// processes), `None` while it has no run or on a platform that is not
 /// measured yet. Every change is also sent as the `node_resources` event.
 #[tauri::command]
-pub fn get_node_resources(state: State<'_, AppState>) -> Option<NodeResources> {
-    state.node_resources.borrow().clone()
+pub fn get_node_resources(
+    state: State<'_, AppState>,
+    node: NodeId,
+) -> Result<Option<NodeResources>, String> {
+    Ok(state.node(&node)?.resources.borrow().clone())
 }
 
 /// The newest sample of the computer's CPU and memory, `None` before the
