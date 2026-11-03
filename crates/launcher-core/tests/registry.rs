@@ -319,6 +319,98 @@ async fn two_nodes_run_side_by_side_on_their_own_ports_folders_and_cookies() {
     drop(fx.dir);
 }
 
+/// Each node's process tree is sampled on its own: the second node's fake
+/// zebrad holds 128 MiB, which shows in its samples only, and each node's
+/// samples name its own zebrad. A node that stops has no sample while the
+/// other's go on. Linux only, like the resource readers.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_node_samples_its_own_process_tree() {
+    let fx = fixture_from(true, |paths| {
+        let mut config = config(paths, nothing_in_use);
+        let fake = config.customize.take().expect("the fake's settings");
+        config.customize = Some(Arc::new(move |spec, supervisor| {
+            fake(spec, supervisor);
+            if spec.network == Network::Testnet {
+                supervisor
+                    .command
+                    .env
+                    .push(("FAKE_ZEBRAD_ALLOC_MB".into(), "128".into()));
+            }
+        }));
+        config.resource_interval = Duration::from_millis(200);
+        config
+    })
+    .await;
+    let first = fx.registry.first().expect("the first node");
+    let testnet = within(fx.registry.add(draft(Network::Testnet, "Zebra · Testnet")))
+        .await
+        .expect("add a Testnet node");
+    let second = fx.registry.node(&testnet.id).expect("lookup by id");
+    assert_eq!(*first.resources.borrow(), None, "no run, no sample");
+
+    within(first.start(&done(), StartOptions::default()))
+        .await
+        .expect("start the first node");
+    within(second.start(&done(), StartOptions::default()))
+        .await
+        .expect("start the second node");
+    let pid_a = first.supervisor.status().pid.expect("the first node's pid");
+    let pid_b = second
+        .supervisor
+        .status()
+        .pid
+        .expect("the second node's pid");
+
+    let mut samples_b = second.resources.clone();
+    let big = within(samples_b.wait_for(|sample| {
+        sample
+            .as_ref()
+            .is_some_and(|sample| sample.memory_bytes >= 100 << 20)
+    }))
+    .await
+    .expect("the second node's sampler")
+    .clone()
+    .expect("a sample");
+    assert_eq!(big.members[0].pid, pid_b, "{big:?}");
+    let mut samples_a = first.resources.clone();
+    let small = within(samples_a.wait_for(Option::is_some))
+        .await
+        .expect("the first node's sampler")
+        .clone()
+        .expect("a sample");
+    assert_eq!(small.members[0].pid, pid_a, "{small:?}");
+    assert_eq!(small.processes, 1, "{small:?}");
+    assert!(
+        small.memory_bytes < 100 << 20,
+        "the other node's memory is not in this one's: {small:?}"
+    );
+
+    // Stopping the first node ends its samples; the second's go on.
+    within(first.supervisor.stop())
+        .await
+        .expect("stop the first");
+    within(samples_a.wait_for(Option::is_none))
+        .await
+        .expect("the first node's sampler");
+    let seen = samples_b
+        .borrow_and_update()
+        .as_ref()
+        .expect("a sample")
+        .run_secs;
+    let later = within(
+        samples_b.wait_for(|sample| sample.as_ref().is_some_and(|sample| sample.run_secs > seen)),
+    )
+    .await
+    .expect("the second node's sampler")
+    .clone()
+    .expect("a sample");
+    assert_eq!(later.members[0].pid, pid_b);
+
+    within(fx.registry.shutdown()).await;
+    drop(fx.dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adding_refuses_a_draft_that_breaks_a_rule_and_leaves_nothing_behind() {
     fn held(_: PortRole, port: u16) -> bool {

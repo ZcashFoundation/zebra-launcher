@@ -7,12 +7,14 @@
 //!        │                    ▼
 //!        │          SettingsHandle::save_nodes (launcher.json)
 //!        ▼
-//!   NodeHandle ──▶ the node's supervisor, RPC monitor, metrics poller and gates
+//!   NodeHandle ──▶ the node's supervisor, RPC monitor, metrics poller,
+//!                  resource sampler and gates
 //! ```
 //!
 //! Each node runs on its own actors, as the single node did: its supervisor
 //! (with its log ring, log file, pid file and restart policy), its RPC
-//! monitor and its metrics poller, created from the node's spec. The
+//! monitor, its metrics poller and its resource sampler, which reads the
+//! process tree of the supervisor's runs, created from the node's spec. The
 //! registry actor only changes the list and saves it; starting, stopping and
 //! the node's files go straight to the node's actors through its
 //! [`NodeHandle`], which callers look up by id in the published list without
@@ -29,8 +31,8 @@ use std::{
 };
 
 use launcher_types::{
-    MetricsSnapshot, NodeDetails, NodeDraft, NodeId, NodeInfo, NodeStats, NodeUpdate, Phase,
-    PortRole, Settings,
+    MetricsSnapshot, NodeDetails, NodeDraft, NodeId, NodeInfo, NodeResources, NodeStats,
+    NodeUpdate, Phase, PortRole, Settings,
 };
 use tokio::{
     sync::{OwnedSemaphorePermit, mpsc, oneshot, watch},
@@ -46,7 +48,7 @@ use crate::{
     monitor,
     nodes::{self, NodeError, NodeLayout, NodeSpec},
     paths::{NodePaths, Paths},
-    pidfile,
+    pidfile, resources,
     runtime::{self, NodeActors},
     settings::SettingsHandle,
     supervisor::{self, Listener, Note, StartOptions, SupervisorConfig, SupervisorError},
@@ -72,6 +74,8 @@ pub struct RegistryConfig {
     pub monitor_interval: Duration,
     /// How often each node's metrics page is read.
     pub metrics_interval: Duration,
+    /// How often each node's process tree is read while it has a run.
+    pub resource_interval: Duration,
     /// Whether another program holds a port, for a new node's ports.
     pub port_in_use: PortProbe,
     /// The sizes measured this session, so a deleted state reports what it held.
@@ -79,8 +83,9 @@ pub struct RegistryConfig {
 }
 
 impl RegistryConfig {
-    /// The defaults: zebrad's polling intervals, and a port counts as in use
-    /// when binding it fails ([`port_in_use`]).
+    /// The defaults: zebrad's polling intervals, the resource samplers'
+    /// [`resources::INTERVAL`], and a port counts as in use when binding it
+    /// fails ([`port_in_use`]).
     pub fn new(paths: Paths, zebrad: impl Into<PathBuf>) -> Self {
         Self {
             paths,
@@ -88,6 +93,7 @@ impl RegistryConfig {
             customize: None,
             monitor_interval: monitor::DEFAULT_INTERVAL,
             metrics_interval: poller::DEFAULT_INTERVAL,
+            resource_interval: resources::INTERVAL,
             port_in_use: Arc::new(port_in_use),
             sizes: Arc::new(SizeCache::default()),
         }
@@ -175,6 +181,9 @@ pub struct NodeHandle {
     pub details: watch::Receiver<Option<NodeDetails>>,
     /// The latest read of the node's metrics page.
     pub metrics: watch::Receiver<Option<MetricsSnapshot>>,
+    /// The newest sample of the node's process tree, `None` while it has no
+    /// run or on a platform that is not measured yet.
+    pub resources: watch::Receiver<Option<NodeResources>>,
     /// Keeps the node's starts, data changes and config writes apart.
     pub gates: NodeGates,
     /// Bumped by every log subscription to the node; an older forwarder
@@ -717,7 +726,8 @@ impl Actor {
         }
     }
 
-    /// The runtime for `spec`: its supervisor, monitor, poller and gates.
+    /// The runtime for `spec`: its supervisor, monitor, poller, sampler and
+    /// gates.
     fn new_runtime(&mut self, spec: NodeSpec) -> io::Result<Runtime> {
         let paths = spec.paths(&self.config.paths);
         let (listeners_tx, listeners_rx) = watch::channel(listeners(&spec));
@@ -726,6 +736,7 @@ impl Actor {
             stats,
             details,
             metrics,
+            resources,
         } = runtime::spawn(&self.config, &spec, listeners_rx)?;
         // Phase changes reach the summaries through the actor.
         let mut status = supervisor.watch_status();
@@ -757,6 +768,7 @@ impl Actor {
                 stats,
                 details,
                 metrics,
+                resources,
                 log_generation: Arc::new(AtomicU64::new(0)),
             },
             spec: spec_tx,

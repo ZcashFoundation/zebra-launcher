@@ -1,9 +1,10 @@
 //! One node's runtime: its files brought up to date, then the zebrad
-//! supervisor, the RPC monitor and the metrics poller that run it.
+//! supervisor, the RPC monitor, the metrics poller and the resource sampler
+//! that run it.
 
 use std::{io, time::Duration};
 
-use launcher_types::{MetricsSnapshot, NodeDetails, NodeStats};
+use launcher_types::{MetricsSnapshot, NodeDetails, NodeResources, NodeStats};
 use tokio::sync::watch;
 
 use crate::{
@@ -15,6 +16,7 @@ use crate::{
     paths::Paths,
     process::ZebradCommand,
     registry::RegistryConfig,
+    resources::{self, ResourceSampler},
     supervisor::{self, Listener, SupervisorConfig, SupervisorHandle},
 };
 
@@ -30,6 +32,9 @@ pub struct NodeActors {
     /// The latest read of zebrad's Prometheus metrics page, `None` while
     /// zebrad is not running or the page stopped answering.
     pub metrics: watch::Receiver<Option<MetricsSnapshot>>,
+    /// The newest sample of the node's process tree, `None` while it has no
+    /// run or on a platform that is not measured yet.
+    pub resources: watch::Receiver<Option<NodeResources>>,
 }
 
 /// Rolls back an interrupted configuration change of `spec`'s node, then
@@ -63,8 +68,9 @@ pub fn prepare_files(paths: &Paths, spec: &NodeSpec) {
 /// Starts the actors of `spec`'s node as `config` says: its supervisor, which
 /// runs the zebrad in `config`, checks `listeners` before every start and
 /// kills zebrad when a stop takes longer than the node's stop grace, its RPC
-/// monitor and its metrics poller. Fails only when the supervisor cannot
-/// start.
+/// monitor, its metrics poller and its resource sampler, which reads the
+/// process tree of each of the supervisor's runs. Fails only when the
+/// supervisor cannot start.
 pub fn spawn(
     config: &RegistryConfig,
     spec: &NodeSpec,
@@ -88,10 +94,19 @@ pub fn spawn(
         config.monitor_interval,
     );
     let metrics = MetricsPoller::spawn_with(supervisor.watch_status(), config.metrics_interval);
+    // In the node's span, so what the sampler logs goes to this node's log.
+    let resources = tracing::info_span!("node", node = %spec.id).in_scope(|| {
+        ResourceSampler::spawn_with(
+            supervisor.watch_probe(),
+            config.resource_interval,
+            resources::platform_reader(),
+        )
+    });
     Ok(NodeActors {
         supervisor,
         stats,
         details,
         metrics,
+        resources,
     })
 }
