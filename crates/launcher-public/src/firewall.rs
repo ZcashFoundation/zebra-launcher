@@ -41,12 +41,11 @@ pub fn detect(path: Option<&OsStr>) -> Option<FirewallTool> {
     launcher_herd::public::firewall::pick_tool(on_path(path, "firewall-cmd"), on_path(path, "ufw"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     #[test]
-    #[cfg(unix)]
     fn tools_are_found_on_the_path() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
