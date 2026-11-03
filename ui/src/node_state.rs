@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use launcher_types::{
     LogLine, MetricsSnapshot, Network, NodeDetails, NodeId, NodeInfo, NodeKind, NodePort,
-    NodeStats, Phase, PortRole, StaleProcessInfo, Status,
+    NodeResources, NodeStats, Phase, PortRole, StaleProcessInfo, Status,
 };
 use leptos::prelude::*;
 
@@ -16,6 +16,7 @@ use crate::{
     insights::{Insights, RunEvent, events::status_events},
     log_view::LogBuffer,
     metrics_history::MetricsHistory,
+    resource_history::ResourceHistory,
     stats_history::StatsHistory,
 };
 
@@ -45,6 +46,10 @@ pub struct NodeState {
     pub metrics: RwSignal<Option<MetricsSnapshot>>,
     /// The metrics snapshots since the launcher opened.
     pub metrics_history: RwSignal<MetricsHistory>,
+    /// The newest sample of the node's process tree, `None` while it has no run.
+    pub resources: RwSignal<Option<NodeResources>>,
+    /// The resource samples since the launcher opened.
+    pub resource_history: RwSignal<ResourceHistory>,
     /// Since when the dashboard's verdict has read as it does, for its "for N min" and "stop
     /// requested N s ago". One rule, the dashboard's: the page resets it to now whenever the
     /// verdict's rule or level changes; the first status seeds it here, from `started_at`
@@ -73,6 +78,8 @@ impl NodeState {
             history: RwSignal::new(StatsHistory::default()),
             metrics: RwSignal::new(None),
             metrics_history: RwSignal::new(MetricsHistory::default()),
+            resources: RwSignal::new(None),
+            resource_history: RwSignal::new(ResourceHistory::default()),
             phase_since: RwSignal::new(clock::now()),
             config_changed: RwSignal::new(0),
         }
@@ -139,6 +146,14 @@ impl NodeState {
                 .update(|history| history.push(snapshot));
         }
         self.metrics.set(snapshot);
+    }
+
+    /// Publishes a sample of the node's process tree and keeps it in the history.
+    pub fn record_resources(&self, sample: Option<NodeResources>) {
+        if let Some(sample) = &sample {
+            self.resource_history.update(|history| history.push(sample));
+        }
+        self.resources.set(sample);
     }
 
     /// Folds a batch of log lines into the insights and the log buffer. Problems that arrive
