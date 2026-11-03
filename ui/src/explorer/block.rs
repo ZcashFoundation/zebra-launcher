@@ -9,7 +9,7 @@ use launcher_types::{
     Network, NodeId,
     explorer::{
         BlockId, BlockLedger, BlockPage as Page, Budget, ExplorerErrorKind, ExplorerRequest,
-        ExplorerResponse, ExplorerRoute, FutureBlock, Pool, RewardSplit, TxidPage,
+        ExplorerResponse, ExplorerRoute, FutureBlock, LiveState, Pool, RewardSplit, TxidPage,
     },
 };
 use leptos::prelude::*;
@@ -41,23 +41,44 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
                 .map_or(0, |tip| tip.epoch)
         })
     };
+    // The syncing node's height while it catches up, from the explorer's news.
+    let syncing_at = move || {
+        nav.live
+            .with(|live| match live.as_ref().map(|live| &live.state) {
+                Some(LiveState::Syncing { height, .. }) => Some(*height),
+                _ => None,
+            })
+    };
     // A height above the tip asks again at every new tip, so the countdown becomes the block;
-    // a height asks again after a reorganisation, which may have put another block there.
+    // a height asks again after a reorganisation, which may have put another block there; a
+    // height the syncing node had yet to reach asks again once, when the node has reached it.
     let future = RwSignal::new(false);
+    let past_tip = RwSignal::new(false);
     let answer = load(node.clone(), nav, move || {
         let revision = match id {
             _ if future.get() => u64::from(tip().unwrap_or(0)),
-            BlockId::Height(_) => epoch() << 32,
+            BlockId::Height(height) => {
+                let reached = past_tip.get()
+                    && syncing_at().is_none_or(|at| at >= height)
+                    && nav.live.with(|live| {
+                        live.as_ref()
+                            .is_some_and(|live| live.state != LiveState::NotRunning)
+                    });
+                (epoch() << 32) | u64::from(reached)
+            }
             BlockId::Hash(_) => 0,
         };
         Some((ExplorerRequest::Block { id }, revision))
     });
-    Effect::new(move |_| {
-        let is_future = matches!(
-            answer.value.get(),
-            Loaded::Ready(ref reply) if matches!(reply.response, ExplorerResponse::Future(_))
-        );
-        future.set(is_future);
+    Effect::new(move |_| match answer.value.get() {
+        Loaded::Ready(reply) => future.set(matches!(reply.response, ExplorerResponse::Future(_))),
+        Loaded::Failed(error) => {
+            future.set(false);
+            if matches!(error.kind, ExplorerErrorKind::PastTip { .. }) {
+                past_tip.set(true);
+            }
+        }
+        Loaded::Loading => future.set(false),
     });
     view! {
         <div class="ex-block" class:ex-refreshing=move || answer.refreshing.get()>
@@ -68,9 +89,9 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
                         <section class="ex-section">
                             <h2>{format!("Block {}", thousands(u64::from(height)))}</h2>
                             <p>
-                                {format!(
+                                {move || format!(
                                     "Your node has blocks up to {}; it is still catching up.",
-                                    thousands(u64::from(node_height))
+                                    thousands(u64::from(syncing_at().unwrap_or(node_height)))
                                 )}
                             </p>
                             <button type="button" on:click=move |_| app.tab.set(Tab::Dashboard)>
