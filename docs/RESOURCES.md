@@ -1385,8 +1385,10 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      spawn, when the exec may already have read from disk.
    - The one-minute rates count the newest run's samples only, so after a restart the CPU
      and Disk tiles start from the new run, as the sparklines, the table and the totals do.
-   - "syncing uses every CPU" follows zebrad's own progress lines (syncing, slow or close to
-     the tip), so a stalled node shows the run's average instead.
+   - "syncing uses every CPU" needs zebrad's own progress lines to say it syncs (syncing,
+     slow or close to the tip) and the tree to use half the CPUs or more. zebrad says it
+     syncs whenever it is behind the tip, also with no peers, so a stalled node or one
+     without peers shows the run's average instead.
    - The footer's busy share is the newest computer sample's (its last 5 s); one-minute
      averages of the computer wait for `MachineHistory` (phase 4).
    - The mock has no flag for the tip: its sync reaches the tip after about 47 minutes, when

@@ -48,8 +48,8 @@ pub fn basis_line(platform: Platform) -> String {
 }
 
 /// The CPU tile's detail: the share of the computer, then why it is high while the node syncs
-/// (`70 % of 8 CPUs · syncing uses every CPU`) or the run's average otherwise
-/// (`3 % of 8 CPUs · 2.1 on average this run`).
+/// and the tree uses half the CPUs or more (`70 % of 8 CPUs · syncing uses every CPU`), or
+/// the run's average otherwise (`3 % of 8 CPUs · 2.1 on average this run`).
 pub fn cpu_detail(
     cores_now: Option<f64>,
     logical_cpus: Option<u32>,
@@ -57,13 +57,17 @@ pub fn cpu_detail(
     run_average: Option<f64>,
 ) -> String {
     let mut parts = Vec::with_capacity(2);
-    if let (Some(cores_now), Some(cpus)) = (cores_now, logical_cpus.filter(|&cpus| cpus > 0)) {
+    let cpus = logical_cpus.filter(|&cpus| cpus > 0);
+    if let (Some(cores_now), Some(cpus)) = (cores_now, cpus) {
         parts.push(format!(
             "{} of {cpus} CPUs",
             share(cores_now / f64::from(cpus))
         ));
     }
-    if syncing {
+    let busy = cores_now
+        .zip(cpus)
+        .is_some_and(|(cores, cpus)| cores / f64::from(cpus) >= 0.5);
+    if syncing && busy {
         parts.push("syncing uses every CPU".to_owned());
     } else if let Some(average) = run_average {
         parts.push(format!("{} on average this run", cores_number(average)));
@@ -276,7 +280,8 @@ fn while_live(
     })
 }
 
-/// Whether zebrad's own progress lines say it is catching up, which keeps every CPU busy.
+/// Whether zebrad's own progress lines say it is catching up. They say so whenever it is
+/// behind the tip, also while it has no peers to sync from.
 fn is_syncing(stage: Option<SyncStage>) -> bool {
     matches!(
         stage,
@@ -590,6 +595,15 @@ mod tests {
         assert_eq!(
             cpu_detail(Some(0.25), Some(8), false, Some(2.1)),
             "3 % of 8 CPUs · 2.1 on average this run"
+        );
+        // zebrad still says it syncs without peers, while its tree is nearly idle.
+        assert_eq!(
+            cpu_detail(Some(0.1), Some(8), true, Some(0.2)),
+            "1 % of 8 CPUs · 0.2 on average this run"
+        );
+        assert_eq!(
+            cpu_detail(Some(4.0), Some(8), true, Some(2.1)),
+            "50 % of 8 CPUs · syncing uses every CPU"
         );
         assert_eq!(cpu_detail(None, Some(8), false, None), "");
         assert_eq!(
