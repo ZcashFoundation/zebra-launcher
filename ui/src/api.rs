@@ -4,9 +4,14 @@
 use std::{cell::Cell, fmt};
 
 use launcher_types::{
-    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
-    ImportOutcome, LogLine, MetricsSnapshot, NodeDetails, NodeId, NodeInfo, NodeStats, OpenTarget,
-    Settings, StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo, UpdateState, events,
+    ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, FirstRunInfo, ImportOutcome, LogLine,
+    MachineResources, MetricsSnapshot, NodeDataDirChoice, NodeDetails, NodeDraft, NodeEvent,
+    NodeId, NodeInfo, NodeResources, NodeStats, NodeUpdate, OpenTarget, Settings, StaleProcessInfo,
+    Status, UpdateHealthFailure, UpdateInfo, UpdateState, events,
+    explorer::{
+        ExplorerCall, ExplorerError, ExplorerErrorKind, ExplorerLiveEvent, ExplorerReply,
+        ExplorerRequest,
+    },
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
@@ -75,117 +80,155 @@ fn mock_handler<T: Serialize + DeserializeOwned>(
     }
 }
 
-pub async fn get_status() -> ApiResult<Status> {
+/// The arguments of a command about one node.
+#[derive(Serialize)]
+struct NodeArgs<'a> {
+    node: &'a NodeId,
+}
+
+/// The nodes, in the backend's order.
+pub async fn list_nodes() -> ApiResult<Vec<NodeInfo>> {
     if !is_tauri() {
-        return Ok(wire(mock::get_status().await)?);
+        return Ok(wire(mock::nodes::list_nodes().await)?);
     }
-    Ok(tauri::invoke0("get_status").await?)
+    Ok(tauri::invoke0("list_nodes").await?)
 }
 
-/// Fails when a zebrad from an earlier launcher run is still alive (`status.stale`).
-pub async fn start_zebrad() -> ApiResult<()> {
-    if !is_tauri() {
-        return mock::start_zebrad().await.map_err(ApiError);
-    }
-    Ok(tauri::invoke0("start_zebrad").await?)
-}
-
-/// Terminates the zebrad left behind by an earlier launcher run, then starts.
-pub async fn start_zebrad_killing_stale() -> ApiResult<()> {
-    if !is_tauri() {
-        mock::start_zebrad_killing_stale().await;
-        return Ok(());
-    }
-    Ok(tauri::invoke0("start_zebrad_killing_stale").await?)
-}
-
-pub async fn stop_zebrad() -> ApiResult<()> {
-    if !is_tauri() {
-        mock::stop_zebrad().await;
-        return Ok(());
-    }
-    Ok(tauri::invoke0("stop_zebrad").await?)
-}
-
-pub async fn restart_zebrad() -> ApiResult<()> {
-    if !is_tauri() {
-        mock::restart_zebrad().await;
-        return Ok(());
-    }
-    Ok(tauri::invoke0("restart_zebrad").await?)
-}
-
-/// The nodes the backend runs besides the one the commands above control. None until the
-/// backend runs several nodes (docs/MULTI-NODE.md); the mock adds five with `?herd`.
-pub fn extra_nodes() -> Vec<NodeInfo> {
-    if is_tauri() {
-        return Vec::new();
-    }
-    mock::herd::extra_nodes()
-}
-
-/// Calls `on_status` with every status change of an extra node, starting with the current one.
-pub fn on_extra_node_status(node: &NodeId, on_status: impl Fn(Status) + 'static) {
-    if !is_tauri() {
-        mock::herd::on_node_status(node, on_status);
-    }
-}
-
-/// Calls `on_stats` with every statistics change of an extra node.
-pub fn on_extra_node_stats(node: &NodeId, on_stats: impl Fn(Option<NodeStats>) + 'static) {
-    if !is_tauri() {
-        mock::herd::on_node_stats(node, on_stats);
-    }
-}
-
-/// Streams an extra node's log lines in batches.
-pub fn subscribe_extra_node_logs(node: &NodeId, on_batch: impl Fn(Vec<LogLine>) + 'static) {
-    if !is_tauri() {
-        mock::herd::subscribe_node_logs(node, on_batch);
-    }
-}
-
-/// Adds a node, stopped. Only the mock can until the backend runs several nodes.
-pub async fn add_node(info: NodeInfo) -> ApiResult<()> {
-    if is_tauri() {
-        return Err(ApiError("Adding nodes needs a newer backend.".into()));
-    }
-    mock::herd::add_node(info);
-    Ok(())
-}
-
-pub async fn start_extra_node(node: &NodeId) -> ApiResult<()> {
-    mock::herd::start_node(node).await;
-    Ok(())
-}
-
-pub async fn stop_extra_node(node: &NodeId) -> ApiResult<()> {
-    mock::herd::stop_node(node).await;
-    Ok(())
-}
-
-pub async fn restart_extra_node(node: &NodeId) -> ApiResult<()> {
-    mock::herd::restart_node(node).await;
-    Ok(())
-}
-
-/// Calls `on_status` with every `status` event for the rest of the page's life. `on_error`
-/// gets a message the first time a payload does not deserialize.
-pub async fn on_status(
-    on_status: impl Fn(Status) + 'static,
+/// Calls `on_nodes` with the node list whenever it changes (`nodes`).
+pub async fn on_nodes(
+    on_nodes: impl Fn(Vec<NodeInfo>) + 'static,
     on_error: impl Fn(String) + 'static,
 ) -> ApiResult<()> {
     if !is_tauri() {
-        mock::on_status(mock_handler("`status` event", on_status, on_error));
+        mock::nodes::on_nodes(mock_handler("`nodes` event", on_nodes, on_error));
+        return Ok(());
+    }
+    Ok(tauri::listen(events::NODES, on_nodes, on_error).await?)
+}
+
+#[derive(Serialize)]
+struct AddNodeArgs<'a> {
+    draft: &'a NodeDraft,
+}
+
+/// Adds a node, stopped, and returns it as the backend set it up: the backend checks the
+/// draft and fills in what it leaves out (the id, the ports, the data folder).
+pub async fn add_node(draft: NodeDraft) -> ApiResult<NodeInfo> {
+    if !is_tauri() {
+        return Ok(wire(
+            mock::nodes::add_node(wire(draft)?)
+                .await
+                .map_err(ApiError)?,
+        )?);
+    }
+    Ok(tauri::invoke("add_node", &AddNodeArgs { draft: &draft }).await?)
+}
+
+#[derive(Serialize)]
+struct UpdateNodeArgs<'a> {
+    node: &'a NodeId,
+    update: &'a NodeUpdate,
+}
+
+/// Changes a node's name, start at launch, stop grace period or network, and returns it.
+pub async fn update_node(node: &NodeId, update: NodeUpdate) -> ApiResult<NodeInfo> {
+    if !is_tauri() {
+        return Ok(wire(
+            mock::nodes::update_node(node, wire(update)?)
+                .await
+                .map_err(ApiError)?,
+        )?);
+    }
+    Ok(tauri::invoke(
+        "update_node",
+        &UpdateNodeArgs {
+            node,
+            update: &update,
+        },
+    )
+    .await?)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveNodeArgs<'a> {
+    node: &'a NodeId,
+    delete_data: bool,
+}
+
+/// Stops and removes a node, deleting its chain state with `delete_data`, and returns the
+/// bytes freed (0 when kept or unknown). Refused for the last node.
+pub async fn remove_node(node: &NodeId, delete_data: bool) -> ApiResult<u64> {
+    if !is_tauri() {
+        return Ok(wire(
+            mock::nodes::remove_node(node, delete_data)
+                .await
+                .map_err(ApiError)?,
+        )?);
+    }
+    Ok(tauri::invoke("remove_node", &RemoveNodeArgs { node, delete_data }).await?)
+}
+
+pub async fn get_status(node: &NodeId) -> ApiResult<Status> {
+    if !is_tauri() {
+        return Ok(wire(
+            mock::nodes::get_status(node).await.map_err(ApiError)?,
+        )?);
+    }
+    Ok(tauri::invoke("get_status", &NodeArgs { node }).await?)
+}
+
+/// Starts a node. Fails when a zebrad from an earlier launcher run is still alive
+/// (`status.stale`).
+pub async fn start_node(node: &NodeId) -> ApiResult<()> {
+    if !is_tauri() {
+        return mock::nodes::start_node(node).await.map_err(ApiError);
+    }
+    Ok(tauri::invoke("start_node", &NodeArgs { node }).await?)
+}
+
+/// Terminates the zebrad left behind by an earlier launcher run of a node, then starts it.
+pub async fn start_node_killing_stale(node: &NodeId) -> ApiResult<()> {
+    if !is_tauri() {
+        return mock::nodes::start_node_killing_stale(node)
+            .await
+            .map_err(ApiError);
+    }
+    Ok(tauri::invoke("start_node_killing_stale", &NodeArgs { node }).await?)
+}
+
+pub async fn stop_node(node: &NodeId) -> ApiResult<()> {
+    if !is_tauri() {
+        return mock::nodes::stop_node(node).await.map_err(ApiError);
+    }
+    Ok(tauri::invoke("stop_node", &NodeArgs { node }).await?)
+}
+
+pub async fn restart_node(node: &NodeId) -> ApiResult<()> {
+    if !is_tauri() {
+        return mock::nodes::restart_node(node).await.map_err(ApiError);
+    }
+    Ok(tauri::invoke("restart_node", &NodeArgs { node }).await?)
+}
+
+/// Calls `on_status` with every `status` event, of every node, for the rest of the page's
+/// life. `on_error` gets a message the first time a payload does not deserialize.
+pub async fn on_status(
+    on_status: impl Fn(NodeEvent<Status>) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::nodes::on_status(mock_handler("`status` event", on_status, on_error));
         return Ok(());
     }
     Ok(tauri::listen(events::STATUS, on_status, on_error).await?)
 }
 
 /// Calls `on_stale` when the backend reports, at launch, that a zebrad from an earlier launcher
-/// run is still alive. It may fire before the UI listens, so `get_status().stale` is read too.
+/// run of a node is still alive. It may fire before the UI listens, so `get_status().stale` is
+/// read too.
 pub async fn on_stale_process(
-    on_stale: impl Fn(StaleProcessInfo) + 'static,
+    on_stale: impl Fn(NodeEvent<StaleProcessInfo>) + 'static,
     on_error: impl Fn(String) + 'static,
 ) -> ApiResult<()> {
     if !is_tauri() {
@@ -197,83 +240,128 @@ pub async fn on_stale_process(
 
 /// Calls `on_stats` with every `node_stats` event for the rest of the page's life.
 pub async fn on_node_stats(
-    on_stats: impl Fn(Option<NodeStats>) + 'static,
+    on_stats: impl Fn(NodeEvent<Option<NodeStats>>) + 'static,
     on_error: impl Fn(String) + 'static,
 ) -> ApiResult<()> {
     if !is_tauri() {
-        mock::on_node_stats(mock_handler("`node_stats` event", on_stats, on_error));
+        mock::nodes::on_node_stats(mock_handler("`node_stats` event", on_stats, on_error));
         return Ok(());
     }
     Ok(tauri::listen(events::NODE_STATS, on_stats, on_error).await?)
 }
 
-/// Calls `on_details` with every `node_details` event: the details behind the node statistics
-/// (the peer list, the chain's supply, the best block), from the same RPC poll, `None` while
-/// zebrad does not run.
+/// Calls `on_details` with every `node_details` event: the details behind a node's statistics
+/// (the peer list, the chain's supply, the best block), from the same RPC poll, `None` while it
+/// does not run.
 pub async fn on_node_details(
-    on_details: impl Fn(Option<NodeDetails>) + 'static,
+    on_details: impl Fn(NodeEvent<Option<NodeDetails>>) + 'static,
     on_error: impl Fn(String) + 'static,
 ) -> ApiResult<()> {
     if !is_tauri() {
-        mock::on_node_details(mock_handler("`node_details` event", on_details, on_error));
+        mock::nodes::on_node_details(mock_handler("`node_details` event", on_details, on_error));
         return Ok(());
     }
     Ok(tauri::listen(events::NODE_DETAILS, on_details, on_error).await?)
 }
 
-/// Calls `on_metrics` with every `metrics` event: zebrad's metrics page, read every 10 s while
+/// Calls `on_metrics` with every `metrics` event: a node's metrics page, read every 10 s while
 /// it runs, `None` while it does not.
 pub async fn on_metrics(
-    on_metrics: impl Fn(Option<MetricsSnapshot>) + 'static,
+    on_metrics: impl Fn(NodeEvent<Option<MetricsSnapshot>>) + 'static,
     on_error: impl Fn(String) + 'static,
 ) -> ApiResult<()> {
     if !is_tauri() {
-        mock::on_metrics(mock_handler("`metrics` event", on_metrics, on_error));
+        mock::nodes::on_metrics(mock_handler("`metrics` event", on_metrics, on_error));
         return Ok(());
     }
     Ok(tauri::listen(events::METRICS, on_metrics, on_error).await?)
 }
 
-/// Streams log batches to `on_batch` for the rest of the page's life. When the backend fell
-/// behind, a gap marker (`LogLine::gap_marker`, with `dropped` set) takes the place of the lost
-/// lines.
+/// Calls `on_resources` with every `node_resources` event: what a node's processes use, read
+/// every 5 s from the spawn until the run ends, `None` while the node has no run and on a
+/// platform the backend does not measure yet.
+pub async fn on_node_resources(
+    on_resources: impl Fn(NodeEvent<Option<NodeResources>>) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::nodes::on_node_resources(mock_handler(
+            "`node_resources` event",
+            on_resources,
+            on_error,
+        ));
+        return Ok(());
+    }
+    Ok(tauri::listen(events::NODE_RESOURCES, on_resources, on_error).await?)
+}
+
+/// Calls `on_machine` with every `machine_resources` event: the computer's CPU and memory, read
+/// every 5 s. The event is about no node, so it carries no id.
+pub async fn on_machine_resources(
+    on_machine: impl Fn(Option<MachineResources>) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::on_machine_resources(mock_handler(
+            "`machine_resources` event",
+            on_machine,
+            on_error,
+        ));
+        return Ok(());
+    }
+    Ok(tauri::listen(events::MACHINE_RESOURCES, on_machine, on_error).await?)
+}
+
+/// Streams a node's log batches to `on_batch` for the rest of the page's life. When the
+/// backend fell behind, a gap marker (`LogLine::gap_marker`, with `dropped` set) takes the
+/// place of the lost lines.
 pub async fn subscribe_logs(
+    node: &NodeId,
     on_batch: impl Fn(Vec<LogLine>) + 'static,
     on_error: impl Fn(String) + 'static,
 ) -> ApiResult<()> {
     if !is_tauri() {
-        mock::subscribe_logs(mock_handler("log batch", on_batch, on_error));
+        mock::nodes::subscribe_logs(node, mock_handler("log batch", on_batch, on_error));
         return Ok(());
     }
     let channel = tauri::channel("log batch", on_batch, on_error);
     let args = js_sys::Object::new();
+    js_sys::Reflect::set(&args, &JsValue::from_str("node"), &tauri::to_js(node)?)?;
     js_sys::Reflect::set(&args, &JsValue::from_str("channel"), &channel)?;
     tauri::invoke_js("subscribe_logs", &args).await?;
     Ok(())
 }
 
-pub async fn read_config() -> ApiResult<ConfigDocument> {
+pub async fn read_config(node: &NodeId) -> ApiResult<ConfigDocument> {
     if !is_tauri() {
-        return Ok(wire(mock::read_config().await.map_err(ApiError)?)?);
+        return Ok(wire(
+            mock::nodes::read_config(node).await.map_err(ApiError)?,
+        )?);
     }
-    Ok(tauri::invoke0("read_config").await?)
+    Ok(tauri::invoke("read_config", &NodeArgs { node }).await?)
 }
 
 #[derive(Serialize)]
 struct ApplyConfigArgs<'a> {
+    node: &'a NodeId,
     text: &'a str,
     token: &'a str,
 }
 
-/// Writes the config and restarts zebrad. `Err` means nothing was written.
-pub async fn apply_config(text: String, token: String) -> Result<ApplyOutcome, ApplyError> {
+/// Writes a node's config and restarts it. `Err` means nothing was written.
+pub async fn apply_config(
+    node: &NodeId,
+    text: String,
+    token: String,
+) -> Result<ApplyOutcome, ApplyError> {
     if !is_tauri() {
-        return match mock::apply_config(text, token).await {
+        return match mock::nodes::apply_config(node, text, token).await {
             Ok(outcome) => wire(outcome).map_err(apply_error),
             Err(error) => Err(wire(error).unwrap_or_else(apply_error)),
         };
     }
     let args = ApplyConfigArgs {
+        node,
         text: &text,
         token: &token,
     };
@@ -292,13 +380,15 @@ fn apply_error(error: JsValue) -> ApplyError {
     })
 }
 
-/// Replaces `zebrad.toml` with the minimal managed file, keeping the old one as
-/// `zebrad.toml.bak`, and returns the new file. Only while zebrad is stopped or failed.
-pub async fn reset_config() -> ApiResult<ConfigDocument> {
+/// Replaces a node's `zebrad.toml` with the minimal managed file, keeping the old one as
+/// `zebrad.toml.bak`, and returns the new file. Only while the node is stopped or failed.
+pub async fn reset_config(node: &NodeId) -> ApiResult<ConfigDocument> {
     if !is_tauri() {
-        return Ok(wire(mock::reset_config().await.map_err(ApiError)?)?);
+        return Ok(wire(
+            mock::nodes::reset_config(node).await.map_err(ApiError)?,
+        )?);
     }
-    Ok(tauri::invoke0("reset_config").await?)
+    Ok(tauri::invoke("reset_config", &NodeArgs { node }).await?)
 }
 
 pub async fn get_settings() -> ApiResult<Settings> {
@@ -327,27 +417,55 @@ pub async fn set_settings(settings: Settings) -> ApiResult<Settings> {
     .await?)
 }
 
-pub async fn get_node_stats() -> ApiResult<Option<NodeStats>> {
+pub async fn get_node_stats(node: &NodeId) -> ApiResult<Option<NodeStats>> {
     if !is_tauri() {
-        return Ok(wire(mock::get_node_stats().await)?);
+        return Ok(wire(
+            mock::nodes::get_node_stats(node).await.map_err(ApiError)?,
+        )?);
     }
-    Ok(tauri::invoke0("get_node_stats").await?)
+    Ok(tauri::invoke("get_node_stats", &NodeArgs { node }).await?)
 }
 
-/// The details behind the node statistics, `None` whenever `get_node_stats` is.
-pub async fn get_node_details() -> ApiResult<Option<NodeDetails>> {
+/// The details behind a node's statistics, `None` whenever `get_node_stats` is.
+pub async fn get_node_details(node: &NodeId) -> ApiResult<Option<NodeDetails>> {
     if !is_tauri() {
-        return Ok(wire(mock::get_node_details().await)?);
+        return Ok(wire(
+            mock::nodes::get_node_details(node)
+                .await
+                .map_err(ApiError)?,
+        )?);
     }
-    Ok(tauri::invoke0("get_node_details").await?)
+    Ok(tauri::invoke("get_node_details", &NodeArgs { node }).await?)
 }
 
-/// The newest reading of zebrad's metrics page, if zebrad runs and answered.
-pub async fn get_metrics() -> ApiResult<Option<MetricsSnapshot>> {
+/// The newest reading of a node's metrics page, if it runs and answered.
+pub async fn get_metrics(node: &NodeId) -> ApiResult<Option<MetricsSnapshot>> {
     if !is_tauri() {
-        return Ok(wire(mock::get_metrics().await)?);
+        return Ok(wire(
+            mock::nodes::get_metrics(node).await.map_err(ApiError)?,
+        )?);
     }
-    Ok(tauri::invoke0("get_metrics").await?)
+    Ok(tauri::invoke("get_metrics", &NodeArgs { node }).await?)
+}
+
+/// The newest sample of a node's processes, `None` while it has no run.
+pub async fn get_node_resources(node: &NodeId) -> ApiResult<Option<NodeResources>> {
+    if !is_tauri() {
+        return Ok(wire(
+            mock::nodes::get_node_resources(node)
+                .await
+                .map_err(ApiError)?,
+        )?);
+    }
+    Ok(tauri::invoke("get_node_resources", &NodeArgs { node }).await?)
+}
+
+/// The newest sample of the computer's CPU and memory, `None` before the first one.
+pub async fn get_machine_resources() -> ApiResult<Option<MachineResources>> {
+    if !is_tauri() {
+        return Ok(wire(mock::get_machine_resources().await)?);
+    }
+    Ok(tauri::invoke0("get_machine_resources").await?)
 }
 
 /// What the first-run flow shows: the default data directory, its free space and any alpha.4
@@ -369,16 +487,21 @@ pub async fn pick_data_dir() -> ApiResult<Option<String>> {
 
 #[derive(Serialize)]
 struct ChooseDataDirArgs<'a> {
+    node: &'a NodeId,
     path: &'a str,
 }
 
-/// Makes `path` the data directory (only while zebrad is stopped or failed) and returns the
-/// saved settings with the free space there. State in the old location stays where it is.
-pub async fn choose_data_dir(path: String) -> ApiResult<DataDirChoice> {
+/// Makes `path` a node's data folder (only while it is stopped or failed) and returns the node
+/// with the free space there. State in the old location stays where it is.
+pub async fn choose_data_dir(node: &NodeId, path: String) -> ApiResult<NodeDataDirChoice> {
     if !is_tauri() {
-        return Ok(wire(mock::choose_data_dir(path).await.map_err(ApiError)?)?);
+        return Ok(wire(
+            mock::nodes::choose_data_dir(node, path)
+                .await
+                .map_err(ApiError)?,
+        )?);
     }
-    Ok(tauri::invoke("choose_data_dir", &ChooseDataDirArgs { path: &path }).await?)
+    Ok(tauri::invoke("choose_data_dir", &ChooseDataDirArgs { node, path: &path }).await?)
 }
 
 #[derive(Serialize)]
@@ -413,13 +536,17 @@ pub async fn delete_legacy_state() -> ApiResult<u64> {
     Ok(tauri::invoke0("delete_legacy_state").await?)
 }
 
-/// Deletes the chain state and returns the bytes freed. Only while zebrad is stopped or
+/// Deletes a node's chain state and returns the bytes freed. Only while it is stopped or
 /// failed.
-pub async fn delete_node_data() -> ApiResult<u64> {
+pub async fn delete_node_data(node: &NodeId) -> ApiResult<u64> {
     if !is_tauri() {
-        return Ok(wire(mock::delete_node_data().await.map_err(ApiError)?)?);
+        return Ok(wire(
+            mock::nodes::delete_node_data(node)
+                .await
+                .map_err(ApiError)?,
+        )?);
     }
-    Ok(tauri::invoke0("delete_node_data").await?)
+    Ok(tauri::invoke("delete_node_data", &NodeArgs { node }).await?)
 }
 
 /// The diagnostics text for a bug report.
@@ -514,15 +641,64 @@ pub async fn on_update_health_failed(
 }
 
 #[derive(Serialize)]
-struct OpenPathArgs {
+struct OpenPathArgs<'a> {
     target: OpenTarget,
+    node: Option<&'a NodeId>,
 }
 
-/// Opens one of the backend's fixed locations with the system's default handler.
-pub async fn open_path(target: OpenTarget) -> ApiResult<()> {
+/// Opens one of the backend's fixed locations with the system's default handler. The folder
+/// of a node's `zebrad.toml`, its data folder and its metrics page are those of `node`, or of
+/// the first node without one.
+pub async fn open_path(target: OpenTarget, node: Option<&NodeId>) -> ApiResult<()> {
     if !is_tauri() {
-        mock::open_path(target).await;
+        mock::open_path(target, node).await;
         return Ok(());
     }
-    Ok(tauri::invoke("open_path", &OpenPathArgs { target }).await?)
+    Ok(tauri::invoke("open_path", &OpenPathArgs { target, node }).await?)
+}
+
+#[derive(Serialize)]
+struct ExplorerArgs<'a> {
+    node: &'a NodeId,
+    call: &'a ExplorerCall,
+}
+
+/// One request to `node`'s block explorer. `Err` is the explorer's own error; a failed IPC
+/// call reads as kind `internal`.
+pub async fn explorer(
+    node: &NodeId,
+    request: ExplorerRequest,
+) -> Result<ExplorerReply, ExplorerError> {
+    let call = ExplorerCall { request };
+    if !is_tauri() {
+        return match mock::explorer::handle(node, call).await {
+            Ok(reply) => wire(reply).map_err(explorer_error),
+            Err(error) => Err(wire(error).unwrap_or_else(explorer_error)),
+        };
+    }
+    match tauri::invoke("explorer", &ExplorerArgs { node, call: &call }).await {
+        Ok(reply) => Ok(reply),
+        Err(error) => Err(explorer_error(error)),
+    }
+}
+
+/// Reads an `ExplorerError` rejection; anything else is kind `internal`.
+fn explorer_error(error: JsValue) -> ExplorerError {
+    tauri::from_js::<ExplorerError>(error.clone()).unwrap_or_else(|_| ExplorerError {
+        kind: ExplorerErrorKind::Internal,
+        message: ApiError::from(error).0,
+    })
+}
+
+/// Calls `on_live` with every `explorer_live` event: one node's explorer state, at most four
+/// a second.
+pub async fn on_explorer_live(
+    on_live: impl Fn(ExplorerLiveEvent) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::explorer::on_live(mock_handler("`explorer_live` event", on_live, on_error));
+        return Ok(());
+    }
+    Ok(tauri::listen(events::EXPLORER_LIVE, on_live, on_error).await?)
 }

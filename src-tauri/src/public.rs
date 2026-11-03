@@ -3,17 +3,14 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use launcher_core::config;
+use launcher_core::config::{self, LightwalletdKey};
 use launcher_public::{
     EndpointHost, Options, PublicServices, Wiring, ddns::HttpsFetch, secrets::Keychain,
 };
 use launcher_types::{events, public::PublicStatus};
 use tauri::{AppHandle, Emitter, Runtime};
 
-use crate::{
-    app_state::{AppState, managed_keys},
-    try_state,
-};
+use crate::{app_state::AppState, try_state};
 
 /// The bundled zebrad's version, until zebrad reports its own.
 const ZEBRAD_VERSION: &str = include_str!("../../ZEBRAD_VERSION");
@@ -33,15 +30,19 @@ impl<R: Runtime> EndpointHost for Host<R> {
         let state = try_state(&self.app);
         Box::pin(async move {
             let state = state.ok_or("Zeal is still starting")?;
-            let _config = state.try_config_permit()?;
-            let running = state.supervisor.status().phase.is_active();
+            // PS1 serves from the first node (docs/PUBLIC-SERVICES.md).
+            let node = state.first_node()?;
+            let _config = node.gates.try_config_permit()?;
+            let running = node.supervisor.status().phase.is_active();
             let _start = if running && restart {
-                Some(state.start_permit()?)
+                Some(node.gates.start_permit()?)
             } else {
                 None
             };
-            let paths = state.paths.clone();
-            let keys = managed_keys(&state.settings.current(), &paths);
+            let paths = node.paths.clone();
+            let mut keys = node.managed_keys();
+            keys.lightwalletd =
+                LightwalletdKey::for_public(&state.settings.current().public, node.spec().network);
             tauri::async_runtime::spawn_blocking(move || config::ensure(&paths, &keys))
                 .await
                 .map_err(|err| err.to_string())?
@@ -49,7 +50,7 @@ impl<R: Runtime> EndpointHost for Host<R> {
             if running && restart {
                 tracing::info!("restarting zebrad for the light wallet endpoint");
                 // A start resolves once zebrad accepted its configuration, as in apply_config.
-                tokio::time::timeout(RESTART_TIMEOUT, state.supervisor.restart())
+                tokio::time::timeout(RESTART_TIMEOUT, node.supervisor.restart())
                     .await
                     .map_err(|_| "zebrad did not restart in time".to_string())?
                     .map_err(|err| err.to_string())?;
@@ -62,6 +63,11 @@ impl<R: Runtime> EndpointHost for Host<R> {
 /// Starts the public services and forwards their status to the UI. `held` comes from
 /// [`launcher_public::prepare_launch`].
 pub fn start<R: Runtime>(app: &AppHandle<R>, state: &AppState, held: bool) -> PublicServices {
+    // The registry always holds a node, and PS1 serves from the first.
+    let node = state
+        .registry
+        .first()
+        .expect("the registry always holds a node");
     let options = Options::new(state.paths.data_dir(), ZEBRAD_VERSION.trim());
     let fetch: Arc<dyn launcher_public::ddns::Fetch> = match HttpsFetch::new() {
         Ok(fetch) => Arc::new(fetch),
@@ -74,8 +80,9 @@ pub fn start<R: Runtime>(app: &AppHandle<R>, state: &AppState, held: bool) -> Pu
         options,
         Wiring {
             settings: state.settings.clone(),
-            status: state.supervisor.watch_status(),
-            stats: state.node_stats.clone(),
+            node: node.watch_spec(),
+            status: node.supervisor.watch_status(),
+            stats: node.stats.clone(),
             host: Arc::new(Host { app: app.clone() }),
             secrets: Arc::new(Keychain),
             fetch,

@@ -33,6 +33,10 @@ fixes this on every platform (shutdown when its stdin closes) is proposed upstre
 - Runs the bundled `zebrad` as a supervised child process: start, stop and restart from
   the window or the tray, graceful shutdown, crash backoff, and a clear reason when
   zebrad cannot run (bad config, port in use, database locked, end of support).
+- **Several nodes:** up to eight zebrad nodes side by side, on Mainnet and Testnet, each
+  with its own data folder, ports, configuration and logs; an overview of each network's
+  nodes, and a dialog that adds a node with ports no other node uses
+  ([MULTI-NODE.md](docs/MULTI-NODE.md)).
 - **Dashboard:** a health verdict with the actions that fix it, sync progress with the
   block rate and the time left to the tip, stat tiles, charts of blocks behind the tip and
   peers by direction since the launcher opened, recent problems and this run's events read

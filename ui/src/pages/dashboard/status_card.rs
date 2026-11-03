@@ -163,12 +163,14 @@ fn run_action(dash: Dash, action: Action, busy: RwSignal<bool>, failure: Transie
     spawn_local(async move {
         let result = match &action {
             Action::Start | Action::StartNow => state.node_untracked().start().await,
-            Action::StartKillingStale => api::start_zebrad_killing_stale().await,
+            Action::StartKillingStale => {
+                api::start_node_killing_stale(&state.node_untracked().id()).await
+            }
             Action::Restart => state.node_untracked().restart().await,
             Action::Install => api::install_update().await,
             Action::CancelUpdate => api::cancel_update().await,
-            Action::OpenLogsFolder => api::open_path(OpenTarget::LogDir).await,
-            Action::OpenReleases => api::open_path(OpenTarget::ReleasesPage).await,
+            Action::OpenLogsFolder => api::open_path(OpenTarget::LogDir, None).await,
+            Action::OpenReleases => api::open_path(OpenTarget::ReleasesPage, None).await,
             Action::ShowInLogs(_)
             | Action::OpenConfigure
             | Action::ResetConfig

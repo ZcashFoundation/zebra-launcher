@@ -1333,6 +1333,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "explorer-model"
+version = "0.1.0"
+dependencies = [
+ "launcher-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2582,6 +2591,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "dirs",
+ "explorer-model",
  "launcher-types",
  "libc",
  "nix",
@@ -5886,6 +5896,7 @@ name = "ui"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "explorer-model",
  "js-sys",
  "launcher-herd",
  "launcher-types",

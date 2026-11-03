@@ -15,26 +15,41 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+pub mod explorer;
 mod nodes;
 pub mod public;
+mod resources;
 
-pub use nodes::{NodeId, NodeInfo, NodeKind, NodePort, NodeRole, PortRole, assign_ports};
+pub use nodes::{
+    MAX_NODES, NodeDraft, NodeEvent, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram, NodeRole,
+    NodeUpdate, PortRole, assign_ports, node_ports,
+};
+pub use resources::{
+    MAX_MEMBERS, MachineResources, MemoryPressure, NodeResources, Platform, ProcessUsage,
+};
 
 /// The names of the events the backend emits and the UI listens to. Logs do
 /// not go through an event: they take a `tauri::ipc::Channel` of
-/// `Vec<LogLine>` batches, set up by the `subscribe_logs` command.
+/// `Vec<LogLine>` batches, set up by the `subscribe_logs` command for one
+/// node.
+///
+/// An event about one node carries a [`NodeEvent`](crate::NodeEvent): the
+/// node's id and the value, `{"node": "zebrad-mainnet", "value": ...}`.
 pub mod events {
-    /// Every [`Status`](crate::Status) change.
+    /// Every change of the node list: a `Vec<NodeInfo>`
+    /// ([`NodeInfo`](crate::NodeInfo)), in the list's order.
+    pub const NODES: &str = "nodes";
+    /// Every [`Status`](crate::Status) change of a node.
     pub const STATUS: &str = "status";
-    /// Every `Option<NodeStats>` change ([`NodeStats`](crate::NodeStats)).
+    /// Every `Option<NodeStats>` change of a node ([`NodeStats`](crate::NodeStats)).
     pub const NODE_STATS: &str = "node_stats";
-    /// Every `Option<NodeDetails>` change
+    /// Every `Option<NodeDetails>` change of a node
     /// ([`NodeDetails`](crate::NodeDetails)): the details behind the node
     /// statistics, from the same RPC poll.
     pub const NODE_DETAILS: &str = "node_details";
-    /// zebrad was to start at launch, but a zebrad from an earlier launcher
+    /// A node was to start at launch, but a zebrad from an earlier launcher
     /// run is still alive: a [`StaleProcessInfo`](crate::StaleProcessInfo).
-    /// The UI offers `start_zebrad_killing_stale`.
+    /// The UI offers `start_node_killing_stale`.
     pub const STALE_PROCESS: &str = "stale_process";
     /// Every [`UpdateState`](crate::UpdateState) change.
     pub const UPDATE_STATE: &str = "update_state";
@@ -43,13 +58,25 @@ pub mod events {
     /// The launcher did not come back healthy after an update: an
     /// [`UpdateHealthFailure`](crate::UpdateHealthFailure).
     pub const UPDATE_HEALTH_FAILED: &str = "update_health_failed";
-    /// Every `Option<MetricsSnapshot>` change
+    /// Every `Option<MetricsSnapshot>` change of a node
     /// ([`MetricsSnapshot`](crate::MetricsSnapshot)): zebrad's Prometheus
     /// metrics, read every 10 s while it runs.
     pub const METRICS: &str = "metrics";
     /// A public service's state changed: one
     /// [`PublicStatus`](crate::public::PublicStatus), counters coalesced.
     pub const PUBLIC_STATUS: &str = "public_status";
+    /// A node's explorer changed what it publishes on its own: an
+    /// [`ExplorerLiveEvent`](crate::explorer::ExplorerLiveEvent), at most four a second.
+    pub const EXPLORER_LIVE: &str = "explorer_live";
+    /// Every `Option<NodeResources>` change of a node
+    /// ([`NodeResources`](crate::NodeResources)): what its processes use, read
+    /// every 5 s from the spawn until the run ends.
+    pub const NODE_RESOURCES: &str = "node_resources";
+    /// Every `Option<MachineResources>` change
+    /// ([`MachineResources`](crate::MachineResources)): the computer's CPU and
+    /// memory, read every 5 s. Not about one node: the value alone, without a
+    /// `NodeEvent`.
+    pub const MACHINE_RESOURCES: &str = "machine_resources";
 }
 
 /// A location the `open_path` command opens with the system's default
@@ -488,7 +515,9 @@ impl Theme {
     }
 }
 
-/// The launcher's own settings, stored in `launcher.json`.
+/// The launcher's own settings, stored in `launcher.json` next to the node list. Each node's
+/// network, data folder, start at launch and stop grace are in its spec
+/// ([`NodeInfo`]).
 ///
 /// Missing fields take their default, so older files keep loading.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -496,25 +525,18 @@ impl Theme {
 pub struct Settings {
     /// The file format version. Files older than version 2 predate
     /// `first_run_done` and are migrated when loaded (see
-    /// [`Settings::first_run_done`]).
+    /// [`Settings::first_run_done`]); files older than version 3 ran a single
+    /// node, whose settings become the first node of the node list.
     pub schema_version: u32,
     /// How launcher updates are handled.
     pub update_mode: UpdateMode,
     /// Closing the window hides it to the tray instead of quitting.
     pub close_to_tray: bool,
-    /// Start zebrad when the launcher starts.
-    pub start_node_on_launch: bool,
     /// The Grafana dashboard URL to embed: `http://127.0.0.1` or
     /// `http://localhost` with any port and path, see [`is_loopback_http_url`].
     pub grafana_url: Option<String>,
-    /// The directory chosen for the chain state, if not the default.
-    pub data_dir: Option<String>,
-    /// The network zebrad runs on.
-    pub network: Network,
-    /// How long a graceful stop may take before zebrad is killed, in seconds.
-    pub stop_grace_secs: u64,
     /// The first-run flow was completed (`complete_first_run`). Until then
-    /// the UI shows it and zebrad is not started.
+    /// the UI shows it and no node is started.
     ///
     /// New installs start with `false`. A `launcher.json` written before
     /// schema version 2 belongs to a user who already ran the launcher, so
@@ -532,11 +554,13 @@ pub struct Settings {
 
 impl Settings {
     /// The current [`Settings::schema_version`].
-    pub const SCHEMA_VERSION: u32 = 2;
+    pub const SCHEMA_VERSION: u32 = 3;
 }
 
+/// The stop grace period a node gets unless the user sets another, in seconds.
+pub const DEFAULT_STOP_GRACE_SECS: u64 = 60;
 /// The shortest stop grace period that can be saved, in seconds
-/// ([`Settings::stop_grace_secs`]). The backend validates against these
+/// ([`NodeInfo::stop_grace_secs`]). The backend validates against these
 /// bounds and the settings form applies them to its field.
 pub const MIN_STOP_GRACE_SECS: u64 = 5;
 /// The longest stop grace period that can be saved, in seconds.
@@ -551,11 +575,7 @@ impl Default for Settings {
             schema_version: Self::SCHEMA_VERSION,
             update_mode: UpdateMode::Off,
             close_to_tray: true,
-            start_node_on_launch: true,
             grafana_url: None,
-            data_dir: None,
-            network: Network::Mainnet,
-            stop_grace_secs: 60,
             first_run_done: false,
             theme: Theme::System,
             public: public::PublicConfig::default(),
@@ -622,6 +642,11 @@ pub struct NodeStats {
     pub updated_at: SystemTime,
 }
 
+/// Synced: within a block of the estimated tip, or a progress of 99.99 % or more.
+pub fn at_tip(height: u64, estimated_height: u64, verification_progress: f64) -> bool {
+    estimated_height.saturating_sub(height) <= 1 || verification_progress >= 0.9999
+}
+
 /// When the running zebrad release reaches its end of support and halts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EosInfo {
@@ -662,6 +687,14 @@ pub struct NodeDetails {
     /// `getblockchaininfo.upgrades` with the highest activation height.
     #[serde(default)]
     pub active_upgrade: Option<String>,
+    /// Every network upgrade zebrad knows for its network, by activation height: the
+    /// explorer keys its rules to these heights.
+    #[serde(default)]
+    pub upgrades: Vec<NetworkUpgrade>,
+    /// The consensus branches of the tip and of the next block, which differ when the next
+    /// block activates an upgrade.
+    #[serde(default)]
+    pub consensus: Option<ConsensusBranches>,
     /// zebrad's P2P user agent, such as `/Zebra:7.0.0/`.
     #[serde(default)]
     pub subversion: Option<String>,
@@ -676,6 +709,41 @@ pub struct NodeDetails {
     pub mempool_usage: Option<u64>,
     /// When these details were last refreshed.
     pub updated_at: SystemTime,
+}
+
+/// A network upgrade as zebrad reports it in `getblockchaininfo.upgrades`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkUpgrade {
+    /// zebrad's name for it, such as `NU6.1`.
+    pub name: String,
+    /// Its consensus branch id in hex, such as `4dec4df0`.
+    pub branch_id: String,
+    /// The height of its first block.
+    pub activation_height: u64,
+    /// Whether it is active yet.
+    pub status: UpgradeStatus,
+}
+
+/// Whether a network upgrade is active ([`NetworkUpgrade::status`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradeStatus {
+    /// Activated at or below the tip.
+    Active,
+    /// It has an activation height above the tip.
+    Pending,
+    /// It has no activation height on this network.
+    Disabled,
+}
+
+/// The consensus branch ids of the tip and of the next block, in hex
+/// (`getblockchaininfo.consensus`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsensusBranches {
+    /// The branch the tip was validated with.
+    pub chain_tip: String,
+    /// The branch the next block is validated with.
+    pub next_block: String,
 }
 
 /// One peer, from `getpeerinfo`.
@@ -995,11 +1063,11 @@ pub struct ImportOutcome {
     pub to: String,
 }
 
-/// The result of `choose_data_dir`.
+/// The result of `choose_data_dir` for a node.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DataDirChoice {
-    /// The saved settings, with the new `data_dir`.
-    pub settings: Settings,
+pub struct NodeDataDirChoice {
+    /// The node, with its new data folder.
+    pub node: NodeInfo,
     /// Free space on the chosen volume, if it could be read. Warning about
     /// too little space is up to the UI.
     pub free_bytes: Option<u64>,
@@ -1363,21 +1431,27 @@ mod tests {
     #[test]
     fn settings_defaults_fill_missing_fields() {
         let settings: Settings =
-            serde_json::from_str(r#"{"network":"testnet"}"#).expect("partial settings parse");
+            serde_json::from_str(r#"{"close_to_tray":false}"#).expect("partial settings parse");
         assert_eq!(
             settings,
             Settings {
-                network: Network::Testnet,
+                close_to_tray: false,
                 ..Settings::default()
             }
         );
         assert_eq!(settings.theme, Theme::System);
+        // A file of a single-node launcher still reads; its node's fields are not settings.
+        let old: Settings = serde_json::from_str(
+            r#"{"schema_version":2,"network":"testnet","data_dir":"/big","stop_grace_secs":90}"#,
+        )
+        .expect("a version 2 file parses");
+        assert_eq!(old.schema_version, 2);
     }
 
     #[test]
     fn stop_grace_bounds_hold_the_default() {
         assert_eq!(STOP_GRACE_SECS, MIN_STOP_GRACE_SECS..=MAX_STOP_GRACE_SECS);
-        assert!(STOP_GRACE_SECS.contains(&Settings::default().stop_grace_secs));
+        assert!(STOP_GRACE_SECS.contains(&DEFAULT_STOP_GRACE_SECS));
         assert!(!STOP_GRACE_SECS.contains(&(MIN_STOP_GRACE_SECS - 1)));
         assert!(!STOP_GRACE_SECS.contains(&(MAX_STOP_GRACE_SECS + 1)));
     }
@@ -1410,6 +1484,8 @@ mod tests {
         assert_eq!(details.chain_supply_zec, None);
         assert!(details.value_pools.is_empty());
         assert_eq!(details.active_upgrade, None);
+        assert!(details.upgrades.is_empty());
+        assert_eq!(details.consensus, None);
         assert_eq!(details.mempool_usage, None);
         assert_eq!(
             details.updated_at,
@@ -1429,8 +1505,21 @@ mod tests {
                 zec: 0.5,
             }],
             active_upgrade: Some("NU6".into()),
+            upgrades: vec![NetworkUpgrade {
+                name: "NU6".into(),
+                branch_id: "c8e71055".into(),
+                activation_height: 2_726_400,
+                status: UpgradeStatus::Active,
+            }],
+            consensus: Some(ConsensusBranches {
+                chain_tip: "c8e71055".into(),
+                next_block: "c8e71055".into(),
+            }),
             ..details
         };
+        let json = serde_json::to_value(&full).unwrap();
+        assert_eq!(json["upgrades"][0]["status"], "active");
+        assert_eq!(json["consensus"]["next_block"], "c8e71055");
         let round_trip: NodeDetails =
             serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
         assert_eq!(round_trip, full);

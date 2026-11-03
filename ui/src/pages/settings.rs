@@ -1,8 +1,14 @@
 //! The launcher settings form, plus the data directory, diagnostics and "Delete node data".
-//! Save sends the whole settings object to `set_settings`; the data directory is changed only
-//! through `choose_data_dir`, so Save always sends the stored one.
+//! Save sends the whole settings object to `set_settings`. With one node the form also holds
+//! that node's start at launch, stop grace period and network, as it did when they were the
+//! launcher's, and Save sends those that changed to `update_node`; its data folder changes
+//! through `choose_data_dir` right away. With several nodes those fields are each node's and
+//! leave this page.
 
-use launcher_types::{Network, OpenTarget, STOP_GRACE_SECS, Settings, Theme, is_loopback_http_url};
+use launcher_types::{
+    Network, NodeInfo, NodeUpdate, OpenTarget, STOP_GRACE_SECS, Settings, Theme,
+    is_loopback_http_url,
+};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -32,11 +38,42 @@ struct TextFields {
 }
 
 impl TextFields {
-    fn from_settings(settings: &Settings) -> Self {
+    fn from_stored(settings: &Settings, node: &NodeChoices) -> Self {
         Self {
             grafana_url: settings.grafana_url.clone().unwrap_or_default(),
-            stop_grace_secs: settings.stop_grace_secs.to_string(),
+            stop_grace_secs: node.stop_grace_secs.to_string(),
         }
+    }
+}
+
+/// The node's settings the form edits while the backend runs one node: what its Behaviour and
+/// Node sections showed when they were the launcher's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NodeChoices {
+    autostart: bool,
+    network: Network,
+    stop_grace_secs: u64,
+}
+
+impl NodeChoices {
+    fn of(info: &NodeInfo) -> Self {
+        Self {
+            autostart: info.autostart,
+            network: info.network,
+            stop_grace_secs: info.stop_grace_secs,
+        }
+    }
+
+    /// What `update_node` changes to make `stored` read as `self`; `None` when nothing does.
+    fn update(&self, stored: &NodeChoices) -> Option<NodeUpdate> {
+        let update = NodeUpdate {
+            autostart: (self.autostart != stored.autostart).then_some(self.autostart),
+            network: (self.network != stored.network).then_some(self.network),
+            stop_grace_secs: (self.stop_grace_secs != stored.stop_grace_secs)
+                .then_some(self.stop_grace_secs),
+            name: None,
+        };
+        (update != NodeUpdate::default()).then_some(update)
     }
 }
 
@@ -69,12 +106,18 @@ fn parse_grafana_url(input: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// True when the form differs from `stored`: a choice in `draft`, or a text field that reads
-/// differently. A text that does not parse differs whatever is stored, even where its parsed
-/// value would read as the stored one (a bad URL where none is stored): the user typed
-/// something the form will not save, so Revert is offered and a change made elsewhere does
-/// not refill the form over it.
-fn draft_differs(stored: &Settings, draft: &Settings, fields: &TextFields) -> bool {
+/// True when the form differs from what is stored (`stored` and the node's `stored_node`): a
+/// choice in `draft` or `node_draft`, or a text field that reads differently. A text that does
+/// not parse differs whatever is stored, even where its parsed value would read as the stored
+/// one (a bad URL where none is stored): the user typed something the form will not save, so
+/// Revert is offered and a change made elsewhere does not refill the form over it.
+fn draft_differs(
+    stored: &Settings,
+    stored_node: &NodeChoices,
+    draft: &Settings,
+    node_draft: &NodeChoices,
+    fields: &TextFields,
+) -> bool {
     let (Ok(grafana_url), Ok(stop_grace_secs)) = (
         parse_grafana_url(&fields.grafana_url),
         parse_stop_grace(&fields.stop_grace_secs),
@@ -83,10 +126,13 @@ fn draft_differs(stored: &Settings, draft: &Settings, fields: &TextFields) -> bo
     };
     let edited = Settings {
         grafana_url,
-        stop_grace_secs,
         ..draft.clone()
     };
-    edited != *stored
+    let edited_node = NodeChoices {
+        stop_grace_secs,
+        ..node_draft.clone()
+    };
+    edited != *stored || edited_node != *stored_node
 }
 
 /// "212.4 GB free", or a note that it is unknown: the data folder row here and the wizard's
@@ -125,44 +171,55 @@ enum Mutation {
 pub fn SettingsPage() -> impl IntoView {
     let state = AppState::get();
     let draft = RwSignal::new(None::<Settings>);
+    let node_draft = RwSignal::new(None::<NodeChoices>);
     let fields = RwSignal::new(TextFields::default());
     let busy = RwSignal::new(None::<Mutation>);
     let saving = move || busy.get() == Some(Mutation::Save);
     // The outcome of Save, or why it is refused; the next edit clears it.
     let outcome = Transient::<Result<String, String>>::new();
+    // The node the form's node fields are about, as stored: the selected one, which with one
+    // node is the only one.
+    let stored_node = Memo::new(move |_| {
+        state
+            .nodes_loaded
+            .get()
+            .then(|| state.node().info.with(NodeChoices::of))
+    });
 
     let reset = move || {
         let loaded = state.settings.get_untracked();
-        fields.set(
-            loaded
-                .as_ref()
-                .map(TextFields::from_settings)
-                .unwrap_or_default(),
-        );
+        let node = stored_node.get_untracked();
+        fields.set(match (&loaded, &node) {
+            (Some(loaded), Some(node)) => TextFields::from_stored(loaded, node),
+            _ => TextFields::default(),
+        });
         draft.set(loaded);
+        node_draft.set(node);
     };
-    // Fill the form when the settings arrive, and again when they change elsewhere (the
-    // first-run flow, the data folder) while the form is not edited. The data folder is not a
-    // form field, so it does not count as an edit.
-    Effect::new(move |previous: Option<Option<Settings>>| {
-        let loaded = state.settings.get();
-        let untouched = match previous.flatten() {
-            None => true,
-            Some(previous) => draft.with_untracked(|draft| {
-                draft.as_ref().is_none_or(|draft| {
-                    let previous = Settings {
-                        data_dir: draft.data_dir.clone(),
-                        ..previous
-                    };
-                    !fields.with_untracked(|fields| draft_differs(&previous, draft, fields))
-                })
-            }),
-        };
-        if loaded.is_some() && untouched {
-            reset();
-        }
-        loaded
-    });
+    // Fill the form when the settings and the node arrive, and again when they change
+    // elsewhere (the first-run flow, another window) while the form is not edited. The data
+    // folder is not a form field, so it does not count as an edit.
+    Effect::new(
+        move |previous: Option<(Option<Settings>, Option<NodeChoices>)>| {
+            let loaded = state.settings.get();
+            let node = stored_node.get();
+            let untouched = match &previous {
+                Some((Some(previous), Some(previous_node))) => draft.with_untracked(|draft| {
+                    node_draft.with_untracked(|node_draft| match (draft, node_draft) {
+                        (Some(draft), Some(node_draft)) => !fields.with_untracked(|fields| {
+                            draft_differs(previous, previous_node, draft, node_draft, fields)
+                        }),
+                        _ => true,
+                    })
+                }),
+                _ => true,
+            };
+            if loaded.is_some() && node.is_some() && untouched {
+                reset();
+            }
+            (loaded, node)
+        },
+    );
 
     // The Appearance choice shows at once: the shell's theme effect reads the draft's theme
     // while it differs from the stored one. Save stores it; Revert puts the draft back.
@@ -181,10 +238,16 @@ pub fn SettingsPage() -> impl IntoView {
     // Save and Revert are offered while the form differs from what is stored.
     let dirty = move || {
         draft.with(|draft| {
-            draft.as_ref().is_some_and(|draft| {
+            node_draft.with(|node_draft| {
+                let (Some(draft), Some(node_draft)) = (draft, node_draft) else {
+                    return false;
+                };
                 state.settings.with(|stored| {
-                    stored.as_ref().is_none_or(|stored| {
-                        fields.with(|fields| draft_differs(stored, draft, fields))
+                    stored_node.with(|stored_node| match (stored, stored_node) {
+                        (Some(stored), Some(stored_node)) => fields.with(|fields| {
+                            draft_differs(stored, stored_node, draft, node_draft, fields)
+                        }),
+                        _ => true,
                     })
                 })
             })
@@ -196,7 +259,9 @@ pub fn SettingsPage() -> impl IntoView {
         if busy.get_untracked().is_some() {
             return;
         }
-        let Some(mut settings) = draft.get_untracked() else {
+        let (Some(mut settings), Some(node_choices)) =
+            (draft.get_untracked(), node_draft.get_untracked())
+        else {
             return;
         };
         let f = fields.get_untracked();
@@ -211,17 +276,38 @@ pub fn SettingsPage() -> impl IntoView {
             }
         };
         settings.grafana_url = grafana_url;
-        settings.stop_grace_secs = stop_grace_secs;
-        // `set_settings` keeps the stored `data_dir` whatever is sent; send that one anyway.
-        settings.data_dir = state
-            .settings
-            .with_untracked(|stored| stored.as_ref().and_then(|s| s.data_dir.clone()));
+        let edited_node = NodeChoices {
+            stop_grace_secs,
+            ..node_choices
+        };
+        let stored = state.settings.get_untracked();
+        let node_update = stored_node
+            .get_untracked()
+            .and_then(|stored_node| edited_node.update(&stored_node));
+        let node = state.node_untracked();
         busy.set(Some(Mutation::Save));
         outcome.clear();
         spawn_local(async move {
-            match api::set_settings(settings).await {
-                Ok(stored) => {
-                    state.settings.set(Some(stored));
+            let mut saved = Ok(());
+            if stored.as_ref() != Some(&settings) {
+                match api::set_settings(settings).await {
+                    Ok(stored) => state.settings.set(Some(stored)),
+                    Err(error) => saved = Err(error),
+                }
+            }
+            if saved.is_ok()
+                && let Some(update) = node_update
+            {
+                match api::update_node(&node.id(), update).await {
+                    Ok(info) => {
+                        node.info.set(info);
+                        state.refresh_nodes();
+                    }
+                    Err(error) => saved = Err(error),
+                }
+            }
+            match saved {
+                Ok(()) => {
                     reset();
                     outcome.report(Ok("Saved.".into()));
                 }
@@ -242,9 +328,19 @@ pub fn SettingsPage() -> impl IntoView {
     let read = move |pick: fn(&Settings) -> bool| {
         move || draft.with(|draft| draft.as_ref().is_some_and(pick))
     };
+    let update_node = move |change: fn(&mut NodeChoices, bool), value: bool| {
+        node_draft.update(|draft| {
+            if let Some(draft) = draft {
+                change(draft, value);
+            }
+        });
+        outcome.clear();
+    };
+    // With several nodes, a node's own settings are on its pages, not here.
+    let one_node = move || !state.herd();
     view! {
         <Show
-            when=move || draft.with(Option::is_some)
+            when=move || draft.with(Option::is_some) && node_draft.with(Option::is_some)
             fallback=|| view! { <p class="muted">"Loading settings…"</p> }
         >
             <form class="settings" on:submit=save>
@@ -281,15 +377,15 @@ pub fn SettingsPage() -> impl IntoView {
                         />
                         "Keep running in the tray when the window is closed"
                     </label>
+                    <Show when=one_node>
                     <label class="check">
                         <input
                             type="checkbox"
-                            prop:checked=read(|s| s.start_node_on_launch)
+                            prop:checked=move || {
+                                node_draft.with(|draft| draft.as_ref().is_some_and(|d| d.autostart))
+                            }
                             on:change=move |event| {
-                                update(
-                                    |s, v| s.start_node_on_launch = v,
-                                    event_target_checked(&event),
-                                )
+                                update_node(|d, v| d.autostart = v, event_target_checked(&event))
                             }
                         />
                         "Start the node when the launcher opens"
@@ -310,6 +406,7 @@ pub fn SettingsPage() -> impl IntoView {
                         <span class="muted">"How long zebrad gets to shut down before it is killed."</span>
                         {move || grace_error.get().map(|e| view! { <span class="error">{e}</span> })}
                     </label>
+                    </Show>
                 </fieldset>
 
                 <fieldset>
@@ -336,13 +433,14 @@ pub fn SettingsPage() -> impl IntoView {
                     />
                 </fieldset>
 
+                <Show when=one_node>
                 <fieldset>
                     <legend>"Node"</legend>
                     <label class="field">
                         <span>"Network"</span>
                         <select
                             prop:value=move || {
-                                draft.with(|d| match d.as_ref().map(|d| d.network) {
+                                node_draft.with(|d| match d.as_ref().map(|d| d.network) {
                                     Some(Network::Testnet) => "testnet",
                                     _ => "mainnet",
                                 })
@@ -352,7 +450,7 @@ pub fn SettingsPage() -> impl IntoView {
                                     "testnet" => Network::Testnet,
                                     _ => Network::Mainnet,
                                 };
-                                draft.update(|d| {
+                                node_draft.update(|d| {
                                     if let Some(d) = d {
                                         d.network = network;
                                     }
@@ -364,11 +462,14 @@ pub fn SettingsPage() -> impl IntoView {
                             <option value="testnet">"Testnet"</option>
                         </select>
                     </label>
-                    <DataDirRow draft busy />
+                    <DataDirRow busy />
                     <p class="muted cfg-settings-pointer">
                         "zebrad's own settings are on the Configure tab."
                     </p>
                 </fieldset>
+                </Show>
+
+                <Nodes />
 
                 <fieldset>
                     <legend>"Metrics"</legend>
@@ -418,48 +519,40 @@ pub fn SettingsPage() -> impl IntoView {
             <PublicServices />
             <section class="settings">
                 <Diagnostics />
-                <DeleteNodeData busy />
+                <Show when=one_node>
+                    <DeleteNodeData busy />
+                </Show>
                 <About />
             </section>
         </Show>
     }
 }
 
-/// True while the backend accepts data changes (its zebrad stopped or failed).
+/// True while the backend accepts data changes for the selected node (stopped or failed).
 fn data_change_open(state: AppState) -> impl Fn() -> bool + Copy {
     move || {
         state
-            .primary
+            .node()
             .status
             .with(|status| data_change_allowed(&status.phase))
     }
 }
 
-/// The data directory, with "Change…" (folder picker, then `choose_data_dir`). It is saved
-/// right away, not by the form's Save; `draft` follows so the form does not look edited.
+/// The node's data folder, with "Change…" (folder picker, then `choose_data_dir`). It is saved
+/// right away, not by the form's Save.
 #[component]
-fn DataDirRow(
-    draft: RwSignal<Option<Settings>>,
-    busy: RwSignal<Option<Mutation>>,
-) -> impl IntoView {
+fn DataDirRow(busy: RwSignal<Option<Mutation>>) -> impl IntoView {
     let state = AppState::get();
     let allowed = data_change_open(state);
     let outcome = Transient::<Result<String, String>>::new();
     // The free space at the folder in use, read (read-only) when the row mounts and whenever
-    // the stored folder changes. Without a stored folder the launcher's default one is in use;
-    // its path comes from the first-run info.
-    let stored_dir = Memo::new(move |_| {
+    // the folder changes.
+    let dir_in_use = Memo::new(move |_| {
         state
-            .settings
-            .with(|s| s.as_ref().and_then(|s| s.data_dir.clone()))
+            .nodes_loaded
+            .get()
+            .then(|| state.node().info.with(|info| info.data_dir.clone()))
     });
-    let default_dir = RwSignal::new(None::<String>);
-    spawn_local(async move {
-        if let Ok(info) = api::get_first_run_info().await {
-            default_dir.set(Some(info.default_data_dir));
-        }
-    });
-    let dir_in_use = Memo::new(move |_| stored_dir.get().or_else(|| default_dir.get()));
     // `None` while unread; `Some(None)` when the backend could not tell.
     let free_in_use = RwSignal::new(None::<Option<u64>>);
     Effect::new(move |_| {
@@ -482,19 +575,14 @@ fn DataDirRow(
         }
         busy.set(Some(Mutation::DataDir));
         outcome.clear();
+        let node = state.node_untracked();
         spawn_local(async move {
             // Nothing to say when the picker was cancelled.
             let saved = match api::pick_data_dir().await {
                 Ok(None) => None,
-                Ok(Some(path)) => Some(match api::choose_data_dir(path).await {
+                Ok(Some(path)) => Some(match api::choose_data_dir(&node.id(), path).await {
                     Ok(choice) => {
-                        let data_dir = choice.settings.data_dir.clone();
-                        state.settings.set(Some(choice.settings));
-                        draft.update(|draft| {
-                            if let Some(draft) = draft {
-                                draft.data_dir = data_dir;
-                            }
-                        });
+                        node.info.set(choice.node);
                         Ok(data_dir_saved_text(choice.free_bytes))
                     }
                     Err(error) => Err(format!("Could not use that folder: {error}")),
@@ -514,8 +602,7 @@ fn DataDirRow(
             <code class="readonly">
                 {move || {
                     state
-                        .settings
-                        .with(|s| s.as_ref().and_then(|s| s.data_dir.clone()))
+                        .chosen_data_dir(state.node())
                         .unwrap_or_else(|| "default (the launcher's data folder)".into())
                 }}
             </code>
@@ -548,9 +635,60 @@ fn DataDirRow(
     }
 }
 
+/// The nodes Zeal runs, with "Add a node…": with one node, the way to a second one, since the
+/// sidebar with its "Add node" appears only once there are two.
+#[component]
+fn Nodes() -> impl IntoView {
+    let state = AppState::get();
+    let summary = move || {
+        let nodes = state.nodes.get();
+        match nodes.as_slice() {
+            [node] => node.info.with(|info| {
+                let other = match info.network {
+                    Network::Mainnet => Network::Testnet,
+                    Network::Testnet => Network::Mainnet,
+                };
+                format!(
+                    "Zeal runs one node, {}. Add another to run {other} next to {}; the window then lists them in a sidebar.",
+                    info.name, info.network
+                )
+            }),
+            nodes => {
+                let names: Vec<String> = nodes
+                    .iter()
+                    .map(|node| node.info.with(|info| info.name.clone()))
+                    .collect();
+                format!(
+                    "Zeal runs {} nodes: {}. Each node's settings are on its pages.",
+                    nodes.len(),
+                    names.join(", ")
+                )
+            }
+        }
+    };
+    view! {
+        <fieldset>
+            <legend>"Nodes"</legend>
+            <p class="muted">{summary}</p>
+            <div class="buttons">
+                <button
+                    type="button"
+                    class="settings-add-node"
+                    disabled=move || !state.nodes_loaded.get() || state.add_refused().is_some()
+                    on:click=move |_| state.add_node.run(())
+                >
+                    "Add a node…"
+                </button>
+                {move || state.add_refused().map(|why| view! { <span class="muted">{why}</span> })}
+            </div>
+        </fieldset>
+    }
+}
+
 /// The free space at the folder in use: `212.4 GB free`, in the warning tone with an icon when
-/// Mainnet would not fit, or `free space unknown`.
-fn free_space_view(free: Option<u64>) -> impl IntoView {
+/// Mainnet would not fit, or `free space unknown`: the data folder row here and the add-node
+/// dialog's.
+pub(crate) fn free_space_view(free: Option<u64>) -> impl IntoView {
     let low = is_low_space(free);
     view! {
         <span class="data-dir-free" class:warn=low class:muted=!low>
@@ -568,8 +706,9 @@ fn About() -> impl IntoView {
     let note = Transient::<Result<String, String>>::new();
     let open = move |target: OpenTarget, what: &'static str| {
         note.clear();
+        let node = state.node_untracked().id();
         spawn_local(async move {
-            if let Err(failure) = api::open_path(target).await {
+            if let Err(failure) = api::open_path(target, Some(&node)).await {
                 note.report(Err(format!("Could not open {what}: {failure}")));
             }
         });
@@ -581,18 +720,18 @@ fn About() -> impl IntoView {
         })
     };
     let zebrad = move || {
-        state.primary.stats.with(|stats| {
+        state.node().stats.with(|stats| {
             stats
                 .as_ref()
                 .map_or_else(|| "not running".to_owned(), |s| s.zebrad_version.clone())
         })
     };
     let network = move || {
-        state.settings.with(|settings| {
-            settings
-                .as_ref()
-                .map_or_else(|| "…".to_owned(), |s| s.network.to_string())
-        })
+        if state.nodes_loaded.get() {
+            state.node().info.with(|info| info.network.to_string())
+        } else {
+            "…".to_owned()
+        }
     };
     view! {
         <fieldset class="about">
@@ -690,8 +829,7 @@ fn DeleteNodeData(busy: RwSignal<Option<Mutation>>) -> impl IntoView {
 
     let state_folder = move || {
         state
-            .settings
-            .with(|s| s.as_ref().and_then(|s| s.data_dir.clone()))
+            .chosen_data_dir(state.node())
             .map(|dir| state_dir(&dir))
             .unwrap_or_else(|| "the state folder in the launcher's data folder".into())
     };
@@ -701,8 +839,9 @@ fn DeleteNodeData(busy: RwSignal<Option<Mutation>>) -> impl IntoView {
         }
         busy.set(Some(Mutation::DeleteNodeData));
         outcome.clear();
+        let node = state.node_untracked().id();
         spawn_local(async move {
-            outcome.report(match api::delete_node_data().await {
+            outcome.report(match api::delete_node_data(&node).await {
                 Ok(freed) => Ok(format!("Deleted the node data, freeing {}.", bytes(freed))),
                 Err(error) => Err(format!("Could not delete the node data: {error}")),
             });
@@ -777,28 +916,50 @@ mod tests {
         assert!(parse_stop_grace("").is_err());
     }
 
+    fn node() -> NodeChoices {
+        NodeChoices {
+            autostart: true,
+            network: Network::Mainnet,
+            stop_grace_secs: 60,
+        }
+    }
+
     #[test]
     fn a_draft_differs_by_a_choice_a_text_field_or_a_text_that_does_not_parse() {
         let stored = Settings::default();
-        let fields = TextFields::from_settings(&stored);
-        assert!(!draft_differs(&stored, &stored, &fields));
-        // A choice.
+        let stored_node = node();
+        let fields = TextFields::from_stored(&stored, &stored_node);
+        let differs = |draft: &Settings, node_draft: &NodeChoices, fields: &TextFields| {
+            draft_differs(&stored, &stored_node, draft, node_draft, fields)
+        };
+        assert!(!differs(&stored, &stored_node, &fields));
+        // A choice, the launcher's or the node's.
         let draft = Settings {
             close_to_tray: !stored.close_to_tray,
             ..stored.clone()
         };
-        assert!(draft_differs(&stored, &draft, &fields));
+        assert!(differs(&draft, &stored_node, &fields));
+        let testnet = NodeChoices {
+            network: Network::Testnet,
+            ..node()
+        };
+        assert!(differs(&stored, &testnet, &fields));
         // A text field is read as it would be saved: padding is not a change, a new URL is.
         let padded = TextFields {
-            stop_grace_secs: format!(" {} ", stored.stop_grace_secs),
+            stop_grace_secs: format!(" {} ", stored_node.stop_grace_secs),
             ..fields.clone()
         };
-        assert!(!draft_differs(&stored, &stored, &padded));
+        assert!(!differs(&stored, &stored_node, &padded));
         let other_url = TextFields {
             grafana_url: "http://127.0.0.1:3000".into(),
             ..fields.clone()
         };
-        assert!(draft_differs(&stored, &stored, &other_url));
+        assert!(differs(&stored, &stored_node, &other_url));
+        let other_grace = TextFields {
+            stop_grace_secs: "90".into(),
+            ..fields.clone()
+        };
+        assert!(differs(&stored, &stored_node, &other_grace));
         // A text that does not parse differs whatever is stored, even where its parsed value
         // would read as the stored one: no URL is stored, and a bad URL is not "no URL".
         assert_eq!(stored.grafana_url, None);
@@ -806,12 +967,38 @@ mod tests {
             grafana_url: "http://example.com".into(),
             ..fields.clone()
         };
-        assert!(draft_differs(&stored, &stored, &bad_url));
+        assert!(differs(&stored, &stored_node, &bad_url));
         let bad_grace = TextFields {
             stop_grace_secs: "0".into(),
             ..fields
         };
-        assert!(draft_differs(&stored, &stored, &bad_grace));
+        assert!(differs(&stored, &stored_node, &bad_grace));
+    }
+
+    #[test]
+    fn only_the_node_choices_that_changed_are_sent() {
+        assert_eq!(node().update(&node()), None);
+        let edited = NodeChoices {
+            autostart: false,
+            stop_grace_secs: 120,
+            ..node()
+        };
+        assert_eq!(
+            edited.update(&node()),
+            Some(NodeUpdate {
+                autostart: Some(false),
+                stop_grace_secs: Some(120),
+                ..NodeUpdate::default()
+            })
+        );
+        let testnet = NodeChoices {
+            network: Network::Testnet,
+            ..node()
+        };
+        assert_eq!(
+            testnet.update(&node()).and_then(|update| update.network),
+            Some(Network::Testnet)
+        );
     }
 
     #[test]

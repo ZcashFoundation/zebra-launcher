@@ -1,0 +1,18 @@
+[package]
+name = "explorer-model"
+description = "The block explorer's pure model: zebrad's RPC shapes, block ledgers, rules, the query classifier and a synthetic chain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+launcher-types = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -2,6 +2,7 @@
 //! pages, the node (its status, name, kind and network) and its tabs; on the overview and the
 //! launcher's own pages, the page's name.
 
+use launcher_types::NodeKind;
 use leptos::prelude::*;
 
 use crate::{
@@ -11,12 +12,14 @@ use crate::{
     node_summary::summarize,
 };
 
-/// The tabs a node offers. Configure edits the backend node's `zebrad.toml` only until the
-/// backend runs several nodes, so the other nodes have no Configure yet.
-fn node_tabs(primary: bool) -> Vec<Tab> {
+/// The tabs a node offers: Configure edits a zebrad node's `zebrad.toml`, so other kinds have
+/// none yet; the Explorer is for the kinds that keep the chain and answer zebrad's RPC
+/// ([`NodeKind::has_explorer`]).
+fn node_tabs(kind: NodeKind) -> Vec<Tab> {
     Tab::NODE
         .into_iter()
-        .filter(|tab| primary || *tab != Tab::Configure)
+        .filter(|tab| kind == NodeKind::Zebrad || *tab != Tab::Configure)
+        .filter(|tab| kind.has_explorer() || *tab != Tab::Explorer)
         .collect()
 }
 
@@ -24,9 +27,10 @@ fn node_tabs(primary: bool) -> Vec<Tab> {
 pub fn HerdHeader() -> impl IntoView {
     let state = AppState::get();
     let node = move || state.node();
-    // A node without a Configure tab shows its dashboard when picked from Configure.
+    // A node without a Configure or an Explorer tab shows its dashboard when picked from it.
     Effect::new(move |_| {
-        if state.tab.get() == Tab::Configure && !state.node().primary {
+        let kind = state.node().info.with(|info| info.kind);
+        if !node_tabs(kind).contains(&state.tab.get()) && state.tab.get().is_node_tab() {
             state.tab.set(Tab::Dashboard);
         }
     });
@@ -61,7 +65,7 @@ pub fn HerdHeader() -> impl IntoView {
                     </span>
                 </div>
                 <nav class="tabs" role="tablist" aria-label="Node pages">
-                    {node_tabs(node.primary)
+                    {node_tabs(node.info.with_untracked(|info| info.kind))
                         .into_iter()
                         .map(|tab| {
                             view! {
@@ -104,5 +108,32 @@ pub fn HerdHeader() -> impl IntoView {
                 </span>
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_explorer_is_for_nodes_that_keep_the_chain() {
+        assert_eq!(
+            node_tabs(NodeKind::Zebrad),
+            [
+                Tab::Dashboard,
+                Tab::Logs,
+                Tab::Explorer,
+                Tab::Configure,
+                Tab::NodeSettings
+            ]
+        );
+        assert_eq!(
+            node_tabs(NodeKind::Zakura),
+            [Tab::Dashboard, Tab::Logs, Tab::Explorer, Tab::NodeSettings]
+        );
+        assert_eq!(
+            node_tabs(NodeKind::Zaino),
+            [Tab::Dashboard, Tab::Logs, Tab::NodeSettings]
+        );
     }
 }

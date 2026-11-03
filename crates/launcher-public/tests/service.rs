@@ -70,6 +70,7 @@ struct Setup {
     applied: Arc<AtomicU32>,
     _status: watch::Sender<Status>,
     _stats: watch::Sender<Option<NodeStats>>,
+    _node: watch::Sender<launcher_core::nodes::NodeSpec>,
 }
 
 async fn setup() -> Setup {
@@ -82,6 +83,7 @@ async fn setup() -> Setup {
     });
     let (stats_tx, stats) = watch::channel(None::<NodeStats>);
     let applied = Arc::new(AtomicU32::new(0));
+    let (node_tx, node) = watch::channel(launcher_core::nodes::NodeSpec::first(Network::Mainnet));
     let host = Host {
         settings: settings.clone(),
         status: status_tx.clone(),
@@ -97,6 +99,7 @@ async fn setup() -> Setup {
         options,
         Wiring {
             settings: settings.clone(),
+            node,
             status,
             stats,
             host: Arc::new(host),
@@ -112,6 +115,7 @@ async fn setup() -> Setup {
         applied,
         _status: status_tx,
         _stats: stats_tx,
+        _node: node_tx,
     }
 }
 

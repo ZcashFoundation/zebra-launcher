@@ -1,15 +1,16 @@
-//! Quitting stops zebrad first.
+//! Quitting stops every node first.
 //!
-//! On [`RunEvent::ExitRequested`] the exit is prevented, the supervisor is
-//! shut down (graceful stop, then kill after the grace period) with an overall
-//! cap, and the app exits again with the requested code. The second request
+//! On [`RunEvent::ExitRequested`] the exit is prevented, every node's
+//! supervisor is shut down side by side (graceful stop, then kill after that
+//! node's grace period) with an overall cap, and the app exits again with
+//! the requested code. The second request
 //! passes through because the guard records that the shutdown finished.
 //! [`RunEvent::Exit`] is the last resort when the event loop ends without a
 //! request we could prevent: it blocks until the shutdown finishes or the cap
 //! expires.
 //!
 //! Closing the main window hides it instead when `close_to_tray` is on and
-//! the tray icon exists, so zebrad keeps running; without a tray (Linux
+//! the tray icon exists, so the nodes keep running; without a tray (Linux
 //! without libappindicator) closing the window quits as above. The tray's
 //! Show item, a second launch and the macOS dock icon show it again.
 
@@ -71,7 +72,7 @@ pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
                 if let Err(err) = window.hide() {
                     tracing::warn!(%err, "could not hide the window");
                 }
-                tracing::info!("window hidden to the tray; zebrad keeps running");
+                tracing::info!("window hidden to the tray; the nodes keep running");
             }
         }
         #[cfg(target_os = "macos")]
@@ -84,7 +85,7 @@ pub fn on_run_event<R: Runtime>(app: &AppHandle<R>, event: RunEvent) {
                 return;
             }
             state.exit.started.store(true, Ordering::SeqCst);
-            tracing::warn!("exiting without a prior exit request; stopping zebrad");
+            tracing::warn!("exiting without a prior exit request; stopping the nodes");
             // If a shutdown is already running, this waits for the actor to end.
             tauri::async_runtime::block_on(shutdown(state.inner(), public_services(app)));
             state.exit.finished.store(true, Ordering::SeqCst);
@@ -99,24 +100,23 @@ fn public_services<R: Runtime>(app: &AppHandle<R>) -> Option<launcher_public::Pu
         .map(|public| public.inner().clone())
 }
 
-/// Closes the public services' front door, then stops zebrad and the
-/// supervisor, giving up after the cap.
+/// Closes the public services' front door, then stops every node and its supervisor,
+/// giving up after the cap.
 ///
-/// The cap is the supervisor's: its grace is fixed at launch, while the
-/// settings may have changed since.
+/// The cap is the longest of the supervisors' (they stop side by side):
+/// each grace is fixed at launch, while the settings may have changed since.
 async fn shutdown(state: &AppState, public: Option<launcher_public::PublicServices>) {
     if let Some(public) = public {
-        // Nothing public outlives Zeal: the front door closes before zebrad stops.
+        // Nothing public outlives Zeal: the front door closes before the nodes stop.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), public.shutdown()).await;
     }
-    let cap = state.supervisor.shutdown_cap();
-    tracing::info!(cap_secs = cap.as_secs(), "stopping zebrad before exit");
-    match tokio::time::timeout(cap, state.supervisor.shutdown()).await {
-        // `Closed` means an earlier shutdown already ended the actor.
-        Ok(_) => tracing::info!("zebrad stopped; exiting"),
+    let cap = state.registry.shutdown_cap();
+    tracing::info!(cap_secs = cap.as_secs(), "stopping the nodes before exit");
+    match tokio::time::timeout(cap, state.registry.shutdown()).await {
+        Ok(()) => tracing::info!("the nodes stopped; exiting"),
         Err(_) => tracing::error!(
             cap_secs = cap.as_secs(),
-            "zebrad did not stop in time; exiting anyway"
+            "the nodes did not stop in time; exiting anyway"
         ),
     }
 }

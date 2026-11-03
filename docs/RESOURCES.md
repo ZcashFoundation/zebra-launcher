@@ -1,9 +1,11 @@
 # Resource monitoring
 
-> **Status: proposal, 2026-11-03.** A design for review before any code. It answers the
-> maintainer's question "can we also monitor resource usage of each node or child
-> process?". [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built and
-> is updated phase by phase as this lands. [MULTI-NODE.md](MULTI-NODE.md) is the plan it
+> **Status, 2026-11-03: phases 1 and 2 are built (the Resources card, live on Linux), and of
+> phase 7 the parts the node registry of MULTI-NODE phase 2a makes possible (a sampler per
+> node, the node-scoped event and command, the herd's figures in the mock); phases 3 to 6 and
+> the rest of phase 7 are the design.** [Phases](#phases) says what each built phase changed
+> from this design. [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built
+> and is updated phase by phase as this lands. [MULTI-NODE.md](MULTI-NODE.md) is the plan it
 > fits into.
 
 Yes, for each node and for every process a node starts. Zeal already draws the boundary of
@@ -452,7 +454,7 @@ impl MachineSampler {
 
 | | One node (now) | Several nodes (MULTI-NODE phase 2) |
 | --- | --- | --- |
-| Event `node_resources` | `Option<NodeResources>` | `NodeResourcesEvent { node, resources }` |
+| Event `node_resources` | `Option<NodeResources>` | `NodeResourcesEvent { node, resources }`; built as `NodeEvent { node, value }`, see phase 7 |
 | Event `machine_resources` | `Option<MachineResources>` | unchanged |
 | Snapshot command | `get_node_resources()` | `get_node_resources(node)` |
 | Snapshot command | `get_machine_resources()` | unchanged |
@@ -1365,6 +1367,44 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    `extra_nodes()` returns nothing today, so the card stays hidden and nothing changes for
    users. Screenshots: syncing, at the tip, stopped, `?os=macos`, `?os=windows` and a
    narrow window.
+
+   **Built.** As planned, with these differences:
+
+   - `MachineResources` has no `volumes` field yet, and `VolumeUsage` and
+     `NodeResourcesEvent` do not exist: they come with phases 5 and 7. The field defaults on
+     the wire, so adding it later breaks nothing. The card's footer line has no free-space
+     part until then.
+   - `MemoryPressure::as_str` gives the footer's words; the macOS memory label reads "Memory
+     as Activity Monitor shows it", the basis line's wording.
+   - `format::mem_bytes` drops a trailing `.0`, so totals read "16 GiB" and a commit charge of
+     exactly 7 GiB reads "7 GiB committed".
+   - The Disk and Processes tiles show their value on two lines, as in the sketch. The Disk
+     tile's sparkline plots the write rate. While stopped, the tiles keep the last run's
+     sparklines.
+   - The tiles stand four across on a page of 1200 px or more, two across under it and one
+     under 640 px, so each of the Disk tile's figures keeps a line. A no-break space joins
+     each figure to its unit, so a wider font breaks before the word, not inside the figure.
+   - A rate since the spawn, or since a process started, is averaged over at least 1 s,
+     like the backend's first CPU rate: the first sample comes within milliseconds of the
+     spawn, when the exec may already have read from disk.
+   - The one-minute rates count the newest run's samples only, so after a restart the CPU
+     and Disk tiles start from the new run, as the sparklines, the table and the totals do.
+   - The indent under a parent is visual only, so the Process cell of a child also says
+     "started by" its parent to screen readers.
+   - "syncing uses every CPU" needs zebrad's own progress lines to say it syncs (syncing,
+     slow or close to the tip) and the tree to use half the CPUs or more. zebrad says it
+     syncs whenever it is behind the tip, also with no peers, so a stalled node or one
+     without peers shows the run's average instead.
+   - The footer's busy share is the newest computer sample's (its last 5 s); one-minute
+     averages of the computer wait for `MachineHistory` (phase 4).
+   - The mock has no flag for the tip: its sync reaches the tip after about 47 minutes, when
+     the card shows the tip's figures.
+   - Two mock flags the design did not plan show the card's other states: `?children`, a
+     `block_notify_command` under the primary zebrad whose processes come and go (indented
+     rows, an orphan on a line of its own, and "and 11 more"), and `?unreadable`, CPU and
+     I/O refused by the OS ("not available", "the system does not report them").
+   - The node card's "State memory (of 6.1 GiB in use)" cross-check is in no phase yet and is
+     not built.
 2. **Live on Linux.**
    - `TreeProbe`, `ChildHandle::probe` and `watch_probe` (`install_run`, `finalize`).
    - `resources/{procfs, fold, linux}.rs`.
@@ -1377,6 +1417,62 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    The macOS and Windows readers return "unsupported", so the card stays hidden there.
    Ships: Linux users see their zebrad's CPU, memory, disk I/O and processes. Screenshot:
    the app under `cargo tauri dev` with `FAKE_ZEBRAD_BURN_MS`.
+
+   **Built.** As planned, with these differences:
+
+   - `TreeProbe` holds the run id, the pid and the spawn on both clocks; it has no job field,
+     and `ChildHandle.job` stays a plain `Job`, until phase 3.
+   - `MachineSampler::spawn()` and `spawn_with(interval, reader)` take no data folders, and
+     `MachineReader` has only `machine()`: `DataDir`, the `data_dirs` mapping in src-tauri
+     and its test come with the volumes in phase 5.
+   - `TreeReading` has no `job` field and `MemberReading` no commit charge (Windows, phase
+     3). The fold has Linux's rule only, CPU and I/O rolling into the parent; the `Rollup`
+     modes of macOS and Windows come with their readers. `TreeReading.denied` says which
+     fields the OS refused, and the sampler logs each such field once.
+   - After the scan, the reader reads each member in tree order, a parent before its
+     children. A reap between two reads can then hide a child's time for one reading, which
+     the never-decreasing total holds, but never count it twice.
+   - The fold also covers a member that leaves in the same interval as its parent: it is
+     checked against the nearest live ancestor, shallowest first, and growth that its
+     departures leave unclaimed carries over to the waiting ones. zebrad running a
+     `block_notify_command` is the case: `sh` reaps the command and zebrad reaps `sh` within
+     one interval, so zebrad's rollup holds both, and the rule above alone (the command has
+     no live parent, so its time goes to `lost`) would count the command twice.
+   - A member waiting on its parent after such a torn read moves up to the parent's live
+     ancestor when the parent leaves before the next reading, and settles after the
+     parent's own departure, waiting one more reading if it must. The parent's final total
+     holds the member's, so sending the member to `lost` would count it twice; an `sh` that
+     ends within a second of its command is the usual case.
+   - Waiting members claim an ancestor's growth before members that just left, since their
+     reap may be what the reading shows, with one exception: a member that could not claim
+     although its parent's departure claimed in the same reading. The parent's total reached
+     the rollup without it, so it is an orphan that init reaped, and it claims last. Waiting
+     first, it could take the growth of a sibling the ancestor had just reaped, which would
+     then go to `lost` while its time is in the rollup.
+   - The root's identity stays among the sticky ids after the root exits, so its start
+     time is checked once per run.
+   - The first reading comes within milliseconds of the spawn, so a run's first rate is
+     averaged over at least 1 s.
+   - On a platform without a reader, each sampler publishes `None` after its first attempt
+     and stops for good.
+   - After a reader panic the sampler publishes `None` while zebrad keeps running, until
+     the next run. The card then says "Not measured until zebrad's next run" instead of the
+     last-run line, since the newest sample's first process is still the node's pid; the
+     mock's `?readerpanic` shows it.
+   - `copy_diagnostics` appends the section after the log tails; it gives exact byte counts
+     beside GiB.
+   - fake-zebrad's `short` child starts 300 ms after `Starting zebrad`, as the sampler's
+     reading at the spawn would see it otherwise. `FAKE_ZEBRAD_WRITE_MB` writes next to its
+     `-c` config, which the test keeps under `CARGO_TARGET_TMPDIR`, and removes the file
+     after `sync_all`: under `cargo tauri dev` that config is the per-user `zebrad.toml`,
+     which an installed Zeal shares.
+   - The `procfs.rs` tests use literal fixtures written for them; the captures from a
+     syncing zebrad 7.0.0 under `tests/fixtures/proc/` are not made yet, and neither is the
+     real-zebrad contract check, which needs the pinned zebrad. The live tests are gated to
+     Linux.
+   - The read costs about 4 µs per process on the computer: 0.6 ms with 150 processes and
+     11 ms with 2,600 (release build, Linux 6.6 under WSL2). A periodic full scan with reads
+     of known members in between is not needed at those sizes.
 3. **macOS and Windows.**
    - `resources/macos.rs` with the local Mach declarations.
    - `Job::{accounting, process_ids, contains}` and `resources/windows.rs`.
@@ -1425,6 +1521,46 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - `dir_size` for kinds without a size metric.
    - Leftover processes reported after the root exits.
 
+   **Built so far**, with MULTI-NODE phase 2a's registry, which runs zebrad nodes only:
+
+   - `runtime::spawn` starts a `ResourceSampler` beside each node's supervisor, RPC monitor
+     and metrics poller, on that supervisor's probe watch; `NodeHandle.resources` carries its
+     receiver, and the sampler ends with the node's supervisor. `RegistryConfig` gains
+     `resource_interval` (5 s) for the tests. The sampler is started in the node's tracing
+     span and its task runs in the span current at its spawn, so what it logs goes to that
+     node's log, not to every node's.
+   - `node_resources` carries a `NodeEvent { node, value }`, like every other node event
+     (MULTI-NODE.md, "Built differently"), not the `NodeResourcesEvent { node, resources }`
+     of [Types](#types), which is not added. `get_node_resources` takes the node's id;
+     `machine_resources` and `get_machine_resources` are unchanged. The bridge starts and
+     stops a node's resource forwarder with its other forwarders.
+   - The app keeps one `MachineSampler`, and `AppState` only its receiver: each node's
+     samples are in the registry. It is not fed the registry's data folders: it reads no
+     volumes until phase 5.
+   - Copy diagnostics gives each node's newest sample, with one line per process, in a
+     "resources" section of that node's part, after its statistics, and the computer's in a
+     "Computer" section after the nodes' parts (`diagnostics::machine_section`), instead of
+     one `resources_section(node, machine)`.
+   - The UI: every `NodeState` keeps its own `resources` and `resource_history` from the
+     node-scoped event and snapshot (a snapshot older than an event is dropped, as for the
+     other node events), so the Resources card shows the selected node's tree. The card's
+     footer still shows the computer on every node's card, as the overview's `MachineStrip`
+     (phase 6) is not built.
+   - The mock: every node of `?herd`, and every node the add-node dialog adds, has samples of
+     its own with the `?herd` figures of [Mock data](#mock-data-uisrcmockresourcesrs), and
+     `?herd`'s computer has 16 CPUs and 32 GiB. zcashd, stopped, has none; where the design
+     gives no figures the mock picks some (zcashd once started, 0.2 cores and 2.4 GiB; a
+     zebrad the dialog adds, what the main zebrad uses at the tip). The herd's nodes come
+     through the mock's node-scoped API, as the real backend's do, so `subscribe_extra` and
+     `on_extra_node_resources` are not needed: phase 2a removed `subscribe_extra`.
+   - A registry test runs two nodes on fake zebrads, one of them holding 128 MiB, and checks
+     that each node's samples name its own zebrad and only that node's show the memory
+     (Linux, like the other live tests).
+   - Not built yet: `NodeSummary`'s `cpu_cores` and `memory_bytes` (the tray shows no figures
+     per node before its per-node submenus, MULTI-NODE phase 2b), the machine sampler's data
+     folders (phase 5), Generic and Zebend trees (MULTI-NODE phase 4), `dir_size`, and
+     leftover processes after the root exits.
+
 Through every phase:
 
 - this document is kept current;
@@ -1469,12 +1605,13 @@ Unconfirmed, to be checked in the phase named:
   - How much network traffic the Windows job's I/O counters include.
   - Whether `QueryInformationJobObject` fails with `ERROR_MORE_DATA` on a short process
     list (the loop handles both cases).
-- **Phase 2:** the cost of the `/proc` scan with thousands of processes, from the per-tick
-  log.
+- **Phase 2:** the cost of the `/proc` scan with thousands of processes. Measured: 11 ms
+  for 2,600 processes on one computer (see phase 2); the per-tick debug log shows it
+  elsewhere.
 - **MULTI-NODE phases 3–5:** whether Zakura, Zaino, Zallet and the zcashd build start
   children or export process metrics of their own.
-- **Estimates:** the 16,000-SST estimate, and a Rust `/proc` scan of a few hundred processes
-  in under 5 ms.
+- **Estimates:** the 16,000-SST estimate. (A Rust `/proc` scan of a few hundred processes
+  takes under 5 ms: 0.6 ms for 150.)
 
 ## Alternatives considered
 

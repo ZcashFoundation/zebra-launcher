@@ -17,6 +17,7 @@ mod clock;
 mod config_editor;
 mod config_form;
 mod config_view;
+mod explorer;
 mod format;
 mod grafana_url;
 mod health;
@@ -28,6 +29,7 @@ mod node_state;
 mod node_summary;
 mod public_state;
 mod public_text;
+mod resource_history;
 mod stats_history;
 mod tauri;
 mod theme;
@@ -61,6 +63,7 @@ mod pages {
     pub mod first_run;
     pub mod grafana;
     pub mod logs;
+    pub mod node_settings;
     pub mod overview;
     pub mod settings;
 }

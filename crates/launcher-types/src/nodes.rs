@@ -5,7 +5,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Network;
+use crate::{DEFAULT_STOP_GRACE_SECS, Network};
+
+/// The most nodes Zeal runs: adding another is refused at this many.
+pub const MAX_NODES: usize = 8;
 
 /// A node's id: a short slug of lowercase ASCII letters, digits and dashes (`zebrad-mainnet`),
 /// unique and stable for the node's life. It names the node's folders and travels with every
@@ -190,6 +193,18 @@ impl NodeKind {
         self == NodeKind::Zebrad
     }
 
+    /// Whether the node gets an Explorer: it keeps the chain and answers zebrad's RPC
+    /// methods. The zcashd compatibility build waits until its RPC has been checked.
+    pub fn has_explorer(self) -> bool {
+        matches!(self, NodeKind::Zebrad | NodeKind::Zakura)
+    }
+
+    /// Whether this Zeal can add a node of the kind: zebrad only, for now. The other kinds
+    /// come in later releases (docs/MULTI-NODE.md).
+    pub fn addable(self) -> bool {
+        self == NodeKind::Zebrad
+    }
+
     /// One sentence for the add-node dialog: what the kind is.
     pub fn summary(self) -> &'static str {
         match self {
@@ -232,6 +247,27 @@ impl NodeKind {
             NodeKind::Generic => Vec::new(),
         }
     }
+}
+
+/// The ports a new node of `kind` on `network` gets beside nodes that hold `taken`: the kind's
+/// defaults for the network, moved with [`assign_ports`] out of the way of `taken` and of the
+/// kind's defaults on the other network. A second Mainnet zebrad so gets 28233 and 28232, not
+/// Testnet's 18233 and 18232, and a tool pointed at Testnet's default RPC port never reaches a
+/// Mainnet node.
+pub fn node_ports(kind: NodeKind, network: Network, taken: &[u16]) -> Vec<NodePort> {
+    let wanted = kind.default_ports(network);
+    let other = match network {
+        Network::Mainnet => Network::Testnet,
+        Network::Testnet => Network::Mainnet,
+    };
+    let mut avoid = taken.to_vec();
+    avoid.extend(
+        kind.default_ports(other)
+            .into_iter()
+            .map(|port| port.port)
+            .filter(|port| !wanted.iter().any(|own| own.port == *port)),
+    );
+    assign_ports(&wanted, &avoid)
 }
 
 /// `wanted` with every port that `taken` holds moved out of the way: up by 10,000 at a time
@@ -299,6 +335,16 @@ pub struct NodePort {
     pub port: u16,
 }
 
+/// Where a node's program comes from. On the wire it is tagged by `from`:
+/// `{"from": "bundled"}`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "from", rename_all = "snake_case")]
+pub enum NodeProgram {
+    /// The zebrad bundled with Zeal.
+    #[default]
+    Bundled,
+}
+
 /// What everyone lists about a node: who it is and where it lives, not how it is doing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeInfo {
@@ -309,13 +355,38 @@ pub struct NodeInfo {
     pub network: Network,
     /// For a service, the node it uses.
     pub depends_on: Option<NodeId>,
-    /// The node's data folder.
+    /// The node's data folder: its chain state is in the `state` folder inside it.
     pub data_dir: String,
+    /// The node's own folder, `<app data>/nodes/<id>`, with its configuration, log and
+    /// cookie: removing the node with its data deletes it too. `None` for the first node,
+    /// whose files are the launcher's own and stay.
+    #[serde(default)]
+    pub own_folder: Option<String>,
     /// The ports it listens on.
     pub ports: Vec<NodePort>,
+    /// Where its program comes from.
+    #[serde(default)]
+    pub program: NodeProgram,
+    /// Zeal starts the node when it opens, once the first run is done.
+    #[serde(default = "autostart_default")]
+    pub autostart: bool,
+    /// How long a requested stop may take before the node is killed, in seconds.
+    #[serde(default = "stop_grace_default")]
+    pub stop_grace_secs: u64,
+}
+
+fn autostart_default() -> bool {
+    true
+}
+
+fn stop_grace_default() -> u64 {
+    DEFAULT_STOP_GRACE_SECS
 }
 
 impl NodeInfo {
+    /// The longest name a node can have, in characters.
+    pub const MAX_NAME_LEN: usize = 64;
+
     /// The default name of a node: its kind and network, "Zebra · Mainnet".
     pub fn default_name(kind: NodeKind, network: Network) -> String {
         format!("{} · {network}", kind.label())
@@ -338,6 +409,78 @@ impl NodeInfo {
             .find(|candidate| free(candidate))
             .expect("an unbounded range has a free number")
     }
+
+    /// Whether `name` is a default name of a node of `kind` on `network`: "Zebra · Mainnet",
+    /// or a numbered one such as "Zebra · Mainnet 2".
+    pub fn is_default_name(name: &str, kind: NodeKind, network: Network) -> bool {
+        match name.strip_prefix(&Self::default_name(kind, network)) {
+            Some("") => true,
+            Some(rest) => rest
+                .strip_prefix(' ')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+            None => false,
+        }
+    }
+
+    /// The port the node listens on for `role`, if it has one.
+    pub fn port(&self, role: PortRole) -> Option<u16> {
+        self.ports
+            .iter()
+            .find(|port| port.role == role)
+            .map(|port| port.port)
+    }
+}
+
+/// A node to add (`add_node`): what the user chose, and what the backend fills in when it is
+/// left out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeDraft {
+    pub kind: NodeKind,
+    pub network: Network,
+    /// The name people see. Not empty, and not the name of another node.
+    pub name: String,
+    /// The node's id; `None`: the backend picks the first free one for the kind and network
+    /// ([`NodeId::suggest`]), skipping the folders of removed nodes whose data was kept.
+    #[serde(default)]
+    pub id: Option<NodeId>,
+    /// The ports; `None`: the kind's defaults, moved out of the way of every other node's
+    /// ports, of the other network's defaults and of ports already in use on this computer
+    /// ([`node_ports`]).
+    #[serde(default)]
+    pub ports: Option<Vec<NodePort>>,
+    /// The data folder; `None`: a folder of its own in the launcher's data folder.
+    #[serde(default)]
+    pub data_dir: Option<String>,
+    #[serde(default)]
+    pub program: NodeProgram,
+    #[serde(default = "autostart_default")]
+    pub autostart: bool,
+}
+
+/// A change to a node (`update_node`): each field that is set replaces the node's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUpdate {
+    /// A new name: not empty, and not the name of another node.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub autostart: Option<bool>,
+    /// A new stop grace period, within [`STOP_GRACE_SECS`](crate::STOP_GRACE_SECS); it takes
+    /// effect when Zeal next opens.
+    #[serde(default)]
+    pub stop_grace_secs: Option<u64>,
+    /// A new network: the ports move to the network's defaults, out of the way of the other
+    /// nodes, and a default name follows. The change takes effect on the node's next start.
+    #[serde(default)]
+    pub network: Option<Network>,
+}
+
+/// An event about one node: which node, and what changed. Every node-scoped event (`status`,
+/// `node_stats`, `node_details`, `metrics`, `stale_process`) carries one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEvent<T> {
+    pub node: NodeId,
+    pub value: T,
 }
 
 #[cfg(test)]
@@ -419,6 +562,86 @@ mod tests {
     }
 
     #[test]
+    fn a_node_stays_off_the_other_networks_default_ports() {
+        let numbers =
+            |ports: Vec<NodePort>| -> Vec<u16> { ports.iter().map(|port| port.port).collect() };
+        let zebrad = NodeKind::Zebrad;
+        // Beside the first Mainnet node, a Testnet node keeps Testnet's defaults but the
+        // metrics port both share...
+        let first = [8233, 8232, 9999];
+        assert_eq!(
+            numbers(node_ports(zebrad, Network::Testnet, &first)),
+            [18233, 18232, 19999]
+        );
+        // ...and a second Mainnet node skips Testnet's.
+        assert_eq!(
+            numbers(node_ports(zebrad, Network::Mainnet, &first)),
+            [28233, 28232, 19999]
+        );
+        // A Testnet node after that still gets Testnet's own.
+        assert_eq!(
+            numbers(node_ports(
+                zebrad,
+                Network::Testnet,
+                &[8233, 8232, 9999, 28233, 28232, 19999]
+            )),
+            [18233, 18232, 29999]
+        );
+        // With nothing else, the defaults.
+        assert_eq!(
+            node_ports(zebrad, Network::Mainnet, &[]),
+            zebrad.default_ports(Network::Mainnet)
+        );
+    }
+
+    #[test]
+    fn node_payloads_fill_in_what_older_ones_lack() {
+        // A node as the phase 1 mock sent it: no program, autostart or stop grace.
+        let info: NodeInfo = serde_json::from_value(serde_json::json!({
+            "id": "zebrad-testnet",
+            "name": "Zebra · Testnet",
+            "kind": "zebrad",
+            "network": "testnet",
+            "depends_on": null,
+            "data_dir": "/data/nodes/zebrad-testnet",
+            "ports": [{"role": "p2p", "port": 18233}, {"role": "rpc", "port": 18232}],
+        }))
+        .expect("an older node payload");
+        assert_eq!(info.program, NodeProgram::Bundled);
+        assert!(info.autostart);
+        assert_eq!(info.stop_grace_secs, DEFAULT_STOP_GRACE_SECS);
+        assert_eq!(info.port(PortRole::Rpc), Some(18232));
+        assert_eq!(info.port(PortRole::Metrics), None);
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["program"], serde_json::json!({"from": "bundled"}));
+
+        let draft: NodeDraft = serde_json::from_value(serde_json::json!({
+            "kind": "zebrad",
+            "network": "mainnet",
+            "name": "Zebra · Mainnet 2",
+        }))
+        .expect("a draft with the choices only");
+        assert_eq!(
+            (draft.id, draft.ports, draft.data_dir),
+            (None, None, None),
+            "the backend fills these in"
+        );
+        assert!(draft.autostart);
+        assert_eq!(
+            serde_json::from_str::<NodeUpdate>("{}").unwrap(),
+            NodeUpdate::default()
+        );
+        let event = NodeEvent {
+            node: NodeId::new("zebrad-mainnet").unwrap(),
+            value: 7u32,
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({"node": "zebrad-mainnet", "value": 7})
+        );
+    }
+
+    #[test]
     fn kinds_know_their_role_and_what_they_use() {
         for kind in NodeKind::ALL {
             assert!(NodeId::new(kind.slug()).is_some(), "{kind:?}");
@@ -428,10 +651,19 @@ mod tests {
             }
         }
         assert!(NodeKind::Zebrad.bundled());
+        let explorers: Vec<NodeKind> = NodeKind::ALL
+            .into_iter()
+            .filter(|kind| kind.has_explorer())
+            .collect();
+        assert_eq!(explorers, [NodeKind::Zebrad, NodeKind::Zakura]);
         assert_eq!(
             NodeKind::ALL.iter().filter(|kind| kind.bundled()).count(),
             1
         );
+        // Only the bundled kind can be added so far.
+        for kind in NodeKind::ALL {
+            assert_eq!(kind.addable(), kind.bundled(), "{kind:?}");
+        }
         assert_eq!(NodeKind::Zaino.role(), NodeRole::Indexer);
         assert_eq!(
             NodeInfo::default_name(NodeKind::Zebrad, Network::Testnet),
@@ -449,5 +681,19 @@ mod tests {
             ),
             "Zebra · Testnet 3"
         );
+        for (name, default) in [
+            ("Zebra · Testnet", true),
+            ("Zebra · Testnet 3", true),
+            ("Zebra · Testnet node", false),
+            ("Zebra · Testnet ", false),
+            ("Zebra · Mainnet", false),
+            ("My node", false),
+        ] {
+            assert_eq!(
+                NodeInfo::is_default_name(name, NodeKind::Zebrad, Network::Testnet),
+                default,
+                "{name:?}"
+            );
+        }
     }
 }

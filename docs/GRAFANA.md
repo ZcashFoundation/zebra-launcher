@@ -12,7 +12,8 @@ data lives, the dashboards and their known gaps. This page covers the launcher's
 
 ## What the launcher configures
 
-The launcher writes these keys into its managed `zebrad.toml`:
+The launcher writes these keys into its managed `zebrad.toml` (for the first node, or the
+only one):
 
 | Key | Value |
 | --- | --- |
@@ -22,7 +23,10 @@ The launcher writes these keys into its managed `zebrad.toml`:
 
 Prometheus only needs the metrics endpoint. The launcher never moves these ports (they are
 read-only in Configure), so the targets in `observability/prometheus.yml` and
-`observability/prometheus.linux.yml` always match.
+`observability/prometheus.linux.yml` always match. A node added later gets ports of its own,
+shown in the add-node dialog and in its Node settings (a Testnet node added beside a Mainnet
+one, for example, has its metrics on `127.0.0.1:19999`); the stack scrapes only the first
+node's.
 
 ## The Grafana tab
 

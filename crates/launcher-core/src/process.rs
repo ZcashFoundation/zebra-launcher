@@ -11,7 +11,13 @@
 //! All raw OS calls live in the two backends, `unix` and `windows`, which
 //! offer the same functions so they can be read side by side.
 
-use std::{ffi::OsString, io, path::PathBuf, process::Stdio};
+use std::{
+    ffi::OsString,
+    io,
+    path::PathBuf,
+    process::Stdio,
+    time::{Instant, SystemTime},
+};
 
 use tokio::{
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
@@ -155,6 +161,21 @@ pub enum StopMethod {
     Terminated,
 }
 
+/// What a sampler needs to find a run's process tree. The supervisor publishes it from the
+/// spawn until the run is finalized (`SupervisorHandle::watch_probe`).
+#[derive(Clone, Debug)]
+pub struct TreeProbe {
+    /// The supervisor's run id.
+    pub run: u64,
+    /// The process Zeal started; on Unix also its process group id.
+    pub pid: u32,
+    /// When the supervisor saw the spawn, checked against the root's start time at the run's
+    /// first reading.
+    pub spawned_at: SystemTime,
+    /// The same moment on the monotonic clock: the base of every rate.
+    pub spawned: Instant,
+}
+
 /// What the supervisor keeps to stop zebrad.
 #[derive(Debug)]
 pub struct ChildHandle {
@@ -168,6 +189,17 @@ impl ChildHandle {
     /// The process id.
     pub fn pid(&self) -> u32 {
         self.pid
+    }
+
+    /// The probe of this child's tree for run `run`, spawned at `spawned_at` (`spawned` on the
+    /// monotonic clock). The only place a probe is made.
+    pub fn probe(&self, run: u64, spawned_at: SystemTime, spawned: Instant) -> TreeProbe {
+        TreeProbe {
+            run,
+            pid: self.pid,
+            spawned_at,
+            spawned,
+        }
     }
 
     /// Asks zebrad to stop, as gracefully as the platform and the zebrad allow.

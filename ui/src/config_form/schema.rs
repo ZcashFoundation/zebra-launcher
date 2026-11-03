@@ -133,8 +133,9 @@ pub const FIELDS: &[Field] = &[
         default: Some("[::]:8233"),
         doc: "The address and port on which the node accepts connections from other nodes. \
               The default [::]:8233 listens on every IPv4 and IPv6 address of this machine; \
-              Testnet nodes use port 18233. Change it only to listen on one address or on \
-              another port. Without a port, the node uses the network's default port.",
+              Testnet nodes use port 18233. The launcher keeps the port it gave the node, so \
+              that two nodes never share one; change the address only, to listen on one \
+              address of this machine.",
         control: Control::User,
     },
     Field {
@@ -428,8 +429,8 @@ pub const FIELDS: &[Field] = &[
               sets it so that it can talk to the node. Anyone who can reach this port can read \
               the node's state and send transactions through it.",
         control: Control::Managed {
-            note: "The launcher keeps the RPC on 127.0.0.1, port 8232 on Mainnet and 18232 on \
-                   Testnet.",
+            note: "The launcher keeps the RPC on 127.0.0.1, on the port it gave the node: 8232 \
+                   on Mainnet and 18232 on Testnet unless another node has it.",
         },
     },
     Field {
@@ -565,7 +566,8 @@ pub const FIELDS: &[Field] = &[
         doc: "The address and port where the node serves Prometheus metrics. Unset, metrics \
               are off; the launcher sets it so that the Grafana tab has data.",
         control: Control::Managed {
-            note: "The launcher keeps metrics on 127.0.0.1:9999 for the Grafana tab.",
+            note: "The launcher keeps metrics on 127.0.0.1, on the port it gave the node: 9999 \
+                   unless another node has it.",
         },
     },
     // [tracing]

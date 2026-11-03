@@ -312,7 +312,7 @@ fn public() -> MockPublic {
 
 /// The network the mock's zebrad runs on.
 fn network() -> Network {
-    mock().settings.with_untracked(|settings| settings.network)
+    mock().info.with_untracked(|info| info.network)
 }
 
 impl MockPublic {

@@ -20,10 +20,12 @@ fn is_mac() -> bool {
 pub fn Nav() -> impl IntoView {
     let state = AppState::get();
     let mac = is_mac();
+    // The tab bar is the single node's: its network.
     let network = move || {
         state
-            .settings
-            .with(|settings| settings.as_ref().map(|s| s.network))
+            .nodes_loaded
+            .get()
+            .then(|| state.first_node().info.with(|info| info.network))
     };
     let version = move || {
         state

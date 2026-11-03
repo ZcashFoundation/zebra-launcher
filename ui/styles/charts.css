@@ -668,6 +668,79 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Resources card: four tiles in a row, two across under 1200 px and stacked under 640 px, so
+   the Disk tile's two long figures keep a line each; the process table, which keeps Process,
+   CPU and Memory under 640 px; and the line about the computer. The tile rules come after the
+   tile row's, so they win at every width. */
+
+.dash-resources {
+  margin-bottom: 12px;
+}
+
+.dash-resources-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+}
+
+.dash-resources-head h3 {
+  margin-bottom: 0;
+}
+
+.dash-resources-head .chart-subtitle {
+  margin: 0;
+}
+
+.dash-resources-basis {
+  margin-top: 2px;
+}
+
+.dash-resources-tiles {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 8px;
+}
+
+/* The Disk and Processes values come on two lines. */
+.dash-resources-tiles .tile-value > span {
+  white-space: pre-line;
+}
+
+@container page (max-width: 1200px) {
+  .dash-resources-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container page (max-width: 640px) {
+  .dash-resources-tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dash-resources-processes .dash-resources-wide {
+    display: none;
+  }
+}
+
+.dash-resources-processes caption {
+  padding: 4px 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.dash-resources-name {
+  display: inline-block;
+  overflow-wrap: anywhere;
+}
+
+.dash-resources-line {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
 /* Activity row (styled by insights.css): Recent problems, This run and Peers, three across
    from 1360 px, the narrowest page where a third of the row holds the peer table; two across
    with Peers full width under them between 900 and 1360 px; stacked below. The two list cards

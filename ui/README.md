@@ -23,7 +23,8 @@ trunk serve        # http://localhost:1420, rebuilds and reloads on save
 ```
 
 Outside Tauri there is no `window.__TAURI__`, so `api.rs` routes every command to `mock.rs`, a fake
-backend that makes every page demoable:
+backend that makes every page demoable. Its node-scoped API is the backend's (`mock/nodes.rs`):
+every node command and event carries a node's id, and the mock's zebrad below is the first node.
 
 - zebrad "starts" on load (Starting, then Running) and Start / Stop / Restart change the phase
   after short delays;
@@ -57,7 +58,9 @@ backend that makes every page demoable:
   runs on that address). Without `?firstrun` the first run counts as done. "Change…" for the data
   folder and "Delete node data…" work once the node is stopped (they refuse with "stop zebrad
   first" otherwise, like the backend); the mock state is 248.3 GB. "Copy diagnostics" shows the
-  text below the button when the browser denies clipboard access, as headless browsers do;
+  text below the button when the browser denies clipboard access, as headless browsers do.
+  Settings → Nodes → "Add a node…" opens the add-node dialog, and once a second node is added
+  the window switches to the sidebar;
 - launcher updates: the mock runs version 0.1.0 with updates Off, and "Check now" (Settings) or
   "Check for updates" (dashboard) finds nothing. `?update=…` starts in a state, with the mode
   that goes with it, and a check then finds 0.2.0 (84 MB) unless noted:
@@ -74,13 +77,59 @@ backend that makes every page demoable:
   instead of Install) and `&stalecheck` for the stale-check warning (no successful check for
   20 days). Saving the Off mode returns the updater to Idle, like the backend.
 
+- the dashboard's Resources card: zebrad's process tree is sampled every 5 s while it has a pid
+  (Starting, Running and Stopping). It opens its database for the first 10 s of every run (1.1
+  cores, 180 MB/s read), then syncs at about 5.6 cores with 35 MB/s read and 95 MB/s written
+  while its memory climbs from 2.4 to 6.4 GiB over 30 minutes; once the node reaches the tip
+  (after about 47 minutes in the mock) it settles at 0.25 cores and 3.2 GiB. `?stalled` and
+  `?nopeers` keep it at 0.1 cores, and `?crashloop` restarts the counters with every run. Stop
+  the node to see the card's last-run line. The computer has 8 CPUs and 16 GiB, of which other
+  programs use 0.6 to 0.9 cores and 5.2 GiB. `?os=macos` and `?os=windows` show those
+  platforms' figures and labels (memory pressure on macOS; commit, handles and no thread
+  counts on Windows); Linux is the default. `?children` gives zebrad a `block_notify_command`
+  that runs in cycles of three samples: an `sh` with `notify-block` under it, indented under
+  their parents; then 40 `curl`s as well, more than a sample lists, so the table ends with
+  "and 11 more"; then `notify-block` alone, orphaned, on a line of its own. `?unreadable`
+  reports CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk
+  tile "—" with "the system does not report them". `?readerpanic` makes the resource reader
+  panic 30 s into the first run, as the backend's can: the samples stop while zebrad keeps
+  running, and the card says it is not measured until zebrad's next run, which Restart
+  starts;
 - several nodes: `?herd` adds five nodes beside the mock's zebrad: on Mainnet, Zakura catching
   up from a snapshot, Zaino reading the Mainnet Zebra, and the zcashd compatibility build,
   stopped; on Testnet, a Zebra and a pruned Zakura at the tip. The window shows the sidebar
   with its Mainnet and Testnet tabs, the overview with a card per node of the chosen network,
-  each node's pages and the add-node dialog, whose Add creates one more simulated node. The
-  real backend runs one node until the registry lands (docs/MULTI-NODE.md), so a real window
-  shows the tab bar.
+  each node's pages and the add-node dialog. The dialog offers Zebra on either network (the
+  other kinds show as coming later), and its Add creates one more simulated zebrad node, with
+  its own folder, ports and `zebrad.toml`, under the backend's rules: at most eight nodes, and
+  a name, ports and data folder no other node has. Its data folder shows the free space there
+  (212.4 GB in the launcher's data folder, with the low-space warning on Mainnet), and its
+  Change… picks `/mnt/storage/zebra` (1,834.5 GB free). A node's Node settings tab renames it,
+  turns its start at launch on or off and removes it, keeping or deleting its data (the last
+  node cannot be removed). The mock's own zebrad, the first node, can be removed too, after
+  which a Testnet node may be first while the window stays on the network shown; with
+  `?stale` its removal is refused while the zebrad from an earlier run is still there.
+  `?herd&leftover` makes a removal that deletes the data leave the node's folder (or the first
+  node's chain state) behind, as when the backend cannot delete a file: the node leaves the
+  list and the error banner names what stayed. Every node has a Resources card of its own,
+  sampled every 5 s while it has a pid: Zebra · Testnet uses 0.15 cores and 1.9 GiB, the
+  pruned Zakura · Testnet 0.1 cores and 1.2 GiB, Zakura · Mainnet 3.2 cores and 4.4 GiB while
+  it catches up, Zaino 0.3 cores and 650 MiB, and zcashd, stopped, has no card until it is
+  started (0.2 cores, 2.4 GiB); a zebrad the dialog adds uses what the mock's zebrad does at
+  the tip. With `?herd` the computer has 16 CPUs and 32 GiB, and its figures count every
+  node. The real backend has the same API and rules; there every node is a zebrad for now.
+- the Explorer (Ctrl/Cmd+3, or Ctrl/Cmd+K for its search): each zebrad and Zakura node has its
+  own synthetic chain from explorer-model, answered with the backend's own page builders, and
+  the dashboard's best block, pools, supply, difficulty and upgrades read the same chain.
+  Amounts are in ZEC, or TAZ on Testnet. The default mock syncs, so the Explorer shows what the
+  node has and does not follow the tip. `?attip` puts zebrad at the tip near block 3,551,000
+  (past NU7, a block every 25 s), so Ironwood, the burn and the shielded budget show;
+  `?tip=<h>` does the same at height `h`. `?explorer=slow` makes every answer take 300 to
+  800 ms, `?explorer=empty` gives a chain of ten blocks, and `?explorer=nobi` takes zebrad's
+  value-pool row from every seventh block, so that block and the next show their fees as
+  unknown. `?reorg` replaces the main node's top two blocks about every 90 s at the tip (with
+  `?attip`), and the Explorer shows the banner. With `?herd` the Testnet nodes have Testnet
+  chains, and Zakura's chain is complete for now (pruning comes later).
 
 - the light client server (docs/PUBLIC-SERVICES.md), in Settings → Public services, with a card
   on the dashboard and a banner on the node's pages. The mock runs launcher-herd's real rules
@@ -138,9 +187,12 @@ to the CSP when it serves the bundled assets.
 | --- | --- |
 | `src/main.rs` | Entry point: mounts the app in the browser; the native build only prints a hint |
 | `src/tauri.rs` | `#[wasm_bindgen]` externs to `window.__TAURI__`, JSON-compatible (de)serialization |
-| `src/api.rs` | One typed function per backend command or event, Tauri or mock |
-| `src/mock.rs` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads |
-| `src/app.rs` | Shared state (`AppState`), backend subscriptions, the shell: header, the five tabs and the first-run wizard |
+| `src/api.rs` | One typed function per backend command or event, Tauri or mock; the node commands and events carry the node's id |
+| `src/mock.rs`, `src/mock/` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads. `nodes.rs` is the node-scoped API and the node list's rules, `herd.rs` the light simulation of every node but the first, and `resources.rs` the resource samples, pure and tested natively |
+| `src/mock/explorer.rs` | The mock's block explorers: one synthetic chain per zebrad or Zakura node, answered with explorer-model's views, and the chain facts the mock's dashboard details read |
+| `src/app.rs` | Shared state (`AppState`: the node list from `list_nodes` and the `nodes` event, matched by id, and the selected node), backend subscriptions, the shell: header, the tab bar for one node or the sidebar for several, and the first-run wizard |
+| `src/node_state.rs` | One node's state: what the backend reports about it and the histories and log analysis the UI keeps for it |
+| `src/node_summary.rs` | A node's state in a few words, for the sidebar and the overview. Pure, tested natively |
 | `src/theme.rs` | Light and dark appearance: resolves the setting against the system preference and applies it to the document |
 | `src/clock.rs` | The current time from JavaScript's `Date` (`SystemTime::now()` panics on wasm) |
 | `src/clipboard.rs` | Copying text to the system clipboard |
@@ -152,12 +204,15 @@ to the CSP when it serves the bundled assets.
 | `src/log_view.rs` | The Logs page's data model: a capped, de-duplicated buffer in `seq` order, dropped-line markers, level and text filters. Pure, tested natively |
 | `src/insights.rs`, `src/insights/fields.rs` | Log analysis: sync stage, problems, startup milestones and activity counts folded from the log stream; tolerant readers for the fields of a zebrad line. Pure, tested natively |
 | `src/stats_history.rs` | The `NodeStats` samples since the launcher opened, for the dashboard's charts and rates. Pure, tested natively |
+| `src/resource_history.rs` | The samples of the node's process tree since the launcher opened, for the Resources card's one-minute rates, sparklines and last-run line. Pure, tested natively |
 | `src/charts.rs`, `src/charts/line_chart.rs`, `src/charts/widgets.rs` | Inline SVG line charts (crosshair, keyboard navigation, table view), stat tiles with sparklines, the sync meter and the range control; the geometry is pure and tested natively |
 | `src/grafana_url.rs` | Builds the URL the Grafana tab embeds from the saved Grafana URL, the picked dashboard, time range, refresh and theme. Pure, tested natively |
 | `src/config_form.rs`, `src/config_form/schema.rs` | zebrad's configuration as a form: the schema of every key the bundled zebrad accepts, values read from `zebrad.toml` with `toml_edit`, validation, and edits written back into the same document. Pure, tested natively; a test pins the schema to the `zebrad generate` fixture |
 | `src/config_view.rs` | Helpers for the Configure page's file pane: changed lines, where a key is written, how far to scroll. Pure, tested natively |
-| `src/components/` | `nav.rs` (header and tabs), `status_strip.rs` (phase, progress, Start/Stop/Restart), `stale_banner.rs`, `updates.rs` (update banner, buttons, "Check for updates", recovery panel), `update_mode_choice.rs` (radio buttons shared by the wizard and Settings), `config_form.rs` (the two-view configuration editor), `log_insights.rs` (analysis cards), `reset_config.rs`, `tooltip.rs` |
-| `src/pages/` | The five tabs (`dashboard.rs`, `logs.rs`, `grafana.rs`, `configure.rs`, `settings.rs`) and the first-run wizard (`first_run.rs`) |
+| `src/components/` | `nav.rs` (header and tabs), `sidebar.rs` and `herd_header.rs` (the shell for several nodes), `add_node.rs` (the add-node dialog), `status_strip.rs` (phase, progress, Start/Stop/Restart), `stale_banner.rs`, `updates.rs` (update banner, buttons, "Check for updates", recovery panel), `update_mode_choice.rs` (radio buttons shared by the wizard and Settings), `config_form.rs` (the two-view configuration editor), `log_insights.rs` (analysis cards), `reset_config.rs`, `tooltip.rs` |
+| `src/pages/` | The pages (`overview.rs` with several nodes, `dashboard.rs`, `logs.rs`, `grafana.rs`, `configure.rs`, `node_settings.rs` with several nodes, `settings.rs`) and the first-run wizard (`first_run.rs`) |
+| `src/explorer.rs`, `src/explorer/` | The Explorer tab: the shell (back and forward, the search box, the source line, the banner) and the Chain, Block, Transaction and Search pages, with their shared parts, text (pure, tested natively), navigation history and per-node state |
+| `styles/explorer.css` | The Explorer's styles, with the `--pool-*` colour tokens from `styles.css` |
 
 The crate also compiles natively so `cargo clippy --workspace --all-targets` and
 `cargo test --workspace` cover it; the native binary only prints a hint. Check the wasm build with

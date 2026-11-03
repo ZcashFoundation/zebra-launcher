@@ -14,9 +14,11 @@ use launcher_core::{
     logfile::RotatingLogConfig,
     logs::Detector,
     pidfile,
-    supervisor::{self, Note, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle},
+    supervisor::{
+        self, Listener, Note, StartOptions, SupervisorConfig, SupervisorError, SupervisorHandle,
+    },
 };
-use launcher_types::{ExitClass, LogEvent, LogLevel, LogStream, Phase};
+use launcher_types::{ExitClass, LogEvent, LogLevel, LogStream, Phase, PortRole};
 use tokio::time::timeout;
 
 #[path = "support/helpers.rs"]
@@ -133,6 +135,50 @@ async fn starts_streams_logs_and_stops_cleanly() {
     let log = std::fs::read_to_string(fx.config.log_file.as_ref().unwrap().path.clone())
         .unwrap_or_default();
     assert!(log.contains("Starting zebrad"), "log file: {log:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_probe_names_each_run_until_it_is_finalized() {
+    let fx = fixture("ok");
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    let mut probe = handle.watch_probe();
+    assert!(probe.borrow().is_none(), "no run yet");
+
+    within(handle.start()).await.expect("start");
+    let status = handle.status();
+    let first = probe
+        .borrow_and_update()
+        .clone()
+        .expect("a probe while zebrad runs");
+    assert_eq!(Some(first.pid), status.pid);
+    assert_eq!(
+        Some(first.spawned_at),
+        status.started_at,
+        "the probe and the status read the clock once"
+    );
+
+    within(handle.stop()).await.expect("stop");
+    assert_eq!(handle.status().pid, None);
+    assert!(
+        probe.borrow().is_none(),
+        "cleared once the run is finalized"
+    );
+
+    within(handle.start()).await.expect("start again");
+    let second = probe.borrow().clone().expect("a probe for the next run");
+    assert!(
+        second.run > first.run,
+        "run {} after {}",
+        second.run,
+        first.run
+    );
+    assert_eq!(Some(second.pid), handle.status().pid);
+    assert!(second.spawned > first.spawned);
+
+    within(handle.shutdown()).await.expect("shutdown");
+    assert!(probe.borrow().is_none());
+    // The sender goes with the actor.
+    within(async { while probe.changed().await.is_ok() {} }).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -504,6 +550,76 @@ async fn database_lock_and_port_conflicts_are_deterministic_failures() {
         }
     );
     within(handle.shutdown()).await.expect("shutdown");
+}
+
+#[test]
+fn the_port_probe_sees_a_socket_that_holds_the_address() {
+    let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
+    let taken = holder.local_addr().expect("bound address");
+    assert!(supervisor::addr_in_use(taken));
+    // A UDP socket on a port does not hold it for zebrad's TCP listeners.
+    let bound = std::net::UdpSocket::bind("127.0.0.1:0").expect("a UDP socket");
+    let udp = bound.local_addr().expect("bound address");
+    assert!(!supervisor::addr_in_use(udp), "only TCP counts");
+    // Port 0 always binds: nothing holds it.
+    assert!(!supervisor::addr_in_use(
+        "127.0.0.1:0".parse().expect("an address")
+    ));
+    drop(holder);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_port_another_program_holds_fails_the_start_before_zebrad_runs() {
+    let mut fx = fixture("ok");
+    let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
+    let taken = holder.local_addr().expect("bound address");
+    let (listeners, receiver) = tokio::sync::watch::channel(vec![Listener {
+        role: PortRole::Rpc,
+        addr: taken,
+    }]);
+    fx.config.listeners = receiver;
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+
+    let err = within(handle.start()).await.expect_err("the port is taken");
+    assert!(
+        matches!(&err, SupervisorError::PortInUse(message) if message.contains(&taken.to_string())),
+        "{err}"
+    );
+    let status = handle.status();
+    assert_eq!(
+        status.phase,
+        Phase::Failed {
+            class: ExitClass::PortInUse
+        }
+    );
+    assert_eq!(status.pid, None, "zebrad never ran");
+    let exit = status.last_exit.expect("the failure is recorded");
+    assert_eq!(exit.class, ExitClass::PortInUse);
+    assert!(
+        exit.detail.as_deref().unwrap_or_default().contains("RPC"),
+        "{exit:?}"
+    );
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(
+        contains(&history, "not starting zebrad: the RPC port"),
+        "{:#?}",
+        messages(&history)
+    );
+    assert!(!contains(&history, "zebrad started"));
+
+    // The ports follow the watch: with a port nobody holds the start goes
+    // ahead. (Port 0 always binds; the port just freed could already be
+    // another test's.)
+    listeners.send_replace(vec![Listener {
+        role: PortRole::Metrics,
+        addr: "127.0.0.1:0".parse().expect("an address"),
+    }]);
+    within(handle.start())
+        .await
+        .expect("start once the port is free");
+    assert_eq!(handle.status().phase, Phase::Running);
+    within(handle.shutdown()).await.expect("shutdown");
+    drop(holder);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -11,7 +11,7 @@ use std::fs;
 use launcher_core::{
     apply,
     config::{self, ManagedKeys},
-    paths::Paths,
+    paths::{NodePaths, Paths},
     supervisor::{self, SupervisorError, SupervisorHandle},
 };
 use launcher_types::{ApplyOutcome, ConfigDocument, ExitClass, Network, Phase};
@@ -22,7 +22,7 @@ use support::{LIMIT, fake_zebrad_command, fast_supervisor_config, within};
 
 struct Fixture {
     _dir: tempfile::TempDir,
-    paths: Paths,
+    paths: NodePaths,
     keys: ManagedKeys,
     original: ConfigDocument,
     handle: SupervisorHandle,
@@ -33,8 +33,9 @@ struct Fixture {
 /// tests do not collide.
 fn fixture(mode: &str) -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
-    let paths = Paths::under(dir.path());
-    paths.ensure_dirs().expect("dirs");
+    let launcher = Paths::under(dir.path());
+    launcher.ensure_dirs().expect("dirs");
+    let paths = launcher.launcher_node();
     let mut keys = ManagedKeys::defaults(Network::Mainnet, &paths, paths.default_state_dir());
     keys.rpc_addr = "127.0.0.1:0".parse().expect("socket address");
     config::ensure(&paths, &keys).expect("ensure");

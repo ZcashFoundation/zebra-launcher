@@ -5,6 +5,7 @@ members = [
     "crates/launcher-herd",
     "crates/launcher-gateway",
     "crates/launcher-public",
+    "crates/explorer-model",
     "crates/launcher-core",
     "ui",
     "src-tauri",
@@ -22,6 +23,7 @@ launcher-types = { path = "crates/launcher-types" }
 launcher-herd = { path = "crates/launcher-herd" }
 launcher-gateway = { path = "crates/launcher-gateway" }
 launcher-public = { path = "crates/launcher-public" }
+explorer-model = { path = "crates/explorer-model" }
 launcher-core = { path = "crates/launcher-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

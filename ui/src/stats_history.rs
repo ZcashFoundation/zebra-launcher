@@ -51,9 +51,13 @@ impl Sample {
         self.estimated_height.saturating_sub(self.height)
     }
 
-    /// Synced: within a block of the estimated tip, or a progress of 99.99 % or more.
+    /// Synced: [`launcher_types::at_tip`].
     pub fn at_tip(&self) -> bool {
-        self.remaining() <= 1 || self.verification_progress >= 0.9999
+        launcher_types::at_tip(
+            self.height,
+            self.estimated_height,
+            self.verification_progress,
+        )
     }
 
     /// The peers by direction, `(inbound, outbound)`, when a peer list landed with the poll.
@@ -423,6 +427,8 @@ mod tests {
             chain_supply_zec: None,
             value_pools: Vec::new(),
             active_upgrade: None,
+            upgrades: Vec::new(),
+            consensus: None,
             subversion: None,
             protocol_version: None,
             mempool_bytes: None,

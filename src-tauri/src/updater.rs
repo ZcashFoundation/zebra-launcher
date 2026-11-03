@@ -22,10 +22,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use launcher_core::updates::{
-    self, FoundUpdate, NodeControl, OnChunk, UpdateBackend, UpdaterConfig, UpdaterHandle,
+use launcher_core::{
+    registry::NodeHandle,
+    updates::{
+        self, FoundUpdate, GateNode, NodeControl, OnChunk, PendingUpdate, UpdateBackend,
+        UpdaterConfig, UpdaterHandle,
+    },
 };
-use launcher_types::{Status, UpdateInfo, UpdateState, events};
+use launcher_types::{NodeId, Status, UpdateInfo, UpdateState, events};
 use tauri::{
     AppHandle, Emitter, Runtime,
     utils::{config::BundleType, platform::bundle_type},
@@ -33,7 +37,7 @@ use tauri::{
 use tauri_plugin_updater::{Update, Updater, UpdaterExt};
 use tokio::sync::watch;
 
-use crate::{app_state::AppState, commands::RELEASES_URL};
+use crate::{LaunchPlan, app_state::AppState, commands::RELEASES_URL};
 
 /// How long a check may take.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -167,16 +171,16 @@ impl<R: Runtime> UpdateBackend for PluginBackend<R> {
     }
 }
 
-/// The zebrad supervisor as the updater sees it: stops go straight to the
-/// supervisor, but starts (the health gate's, and the restart after a failed
-/// install) go through [`crate::start_node`], the same path as a start at
-/// launch or from the tray: not before the first run is done, not while the
-/// node data is being changed, and a zebrad left by an earlier run is
-/// reported to the UI (`stale_process`); the health gate waits for the user
-/// to resolve it.
+/// One node as the post-update health gate sees it: stops go straight to its
+/// supervisor, but starts go through [`crate::start_node`], the same path as
+/// a start at launch or from the tray: not before the first run is done, not
+/// while the node data is being changed, and a zebrad left by an earlier run
+/// is reported to the UI (`stale_process`); the health gate waits for the
+/// user to resolve it.
 struct GatedNode<R: Runtime> {
     app: AppHandle<R>,
     state: AppState,
+    node: NodeHandle,
 }
 
 // Not derived: that would require `R: Clone`.
@@ -185,26 +189,119 @@ impl<R: Runtime> Clone for GatedNode<R> {
         Self {
             app: self.app.clone(),
             state: self.state.clone(),
+            node: self.node.clone(),
         }
     }
 }
 
 impl<R: Runtime> NodeControl for GatedNode<R> {
     fn watch_status(&self) -> watch::Receiver<Status> {
-        self.state.supervisor.watch_status()
+        self.node.supervisor.watch_status()
     }
 
     async fn stop(&self) -> Result<(), String> {
-        NodeControl::stop(&self.state.supervisor).await
+        NodeControl::stop(&self.node.supervisor).await
     }
 
     async fn start(&self) -> Result<(), String> {
-        crate::start_node(&self.app, &self.state).await
+        crate::start_node(&self.app, &self.state, &self.node).await
     }
 
     fn shutdown_cap(&self) -> Duration {
-        self.state.supervisor.shutdown_cap()
+        self.node.supervisor.shutdown_cap()
     }
+}
+
+/// Every node as the updater's install sees them: a stop stops every node
+/// that runs (each killed after its own grace period, side by side) and the
+/// registry remembers which ran; a start brings those back through
+/// [`crate::start_node`]. The status is the nodes' phases folded into one
+/// ([`launcher_core::registry::herd_phase`]).
+struct Herd<R: Runtime> {
+    app: AppHandle<R>,
+    state: AppState,
+    status: watch::Receiver<Status>,
+}
+
+// Not derived: that would require `R: Clone`.
+impl<R: Runtime> Clone for Herd<R> {
+    fn clone(&self) -> Self {
+        Self {
+            app: self.app.clone(),
+            state: self.state.clone(),
+            status: self.status.clone(),
+        }
+    }
+}
+
+impl<R: Runtime> NodeControl for Herd<R> {
+    fn watch_status(&self) -> watch::Receiver<Status> {
+        self.status.clone()
+    }
+
+    fn shutdown_cap(&self) -> Duration {
+        self.state.registry.shutdown_cap()
+    }
+
+    async fn stop(&self) -> Result<(), String> {
+        self.state
+            .registry
+            .stop_for_update()
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    async fn start(&self) -> Result<(), String> {
+        let stopped = self.state.registry.take_stopped_for_update().await;
+        let mut starts = Vec::new();
+        // A node removed since it was stopped stays gone.
+        for node in self.state.registry.nodes_of(&stopped) {
+            let (app, state) = (self.app.clone(), self.state.clone());
+            starts.push(tauri::async_runtime::spawn(async move {
+                crate::start_node(&app, &state, &node).await
+            }));
+        }
+        let mut result = Ok(());
+        for start in starts {
+            if let Err(err) = start.await.map_err(message).and_then(|started| started) {
+                result = Err(err);
+            }
+        }
+        result
+    }
+
+    fn running_nodes(&self) -> Vec<NodeId> {
+        self.state.registry.running_nodes()
+    }
+}
+
+/// The nodes the health gate checks after an update: those the marker lists
+/// as running ([`PendingUpdate::nodes_to_check`]) that are still there, each
+/// started by the gate unless the launcher starts it anyway, and named when
+/// there are several.
+fn gate_nodes<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &AppState,
+    plan: &LaunchPlan,
+    pending: &PendingUpdate,
+) -> Vec<GateNode<GatedNode<R>>> {
+    let first = state.registry.first().map(|node| node.id);
+    let ids = pending.nodes_to_check(first.as_ref());
+    let several = ids.len() > 1;
+    state
+        .registry
+        .nodes_of(&ids)
+        .into_iter()
+        .map(|node| GateNode {
+            start: plan.gate_may_start(&node.id),
+            name: several.then(|| node.info().name),
+            node: GatedNode {
+                app: app.clone(),
+                state: state.clone(),
+                node,
+            },
+        })
+        .collect()
 }
 
 /// A seed for the check jitter that differs between launches and machines.
@@ -218,12 +315,12 @@ fn seed() -> u64 {
 
 /// Starts the updater actor, its event bridge and, if the previous launch
 /// installed an update, the health gate. Call once from setup; manage the
-/// returned handle. `gate_may_start` is [`crate::LaunchPlan::gate_may_start`]:
-/// whether the gate starts zebrad when the update stopped a running one.
-pub fn start<R: Runtime>(
+/// returned handle. `plan` says which nodes the launcher starts itself, so
+/// the gate starts only the others that the update stopped.
+pub(crate) fn start<R: Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
-    gate_may_start: bool,
+    plan: &LaunchPlan,
 ) -> UpdaterHandle {
     let current_version = app.package_info().version.to_string();
     let record_file = updates::record_path(&state.paths);
@@ -238,30 +335,31 @@ pub fn start<R: Runtime>(
         countdown: updates::AUTO_INSTALL_COUNTDOWN,
     };
     let backend = PluginBackend { app: app.clone() };
-    // The actor is spawned with `tokio::spawn`, so enter the runtime.
-    let node = GatedNode {
-        app: app.clone(),
-        state: state.clone(),
-    };
+    // The actor and the registry's followers are spawned with `tokio::spawn`,
+    // so enter the runtime.
     let handle = tauri::async_runtime::block_on(async {
+        let herd = Herd {
+            app: app.clone(),
+            state: state.clone(),
+            status: state.registry.watch_herd(),
+        };
         updates::spawn(
             backend,
-            node.clone(),
+            herd,
             state.settings.watch(),
-            state.node_stats.clone(),
+            state.registry.eos_stats(),
             config,
         )
     });
     tauri::async_runtime::spawn(forward(app.clone(), handle.watch()));
 
     let updater = handle.clone();
-    let app = app.clone();
+    let (app, state, plan) = (app.clone(), state.clone(), plan.clone());
     tauri::async_runtime::spawn(async move {
         let gate = updates::run_health_gate(
             &marker_file,
             &current_version,
-            &node,
-            gate_may_start,
+            |pending| gate_nodes(&app, &state, &plan, pending),
             updates::HEALTH_GATE_TIMEOUT,
             RELEASES_URL,
         )

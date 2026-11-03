@@ -98,6 +98,8 @@ impl Options {
 /// What the actor needs from the rest of the app.
 pub struct Wiring {
     pub settings: SettingsHandle,
+    /// The serving node's spec: the network it runs on.
+    pub node: watch::Receiver<launcher_core::nodes::NodeSpec>,
     pub status: watch::Receiver<Status>,
     pub stats: watch::Receiver<Option<NodeStats>>,
     pub host: Arc<dyn EndpointHost>,
@@ -290,6 +292,7 @@ impl<T> Drop for Child<T> {
 struct Actor {
     options: Options,
     settings: SettingsHandle,
+    node_rx: watch::Receiver<launcher_core::nodes::NodeSpec>,
     status_rx: watch::Receiver<Status>,
     stats_rx: watch::Receiver<Option<NodeStats>>,
     host: Arc<dyn EndpointHost>,
@@ -377,6 +380,7 @@ impl Actor {
         Actor {
             options,
             settings: wiring.settings,
+            node_rx: wiring.node,
             status_rx: wiring.status,
             stats_rx: wiring.stats,
             host: wiring.host,
@@ -468,11 +472,16 @@ impl Actor {
             .map_err(|err| err.to_string())
     }
 
+    /// The network the serving node runs on.
+    fn network(&self) -> launcher_types::Network {
+        self.node_rx.borrow().network
+    }
+
     /// The facts at `now` for `spec`.
-    fn facts(&self, spec: &PublicServiceSpec, settings: &Settings, now: SystemTime) -> Facts {
+    fn facts(&self, spec: &PublicServiceSpec, now: SystemTime) -> Facts {
         let status = self.status_rx.borrow().clone();
         let stats = self.stats_rx.borrow().clone();
-        let mut facts = Facts::new(now, settings.network);
+        let mut facts = Facts::new(now, self.network());
         facts.supported = self.options.supported;
         facts.zebrad_version = stats
             .as_ref()
@@ -554,15 +563,15 @@ impl Actor {
             return;
         };
         self.roll_month(now);
-        if spec.network != settings.network {
+        if spec.network != self.network() {
             // Switching back does not resume by itself.
             self.held = Some(launcher_types::public::PauseReason::NetworkChanged);
         }
-        let facts = self.facts(&spec, &settings, now);
-        self.sync_endpoint(&spec, &facts, settings.network).await;
+        let facts = self.facts(&spec, now);
+        self.sync_endpoint(&spec, &facts, self.network()).await;
         let spec = self.spec().unwrap_or(spec);
 
-        let mut facts = self.facts(&spec, &settings, now);
+        let mut facts = self.facts(&spec, now);
         self.at_tip_since = track_since(self.at_tip_since, at_tip(facts.height, facts.tip), now);
         facts.at_tip_since = self.at_tip_since;
         let expected = facts
@@ -593,7 +602,7 @@ impl Actor {
         let mode = rules::gateway_mode(&state, &facts);
         self.drive(&spec, &facts, &steps, &state, mode).await;
 
-        let facts = self.facts(&spec, &settings, now);
+        let facts = self.facts(&spec, now);
         let mut facts = facts;
         facts.at_tip_since = self.at_tip_since;
         facts.name_elsewhere_since = self.name_elsewhere_since;
@@ -1143,7 +1152,7 @@ impl Actor {
         if !self.options.supported {
             return Err("public services run on Linux only for now".into());
         }
-        if network != self.settings.current().network {
+        if network != self.network() {
             return Err(format!(
                 "Zeal runs zebrad on the other network; switch to {network} first"
             ));
@@ -1322,8 +1331,7 @@ impl Actor {
         let spec = self
             .spec()
             .ok_or_else(|| refuse("no light client server is set up"))?;
-        let settings = self.settings.current();
-        let mut facts = self.facts(&spec, &settings, SystemTime::now());
+        let mut facts = self.facts(&spec, SystemTime::now());
         facts.at_tip_since = self.at_tip_since;
         rules::open_gates(&spec, &facts)?;
         self.update_spec(|spec| spec.opened = true)
@@ -1343,9 +1351,7 @@ impl Actor {
         })
         .await?;
         // The endpoint must be gone before the spec is: once it is, the key is the user's.
-        self.host
-            .apply(spec.network == self.settings.current().network)
-            .await?;
+        self.host.apply(spec.network == self.network()).await?;
         self.applied = Some(None);
         if remove_token && let Some(name) = &spec.name {
             let _ = self
