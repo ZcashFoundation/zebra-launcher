@@ -102,12 +102,27 @@ else
     failed=true
 fi
 
-# The launcher stops zebrad when it exits (PDEATHSIG / graceful stop); give it
-# a moment, then report and clean up any leftover.
-sleep 5
-if pgrep -f zeal-zebrad > /dev/null; then
-    echo "::error::a zeal-zebrad process outlived the launcher"
-    pgrep -af zeal-zebrad || true
+# The launcher stops zebrad when it exits (PDEATHSIG / graceful stop). A
+# zebrad that exited but was orphaned stays a zombie in a container whose PID 1
+# does not reap children; it no longer runs, so only live processes count.
+live_zebrad() {
+    local pid state
+    for pid in $(pgrep -f zeal-zebrad || true); do
+        state="$(ps -o stat= -p "${pid}" 2>/dev/null || true)"
+        case "${state}" in
+            "" | Z*) ;;
+            *) echo "${pid}" ;;
+        esac
+    done
+}
+for _ in $(seq 1 15); do
+    [ -z "$(live_zebrad)" ] && break
+    sleep 1
+done
+mapfile -t leftover < <(live_zebrad)
+if [ "${#leftover[@]}" -gt 0 ]; then
+    echo "::error::a zeal-zebrad process outlived the launcher by 15 s"
+    for pid in "${leftover[@]}"; do ps -o pid=,stat=,args= -p "${pid}" || true; done
     pkill -KILL -f zeal-zebrad || true
     failed=true
 fi
