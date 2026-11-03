@@ -5,7 +5,8 @@
 //! leaves one out still decodes.
 //!
 //! The shapes also serialize, in the same field names, so the synthetic chain can stand in for
-//! zebrad: fields that are `None` are left out, as zebrad leaves them out.
+//! zebrad: fields that are `None` are left out, as zebrad leaves them out, and the genesis
+//! block's parent is written as zebrad writes it.
 
 use std::fmt;
 
@@ -122,11 +123,8 @@ pub struct BlockV1 {
     pub value_pools: Option<Vec<PoolValue>>,
     #[serde(default)]
     pub trees: Trees,
-    #[serde(
-        default,
-        rename = "previousblockhash",
-        skip_serializing_if = "Option::is_none"
-    )]
+    /// The parent's hash; `None` for the genesis block ([`parent_hash`]).
+    #[serde(default, rename = "previousblockhash", with = "parent_hash")]
     pub previous: Option<BlockHash>,
     #[serde(
         default,
@@ -134,6 +132,30 @@ pub struct BlockV1 {
         skip_serializing_if = "Option::is_none"
     )]
     pub next: Option<BlockHash>,
+}
+
+/// `previousblockhash`. zebrad writes the genesis block's as 64 zeros (zebra-chain's
+/// `GENESIS_PREVIOUS_BLOCK_HASH`), which is no block's hash: it reads as no parent, and no
+/// parent is written back the same way, as zebrad writes it.
+mod parent_hash {
+    use launcher_types::explorer::{BlockHash, Hash32};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    const GENESIS_PREVIOUS: BlockHash = Hash32([0; 32]);
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<BlockHash>, D::Error> {
+        let hash = Option::<BlockHash>::deserialize(deserializer)?;
+        Ok(hash.filter(|hash| *hash != GENESIS_PREVIOUS))
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        previous: &Option<BlockHash>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        previous.unwrap_or(GENESIS_PREVIOUS).serialize(serializer)
+    }
 }
 
 impl BlockV1 {
@@ -457,6 +479,24 @@ mod tests {
         .expect("bare block");
         assert_eq!(bare.pools(), None);
         assert_eq!(bare.size, None);
+        assert_eq!(bare.previous, None);
+    }
+
+    #[test]
+    fn the_genesis_block_has_no_parent() {
+        // zebrad 7.0.0 gives the genesis block a `previousblockhash` of 64 zeros.
+        let zeros = "0".repeat(64);
+        let genesis: BlockV1 = serde_json::from_str(&format!(
+            r#"{{"hash":"0000000000d8a9ac4e30b7a7ce2bd2b3b1b9c67b6ec23f5a3e7ba7ca1d4ab501",
+                "confirmations":9,"height":0,"tx":[],"trees":{{}},"previousblockhash":"{zeros}"}}"#
+        ))
+        .expect("genesis");
+        assert_eq!(genesis.previous, None);
+        let json = serde_json::to_value(&genesis).unwrap();
+        assert_eq!(
+            json["previousblockhash"], zeros,
+            "written back as zebrad writes it"
+        );
     }
 
     /// A transaction as zebrad writes it (zebra-rpc's `TransactionObject`), hex shortened.

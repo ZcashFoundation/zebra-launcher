@@ -21,6 +21,7 @@ use launcher_types::{
         SecretKind, TxStatus,
     },
 };
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::watch;
 
 use super::{
@@ -48,12 +49,18 @@ fn slot(call: ReadCall) -> usize {
 }
 
 /// A source over a synthetic chain the test can mine and reorganise, that counts its calls and
-/// holds them while its gate is closed.
+/// holds them while its gate is closed. Every answer goes through zebrad's JSON and back, as
+/// an answer from zebrad's RPC is decoded.
 #[derive(Clone)]
 struct Synth {
     chain: watch::Receiver<SynthChain>,
     gate: watch::Receiver<bool>,
     counts: Counts,
+}
+
+/// `value` as zebrad writes it and the explorer reads it back.
+fn through_json<T: Serialize + DeserializeOwned>(value: T) -> T {
+    serde_json::from_value(serde_json::to_value(value).expect("serializes")).expect("decodes")
 }
 
 impl ChainSource for Synth {
@@ -63,14 +70,20 @@ impl ChainSource for Synth {
         let _ = gate.wait_for(|open| *open).await;
         let chain = self.chain.borrow().clone();
         let found = match call {
-            ReadCall::Best => Some(ReadResult::Best(chain.best())),
+            ReadCall::Best => Some(ReadResult::Best(through_json(chain.best()))),
             ReadCall::Block(id) => chain
                 .block(id)
-                .map(|block| ReadResult::Block(Arc::new(block))),
+                .map(|block| ReadResult::Block(Arc::new(through_json(block)))),
             ReadCall::BlockHash(height) => chain.hash(height).map(ReadResult::BlockHash),
-            ReadCall::Header(id) => chain.header(id).map(ReadResult::Header),
-            ReadCall::Tx(txid) => chain.tx(&txid).map(|tx| ReadResult::Tx(Arc::new(tx))),
-            ReadCall::Subsidy(height) => Some(ReadResult::Subsidy(Arc::new(chain.subsidy(height)))),
+            ReadCall::Header(id) => chain
+                .header(id)
+                .map(|header| ReadResult::Header(through_json(header))),
+            ReadCall::Tx(txid) => chain
+                .tx(&txid)
+                .map(|tx| ReadResult::Tx(Arc::new(through_json(tx)))),
+            ReadCall::Subsidy(height) => Some(ReadResult::Subsidy(Arc::new(through_json(
+                chain.subsidy(height),
+            )))),
         };
         found.ok_or(SourceError::NotFound)
     }
@@ -274,6 +287,23 @@ async fn a_block_page_reads_two_blocks_its_coinbase_and_its_subsidy() {
     };
     assert_eq!(txids.txids, page.txids.txids);
     assert_eq!(delta(harness.counts(), before), [0; 6]);
+}
+
+#[tokio::test]
+async fn the_genesis_block_has_no_parent_to_read() {
+    // zebrad writes the genesis block's parent as 64 zeros, which no block has.
+    let harness = harness_with(SynthChain::new(Network::Mainnet, 9, NOW), |_| {});
+    let ExplorerResponse::Block(page) = harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Height(0),
+        })
+        .await
+    else {
+        panic!("a block page");
+    };
+    assert_eq!(page.summary.height, 0);
+    assert_eq!(page.previous, None);
+    assert_eq!(harness.counts(), [0, 1, 0, 0, 1, 1], "one block, no parent");
 }
 
 #[tokio::test]

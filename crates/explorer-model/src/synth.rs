@@ -1639,6 +1639,12 @@ mod tests {
         let back: Subsidy =
             serde_json::from_str(&serde_json::to_string(&subsidy).unwrap()).unwrap();
         assert_eq!(back, subsidy);
+        // The genesis block's parent is 64 zeros, as zebrad writes it, and reads back as none.
+        let genesis = chain.block(BlockId::Height(0)).unwrap();
+        assert_eq!(genesis.previous, None);
+        let json = serde_json::to_value(&genesis).unwrap();
+        assert_eq!(json["previousblockhash"], "0".repeat(64));
+        assert_eq!(serde_json::from_value::<BlockV1>(json).unwrap(), genesis);
     }
 
     #[test]
