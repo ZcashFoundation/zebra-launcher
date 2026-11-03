@@ -89,7 +89,7 @@ pub async fn log_history(state: State<'_, AppState>, since: u64) -> Result<Vec<L
 #[tauri::command]
 pub async fn start_zebrad(state: State<'_, AppState>) -> Result<(), String> {
     firstrun::start_allowed(&state.settings.current())?;
-    let _permit = state.start_permit()?;
+    let _permit = state.gates.start_permit()?;
     state.supervisor.start().await.map_err(message)
 }
 
@@ -98,7 +98,7 @@ pub async fn start_zebrad(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn start_zebrad_killing_stale(state: State<'_, AppState>) -> Result<(), String> {
     firstrun::start_allowed(&state.settings.current())?;
-    let _permit = state.start_permit()?;
+    let _permit = state.gates.start_permit()?;
     state
         .supervisor
         .start_with(StartOptions { kill_stale: true })
@@ -117,7 +117,7 @@ pub async fn stop_zebrad(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn restart_zebrad(state: State<'_, AppState>) -> Result<(), String> {
     firstrun::start_allowed(&state.settings.current())?;
-    let _permit = state.start_permit()?;
+    let _permit = state.gates.start_permit()?;
     state.supervisor.restart().await.map_err(message)
 }
 
@@ -137,8 +137,8 @@ pub async fn read_config(state: State<'_, AppState>) -> Result<ConfigDocument, S
 /// a configuration change is being applied.
 #[tauri::command]
 pub async fn reset_config(state: State<'_, AppState>) -> Result<ConfigDocument, String> {
-    let _data = state.data_change_permit()?;
-    let _config = state.try_config_permit()?;
+    let _data = state.gates.data_change_permit()?;
+    let _config = state.gates.try_config_permit()?;
     let paths = state.paths.clone();
     let keys = managed_keys(&state.settings.current(), &paths);
     blocking(move || config::reset(&paths, &keys))
@@ -173,6 +173,7 @@ pub async fn apply_config(
     token: String,
 ) -> Result<ApplyOutcome, ApplyError> {
     let _config = state
+        .gates
         .config_writer
         .clone()
         .try_acquire_owned()
@@ -185,7 +186,7 @@ pub async fn apply_config(
     // Held across the stop and the start, so the node data cannot change
     // while zebrad is briefly stopped. Taken before anything is written, so
     // a refusal leaves the file unchanged.
-    let _start = state.start_permit().map_err(|_| {
+    let _start = state.gates.start_permit().map_err(|_| {
         apply_error(
             ApplyErrorKind::Busy,
             "the node data is being changed; apply the configuration when that has finished",
@@ -216,8 +217,9 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 /// updated right away and take effect on the next zebrad start; the stop
 /// grace period takes effect on the next launch. A save that changes such a
 /// key is refused, without saving anything, while a configuration change is
-/// being applied (see [`AppState::config_writer`]); every other save goes
-/// through regardless. `first_run_done` is kept as it is: only
+/// being applied (see
+/// [`NodeGates::config_writer`](launcher_core::gates::NodeGates::config_writer));
+/// every other save goes through regardless. `first_run_done` is kept as it is: only
 /// `complete_first_run` sets it. `data_dir` is kept as it is too: only
 /// `choose_data_dir` changes it, after checking that zebrad is stopped and
 /// the directory is writable, so a stale copy of the settings in the UI
@@ -234,7 +236,7 @@ pub async fn set_settings(
     let config_permit = if managed_keys(&merged, &paths) == managed_keys(&current, &paths) {
         None
     } else {
-        Some(state.try_config_permit()?)
+        Some(state.gates.try_config_permit()?)
     };
 
     let saved = state
@@ -406,8 +408,8 @@ pub async fn choose_data_dir(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<DataDirChoice, String> {
-    let _data = state.data_change_permit()?;
-    let _config = state.try_config_permit()?;
+    let _data = state.gates.data_change_permit()?;
+    let _config = state.gates.try_config_permit()?;
 
     let chosen = path.trim().to_string();
     let dir = PathBuf::from(&chosen);
@@ -453,7 +455,7 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 /// copying anything when the two are on different volumes.
 #[tauri::command]
 pub async fn import_legacy_state(state: State<'_, AppState>) -> Result<ImportOutcome, String> {
-    let _data = state.data_change_permit()?;
+    let _data = state.gates.data_change_permit()?;
     let paths = state.paths.clone();
     let settings = state.settings.current();
     blocking(move || {
@@ -471,7 +473,7 @@ pub async fn import_legacy_state(state: State<'_, AppState>) -> Result<ImportOut
 /// confirmation first.
 #[tauri::command]
 pub async fn delete_legacy_state(state: State<'_, AppState>) -> Result<u64, String> {
-    let _data = state.data_change_permit()?;
+    let _data = state.gates.data_change_permit()?;
     let paths = state.paths.clone();
     let settings = state.settings.current();
     let sizes = state.sizes.clone();
@@ -492,7 +494,7 @@ pub async fn delete_legacy_state(state: State<'_, AppState>) -> Result<u64, Stri
 /// was, which the UI should show as "unknown".
 #[tauri::command]
 pub async fn delete_node_data(state: State<'_, AppState>) -> Result<u64, String> {
-    let _data = state.data_change_permit()?;
+    let _data = state.gates.data_change_permit()?;
     let settings = state.settings.current();
     let roots = state.data_roots(&settings);
     let dir = state_dir(&settings, &state.paths);

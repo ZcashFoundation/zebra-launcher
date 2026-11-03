@@ -14,6 +14,7 @@ use std::{
 use launcher_core::{
     config::ManagedKeys,
     firstrun::{LegacyLocations, SizeCache},
+    gates::NodeGates,
     paths::Paths,
     settings::SettingsHandle,
     supervisor::SupervisorHandle,
@@ -21,12 +22,9 @@ use launcher_core::{
 use launcher_types::{
     MachineResources, MetricsSnapshot, NodeDetails, NodeResources, NodeStats, Settings,
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::watch;
 
 use crate::exit::ExitGuard;
-
-/// The permits in [`AppState::data_gate`]: how many starts may run at once.
-const DATA_GATE_PERMITS: u32 = 64;
 
 /// The resource samplers' outputs, for [`AppState::new`].
 #[derive(Clone, Debug)]
@@ -58,15 +56,9 @@ pub struct AppState {
     pub node_resources: watch::Receiver<Option<NodeResources>>,
     /// The newest sample of the computer's CPU and memory.
     pub machine: watch::Receiver<Option<MachineResources>>,
-    /// One permit: held while `zebrad.toml` is being written, so a config
-    /// apply and a settings change never interleave.
-    ///
-    /// The rule: only `apply_config` holds it for long (across a zebrad
-    /// restart, up to about a minute). Every other writer takes it with
-    /// [`AppState::try_config_permit`] and fails fast with "try again"
-    /// instead of waiting, so no IPC call hangs behind an apply, and takes it
-    /// before changing anything, so a refusal leaves everything as it was.
-    pub config_writer: Arc<Semaphore>,
+    /// Keeps zebrad starts, node-data changes and writes of `zebrad.toml`
+    /// apart.
+    pub gates: NodeGates,
     /// Bumped by every `subscribe_logs`; older log forwarders stop when it
     /// changes, so a reloaded UI does not leave forwarders behind.
     pub log_generation: Arc<AtomicU64>,
@@ -79,11 +71,6 @@ pub struct AppState {
     /// `get_first_run_info` and reused by `delete_node_data` and
     /// `delete_legacy_state`.
     pub sizes: Arc<SizeCache>,
-    /// Keeps zebrad starts and node-data changes apart: every start holds one
-    /// permit until it has finished, and a data change (choosing the data
-    /// directory, importing or deleting the state or the alpha.4 state,
-    /// resetting `zebrad.toml`) holds all of them.
-    data_gate: Arc<Semaphore>,
 }
 
 impl AppState {
@@ -98,6 +85,7 @@ impl AppState {
         resources: ResourceWatches,
     ) -> Self {
         Self {
+            gates: NodeGates::new(supervisor.watch_status()),
             paths,
             supervisor,
             settings,
@@ -106,48 +94,11 @@ impl AppState {
             metrics,
             node_resources: resources.node,
             machine: resources.machine,
-            config_writer: Arc::new(Semaphore::new(1)),
             log_generation: Arc::new(AtomicU64::new(0)),
             exit: Arc::new(ExitGuard::default()),
             tray_ready: Arc::new(AtomicBool::new(false)),
             sizes: Arc::new(SizeCache::default()),
-            data_gate: Arc::new(Semaphore::new(DATA_GATE_PERMITS as usize)),
         }
-    }
-
-    /// Held while zebrad is being started (or stopped and started again), so
-    /// the node data cannot change underneath it. Fails while a data change
-    /// is running.
-    pub fn start_permit(&self) -> Result<OwnedSemaphorePermit, String> {
-        self.data_gate.clone().try_acquire_owned().map_err(|_| {
-            "the node data is being changed; start zebrad when that has finished".to_string()
-        })
-    }
-
-    /// Held while the node data changes. Fails unless zebrad is stopped or
-    /// failed ([`launcher_types::Phase::is_settled`]) and no start or other
-    /// data change is running.
-    pub fn data_change_permit(&self) -> Result<OwnedSemaphorePermit, String> {
-        let permit = self
-            .data_gate
-            .clone()
-            .try_acquire_many_owned(DATA_GATE_PERMITS)
-            .map_err(|_| "zebrad is starting, or another data change is running".to_string())?;
-        if !self.supervisor.status().phase.is_settled() {
-            return Err("stop zebrad first".to_string());
-        }
-        Ok(permit)
-    }
-
-    /// Held while `zebrad.toml` is written by a command that does not wait
-    /// for a running config change (a reset, a data directory change, a
-    /// settings save that changes a managed key); see
-    /// [`AppState::config_writer`].
-    pub fn try_config_permit(&self) -> Result<OwnedSemaphorePermit, String> {
-        self.config_writer
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| "a configuration change is being applied; try again".to_string())
     }
 
     /// The directories `delete_node_data` may delete a state directory in:

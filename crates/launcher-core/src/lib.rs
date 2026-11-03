@@ -10,6 +10,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod firstrun;
 mod fsutil;
+pub mod gates;
 pub mod logfile;
 pub mod logs;
 pub mod metrics;

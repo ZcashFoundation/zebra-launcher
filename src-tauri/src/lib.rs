@@ -303,7 +303,8 @@ pub(crate) fn launch_plan(settings: &launcher_types::Settings) -> LaunchPlan {
 /// Starts zebrad the way every start without a UI request waiting for the
 /// result does: not before the first run is done
 /// ([`firstrun::start_allowed`]), not while the node data is being changed
-/// ([`AppState::start_permit`]), and with a zebrad left by an earlier run
+/// ([`NodeGates::start_permit`](launcher_core::gates::NodeGates::start_permit)),
+/// and with a zebrad left by an earlier run
 /// reported to the UI with [`events::STALE_PROCESS`]. The error is the message
 /// for the log or the caller.
 pub(crate) async fn start_node<R: tauri::Runtime>(
@@ -311,7 +312,7 @@ pub(crate) async fn start_node<R: tauri::Runtime>(
     state: &AppState,
 ) -> Result<(), String> {
     firstrun::start_allowed(&state.settings.current())?;
-    let _permit = state.start_permit()?;
+    let _permit = state.gates.start_permit()?;
     match state.supervisor.start().await {
         Ok(()) => Ok(()),
         Err(SupervisorError::StaleProcess(stale)) => {
