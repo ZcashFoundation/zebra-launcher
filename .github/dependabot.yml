@@ -10,6 +10,13 @@ updates:
       default-days: 7
     commit-message:
       prefix: "deps(cargo): "
+    ignore:
+      # reqwest 0.13 would share its features with tauri-plugin-updater's reqwest 0.13, whose
+      # rustls-tls turns on rustls without a crypto provider: launcher-core's loopback clients
+      # then panic when they are built ("No rustls crypto provider is configured"). Stay on 0.12
+      # until launcher-core moves off reqwest or installs a provider (see Cargo.toml).
+      - dependency-name: "reqwest"
+        versions: [">= 0.13"]
     groups:
       tauri:
         patterns:
