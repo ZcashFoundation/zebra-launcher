@@ -1,0 +1,3 @@
+
+thread 'main' (210466) panicked at zebrad/src/components/metrics.rs:38:27:
+Opening metrics endpoint listener 127.0.0.1:19999 failed: FailedToCreateHTTPListener("Address already in use (os error 98)"). Hint: Check if another zebrad or zcashd process is running. Try changing the metrics endpoint_addr in the Zebra config.

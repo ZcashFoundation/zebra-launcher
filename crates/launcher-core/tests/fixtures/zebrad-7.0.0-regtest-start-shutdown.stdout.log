@@ -1,0 +1,101 @@
+2026-10-23T18:35:01.937583Z  INFO zebrad::components::tracing::component: started tracing component filter="info" TRACING_STATIC_MAX_LEVEL=LevelFilter::INFO LOG_STATIC_MAX_LEVEL=Info
+2026-10-23T18:35:01.937624Z  INFO zebrad::components::tracing::component: installed sentry tracing layer
+2026-10-23T18:35:01.937628Z  INFO zebrad::components::tracing::component: set 'tracing.progress_bar ="summary"' in zebrad.toml to activate progress bars
+2026-10-23T18:35:01.937630Z  INFO zebrad::application: Diagnostic metadata:
+version: 7.0.0-rc.0+192.gad6528b.modified
+Zcash network: Regtest
+running state version: 29.0.0
+initial disk state version: creating.new.database
+features: default,default_release_binaries,howudoin,indicatif,metrics_exporter_prometheus,opentelemetry,progress_bar,prometheus,release_max_level_info,sentry
+branch: HEAD
+git commit: ad6528b
+commit timestamp: 2026-10-21T00:27:19.000000000Z
+target triple: x86_64-unknown-linux-gnu
+rust compiler: 1.91.0
+rust release date: 2025-10-28
+optimization level: 3
+debug checks: true
+2026-10-23T18:35:01.937634Z  INFO zebrad::application: Using config file at: "regtest.toml"
+2026-10-23T18:35:01.937636Z  INFO zebrad::application: ZebradConfig { consensus: Config { checkpoint_sync: true }, metrics: Config { endpoint_addr: Some(127.0.0.1:19999) }, network: Config { listen_addr: 127.0.0.1:0, external_addr: None, network: Regtest { activation_heights: {Height(0): Genesis, Height(1): Canopy}, funding_streams: [], lockbox_disbursements: [], checkpoints: CheckpointList({Height(0): block::Hash("029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327")}) }, initial_mainnet_peers: {"dnsseed.str4d.xyz:8233", "dnsseed.z.cash:8233", "mainnet.seeder.shieldedinfra.net:8233", "mainnet.seeder.zfnd.org:8233", "seeder.zec.rocks:8233"}, initial_testnet_peers: {"dnsseed.testnet.z.cash:18233", "seeder.testnet.zec.rocks:18233", "testnet.seeder.zfnd.org:18233"}, cache_dir: CustomPath("<DATA_DIR>/state"), peerset_initial_target_size: 25, crawl_new_peer_interval: 61s, max_connections_per_ip: 1 }, state: Config { cache_dir: "<DATA_DIR>/state", ephemeral: false, should_backup_non_finalized_state: true, delete_old_database: true, debug_stop_at_height: None, debug_validity_check_interval: None, debug_skip_non_finalized_state_backup_task: false }, tracing: Config { inner: InnerConfig { use_color: false, force_use_color: false, filter: None, buffer_limit: 128000, endpoint_addr: None, flamegraph: None, progress_bar: None, log_file: None, use_journald: false, opentelemetry_endpoint: None, opentelemetry_service_name: None, opentelemetry_sample_percent: None } }, sync: Config { download_concurrency_limit: 50, checkpoint_verify_concurrency_limit: 1000, full_verify_concurrency_limit: 20, parallel_cpu_threads: 0 }, mempool: Config { tx_cost_limit: 80000000, eviction_memory_time: 3600s, debug_enable_at_height: None, max_datacarrier_bytes: Some(83) }, notify: Config { block_notify_command: None }, rpc: Config { listen_addr: Some(127.0.0.1:0), indexer_listen_addr: None, lightwalletd_listen_addr: None, parallel_cpu_threads: 0, debug_force_finished_sync: false, cookie_dir: "<DATA_DIR>/rpc", enable_cookie_auth: true, max_response_body_size: 52428800 }, mining: Config { miner_address: None, extra_coinbase_data: None, miner_memo: None, internal_miner: false }, health: Config { listen_addr: None, min_connected_peers: 1, ready_max_blocks_behind: 2, enforce_on_test_networks: false, ready_max_tip_age: 300s }, zcashd_compat: Config { enabled: false, manage_zcashd: false, zcashd_source: Path, zcashd_path: None, zcashd_datadir: None, zcashd_extra_args: [], p2p_connect_addr: None, block_gossip_peer_ips: [], startup_delay: 1s, restart_backoff: 2s, restart_backoff_max: 300s, restart_reset_after: 3600s, shutdown_grace_period: 300s } }
+2026-10-23T18:35:01.938102Z  INFO {zebrad="ad6528b" net="Regtest"}: zebrad::application: initialized rayon thread pool for CPU-bound tasks num_threads=32
+2026-10-23T18:35:01.942267Z  INFO {zebrad="ad6528b" net="Regtest"}: zebrad::components::metrics: Trying to open metrics endpoint at 127.0.0.1:19999...
+2026-10-23T18:35:01.943840Z  INFO {zebrad="ad6528b" net="Regtest"}: zebrad::components::metrics: Opened metrics endpoint at 127.0.0.1:19999
+2026-10-23T18:35:01.943882Z  INFO zebrad::commands::start: Starting zebrad
+2026-10-23T18:35:01.945015Z  WARN zebrad::commands::start: TCP slow-start-after-idle is enabled, which resets TCP's congestion window between block requests and significantly reduces single-peer throughput for block propagation. Hint: set `net.ipv4.tcp_slow_start_after_idle=0` via sysctl. See https://zebra.zfnd.org/user/troubleshooting.html#linux-tcp-tuning-for-block-propagation setting="net.ipv4.tcp_slow_start_after_idle"
+2026-10-23T18:35:01.945494Z  INFO zebrad::commands::start: initializing node state
+2026-10-23T18:35:01.945942Z  INFO zebrad::commands::start: opening database, this may take a few minutes
+2026-10-23T18:35:01.947572Z  INFO zebra_state::service::finalized_state::disk_format::upgrade: creating new database with the current format running_version=29.0.0
+2026-10-23T18:35:02.017942Z  INFO zebra_state::service::finalized_state::disk_db: Opened Zebra state cache at <DATA_DIR>/state/state/v29/regtest
+2026-10-23T18:35:02.018694Z  INFO zebra_state::service::finalized_state::disk_format::upgrade: marked database format as newly created running_version=29.0.0 disk_version=29.0.0
+2026-10-23T18:35:02.018782Z  INFO zebra_state::service::finalized_state::disk_format::upgrade: database format is valid running_version=29.0.0 initial_disk_version=None
+2026-10-23T18:35:02.019384Z  INFO zebra_state::service: not restoring the non-finalized state backup, because the finalized tip is absent or below the max checkpoint height: Zebra will re-download and re-verify the blocks above its finalized tip finalized_tip_height=None max_checkpoint_height=Height(0)
+2026-10-23T18:35:02.019415Z  INFO zebra_state::service::non_finalized_state: not restoring non-finalized blocks from backup, any backed up blocks that are missing from the non-finalized state will be deleted backup_dir_path="<DATA_DIR>/state/non_finalized_state/regtest" spawning_backup_task=true
+2026-10-23T18:35:02.019733Z  INFO zebra_state::service: loaded Zebra state cache chain_tip=None
+2026-10-23T18:35:02.020003Z  INFO zebra_state::service: starting legacy chain check
+2026-10-23T18:35:02.020100Z  INFO zebra_state::service: cached state consensus branch is valid: no legacy chain found
+2026-10-23T18:35:02.020147Z  INFO zebrad::commands::start: logging database metrics on startup
+2026-10-23T18:35:02.020301Z  INFO zebra_state::service::finalized_state::disk_db: Total Database Disk Size: 0 B
+2026-10-23T18:35:02.020325Z  INFO zebra_state::service::finalized_state::disk_db: Total Live Data Disk Size: 0 B
+2026-10-23T18:35:02.020329Z  INFO zebra_state::service::finalized_state::disk_db: Total Database Memory Size: 61.4 KB
+2026-10-23T18:35:02.020355Z  INFO zebrad::commands::start: initializing network
+2026-10-23T18:35:02.020389Z  INFO open_listener{addr=127.0.0.1:0}: zebra_network::peer_set::initialize: Trying to open Zcash protocol endpoint at 127.0.0.1:0...
+2026-10-23T18:35:02.020433Z  INFO open_listener{addr=127.0.0.1:0}: zebra_network::peer_set::initialize: Opened Zcash protocol endpoint at 127.0.0.1:46417
+2026-10-23T18:35:02.021538Z  INFO zebra_network::address_book_updater: starting the address book updater
+2026-10-23T18:35:02.022338Z  WARN add_initial_peers: zebra_network::config: no initial peers in the network config. Hint: you must configure at least one peer IP or DNS seeder to run Zebra, give it some previously cached peer IP addresses on disk, or make sure Zebra's listener port gets inbound connections.
+2026-10-23T18:35:02.022384Z  INFO add_initial_peers: zebra_network::peer_set::initialize: connecting to initial peer set ipv4_peer_count=0 ipv6_peer_count=0
+2026-10-23T18:35:02.022408Z  INFO add_initial_peers: zebra_network::peer_set::initialize: finished connecting to initial seed and disk cache peers handshake_success_total=0 handshake_error_total=0 outbound_connections=0
+2026-10-23T18:35:02.022462Z  INFO zebra_network::peer_set::initialize: sending initial request for peers active_initial_peer_count=0
+2026-10-23T18:35:02.022523Z  INFO zebrad::commands::start: initializing verifiers
+2026-10-23T18:35:02.022569Z  INFO crawl_and_dial{new_peer_interval=61s}: zebra_network::peer_set::initialize: starting the peer address crawler crawl_new_peer_interval=61s outbound_connections=0
+2026-10-23T18:35:02.022628Z  INFO init{config=Config { checkpoint_sync: true } network=Regtest { activation_heights: {Height(0): Genesis, Height(1): Canopy}, funding_streams: [], lockbox_disbursements: [], checkpoints: CheckpointList({Height(0): block::Hash("029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327")}) }}: zebra_consensus::router: starting state checkpoint validation
+2026-10-23T18:35:02.022970Z  INFO init{config=Config { checkpoint_sync: true } network=Regtest { activation_heights: {Height(0): Genesis, Height(1): Canopy}, funding_streams: [], lockbox_disbursements: [], checkpoints: CheckpointList({Height(0): block::Hash("029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327")}) }}: zebra_consensus::router: state is not fully synced yet, remaining checkpoints will be verified during syncing
+2026-10-23T18:35:02.022978Z  INFO init{config=Config { checkpoint_sync: true } network=Regtest { activation_heights: {Height(0): Genesis, Height(1): Canopy}, funding_streams: [], lockbox_disbursements: [], checkpoints: CheckpointList({Height(0): block::Hash("029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327")}) }}: zebra_consensus::router: initializing block verifier router tip=None max_checkpoint_height=Height(0)
+2026-10-23T18:35:02.023009Z  INFO init{config=Config { checkpoint_sync: true } network=Regtest { activation_heights: {Height(0): Genesis, Height(1): Canopy}, funding_streams: [], lockbox_disbursements: [], checkpoints: CheckpointList({Height(0): block::Hash("029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327")}) }}: zebra_consensus::router: finished state checkpoint validation
+2026-10-23T18:35:02.023063Z  INFO zebrad::commands::start: initializing syncer
+2026-10-23T18:35:02.023153Z  INFO zebrad::commands::start: initializing mempool
+2026-10-23T18:35:02.023211Z  INFO zebrad::commands::start: fully initializing inbound peer request handler
+2026-10-23T18:35:02.026716Z  INFO zebra_rpc::server::cookie: RPC auth cookie written to disk
+2026-10-23T18:35:02.026762Z  INFO zebra_rpc::server: Opened RPC endpoint at 127.0.0.1:45221
+2026-10-23T18:35:02.026804Z  WARN zebrad::commands::start: configure an indexer_listen_addr to start the indexer RPC server
+2026-10-23T18:35:02.026831Z  INFO zebrad::commands::start: spawning block gossip task
+2026-10-23T18:35:02.026834Z  INFO zebrad::commands::start: spawning block notify task
+2026-10-23T18:35:02.026836Z  INFO zebrad::commands::start: spawning mempool queue checker task
+2026-10-23T18:35:02.026838Z  INFO zebrad::commands::start: spawning mempool transaction gossip task
+2026-10-23T18:35:02.026840Z  INFO zebrad::commands::start: spawning delete old databases task
+2026-10-23T18:35:02.026859Z  INFO zebrad::commands::start: spawning progress logging task
+2026-10-23T18:35:02.026869Z  INFO zebrad::components::sync::gossip: initializing block gossip task
+2026-10-23T18:35:02.026870Z  INFO zebra_state::config: checking for old database versions db_kind="state"
+2026-10-23T18:35:02.026882Z  INFO zebrad::commands::start: initializing health endpoints
+2026-10-23T18:35:02.026893Z  INFO zebrad::commands::start: spawning end of support checking task
+2026-10-23T18:35:02.026916Z  INFO zebrad::commands::start: spawning mempool crawler task
+2026-10-23T18:35:02.026920Z  INFO zebrad::commands::start: spawning syncer task
+2026-10-23T18:35:02.026936Z  INFO zebrad::components::mempool::queue_checker: initializing mempool queue checker task
+2026-10-23T18:35:02.026940Z  INFO zebra_state::config: finished old database version cleanup task
+2026-10-23T18:35:02.026953Z  INFO zebrad::components::mempool::gossip: initializing transaction gossip task
+2026-10-23T18:35:02.026959Z  WARN zebrad::components::sync::progress: initial sync can't download and verify the genesis block. Hint: check your network connection, and your computer clock and time zone sync_percent=0.000 % current_height=None
+2026-10-23T18:35:02.026986Z  INFO zebrad::components::sync::end_of_support: Starting end of support task
+2026-10-23T18:35:02.026999Z  INFO zebrad::components::mempool::crawler: initializing mempool crawler task
+2026-10-23T18:35:02.027749Z  INFO checkpoint: zebra_consensus::checkpoint: verified checkpoint range block_count=1 current_range=(Unbounded, Included(Height(0)))
+2026-10-23T18:35:02.027780Z  INFO checkpoint: zebra_consensus::checkpoint: verified final checkpoint: starting full validation final_checkpoint_height=Height(0)
+2026-10-23T18:35:02.047512Z  INFO zebrad::commands::start: spawned initial Zebra tasks
+2026-10-23T18:35:02.047573Z  INFO sync:try_to_sync: zebrad::components::sync: starting sync, obtaining new tips state_tip=Some(Height(0))
+2026-10-23T18:35:07.028264Z  WARN zebrad::components::sync::progress: chain tip metrics channel closed err=SendError { .. }
+2026-10-23T18:35:07.028311Z  INFO zebrad::components::mempool: activating mempool: Zebra is close to the tip tip_height=Height(0)
+2026-10-23T18:35:09.032451Z  INFO zebrad::components::sync::gossip: height=Height(0) hash=block::Hash("029f11d80ef9765602235e1bc9727e3eb6ba20839319f761fee920d63401e327") is_block_submission=false log_msg="sending committed block broadcast"
+2026-10-23T18:35:12.030613Z  INFO zebrad::components::sync::end_of_support: Release always valid in Testnet
+2026-10-23T18:35:20.128340Z  INFO sig{kind=SignalKind(15) name="SIGTERM"}: zebrad::signal: received SIGTERM, starting shutdown
+2026-10-23T18:35:20.128448Z  INFO zebrad::components::tokio: waiting for async tokio tasks to shut down TOKIO_SHUTDOWN_TIMEOUT=20s
+2026-10-23T18:35:20.128762Z  INFO zebra_state::service: dropping the state: logging database metrics
+2026-10-23T18:35:20.128779Z  INFO zebra_state::service::write: StateService closed the block reset channel. Is Zebra shutting down?
+2026-10-23T18:35:20.129285Z  INFO zebra_state::service::finalized_state::disk_db: Total Database Disk Size: 0 B
+2026-10-23T18:35:20.129340Z  INFO zebra_state::service::finalized_state::disk_db: Total Live Data Disk Size: 0 B
+2026-10-23T18:35:20.129347Z  INFO zebra_state::service::finalized_state::disk_db: Total Database Memory Size: 61.4 KB
+2026-10-23T18:35:20.129437Z  INFO zebra_state::service::finalized_state::disk_format::upgrade: checking new blocks were written in current database format running_version=29.0.0
+2026-10-23T18:35:20.129481Z  INFO zebra_state::service::finalized_state::disk_format::upgrade: checking database format produced by new blocks in this instance is valid running_version=29.0.0
+2026-10-23T18:35:20.129657Z  INFO zebra_state::service::finalized_state::disk_format::upgrade: database format is valid running_version=29.0.0 initial_disk_version=29.0.0
+2026-10-23T18:35:20.131940Z  INFO zebra_state::service: waiting for the block write task to finish
+2026-10-23T18:35:20.131998Z  INFO zebra_state::service::finalized_state::disk_format::upgrade: checking new blocks were written in current database format running_version=29.0.0
+2026-10-23T18:35:20.132021Z  INFO zebra_state::service::finalized_state::disk_format::upgrade: checking database format produced by new blocks in this instance is valid running_version=29.0.0
+2026-10-23T18:35:20.132098Z  INFO zebra_state::service::finalized_state::disk_format::upgrade: database format is valid running_version=29.0.0 initial_disk_version=29.0.0
+2026-10-23T18:35:20.133355Z  INFO zebrad::components::tokio: shutting down Zebra
+2026-10-23T18:35:20.133387Z  INFO zebrad::commands::start: stopping zebrad

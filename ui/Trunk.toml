@@ -1,0 +1,21 @@
+# Build with `trunk build --release`, develop with `trunk serve` (mock backend in a plain browser).
+#
+# `[tools] wasm_bindgen` is deliberately left unset: trunk then installs the wasm-bindgen CLI
+# matching the `wasm-bindgen` version in Cargo.lock, and the two must match exactly.
+# In CI (bundle.yml, release.yml) trunk downloads nothing: the setup-tauri action installs
+# sha256-pinned wasm-bindgen and wasm-opt (.github/tool-versions.env) and sets TRUNK_OFFLINE.
+#
+# Release builds use the workspace's `release-wasm` Cargo profile (opt-level "z", LTO, one codegen
+# unit, panic = abort). It is selected by `data-cargo-profile-release` in index.html rather than
+# `[build] cargo_profile` here, which would also apply to `trunk serve`.
+
+[build]
+target = "index.html"
+dist = "dist"
+
+[watch]
+ignore = ["../src-tauri"]
+
+[serve]
+port = 1420
+open = false

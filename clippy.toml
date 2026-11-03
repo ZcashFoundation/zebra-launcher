@@ -1,0 +1,10 @@
+# Locks are banned: shared state goes through channels, `tokio::sync::watch`, atomics or semaphores.
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "no locks: use an actor task, watch, atomics or a semaphore" },
+    { path = "std::sync::RwLock", reason = "no locks: use an actor task, watch, atomics or a semaphore" },
+    { path = "tokio::sync::Mutex", reason = "no locks: use an actor task, watch, atomics or a semaphore" },
+    { path = "tokio::sync::RwLock", reason = "no locks: use an actor task, watch, atomics or a semaphore" },
+    { path = "futures::lock::Mutex", reason = "no locks: use an actor task, watch, atomics or a semaphore" },
+    { path = "parking_lot::Mutex", reason = "no locks: use an actor task, watch, atomics or a semaphore" },
+    { path = "parking_lot::RwLock", reason = "no locks: use an actor task, watch, atomics or a semaphore" },
+]

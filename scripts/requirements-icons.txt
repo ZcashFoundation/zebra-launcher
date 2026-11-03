@@ -1,0 +1,2 @@
+# Python dependencies of scripts/make-icons.py (docs/DEVELOPMENT.md, "Icons").
+pillow==12.2.0
