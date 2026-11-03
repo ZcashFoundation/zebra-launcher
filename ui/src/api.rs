@@ -16,6 +16,8 @@ use crate::{
     tauri::{self, is_tauri},
 };
 
+pub mod public;
+
 /// A failed command, with a message for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApiError(pub String);

@@ -10,9 +10,9 @@ use crate::{
     app::AppState,
     clipboard::copy_to_clipboard,
     components::{
-        icons::warning_icon, outcome_note::OutcomeNote, radio_choice::RadioChoice, rows::Rows,
-        transient::Transient, typed_confirm::TypedConfirm, update_mode_choice::UpdateModeChoice,
-        updates::UpdateStatus,
+        icons::warning_icon, outcome_note::OutcomeNote, public_services::PublicServices,
+        radio_choice::RadioChoice, rows::Rows, transient::Transient, typed_confirm::TypedConfirm,
+        update_mode_choice::UpdateModeChoice, updates::UpdateStatus,
     },
     format::{bytes, data_change_allowed, is_low_space, state_dir},
     theme::theme_text,
@@ -415,6 +415,7 @@ pub fn SettingsPage() -> impl IntoView {
                     <OutcomeNote outcome=outcome.signal() />
                 </div>
             </form>
+            <PublicServices />
             <section class="settings">
                 <Diagnostics />
                 <DeleteNodeData busy />

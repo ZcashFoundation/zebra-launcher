@@ -26,6 +26,8 @@ mod metrics_history;
 mod mock;
 mod node_state;
 mod node_summary;
+mod public_state;
+mod public_text;
 mod stats_history;
 mod tauri;
 mod theme;
@@ -39,6 +41,7 @@ mod components {
     pub mod log_insights;
     pub mod nav;
     pub mod outcome_note;
+    pub mod public_services;
     pub mod radio_choice;
     pub mod reset_config;
     pub mod rows;

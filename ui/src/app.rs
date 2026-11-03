@@ -15,6 +15,7 @@ use crate::{
         add_node::AddNode,
         herd_header::HerdHeader,
         nav::Nav,
+        public_services::PublicBanner,
         sidebar::Sidebar,
         stale_banner::StaleBanner,
         status_strip::StatusStrip,
@@ -404,6 +405,7 @@ pub fn App() -> impl IntoView {
         log_filter_request: RwSignal::new(None),
     };
     provide_context(state);
+    crate::public_state::PublicContext::provide();
     theme::init(&state);
 
     set_interval(move || state.now.set(clock::now()), Duration::from_secs(1));
@@ -673,6 +675,7 @@ pub fn App() -> impl IntoView {
                 <StaleBanner />
                 <UpdateBanner />
                 <HealthFailureBanner />
+                <PublicBanner />
                 {move || {
                     state
                         .backend_error

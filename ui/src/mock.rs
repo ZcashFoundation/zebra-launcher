@@ -26,6 +26,7 @@
 //! | `?stalled` | The sync stalls: the height stops moving while the tip estimate creeps on, no blocks are committed, and zebrad's progress lines report the stall (the verdict's "Sync stalled"). |
 //! | `?nopeers` | zebrad finds no peers: 0 peers in every sample and gauge, an empty peer list, the initial connections fail and the log waits for ready peers (the verdict's "No peers" once two minutes of samples agree). |
 //! | `?crashloop` | zebrad panics about 15 s after every start and the launcher restarts it after a backoff that doubles (5, 10, 20 s): "zebrad crashed", then "Crash loop" from the third crash, with the exits and restarts in the log and on the timeline. |
+//! | `?public=setup`, `serving`, `unconfirmed`, `cgnat`, `expiring` | The light client server starts in that state: set up to the router forward while Zebra syncs, open and reachable, open without evidence from outside, stopped at carrier-grade NAT, or open with a certificate whose renewal failed ([`public`], docs/PUBLIC-SERVICES.md). Without the flag nothing is set up. |
 //! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). |
 //!
 //! The launcher's own notes (`zebrad started (pid N)`, `stop requested (stdin closed)`,
@@ -39,6 +40,7 @@ mod metrics;
 mod updates;
 
 pub mod herd;
+pub mod public;
 
 use std::{
     sync::{
