@@ -1,19 +1,28 @@
 //! The add-node dialog (docs/MULTI-NODE.md): pick a kind, fill in its details (network, name,
 //! program, the node a service uses), and review what Zeal will set up, with the ports moved
-//! out of the way of the nodes that exist. Only the mock can add nodes until the backend runs
-//! several.
+//! out of the way of the nodes that exist. This release adds zebrad nodes, which run the
+//! bundled zebrad; the other kinds show what they will need and cannot be picked yet.
 
 use launcher_types::{
-    DEFAULT_STOP_GRACE_SECS, Network, NodeDraft, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram,
-    NodeRole, assign_ports,
+    DEFAULT_STOP_GRACE_SECS, MAX_NODES, Network, NodeDraft, NodeId, NodeInfo, NodeKind, NodePort,
+    NodeProgram, NodeRole, assign_ports,
 };
 use leptos::{ev, html, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
 
 use crate::{api, app::AppState};
 
-/// Where a node's data goes by default: its own folder under the launcher's data folder.
-const NODES_DIR: &str = "~/.local/share/org.zfnd.zeal/nodes";
+/// A new node's own folder in the launcher's data folder `base`, `<base>/nodes/<id>`, with the
+/// separator `base` uses.
+pub fn node_folder(base: &str, id: &NodeId) -> String {
+    let separator = if base.contains('\\') && !base.contains('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    let base = base.trim_end_matches(separator);
+    format!("{base}{separator}nodes{separator}{id}")
+}
 
 /// What a kind needs that Zeal does not ship, and where it runs, for its card.
 fn requirement(kind: NodeKind) -> &'static str {
@@ -184,7 +193,10 @@ pub fn AddNode(
         let wanted = kind.default_ports(network);
         let ports = assign_ports(&wanted, &taken_ports);
         NodeInfo {
-            data_dir: format!("{NODES_DIR}/{id}"),
+            data_dir: state.default_data_dir.with(|base| match base {
+                Some(base) => node_folder(base, &id),
+                None => "a folder of its own in Zeal's data folder".to_owned(),
+            }),
             id,
             name: name.get().trim().to_owned(),
             kind,
@@ -226,6 +238,15 @@ pub fn AddNode(
     // Why Next or Add is off, if it is.
     let problem = move || -> Option<String> {
         let info = draft.get();
+        if state.nodes.with(Vec::len) >= MAX_NODES {
+            return Some(format!("Zeal runs at most {MAX_NODES} nodes."));
+        }
+        if !info.kind.addable() {
+            return Some(format!(
+                "{} nodes come in a later release.",
+                info.kind.label()
+            ));
+        }
         if info.name.is_empty() {
             return Some("Give the node a name.".into());
         }
@@ -342,20 +363,27 @@ pub fn AddNode(
                 {NodeKind::ALL
                     .into_iter()
                     .map(|choice| {
+                        // A kind this release cannot add stays in view, with what it will need.
+                        let later = !choice.addable();
                         view! {
                             <button
                                 type="button"
                                 role="radio"
                                 class="kind-card"
+                                class:kind-card-later=later
                                 class:selected=move || kind.get() == choice
                                 aria-checked=move || (kind.get() == choice).to_string()
+                                disabled=later
                                 on:click=move |_| kind.set(choice)
                                 on:dblclick=move |_| {
                                     kind.set(choice);
                                     step.set(Step::Details);
                                 }
                             >
-                                <span class="kind-card-name">{choice.label()}</span>
+                                <span class="kind-card-name">
+                                    {choice.label()}
+                                    {later.then(|| view! { <span class="chip kind-card-soon">"Coming later"</span> })}
+                                </span>
                                 <span class="kind-card-role muted">{role_text(choice.role())}</span>
                                 <span class="kind-card-summary">{choice.summary()}</span>
                                 <span class="kind-card-needs muted">{requirement(choice)}</span>
@@ -487,6 +515,9 @@ pub fn AddNode(
                             .map(|line| view! { <p class="muted form-note">{line}</p> })
                             .collect_view()
                     }}
+                    <p class="muted form-note">
+                        "Checked again when the node is added: a port another program holds moves too."
+                    </p>
                 </div>
             </div>
             {caveat(current).map(|text| view! { <div class="banner banner-warn">{text}</div> })}
@@ -647,6 +678,19 @@ mod tests {
         ];
         assert_eq!(ports_line(&ports), "P2P 18233 · RPC 18232");
         assert_eq!(ports_line(&[]), "none");
+    }
+
+    #[test]
+    fn a_new_node_gets_a_folder_in_the_launchers_data_folder() {
+        let id = NodeId::new("zebrad-testnet").unwrap();
+        assert_eq!(
+            node_folder("/home/me/.local/share/org.zfnd.zeal", &id),
+            "/home/me/.local/share/org.zfnd.zeal/nodes/zebrad-testnet"
+        );
+        assert_eq!(
+            node_folder("C:\\Users\\me\\AppData\\Local\\org.zfnd.zeal\\", &id),
+            "C:\\Users\\me\\AppData\\Local\\org.zfnd.zeal\\nodes\\zebrad-testnet"
+        );
     }
 
     #[test]

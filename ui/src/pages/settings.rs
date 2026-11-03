@@ -469,6 +469,8 @@ pub fn SettingsPage() -> impl IntoView {
                 </fieldset>
                 </Show>
 
+                <Nodes />
+
                 <fieldset>
                     <legend>"Metrics"</legend>
                     <label class="field">
@@ -629,6 +631,52 @@ fn DataDirRow(busy: RwSignal<Option<Mutation>>) -> impl IntoView {
             </div>
             <OutcomeNote outcome=outcome.signal() />
         </div>
+    }
+}
+
+/// The nodes Zeal runs, with "Add a node…": with one node, the way to a second one, since the
+/// sidebar with its "Add node" appears only once there are two.
+#[component]
+fn Nodes() -> impl IntoView {
+    let state = AppState::get();
+    let summary = move || {
+        let nodes = state.nodes.get();
+        match nodes.as_slice() {
+            [node] => node.info.with(|info| {
+                format!(
+                    "Zeal runs one node, {}. Add another to run Testnet next to Mainnet, or a second node of the same network; the window then lists them in a sidebar.",
+                    info.name
+                )
+            }),
+            nodes => {
+                let names: Vec<String> = nodes
+                    .iter()
+                    .map(|node| node.info.with(|info| info.name.clone()))
+                    .collect();
+                format!(
+                    "Zeal runs {} nodes: {}. Each node's settings are on its pages.",
+                    nodes.len(),
+                    names.join(", ")
+                )
+            }
+        }
+    };
+    view! {
+        <fieldset>
+            <legend>"Nodes"</legend>
+            <p class="muted">{summary}</p>
+            <div class="buttons">
+                <button
+                    type="button"
+                    class="settings-add-node"
+                    disabled=move || !state.nodes_loaded.get() || state.add_refused().is_some()
+                    on:click=move |_| state.add_node.run(())
+                >
+                    "Add a node…"
+                </button>
+                {move || state.add_refused().map(|why| view! { <span class="muted">{why}</span> })}
+            </div>
+        </fieldset>
     }
 }
 

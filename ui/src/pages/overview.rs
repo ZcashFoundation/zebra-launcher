@@ -83,7 +83,13 @@ pub fn Overview(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
                     <button type="button" on:click=move |_| run_all(false)>
                         "Stop all"
                     </button>
-                    <button type="button" class="primary" on:click=move |_| on_add.run(())>
+                    <button
+                        type="button"
+                        class="primary"
+                        title=move || state.add_refused()
+                        disabled=move || state.add_refused().is_some()
+                        on:click=move |_| on_add.run(())
+                    >
                         "Add node"
                     </button>
                 </div>

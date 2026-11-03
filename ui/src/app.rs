@@ -4,7 +4,7 @@
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
-    ApplyOutcome, LogLine, MachineResources, Network, NodeId, NodeInfo, Settings, Theme,
+    ApplyOutcome, LogLine, MAX_NODES, MachineResources, Network, NodeId, NodeInfo, Settings, Theme,
     UpdateHealthFailure, UpdateInfo, UpdateState,
 };
 use leptos::{ev, prelude::*, task::spawn_local};
@@ -212,6 +212,8 @@ pub struct AppState {
     /// The computer's CPU and memory, read every 5 s; `None` until the first reading, and on
     /// platforms the backend cannot read.
     pub machine: RwSignal<Option<MachineResources>>,
+    /// Opens the add-node dialog: the sidebar, the overview and Settings → Nodes.
+    pub add_node: Callback<()>,
 }
 
 impl AppState {
@@ -245,6 +247,12 @@ impl AppState {
     /// Whether the backend runs several nodes, tracked: the sidebar then replaces the tab bar.
     pub fn herd(&self) -> bool {
         self.nodes.with(|nodes| nodes.len() > 1)
+    }
+
+    /// Why no node can be added now, tracked: at most [`MAX_NODES`].
+    pub fn add_refused(&self) -> Option<String> {
+        (self.nodes.with(Vec::len) >= MAX_NODES)
+            .then(|| format!("Zeal runs at most {MAX_NODES} nodes."))
     }
 
     /// The first node, tracked: the one the first run sets up.
@@ -537,9 +545,10 @@ pub fn App() -> impl IntoView {
     // A placeholder for the first node until the backend's list arrives: the pages render it
     // while connecting, and the list fills it in.
     let node = NodeState::new(node_state::placeholder());
+    // The add-node dialog, opened from the sidebar, the overview and Settings → Nodes. What had
+    // focus before it opened: the app turns inert under it, which takes focus away, so the
+    // opener notes it first.
     let adding = RwSignal::new(false);
-    // What had focus before the add-node dialog opened: the app turns inert under it, which
-    // takes focus away, so the opener notes it first.
     let return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
     let open_add = Callback::new(move |()| {
         let active = web_sys::window()
@@ -565,6 +574,7 @@ pub fn App() -> impl IntoView {
         update_health: RwSignal::new(None),
         log_filter_request: RwSignal::new(None),
         machine: RwSignal::new(None),
+        add_node: open_add,
     };
     provide_context(state);
     theme::init(&state);
