@@ -13,8 +13,6 @@ use launcher_types::explorer::BlockHash;
 
 /// Blocks this deep are final in Zebra (a policy, not a consensus rule).
 pub(crate) const REORG_WINDOW: u32 = 1_000;
-/// How long a check of the tip vouches for the hashes above the final ones.
-pub(crate) const FRESH: Duration = Duration::from_secs(10);
 /// The most heights kept; the oldest go first.
 const MAX_KNOWN: usize = 50_000;
 
@@ -38,15 +36,28 @@ pub(crate) struct Replaced {
     pub(crate) blocks: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ChainIndex {
     tip: Option<(u32, BlockHash)>,
     known: BTreeMap<u32, BlockHash>,
     epoch: u64,
     checked: Option<Instant>,
+    /// How long a check of the tip vouches for the hashes above the final ones.
+    fresh: Duration,
 }
 
 impl ChainIndex {
+    /// An empty index whose tip checks vouch for `fresh`.
+    pub(crate) fn new(fresh: Duration) -> Self {
+        Self {
+            tip: None,
+            known: BTreeMap::new(),
+            epoch: 0,
+            checked: None,
+            fresh,
+        }
+    }
+
     pub(crate) fn tip(&self) -> Option<(u32, BlockHash)> {
         self.tip
     }
@@ -61,6 +72,11 @@ impl ChainIndex {
             .is_some_and(|checked| now.saturating_duration_since(checked) <= max_age)
     }
 
+    /// Whether the last check of the tip still vouches for the heights above the final ones.
+    pub(crate) fn is_fresh(&self, now: Instant) -> bool {
+        self.checked_within(self.fresh, now)
+    }
+
     /// The hash at `height`, when it can be trusted now.
     pub(crate) fn hash_at(&self, height: u32, now: Instant) -> Option<BlockHash> {
         let (tip, _) = self.tip?;
@@ -69,7 +85,7 @@ impl ChainIndex {
         }
         let hash = *self.known.get(&height)?;
         let is_final = tip - height >= REORG_WINDOW;
-        (is_final || self.checked_within(FRESH, now)).then_some(hash)
+        (is_final || self.is_fresh(now)).then_some(hash)
     }
 
     /// Records the hash a read found at `height`, at or below the tip.
@@ -123,7 +139,7 @@ impl ChainIndex {
 
     /// Forgets everything: the node now runs another chain.
     pub(crate) fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self::new(self.fresh);
     }
 }
 
@@ -184,6 +200,8 @@ mod tests {
 
     use super::*;
 
+    const FRESH: Duration = Duration::from_secs(10);
+
     fn hash(height: u32, branch: u8) -> BlockHash {
         let mut bytes = [branch; 32];
         bytes[..4].copy_from_slice(&height.to_be_bytes());
@@ -202,7 +220,7 @@ mod tests {
     #[test]
     fn heights_near_the_tip_need_a_fresh_check() {
         let start = Instant::now();
-        let mut index = ChainIndex::default();
+        let mut index = ChainIndex::new(FRESH);
         assert_eq!(index.hash_at(10, start), None);
         index.apply(update(5_000, 0), start);
         index.learn(3_000, hash(3_000, 0));
@@ -222,7 +240,7 @@ mod tests {
     #[test]
     fn a_reorganisation_drops_what_it_replaced_and_bumps_the_epoch_once() {
         let now = Instant::now();
-        let mut index = ChainIndex::default();
+        let mut index = ChainIndex::new(FRESH);
         index.apply(update(100, 0), now);
         for height in 90..100 {
             index.learn(height, hash(height, 0));
@@ -253,7 +271,7 @@ mod tests {
     #[test]
     fn a_long_jump_drops_the_volatile_heights() {
         let now = Instant::now();
-        let mut index = ChainIndex::default();
+        let mut index = ChainIndex::new(FRESH);
         index.apply(update(10_000, 0), now);
         index.learn(8_000, hash(8_000, 0));
         index.learn(9_999, hash(9_999, 0));

@@ -67,10 +67,14 @@ pub struct ExplorerConfig {
     pub idle_after: Duration,
     /// How often the tip is checked while the Explorer is on screen and the node is at the tip.
     pub tip_poll: Duration,
+    /// How long a check of the tip vouches for the hashes above the final heights: within it, a
+    /// block asked for by height there comes from the cache.
+    pub fresh: Duration,
 }
 
 impl ExplorerConfig {
-    /// A 64 MiB cache, 8 MiB after 10 minutes hidden, and a tip check every 2 s.
+    /// A 64 MiB cache, 8 MiB after 10 minutes hidden, a tip check every 2 s, and 10 s that a
+    /// check vouches for.
     pub fn new(cookie_file: PathBuf) -> Self {
         Self {
             cookie_file,
@@ -78,6 +82,7 @@ impl ExplorerConfig {
             idle_cache_bytes: 8 << 20,
             idle_after: Duration::from_secs(10 * 60),
             tip_poll: Duration::from_secs(2),
+            fresh: Duration::from_secs(10),
         }
     }
 }

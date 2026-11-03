@@ -30,7 +30,7 @@ use tokio::{
 use super::{
     ExplorerConfig, ExplorerInputs, assemble,
     cache::Lru,
-    chain_index::{ChainIndex, FRESH, ForkSearch, REORG_WINDOW, TipUpdate},
+    chain_index::{ChainIndex, ForkSearch, REORG_WINDOW, TipUpdate},
     sched::{Lane, Limits, Scheduler},
     source::{ChainSource, ReadCall, ReadResult, SourceError},
 };
@@ -305,11 +305,11 @@ pub(super) fn start<S: ChainSource>(
     let (internal, internal_rx) = mpsc::unbounded_channel();
     let actor = Actor {
         cache: Lru::new(config.cache_bytes),
+        index: ChainIndex::new(config.fresh),
         config,
         new_source,
         inputs,
         run: None,
-        index: ChainIndex::default(),
         sched: Scheduler::new(Limits::NORMAL),
         permits: Arc::new(Semaphore::new(Limits::NORMAL.total as usize)),
         inflight: HashMap::new(),
@@ -670,7 +670,7 @@ where
             None
         } else if tip - height >= REORG_WINDOW {
             Some(CacheKey::FinalHeader(height))
-        } else if self.index.checked_within(FRESH, now) {
+        } else if self.index.is_fresh(now) {
             Some(CacheKey::Header {
                 height,
                 epoch: self.index.epoch(),
