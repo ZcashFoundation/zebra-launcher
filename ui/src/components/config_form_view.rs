@@ -401,8 +401,14 @@ fn text_attrs(field: &Field) -> TextAttrs {
             ..TextAttrs::NONE
         },
         Kind::Path => TextAttrs::PATH,
-        Kind::SocketAddr { .. } => TextAttrs {
-            placeholder: Some("127.0.0.1:8232"),
+        // The default where there is one; else the form of an address, not a working one:
+        // 127.0.0.1:8232 here was zebrad's own RPC address, taken on every node.
+        Kind::SocketAddr { loopback_only } => TextAttrs {
+            placeholder: Some(field.default.unwrap_or(if loopback_only {
+                "127.0.0.1:port"
+            } else {
+                "IP:port"
+            })),
             ..TextAttrs::PATH
         },
         Kind::Duration => TextAttrs {
@@ -707,10 +713,22 @@ mod tests {
             TextAttrs {
                 class: Some("cfg-mono"),
                 spellcheck_off: true,
-                placeholder: Some("127.0.0.1:8232"),
+                placeholder: Some("127.0.0.1:port"),
                 inputmode: None,
             }
         );
+        let public = Field {
+            kind: Kind::SocketAddr {
+                loopback_only: false,
+            },
+            ..ADDR
+        };
+        assert_eq!(text_attrs(&public).placeholder, Some("IP:port"));
+        let listen = Field {
+            default: Some("[::]:8233"),
+            ..public
+        };
+        assert_eq!(text_attrs(&listen).placeholder, Some("[::]:8233"));
         let duration = Field {
             kind: Kind::Duration,
             default: Some("5m"),

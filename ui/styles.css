@@ -643,6 +643,16 @@ summary:focus-visible,
   font-variant-numeric: tabular-nums;
 }
 
+/* A row for a long value (`wide` in ui/src/components/rows.rs): in a list with more than one
+   label column it starts a line and its cell spans the rest. */
+.rows dt.rows-wide {
+  grid-column: 1;
+}
+
+.rows dd.rows-wide {
+  grid-column: 2 / -1;
+}
+
 /* Logs (the toolbar is the Grafana page's too) */
 
 .page-logs {

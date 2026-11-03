@@ -23,9 +23,15 @@ where
         .collect()
 }
 
-/// `rows` as a definition list; `class` is added to `rows`.
+/// `rows` as a definition list; `class` is added to `rows`. The rows labelled in `wide` start a
+/// line and their cell takes the rest of it, for a long value in a list laid out with several
+/// label columns (the dashboard's Node card); with one label column that changes nothing.
 #[component]
-pub fn Rows(rows: Vec<Row>, #[prop(optional)] class: &'static str) -> impl IntoView {
+pub fn Rows(
+    rows: Vec<Row>,
+    #[prop(optional)] class: &'static str,
+    #[prop(optional)] wide: &'static [&'static str],
+) -> impl IntoView {
     let class = if class.is_empty() {
         "rows".to_owned()
     } else {
@@ -35,9 +41,12 @@ pub fn Rows(rows: Vec<Row>, #[prop(optional)] class: &'static str) -> impl IntoV
         <dl class=class>
             {rows
                 .into_iter()
-                .map(|(label, value)| view! {
-                    <dt>{label}</dt>
-                    <dd>{value}</dd>
+                .map(|(label, value)| {
+                    let wide = wide.contains(&label);
+                    view! {
+                        <dt class:rows-wide=wide>{label}</dt>
+                        <dd class:rows-wide=wide>{value}</dd>
+                    }
                 })
                 .collect_view()}
         </dl>

@@ -511,7 +511,7 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
         <div class="cards dash-details">
             <div class="card dash-node">
                 <h3>"Node"</h3>
-                {move || view! { <Rows rows=node_rows() /> }}
+                {move || view! { <Rows rows=node_rows() wide=&["Exit detail"] /> }}
             </div>
             <div
                 class="card dash-chain"
