@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 launcher-types = { workspace = true }
+explorer-model = { workspace = true }
 leptos = { version = "0.8", features = ["csr"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
@@ -26,6 +27,7 @@ web-sys = { version = "0.3", features = [
     "Navigator",
     "ResizeObserver",
     "Storage",
+    "VisibilityState",
     "Window",
 ] }
 serde = { workspace = true }

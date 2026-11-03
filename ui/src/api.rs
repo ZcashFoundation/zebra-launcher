@@ -7,6 +7,10 @@ use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DataDirChoice, FirstRunInfo,
     ImportOutcome, LogLine, MetricsSnapshot, NodeDetails, NodeId, NodeInfo, NodeStats, OpenTarget,
     Settings, StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo, UpdateState, events,
+    explorer::{
+        ExplorerCall, ExplorerError, ExplorerErrorKind, ExplorerLiveEvent, ExplorerReply,
+        ExplorerRequest,
+    },
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue};
@@ -523,4 +527,50 @@ pub async fn open_path(target: OpenTarget) -> ApiResult<()> {
         return Ok(());
     }
     Ok(tauri::invoke("open_path", &OpenPathArgs { target }).await?)
+}
+
+#[derive(Serialize)]
+struct ExplorerArgs<'a> {
+    node: &'a NodeId,
+    call: &'a ExplorerCall,
+}
+
+/// One request to `node`'s block explorer. `Err` is the explorer's own error; a failed IPC
+/// call reads as kind `internal`.
+pub async fn explorer(
+    node: &NodeId,
+    request: ExplorerRequest,
+) -> Result<ExplorerReply, ExplorerError> {
+    let call = ExplorerCall { request };
+    if !is_tauri() {
+        return match mock::explorer::handle(node, call).await {
+            Ok(reply) => wire(reply).map_err(explorer_error),
+            Err(error) => Err(wire(error).unwrap_or_else(explorer_error)),
+        };
+    }
+    match tauri::invoke("explorer", &ExplorerArgs { node, call: &call }).await {
+        Ok(reply) => Ok(reply),
+        Err(error) => Err(explorer_error(error)),
+    }
+}
+
+/// Reads an `ExplorerError` rejection; anything else is kind `internal`.
+fn explorer_error(error: JsValue) -> ExplorerError {
+    tauri::from_js::<ExplorerError>(error.clone()).unwrap_or_else(|_| ExplorerError {
+        kind: ExplorerErrorKind::Internal,
+        message: ApiError::from(error).0,
+    })
+}
+
+/// Calls `on_live` with every `explorer_live` event: one node's explorer state, at most four
+/// a second.
+pub async fn on_explorer_live(
+    on_live: impl Fn(ExplorerLiveEvent) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::explorer::on_live(mock_handler("`explorer_live` event", on_live, on_error));
+        return Ok(());
+    }
+    Ok(tauri::listen(events::EXPLORER_LIVE, on_live, on_error).await?)
 }

@@ -1,0 +1,611 @@
+/* The Explorer tab (ui/src/explorer.rs and ui/src/explorer/). Colours are tokens only; pools
+   wear their --pool-* identities and always carry a label or a legend. No motion: a refetch dims
+   the previous answer. Breakpoints follow the page's own width (`@container page`). */
+
+.explorer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 1400px;
+}
+
+/* The shell: back, forward, Chain and the search box. */
+
+.ex-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ex-nav {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.ex-nav button {
+  min-width: 34px;
+  min-height: 32px;
+}
+
+.ex-home[aria-current="page"] {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.ex-search {
+  position: relative;
+  flex: 1;
+  min-width: 260px;
+  margin: 0;
+}
+
+.ex-search input {
+  width: 100%;
+  min-height: 32px;
+  padding-right: 32px;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.ex-keycap {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.ex-hint {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ex-hint-refused {
+  color: var(--warn);
+}
+
+/* The source line: which node, network and tip the page reads. */
+
+.ex-source {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 12px;
+}
+
+.ex-source-text {
+  color: var(--text-secondary);
+}
+
+.ex-unit-test {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.ex-chip-accent {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.ex-chip-final {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.ex-promise {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.explorer .ex-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+}
+
+.ex-page {
+  min-width: 0;
+}
+
+.ex-refreshing {
+  opacity: 0.6;
+}
+
+.ex-loading {
+  margin: 8px 0;
+}
+
+/* Sections and their text. */
+
+.ex-section {
+  margin: 0 0 16px;
+}
+
+.ex-section h2 {
+  font-size: 16px;
+}
+
+.ex-section h3 {
+  margin-top: 12px;
+}
+
+.ex-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ex-title-row h2 {
+  margin: 0;
+}
+
+.ex-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 6px 0;
+}
+
+.ex-sentence {
+  margin: 8px 0;
+  font-size: 15px;
+}
+
+.ex-caption {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.ex-hash {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ex-hash code {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.ex-copy {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.ex-copied {
+  font-size: 12px;
+}
+
+button.link.ex-link {
+  color: var(--accent-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.ex-address {
+  overflow-wrap: anywhere;
+}
+
+/* Pools: a swatch beside the name. */
+
+.ex-pool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.ex-swatch {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--series-muted);
+}
+
+.ex-pool-transparent .ex-swatch,
+.ex-fill-transparent {
+  background: var(--pool-transparent);
+}
+
+.ex-pool-sprout .ex-swatch,
+.ex-fill-sprout {
+  background: var(--pool-sprout);
+}
+
+.ex-pool-sapling .ex-swatch,
+.ex-fill-sapling {
+  background: var(--pool-sapling);
+}
+
+.ex-pool-orchard .ex-swatch,
+.ex-fill-orchard {
+  background: var(--pool-orchard);
+}
+
+.ex-pool-ironwood .ex-swatch,
+.ex-fill-ironwood {
+  background: var(--pool-ironwood);
+}
+
+.ex-pool-lockbox .ex-swatch,
+.ex-fill-lockbox {
+  background: var(--pool-lockbox);
+}
+
+.ex-kind {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ex-kind-shielded {
+  border-color: var(--series-1);
+}
+
+.ex-hidden {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+/* The block strip (V1): oldest left, newest right, gaps under them. */
+
+.ex-strip {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(96px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0 0 4px;
+  list-style: none;
+  overflow-x: auto;
+}
+
+.ex-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ex-tile-link {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-height: 132px;
+  padding: 8px;
+  border-radius: 8px;
+  text-align: left;
+}
+
+.ex-tile-newest .ex-tile-link {
+  border-color: var(--accent);
+}
+
+.ex-tile-height {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ex-tile-age,
+.ex-tile-burn,
+.ex-tile-budget,
+.ex-tile-txs,
+.ex-tile-fees {
+  font-size: 12px;
+}
+
+.ex-notes {
+  display: flex;
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--series-track);
+}
+
+.ex-notes-part {
+  height: 100%;
+}
+
+.ex-gap {
+  position: relative;
+  height: 28px;
+  border-bottom: 1px solid var(--axis);
+}
+
+.ex-gap-bar {
+  position: absolute;
+  bottom: 0;
+  left: 40%;
+  width: 20%;
+  background: var(--series-muted);
+}
+
+.ex-gap-target {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px dashed var(--axis);
+}
+
+/* The tiles under the strip. */
+
+.ex-tiles {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin: 12px 0 16px;
+}
+
+@container page (max-width: 1100px) {
+  .ex-tiles {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@container page (max-width: 640px) {
+  .ex-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ex-strip {
+    grid-template-columns: repeat(12, 96px);
+  }
+}
+
+.ex-tiles .tile-value {
+  font-size: 20px;
+}
+
+/* Tables. */
+
+.ex-table-wrap {
+  overflow-x: auto;
+}
+
+.ex-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.ex-table th,
+.ex-table td {
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.ex-table thead th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ex-table tbody th {
+  font-weight: normal;
+}
+
+.ex-table .ex-num {
+  text-align: right;
+}
+
+.ex-row-selected {
+  background: var(--banner-accent-bg);
+}
+
+/* The turnstile (V2): bars either side of an axis, coinbase lighter. */
+
+.ex-bar-cell {
+  position: relative;
+  width: 40%;
+  min-width: 160px;
+}
+
+.ex-axis {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 50%;
+  border-left: 1px solid var(--axis);
+}
+
+.ex-flow {
+  position: relative;
+  display: inline-block;
+  height: 12px;
+  margin-left: 50%;
+  vertical-align: middle;
+}
+
+.ex-flow + .ex-flow {
+  margin-left: 0;
+}
+
+.ex-flow-coinbase {
+  opacity: 0.45;
+}
+
+.ex-flow-out {
+  margin-left: 0;
+  transform: translateX(-100%);
+  left: 50%;
+  position: absolute;
+  top: calc(50% - 6px);
+}
+
+/* The reward split (V3). */
+
+.ex-stack {
+  display: flex;
+  height: 16px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--series-track);
+}
+
+.ex-stack-part {
+  height: 100%;
+}
+
+.ex-fill-miner {
+  background: var(--series-1);
+}
+
+.ex-fill-stream {
+  background: var(--series-3);
+}
+
+.ex-fill-fees {
+  background: var(--series-2);
+}
+
+.ex-fill-burned {
+  background: var(--series-muted);
+}
+
+.ex-reward-rows {
+  margin-top: 8px;
+}
+
+.ex-reward-rows dt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ex-reward-rows dd code {
+  margin-left: 8px;
+}
+
+/* Meters: the budget (V4) and the confirmations (V7). */
+
+.ex-meter {
+  position: relative;
+  max-width: 560px;
+  height: 12px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--series-track);
+}
+
+.ex-meter-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--series-1);
+}
+
+.ex-meter-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--text-secondary);
+}
+
+.ex-meter-label {
+  margin: 4px 0 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.ex-confirmations {
+  margin: 8px 0;
+}
+
+/* Transaction ids, inputs and the search's choices. */
+
+.ex-txids {
+  columns: 3 260px;
+  margin: 0;
+  padding-left: 48px;
+  font-size: 13px;
+}
+
+.ex-inputs {
+  margin: 0;
+  padding-left: 28px;
+}
+
+.ex-txids li,
+.ex-inputs li {
+  padding: 1px 0;
+}
+
+.ex-pager {
+  margin-top: 8px;
+}
+
+.ex-choices {
+  padding-left: 20px;
+}
+
+/* Shielded cards. */
+
+.ex-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.ex-card h3 {
+  margin: 0 0 6px;
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.ex-card p {
+  margin: 4px 0;
+}
+
+.ex-hidden-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ex-details summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.ex-detail-rows {
+  margin-top: 8px;
+}
+
+.ex-detail-rows code {
+  overflow-wrap: anywhere;
+}
+
+@media (forced-colors: active) {
+  .ex-swatch,
+  .ex-notes-part,
+  .ex-flow,
+  .ex-stack-part,
+  .ex-meter-fill {
+    forced-color-adjust: none;
+    border: 1px solid CanvasText;
+  }
+}
