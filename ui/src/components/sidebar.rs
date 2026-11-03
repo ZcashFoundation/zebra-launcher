@@ -8,12 +8,33 @@ use leptos::prelude::*;
 
 use crate::{
     app::{AppState, Tab},
+    charts::widgets::focus_sibling,
     node_state::NodeState,
     node_summary::summarize,
 };
 
 /// The networks in the order the sidebar lists them.
 const NETWORKS: [Network; 2] = [Network::Mainnet, Network::Testnet];
+
+/// The network `by` places from `network` in the sidebar's order, wrapping around: where the
+/// arrow keys move the network choice.
+fn step_network(network: Network, by: i32) -> Network {
+    let len = NETWORKS.len() as i32;
+    let index = NETWORKS
+        .iter()
+        .position(|candidate| *candidate == network)
+        .unwrap_or(0) as i32;
+    NETWORKS[(index + by).rem_euclid(len) as usize]
+}
+
+/// A network choice's name and tooltip, which the folded rail shows only as a letter:
+/// "Testnet · 1 node", "Mainnet · 4 nodes".
+fn network_label(network: Network, count: usize) -> String {
+    match count {
+        1 => format!("{} · 1 node", network.as_str()),
+        count => format!("{} · {count} nodes", network.as_str()),
+    }
+}
 
 /// What a node is called in the sidebar, under its network's tab: a default name without
 /// its network ("Zebra", "Zebra 2"), any other name as it is.
@@ -86,19 +107,34 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
         }
         .into_any()
     };
+    // The network choice is a radio group: it scopes the whole window rather than showing a
+    // panel of its own. Tab reaches the chosen network only; the arrow keys choose the other.
     let network_tab = move |network: Network| {
         let selected = move || state.network.get() == network;
         let count = move || state.nodes_on(network).len();
+        let label = move || network_label(network, count());
         view! {
             <button
                 type="button"
-                role="tab"
+                role="radio"
                 class="net-tab"
                 class:net-tab-testnet=network == Network::Testnet
                 class:active=selected
-                aria-selected=move || selected().to_string()
-                title=move || format!("{} · {} nodes", network.as_str(), count())
+                aria-checked=move || selected().to_string()
+                tabindex=move || if selected() { "0" } else { "-1" }
+                aria-label=label
+                title=label
                 on:click=move |_| state.network.set(network)
+                on:keydown=move |event: web_sys::KeyboardEvent| {
+                    let by = match event.key().as_str() {
+                        "ArrowRight" | "ArrowDown" => 1,
+                        "ArrowLeft" | "ArrowUp" => -1,
+                        _ => return,
+                    };
+                    event.prevent_default();
+                    state.network.set(step_network(network, by));
+                    focus_sibling(&event, by);
+                }
             >
                 <span class="net-tab-name">{network.as_str()}</span>
                 <span class="net-tab-short" aria-hidden="true">{&network.as_str()[..1]}</span>
@@ -112,7 +148,7 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
                 <img class="brand-icon" src="/64x64.png" alt="" width="64" height="64" />
                 <span class="brand-name">"Zeal"</span>
             </div>
-            <div class="net-tabs" role="tablist" aria-label="Network">
+            <div class="net-tabs" role="radiogroup" aria-label="Network">
                 {NETWORKS.map(network_tab).collect_view()}
             </div>
             <button
@@ -235,5 +271,22 @@ mod tests {
         assert_eq!(short_name(&info("Zebra · Mainnet")), "Zebra");
         assert_eq!(short_name(&info("Zebra · Mainnet 2")), "Zebra 2");
         assert_eq!(short_name(&info("Archive node")), "Archive node");
+    }
+
+    #[test]
+    fn the_arrow_keys_move_the_network_choice_around() {
+        use Network::{Mainnet, Testnet};
+        assert_eq!(step_network(Mainnet, 1), Testnet);
+        assert_eq!(step_network(Testnet, -1), Mainnet);
+        // Past either end, the choice wraps.
+        assert_eq!(step_network(Testnet, 1), Mainnet);
+        assert_eq!(step_network(Mainnet, -1), Testnet);
+    }
+
+    #[test]
+    fn a_network_choice_counts_its_nodes() {
+        assert_eq!(network_label(Network::Testnet, 1), "Testnet · 1 node");
+        assert_eq!(network_label(Network::Mainnet, 4), "Mainnet · 4 nodes");
+        assert_eq!(network_label(Network::Testnet, 0), "Testnet · 0 nodes");
     }
 }

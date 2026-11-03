@@ -49,7 +49,7 @@ pub fn RangeControl(value: RwSignal<Range>) -> impl IntoView {
 }
 
 /// Moves focus to the next (`by` > 0) or previous radio, wrapping around the group.
-fn focus_sibling(ev: &web_sys::KeyboardEvent, by: i32) {
+pub(crate) fn focus_sibling(ev: &web_sys::KeyboardEvent, by: i32) {
     let Some(current) = ev
         .target()
         .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
