@@ -21,3 +21,9 @@ pub mod service;
 pub mod store;
 
 pub use service::{EndpointHost, Options, PublicServices, Wiring, prepare_launch};
+
+/// Makes ring the process's default rustls provider if none is yet, so clients built without
+/// an explicit provider (instant-acme's, the updater's) find one. The first install wins.
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}

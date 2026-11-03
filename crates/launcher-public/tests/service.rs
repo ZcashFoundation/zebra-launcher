@@ -39,7 +39,7 @@ struct Host {
 }
 
 impl EndpointHost for Host {
-    fn apply(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+    fn apply(&self, _restart: bool) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
         let port = self
             .settings
             .current()

@@ -29,13 +29,13 @@ pub fn pause(spec: &PublicServiceSpec, facts: &Facts) -> Option<(PauseReason, Re
         return Some((PauseReason::ByYou, Resume::NeedsYou));
     }
     if spec.network != facts.network {
-        return Some((PauseReason::NetworkChanged, Resume::Automatic));
+        return Some((PauseReason::NetworkChanged, Resume::NeedsYou));
+    }
+    if let Some(why) = &facts.held {
+        return Some((why.clone(), Resume::NeedsYou));
     }
     if !spec.opened {
         return None;
-    }
-    if facts.held_at_launch {
-        return Some((PauseReason::NotResumed, Resume::NeedsYou));
     }
     if let Some(interface) = facts.net.as_ref().and_then(|net| net.vpn.clone()) {
         return Some((PauseReason::VpnRoute { interface }, Resume::Automatic));
@@ -203,7 +203,16 @@ mod tests {
         };
         assert_eq!(
             pause(&spec, &testnet),
-            Some((PauseReason::NetworkChanged, Resume::Automatic))
+            Some((PauseReason::NetworkChanged, Resume::NeedsYou))
+        );
+        // Switching back keeps it paused until the user resumes.
+        let back = Facts {
+            held: Some(PauseReason::NetworkChanged),
+            ..base.clone()
+        };
+        assert_eq!(
+            pause(&spec, &back),
+            Some((PauseReason::NetworkChanged, Resume::NeedsYou))
         );
 
         let mut vpn = base.clone();
@@ -281,7 +290,7 @@ mod tests {
             Some((PauseReason::BackingStopped, Resume::Automatic))
         );
         let held = Facts {
-            held_at_launch: true,
+            held: Some(PauseReason::NotResumed),
             ..base
         };
         assert_eq!(

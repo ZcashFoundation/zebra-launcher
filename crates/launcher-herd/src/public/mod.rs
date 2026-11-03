@@ -93,8 +93,13 @@ pub struct Facts {
     pub gateway: GatewayStats,
     /// The keep-awake inhibitor is held.
     pub awake_held: bool,
-    /// Zeal started with "resume when Zeal starts" off, so the service waits for the switch.
-    pub held_at_launch: bool,
+    /// A pause that only the user's switch ends: Zeal started with "resume when Zeal starts"
+    /// off ([`PauseReason::NotResumed`]), or zebrad's network changed
+    /// ([`PauseReason::NetworkChanged`]), which switching back does not undo by itself.
+    ///
+    /// [`PauseReason::NotResumed`]: launcher_types::public::PauseReason::NotResumed
+    /// [`PauseReason::NetworkChanged`]: launcher_types::public::PauseReason::NetworkChanged
+    pub held: Option<launcher_types::public::PauseReason>,
 }
 
 impl Facts {
@@ -127,7 +132,7 @@ impl Facts {
             month_bytes_up: 0,
             gateway: GatewayStats::default(),
             awake_held: false,
-            held_at_launch: false,
+            held: None,
         }
     }
 

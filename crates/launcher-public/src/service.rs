@@ -55,10 +55,11 @@ const NET_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How often the month's upload is written down.
 const SAVE_EVERY: Duration = Duration::from_secs(10 * 60);
 
-/// What the app does for the actor: write the managed keys from the stored settings and
-/// restart zebrad if it runs, behind the app's permits.
+/// What the app does for the actor: write the managed keys from the stored settings and, with
+/// `restart`, restart zebrad if it runs, behind the app's permits. Without `restart` the file
+/// changes for zebrad's next start only, as a network change does.
 pub trait EndpointHost: Send + Sync + 'static {
-    fn apply(&self) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+    fn apply(&self, restart: bool) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 }
 
 /// Where the actor gets certificates and names, and what it may do here.
@@ -299,7 +300,8 @@ struct Actor {
     internal_tx: mpsc::Sender<Internal>,
     internal_rx: Option<mpsc::Receiver<Internal>>,
 
-    held_at_launch: bool,
+    /// A pause only the user's switch ends.
+    held: Option<launcher_types::public::PauseReason>,
     paused: Option<(String, SystemTime)>,
     at_tip_since: Option<SystemTime>,
     name_elsewhere_since: Option<SystemTime>,
@@ -384,7 +386,7 @@ impl Actor {
             out,
             internal_tx,
             internal_rx: Some(internal_rx),
-            held_at_launch,
+            held: held_at_launch.then_some(launcher_types::public::PauseReason::NotResumed),
             paused: None,
             at_tip_since: None,
             name_elsewhere_since: None,
@@ -535,7 +537,7 @@ impl Actor {
             bytes_down: stats.bytes_down,
         };
         facts.awake_held = self.awake.is_some();
-        facts.held_at_launch = self.held_at_launch;
+        facts.held = self.held.clone();
         facts
     }
 
@@ -553,6 +555,10 @@ impl Actor {
             return;
         };
         self.roll_month(now);
+        if spec.network != settings.network {
+            // Switching back does not resume by itself.
+            self.held = Some(launcher_types::public::PauseReason::NetworkChanged);
+        }
         let facts = self.facts(&spec, &settings, now);
         self.sync_endpoint(&spec, &facts, settings.network).await;
         let spec = self.spec().unwrap_or(spec);
@@ -618,10 +624,13 @@ impl Actor {
         let target = self.spec().and_then(|spec| spec.backend_port);
         if !self.applying && self.applied != Some(target) {
             self.applying = true;
+            // zebrad on another network than the service's keeps running as it is: the key
+            // goes from the file before its next start.
+            let restart = spec.network == network;
             let host = self.host.clone();
             let tx = self.internal_tx.clone();
             tokio::spawn(async move {
-                let result = host.apply().await;
+                let result = host.apply(restart).await;
                 let _ = tx.send(Internal::Applied { target, result }).await;
             });
         }
@@ -1077,7 +1086,9 @@ impl Actor {
                     self.stop_door();
                     self.awake = None;
                 }
-                self.held_at_launch = false;
+                if on {
+                    self.held = None;
+                }
                 self.endpoint_error = None;
                 let result = self.update_spec(move |spec| spec.switch_on = on).await;
                 let _ = reply.send(result);
@@ -1300,7 +1311,9 @@ impl Actor {
         })
         .await?;
         // The endpoint must be gone before the spec is: once it is, the key is the user's.
-        self.host.apply().await?;
+        self.host
+            .apply(spec.network == self.settings.current().network)
+            .await?;
         self.applied = Some(None);
         if remove_token && let Some(name) = &spec.name {
             let _ = self
