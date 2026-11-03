@@ -82,6 +82,24 @@ fn caveat(kind: NodeKind) -> Option<&'static str> {
     }
 }
 
+/// The warning for a new node of `kind` on `network` when `existing` already has a node there
+/// that peers would count as the same: two zebrad nodes on one network. Peers accept one
+/// connection from each IP address, so the two compete for them.
+fn same_network_warning(kind: NodeKind, network: Network, existing: &[NodeInfo]) -> Option<String> {
+    if kind != NodeKind::Zebrad {
+        return None;
+    }
+    let other = existing
+        .iter()
+        .find(|node| node.kind == NodeKind::Zebrad && node.network == network)?;
+    Some(format!(
+        "{} is already on {network}. Peers accept one connection from each IP address, so two \
+         nodes on one network behind this computer's address compete for the same peers. A \
+         second node of a network is mainly for testing a build.",
+        other.name
+    ))
+}
+
 /// "P2P 18233 · RPC 18232": a node's ports in a line.
 pub fn ports_line(ports: &[NodePort]) -> String {
     if ports.is_empty() {
@@ -523,6 +541,10 @@ pub fn AddNode(
                     </p>
                 </div>
             </div>
+            {move || {
+                same_network_warning(current, network.get(), &existing())
+                    .map(|text| view! { <div class="banner banner-warn">{text}</div> })
+            }}
             {caveat(current).map(|text| view! { <div class="banner banner-warn">{text}</div> })}
         }
     };
@@ -693,6 +715,40 @@ mod tests {
         assert_eq!(
             node_folder("C:\\Users\\me\\AppData\\Local\\org.zfnd.zeal\\", &id),
             "C:\\Users\\me\\AppData\\Local\\org.zfnd.zeal\\nodes\\zebrad-testnet"
+        );
+    }
+
+    #[test]
+    fn a_second_zebrad_node_on_a_network_is_warned_about() {
+        let info = |name: &str, network| NodeInfo {
+            id: NodeId::new("zebrad-mainnet").unwrap(),
+            name: name.into(),
+            kind: NodeKind::Zebrad,
+            network,
+            depends_on: None,
+            data_dir: String::new(),
+            own_folder: None,
+            ports: Vec::new(),
+            program: NodeProgram::Bundled,
+            autostart: true,
+            stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
+        };
+        let existing = [info("Zebra · Mainnet", Network::Mainnet)];
+        let warning = same_network_warning(NodeKind::Zebrad, Network::Mainnet, &existing)
+            .expect("a second Mainnet node");
+        assert!(
+            warning.starts_with("Zebra · Mainnet is already on Mainnet."),
+            "{warning}"
+        );
+        assert_eq!(
+            same_network_warning(NodeKind::Zebrad, Network::Testnet, &existing),
+            None,
+            "Testnet next to Mainnet"
+        );
+        assert_eq!(
+            same_network_warning(NodeKind::Zaino, Network::Mainnet, &existing),
+            None,
+            "a service makes no peer connections"
         );
     }
 

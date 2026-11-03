@@ -643,9 +643,13 @@ fn Nodes() -> impl IntoView {
         let nodes = state.nodes.get();
         match nodes.as_slice() {
             [node] => node.info.with(|info| {
+                let other = match info.network {
+                    Network::Mainnet => Network::Testnet,
+                    Network::Testnet => Network::Mainnet,
+                };
                 format!(
-                    "Zeal runs one node, {}. Add another to run Testnet next to Mainnet, or a second node of the same network; the window then lists them in a sidebar.",
-                    info.name
+                    "Zeal runs one node, {}. Add another to run {other} next to {}; the window then lists them in a sidebar.",
+                    info.name, info.network
                 )
             }),
             nodes => {
