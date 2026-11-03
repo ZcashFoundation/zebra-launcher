@@ -294,8 +294,9 @@ pub struct BlockLedger {
     pub fees: Option<u64>,
     /// The share of the fees removed from circulation from NU7 (⌊6 F / 10⌋).
     pub burned: Option<u64>,
-    /// Note commitments created, from the trees' sizes: Sapling, Orchard, Ironwood.
-    pub notes: [u32; 3],
+    /// Note commitments created, from the trees' sizes: Sapling, Orchard, Ironwood. `None`
+    /// without the parent block.
+    pub notes: Option<[u32; 3]>,
     pub budget: Budget,
 }
 
