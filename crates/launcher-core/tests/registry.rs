@@ -966,6 +966,10 @@ async fn a_note_goes_to_the_node_it_names_or_to_every_node() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(
+    windows,
+    ignore = "Windows ends zebrad's job at once, so no node stays stopping for the follower"
+)]
 async fn the_end_of_support_follower_waits_once_the_mainnet_nodes_runtime_ended() {
     // The Testnet node ignores the stop request, so the shutdown waits out
     // its stop grace after the Mainnet node's runtime ended.
