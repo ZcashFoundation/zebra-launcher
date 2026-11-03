@@ -18,6 +18,9 @@ use crate::{
 /// The bundled zebrad's version, until zebrad reports its own.
 const ZEBRAD_VERSION: &str = include_str!("../../ZEBRAD_VERSION");
 
+/// How long applying the endpoint waits for zebrad's restart: its stop grace and a start.
+const RESTART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// Applies the managed keys the way `apply_config` does around a restart: the config permit,
 /// the start permit while zebrad runs, `config::ensure`, and a restart only if zebrad was
 /// running. A busy permit fails fast, so the service actor clears the port again.
@@ -45,10 +48,10 @@ impl<R: Runtime> EndpointHost for Host<R> {
                 .map_err(|err| format!("zebrad.toml could not be updated: {err}"))?;
             if running && restart {
                 tracing::info!("restarting zebrad for the light wallet endpoint");
-                state
-                    .supervisor
-                    .restart()
+                // A start resolves once zebrad accepted its configuration, as in apply_config.
+                tokio::time::timeout(RESTART_TIMEOUT, state.supervisor.restart())
                     .await
+                    .map_err(|_| "zebrad did not restart in time".to_string())?
                     .map_err(|err| err.to_string())?;
             }
             Ok(())

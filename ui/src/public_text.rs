@@ -425,7 +425,7 @@ pub fn finding_text(finding: &Finding) -> String {
         Finding::EndpointNotOpen => "Zebra is opening its light wallet endpoint.".into(),
         Finding::EndpointPortTaken { port } => format!(
             "Another program uses port {port} on this computer, so Zebra could not open its \
-             light wallet endpoint. Close it, then run the checks again."
+             light wallet endpoint. Check again for another port, then start Zebra."
         ),
         Finding::EndpointNotWritten { detail } => {
             format!("Zeal could not restart Zebra with its endpoint: {detail}. Try again.")

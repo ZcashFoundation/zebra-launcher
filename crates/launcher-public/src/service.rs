@@ -17,8 +17,7 @@ use std::{
 
 use launcher_core::settings::SettingsHandle;
 use launcher_herd::public::{
-    self as rules, Checked, Facts,
-    evidence::{self, reachability},
+    self as rules, Checked, Facts, evidence,
     firewall::firewall_info,
     light::{at_tip, pick_endpoint_port, track_since, wants_endpoint},
     names::{keychain_account, parse_name, plausible_duckdns_token},
@@ -26,10 +25,10 @@ use launcher_herd::public::{
 use launcher_types::{
     ExitClass, Network, NodeId, NodeStats, Phase, Settings, Status,
     public::{
-        CONSENT_VERSION, CertStatus, CheckId, ConnectionReport, Consent, DnsProvider, Evidence,
-        EvidenceSource, FirewallInfo, GatewayMode, GatewayStats, LightdInfo, LocalTestProblem,
-        NetFacts, OpenError, PublicHostname, PublicService, PublicServiceSpec, PublicState,
-        PublicStatus, StepAnswer, StepId, StillPublic, WanKind,
+        CONSENT_VERSION, CheckId, ConnectionReport, Consent, DnsProvider, Evidence, EvidenceSource,
+        FirewallInfo, GatewayMode, GatewayStats, LightdInfo, LocalTestProblem, NetFacts, OpenError,
+        PublicHostname, PublicService, PublicServiceSpec, PublicState, PublicStatus, StepAnswer,
+        StepId, StillPublic, WanKind,
     },
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -996,14 +995,31 @@ impl Actor {
             .as_ref()
             .map(|acme| acme.handle.cert.clone())
             .unwrap_or_else(|| watch::channel(None).1);
-        match FrontDoor::start(
-            config,
-            cert,
+        let mut started = FrontDoor::start(
+            config.clone(),
+            cert.clone(),
             self.challenge.subscribe(),
             self.mode.subscribe(),
         )
-        .await
+        .await;
+        // A system without IPv6 cannot bind `[::]`: IPv4 alone, then.
+        if matches!(started, Err(launcher_gateway::GatewayError::Listen { .. }))
+            && config.listen.ip().is_ipv6()
+            && config.listen.ip().is_unspecified()
         {
+            let ipv4 = launcher_gateway::Config {
+                listen: SocketAddr::from((Ipv4Addr::UNSPECIFIED, config.listen.port())),
+                ..config
+            };
+            started = FrontDoor::start(
+                ipv4,
+                cert,
+                self.challenge.subscribe(),
+                self.mode.subscribe(),
+            )
+            .await;
+        }
+        match started {
             Ok(mut door) => {
                 self.port_free = Some(true);
                 self.can_validate.send_replace(true);
@@ -1098,7 +1114,7 @@ impl Actor {
                 let _ = reply.send(result);
             }
             Msg::RunChecks { step, reply } => {
-                self.run_checks(step);
+                self.run_checks(step).await;
                 let _ = reply.send(Ok(()));
             }
             Msg::Open { reply } => {
@@ -1247,10 +1263,26 @@ impl Actor {
         }
     }
 
-    fn run_checks(&mut self, step: StepId) {
+    async fn run_checks(&mut self, step: StepId) {
         match step {
             StepId::Service => {
                 self.endpoint_error = None;
+                // zebrad could not bind the endpoint's port: the next look picks a free one.
+                let taken = {
+                    let status = self.status_rx.borrow();
+                    status.phase
+                        == (Phase::Failed {
+                            class: ExitClass::PortInUse,
+                        })
+                        && status
+                            .last_exit
+                            .as_ref()
+                            .and_then(|exit| exit.detail.as_deref())
+                            .is_some_and(|detail| detail.contains("lightwalletd"))
+                };
+                if taken {
+                    let _ = self.update_spec(|spec| spec.backend_port = None).await;
+                }
                 if let Some(light) = &self.light {
                     let _ = light.handle.now.try_send(());
                 }
@@ -1381,16 +1413,6 @@ impl Actor {
             firewall,
         }
     }
-}
-
-/// The reachability `evidence` gives, for callers outside the actor.
-pub fn reach(evidence: &[Evidence], now: SystemTime) -> launcher_types::public::Reachability {
-    reachability(evidence, true, now)
-}
-
-/// Whether a certificate status holds a valid certificate at `now`.
-pub fn cert_valid(cert: &CertStatus, now: SystemTime) -> bool {
-    cert.not_after.is_some_and(|not_after| not_after > now)
 }
 
 #[cfg(test)]
