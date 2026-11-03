@@ -1426,6 +1426,12 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      parent's own departure, waiting one more reading if it must. The parent's final total
      holds the member's, so sending the member to `lost` would count it twice; an `sh` that
      ends within a second of its command is the usual case.
+   - Waiting members claim an ancestor's growth before members that just left, since their
+     reap may be what the reading shows, with one exception: a member that could not claim
+     although its parent's departure claimed in the same reading. The parent's total reached
+     the rollup without it, so it is an orphan that init reaped, and it claims last. Waiting
+     first, it could take the growth of a sibling the ancestor had just reaped, which would
+     then go to `lost` while its time is in the rollup.
    - The root's identity stays among the sticky ids after the root exits, so its start
      time is checked once per run.
    - The first reading comes within milliseconds of the spawn, so a run's first rate is

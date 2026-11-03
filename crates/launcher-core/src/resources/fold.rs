@@ -28,6 +28,12 @@
 //!   live ancestor, and settles after the parent's own departure, waiting one more reading if
 //!   it must: the parent's final total holds the member's.
 //!
+//! Members that waited claim an ancestor's growth before those that just left, since their
+//! reap may be what the reading shows. A member that could not claim although its parent's
+//! departure did, in the same reading, claims last: the parent's total reached the rollup
+//! without it, so the parent did not reap it (an orphan, reaped by init), and the growth left
+//! belongs to its siblings.
+//!
 //! The published totals never decrease within a run, which hides the one-reading dip of a torn
 //! read.
 
@@ -180,6 +186,8 @@ struct Seen {
 #[derive(Clone, Debug, PartialEq)]
 struct Departed {
     id: Identity,
+    /// Its parent when it was last seen.
+    parent: Option<Identity>,
     /// The nearest live ancestor when it left.
     anchor: Identity,
     /// 1 for a child of the anchor, 2 for a grandchild, and so on.
@@ -189,6 +197,9 @@ struct Departed {
     written: Option<u64>,
     /// It has already waited one reading.
     waited: bool,
+    /// It could not claim although its parent's departure claimed in the same reading, so
+    /// its parent did not reap it: an orphan, reaped outside the tree.
+    suspect: bool,
 }
 
 /// One run's measurement: the members last seen, the counters of the departed, and the
@@ -411,12 +422,14 @@ impl Fold {
             match anchor {
                 Some(anchor) => pending.push(Departed {
                     id: *id,
+                    parent: seen.parent,
                     anchor,
                     depth,
                     cpu: seen.cpu,
                     read: seen.read,
                     written: seen.written,
                     waited: false,
+                    suspect: false,
                 }),
                 None => orphans.push(Counters {
                     cpu: seen.cpu,
@@ -444,9 +457,11 @@ impl Fold {
             });
         }
         // Waiting departures first, since their reap may be what this reading shows; then the
-        // shallowest, whose fold carries the time of the children it reaped.
+        // shallowest, whose fold carries the time of the children it reaped. Suspects last:
+        // their time is in no rollup, so the growth is the others'.
         pending.sort_by_key(|departure| {
             (
+                departure.suspect,
                 !departure.waited,
                 departure.depth,
                 departure.id.pid,
@@ -454,14 +469,23 @@ impl Fold {
             )
         });
         let mut waiting = Vec::new();
+        let mut claimed = HashSet::new();
         for departure in pending {
             let anchored = live(&departure.anchor);
             let credit = credit.entry(departure.anchor).or_insert(0.0);
             if anchored && departure.cpu <= *credit + EPSILON {
                 *credit = (*credit - departure.cpu).max(0.0);
+                claimed.insert(departure.id);
             } else if anchored && !departure.waited {
+                // The parent's total reached the anchor and left too little for this one: the
+                // parent did not reap it. A suspect stays one after a move up the tree.
+                let suspect = departure.suspect
+                    || departure
+                        .parent
+                        .is_some_and(|parent| claimed.contains(&parent));
                 waiting.push(Departed {
                     waited: true,
+                    suspect,
                     ..departure
                 });
             } else {
@@ -640,6 +664,17 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-6
+    }
+
+    /// Folds `readings`, 5 s apart, into a new run: the last sample, and the fold.
+    fn fold_all(readings: Vec<Vec<MemberReading>>) -> (NodeResources, Fold) {
+        let clock = clock();
+        let mut fold = Fold::new(&clock.probe(1), Platform::Linux);
+        let mut last = None;
+        for (tick, members) in (1..).zip(readings) {
+            last = Some(fold.fold(clock.reading(tick, members)));
+        }
+        (last.expect("a reading"), fold)
     }
 
     #[test]
@@ -856,6 +891,112 @@ mod tests {
         assert!(close(settled.cpu_secs, 102.3), "{}", settled.cpu_secs);
         assert_eq!(settled.read_bytes, Some(2700));
         assert!(close(fold.lost.cpu, 0.8));
+    }
+
+    #[test]
+    fn an_orphan_claims_after_a_sibling_its_ancestor_reaped() {
+        // zebrad reaps sh (101), whose cmd (102) was orphaned and reaped by init: the rollup
+        // grows by sh's 1.5 s only, and cmd waits. Then zebrad reaps a helper (103) seen at
+        // 3.0 s, which ended at 3.2 s: that growth is the helper's, and cmd's seen 2.0 s is
+        // lost.
+        let (settled, fold) = fold_all(vec![
+            vec![
+                member(100, 1, 100.0, 0.0, 0),
+                member(101, 100, 1.0, 0.0, 0),
+                member(102, 101, 2.0, 0.0, 0),
+            ],
+            vec![member(100, 1, 100.0, 1.5, 0), member(103, 100, 3.0, 0.0, 0)],
+            vec![member(100, 1, 100.0, 4.7, 0)],
+            vec![member(100, 1, 100.0, 4.7, 0)],
+        ]);
+        assert!(close(settled.cpu_secs, 106.7), "{}", settled.cpu_secs);
+        assert!(close(fold.lost.cpu, 2.0), "{}", fold.lost.cpu);
+    }
+
+    #[test]
+    fn a_member_from_a_torn_read_claims_before_one_that_just_left() {
+        // 101 leaves while zebrad was read before reaping it, and 102 leaves the same way one
+        // reading later: each reap shows a reading late, and the waiting one claims first.
+        let (settled, fold) = fold_all(vec![
+            vec![
+                member(100, 1, 100.0, 0.0, 0),
+                member(101, 100, 10.0, 0.0, 0),
+            ],
+            vec![member(100, 1, 105.0, 0.0, 0), member(102, 100, 3.0, 0.0, 0)],
+            vec![member(100, 1, 110.0, 11.0, 0)],
+            vec![member(100, 1, 115.0, 14.5, 0)],
+            vec![member(100, 1, 115.0, 14.5, 0)],
+        ]);
+        assert!(close(settled.cpu_secs, 129.5), "{}", settled.cpu_secs);
+        assert!(close(fold.lost.cpu, 0.0), "{}", fold.lost.cpu);
+    }
+
+    #[test]
+    fn an_orphan_claims_after_the_next_shell_and_its_command() {
+        // zebrad reaps sh (101), and cmd (102), orphaned and reaped by init, waits. Then a
+        // second sh (103) and its command (104) leave together, each reaped by its parent:
+        // that growth is theirs, and cmd's seen 2.0 s is lost.
+        let (settled, fold) = fold_all(vec![
+            vec![
+                member(100, 1, 100.0, 0.0, 0),
+                member(101, 100, 1.0, 0.0, 0),
+                member(102, 101, 2.0, 0.0, 0),
+            ],
+            vec![
+                member(100, 1, 100.0, 1.5, 0),
+                member(103, 100, 1.0, 0.0, 0),
+                member(104, 103, 1.0, 0.0, 0),
+            ],
+            vec![member(100, 1, 100.0, 4.2, 0)],
+            vec![member(100, 1, 100.0, 4.2, 0)],
+        ]);
+        assert!(close(settled.cpu_secs, 106.2), "{}", settled.cpu_secs);
+        assert!(close(fold.lost.cpu, 2.0), "{}", fold.lost.cpu);
+    }
+
+    #[test]
+    fn a_torn_read_and_an_orphan_at_the_same_depth() {
+        // The first sh (101) and its command leave while zebrad was read before reaping sh, so
+        // both wait; the second sh (103) leaves too, and its command (104) was orphaned. The
+        // next reading holds both shells' totals: the first with its command, the second
+        // without, so only the orphan's seen 1.5 s is lost.
+        let (settled, fold) = fold_all(vec![
+            vec![
+                member(100, 1, 100.0, 0.0, 0),
+                member(101, 100, 1.0, 0.0, 0),
+                member(102, 101, 2.0, 0.0, 0),
+            ],
+            vec![
+                member(100, 1, 100.0, 0.0, 0),
+                member(103, 100, 1.0, 0.0, 0),
+                member(104, 103, 1.5, 0.0, 0),
+            ],
+            vec![member(100, 1, 100.0, 5.2, 0)],
+            vec![member(100, 1, 100.0, 5.2, 0)],
+        ]);
+        assert!(close(settled.cpu_secs, 106.7), "{}", settled.cpu_secs);
+        assert!(close(fold.lost.cpu, 1.5), "{}", fold.lost.cpu);
+    }
+
+    #[test]
+    fn an_orphan_stays_last_after_it_moves_up() {
+        // 101 reaps 102, whose child 103 was orphaned and reaped by init: 103 waits on 101 as
+        // an orphan. Then zebrad reaps 101, and a reading later a helper (105) seen at 3.0 s,
+        // which ended at 3.2 s. 103 moves up to zebrad and still claims after the helper.
+        let (settled, fold) = fold_all(vec![
+            vec![
+                member(100, 1, 100.0, 0.0, 0),
+                member(101, 100, 1.0, 0.0, 0),
+                member(102, 101, 1.0, 0.0, 0),
+                member(103, 102, 2.0, 0.0, 0),
+            ],
+            vec![member(100, 1, 100.0, 0.0, 0), member(101, 100, 1.0, 1.2, 0)],
+            vec![member(100, 1, 100.0, 2.3, 0), member(105, 100, 3.0, 0.0, 0)],
+            vec![member(100, 1, 100.0, 5.5, 0)],
+            vec![member(100, 1, 100.0, 5.5, 0)],
+        ]);
+        assert!(close(settled.cpu_secs, 107.5), "{}", settled.cpu_secs);
+        assert!(close(fold.lost.cpu, 2.0), "{}", fold.lost.cpu);
     }
 
     #[test]
