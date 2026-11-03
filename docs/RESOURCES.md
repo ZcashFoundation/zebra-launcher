@@ -1388,6 +1388,8 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      spawn, when the exec may already have read from disk.
    - The one-minute rates count the newest run's samples only, so after a restart the CPU
      and Disk tiles start from the new run, as the sparklines, the table and the totals do.
+   - The indent under a parent is visual only, so the Process cell of a child also says
+     "started by" its parent to screen readers.
    - "syncing uses every CPU" needs zebrad's own progress lines to say it syncs (syncing,
      slow or close to the tip) and the tree to use half the CPUs or more. zebrad says it
      syncs whenever it is behind the tip, also with no peers, so a stalled node or one

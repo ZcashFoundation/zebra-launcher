@@ -220,6 +220,9 @@ pub struct ProcessRow {
     /// How far under the first process: 0 for it and for processes whose parent is not in
     /// the tree, 1 for its children and so on.
     pub depth: usize,
+    /// The name of the process that started it, when that one is in the table: the indent
+    /// shows it, and the row says it to screen readers.
+    pub parent: Option<String>,
     pub started_at: SystemTime,
     /// Cores over the last minute, `5.6`.
     pub cpu: String,
@@ -234,22 +237,25 @@ pub struct ProcessRow {
 ///
 /// [`ResourceHistory::process_rates`]: crate::resource_history::ResourceHistory::process_rates
 pub fn process_rows(sample: &NodeResources, rates: &[ProcessRate]) -> Vec<ProcessRow> {
-    let mut depths: Vec<(u32, usize)> = Vec::with_capacity(sample.members.len());
+    // The rows so far: pid, depth and name.
+    let mut listed: Vec<(u32, usize, &str)> = Vec::with_capacity(sample.members.len());
     let dash = || "—".to_owned();
     sample
         .members
         .iter()
         .map(|member| {
-            let depth = member
+            let parent = member
                 .parent
-                .and_then(|parent| depths.iter().find(|(pid, _)| *pid == parent))
-                .map_or(0, |(_, depth)| depth + 1);
-            depths.push((member.pid, depth));
+                .and_then(|parent| listed.iter().find(|(pid, _, _)| *pid == parent))
+                .map(|&(_, depth, name)| (depth + 1, name.to_owned()));
+            let depth = parent.as_ref().map_or(0, |(depth, _)| *depth);
+            listed.push((member.pid, depth, &member.name));
             let rate = rates.iter().find(|rate| rate.pid == member.pid);
             ProcessRow {
                 pid: member.pid,
                 name: member.name.clone(),
                 depth,
+                parent: parent.map(|(_, name)| name),
                 started_at: member.started_at,
                 cpu: rate
                     .and_then(|rate| rate.cores)
@@ -455,6 +461,9 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                                     style:padding-left=format!("{}em", row.depth as f64 * 1.2)
                                 >
                                     {row.name}
+                                    {row.parent.map(|parent| view! {
+                                        <span class="visually-hidden">{format!(", started by {parent}")}</span>
+                                    })}
                                 </span>
                             </td>
                             <td class="dash-resources-wide">{row.pid}</td>
@@ -798,6 +807,18 @@ mod tests {
         let rows = process_rows(&sample, &rates);
         let depths: Vec<(u32, usize)> = rows.iter().map(|row| (row.pid, row.depth)).collect();
         assert_eq!(depths, vec![(10, 0), (11, 1), (12, 2), (13, 1), (20, 0)]);
+        let parents: Vec<Option<&str>> = rows.iter().map(|row| row.parent.as_deref()).collect();
+        assert_eq!(
+            parents,
+            vec![
+                None,
+                Some("python3"),
+                Some("python3"),
+                Some("python3"),
+                None
+            ],
+            "the parent by its pid, not the row above"
+        );
         assert_eq!(rows[1].cpu, "3.3");
         assert_eq!(rows[1].written, "2.5 MB/s");
         assert_eq!(rows[1].read, "—");
