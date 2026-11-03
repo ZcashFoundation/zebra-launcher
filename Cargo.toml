@@ -22,7 +22,9 @@ nix = { version = "0.31", default-features = false }
 windows-sys = "0.61"
 libc = "0.2"
 toml_edit = "0.25"
-# Loopback JSON-RPC only: plain HTTP, no TLS stack.
+# Loopback JSON-RPC only: plain HTTP, no TLS stack. Held at 0.12: tauri-plugin-updater uses
+# reqwest 0.13 with rustls and no crypto provider, and on the same version those features would
+# reach these clients too, which then panic when built (.github/dependabot.yml).
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 base64 = "0.22"
 # Platform directories, for zebrad's default cache dir (alpha.4 leftovers).
