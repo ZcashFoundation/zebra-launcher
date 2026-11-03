@@ -28,6 +28,7 @@ pub struct Seen {
     pub stats: bool,
     pub details: bool,
     pub metrics: bool,
+    pub resources: bool,
 }
 
 /// One node's signals. `Copy`, like [`AppState`](crate::app::AppState): every field is a signal.

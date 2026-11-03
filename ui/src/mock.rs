@@ -70,9 +70,7 @@ use config::SAMPLE_CONFIG;
 use log_lines::sample_line;
 use metrics::MetricsInput;
 use resources::{MockTree, OsFlag};
-pub use resources::{
-    get_machine_resources, get_node_resources, on_machine_resources, on_node_resources,
-};
+pub use resources::{get_machine_resources, on_machine_resources};
 use updates::{MOCK_RELEASES_URL, MOCK_VERSION, UpdateFlag, health_failure};
 pub use updates::{
     cancel_update, check_for_update, get_update_info, install_update, on_update_health_failed,

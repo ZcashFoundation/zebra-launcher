@@ -506,6 +506,13 @@ fn subscribe_node(state: AppState, node: NodeState) {
                 Ok(_) => {}
                 Err(error) => state.report("Reading metrics", Err(error)),
             }
+            match api::get_node_resources(&id).await {
+                Ok(sample) if !node.has_seen(|seen| seen.resources) => {
+                    node.record_resources(sample)
+                }
+                Ok(_) => {}
+                Err(error) => state.report("Reading node resources", Err(error)),
+            }
         });
     }
     // The subscription streams the retained history before the live lines, so no separate
@@ -605,9 +612,9 @@ pub fn App() -> impl IntoView {
     set_interval(move || state.now.set(clock::now()), Duration::from_secs(1));
 
     // Every node's events are listened to before any snapshot is read: the node list (with its
-    // own snapshot, see `subscribe_then_fetch`), then each node's status, statistics, details
-    // and metrics, which go to the node they name. An event for a node the list has not brought
-    // yet is dropped: that node's snapshots are read once it appears.
+    // own snapshot, see `subscribe_then_fetch`), then each node's status, statistics, details,
+    // metrics and resources, which go to the node they name. An event for a node the list has
+    // not brought yet is dropped: that node's snapshots are read once it appears.
     spawn_local(subscribe_then_fetch(
         state,
         async move |seen| {
@@ -676,30 +683,23 @@ pub fn App() -> impl IntoView {
             )
             .await;
             state.report("Listening for metrics", result);
-        },
-        api::list_nodes,
-        "Reading the nodes",
-        move |list| state.apply_nodes(list),
-    ));
-    // The resources come as a stream plus a snapshot too: the first node's, without a node id,
-    // to the placeholder the first list fills, and the computer's.
-    spawn_local(subscribe_then_fetch(
-        state,
-        async move |seen| {
             let result = api::on_node_resources(
-                move |sample| {
-                    seen.mark();
-                    node.record_resources(sample);
+                move |event| {
+                    if let Some(node) = state.find(&event.node) {
+                        node.mark_seen(|seen| &mut seen.resources);
+                        node.record_resources(event.value);
+                    }
                 },
                 state.payload_error(),
             )
             .await;
             state.report("Listening for node resources", result);
         },
-        api::get_node_resources,
-        "Reading node resources",
-        move |sample| node.record_resources(sample),
+        api::list_nodes,
+        "Reading the nodes",
+        move |list| state.apply_nodes(list),
     ));
+    // The computer's resources, which are about no node, come as a stream plus a snapshot too.
     spawn_local(subscribe_then_fetch(
         state,
         async move |seen| {

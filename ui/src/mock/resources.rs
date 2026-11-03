@@ -506,12 +506,7 @@ impl super::Mock {
     }
 }
 
-/// Calls `handler` with every change of the node's resources, starting with the current value.
-pub fn on_node_resources(handler: impl Fn(Option<NodeResources>) + 'static) {
-    let resources = mock().resources;
-    Effect::new(move |_| handler(resources.get()));
-}
-
+/// The main zebrad's newest sample; [`super::nodes`] sends its changes to the UI.
 pub async fn get_node_resources() -> Option<NodeResources> {
     sleep(50).await;
     mock().resources.get_untracked()

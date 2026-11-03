@@ -271,15 +271,15 @@ pub async fn on_metrics(
     Ok(tauri::listen(events::METRICS, on_metrics, on_error).await?)
 }
 
-/// Calls `on_resources` with every `node_resources` event: what the first node's processes use,
-/// read every 5 s from the spawn until the run ends, `None` while the node has no run and on a
+/// Calls `on_resources` with every `node_resources` event: what a node's processes use, read
+/// every 5 s from the spawn until the run ends, `None` while the node has no run and on a
 /// platform the backend does not measure yet.
 pub async fn on_node_resources(
-    on_resources: impl Fn(Option<NodeResources>) + 'static,
+    on_resources: impl Fn(NodeEvent<Option<NodeResources>>) + 'static,
     on_error: impl Fn(String) + 'static,
 ) -> ApiResult<()> {
     if !is_tauri() {
-        mock::on_node_resources(mock_handler(
+        mock::nodes::on_node_resources(mock_handler(
             "`node_resources` event",
             on_resources,
             on_error,
@@ -290,7 +290,7 @@ pub async fn on_node_resources(
 }
 
 /// Calls `on_machine` with every `machine_resources` event: the computer's CPU and memory, read
-/// every 5 s.
+/// every 5 s. The event is about no node, so it carries no id.
 pub async fn on_machine_resources(
     on_machine: impl Fn(Option<MachineResources>) + 'static,
     on_error: impl Fn(String) + 'static,
@@ -442,12 +442,16 @@ pub async fn get_metrics(node: &NodeId) -> ApiResult<Option<MetricsSnapshot>> {
     Ok(tauri::invoke("get_metrics", &NodeArgs { node }).await?)
 }
 
-/// The newest sample of the first node's processes, `None` while it has no run.
-pub async fn get_node_resources() -> ApiResult<Option<NodeResources>> {
+/// The newest sample of a node's processes, `None` while it has no run.
+pub async fn get_node_resources(node: &NodeId) -> ApiResult<Option<NodeResources>> {
     if !is_tauri() {
-        return Ok(wire(mock::get_node_resources().await)?);
+        return Ok(wire(
+            mock::nodes::get_node_resources(node)
+                .await
+                .map_err(ApiError)?,
+        )?);
     }
-    Ok(tauri::invoke0("get_node_resources").await?)
+    Ok(tauri::invoke("get_node_resources", &NodeArgs { node }).await?)
 }
 
 /// The newest sample of the computer's CPU and memory, `None` before the first one.

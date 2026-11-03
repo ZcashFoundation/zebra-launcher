@@ -10,7 +10,8 @@ use std::{cell::RefCell, rc::Rc, sync::atomic::Ordering};
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DEFAULT_STOP_GRACE_SECS, LogLine,
     MAX_NODES, MetricsSnapshot, NodeDataDirChoice, NodeDetails, NodeDraft, NodeEvent, NodeId,
-    NodeInfo, NodeKind, NodeProgram, NodeStats, NodeUpdate, STOP_GRACE_SECS, Status, node_ports,
+    NodeInfo, NodeKind, NodeProgram, NodeResources, NodeStats, NodeUpdate, STOP_GRACE_SECS, Status,
+    node_ports,
 };
 use leptos::prelude::*;
 
@@ -25,6 +26,7 @@ thread_local! {
     static STATS: Handlers<NodeEvent<Option<NodeStats>>> = RefCell::new(Vec::new());
     static DETAILS: Handlers<NodeEvent<Option<NodeDetails>>> = RefCell::new(Vec::new());
     static METRICS: Handlers<NodeEvent<Option<MetricsSnapshot>>> = RefCell::new(Vec::new());
+    static RESOURCES: Handlers<NodeEvent<Option<NodeResources>>> = RefCell::new(Vec::new());
     /// Whether the main node's signals already feed the handlers.
     static WATCHING_MAIN: RefCell<bool> = const { RefCell::new(false) };
     /// The ids of removed nodes whose data was kept: like the backend, a new node does not get
@@ -52,7 +54,8 @@ fn register<T>(list: &'static std::thread::LocalKey<Handlers<T>>, handler: impl 
     watch_main();
 }
 
-/// Feeds the main node's status, statistics, details and metrics to the handlers, once.
+/// Feeds the main node's status, statistics, details, metrics and resources to the handlers,
+/// once.
 fn watch_main() {
     if WATCHING_MAIN.with_borrow_mut(|watching| std::mem::replace(watching, true)) {
         return;
@@ -78,15 +81,18 @@ fn watch_main() {
         )
     });
     let metrics = mock.metrics.clone();
+    let main = id.clone();
     Effect::new(move |_| {
         emit(
             &METRICS,
             NodeEvent {
-                node: id(),
+                node: main(),
                 value: metrics.get(),
             },
         )
     });
+    let resources = mock.resources.clone();
+    Effect::new(move |_| emit_resources(&id(), resources.get()));
 }
 
 pub(super) fn emit_status(node: &NodeId, status: Status) {
@@ -105,6 +111,16 @@ pub(super) fn emit_stats(node: &NodeId, stats: Option<NodeStats>) {
         NodeEvent {
             node: node.clone(),
             value: stats,
+        },
+    );
+}
+
+pub(super) fn emit_resources(node: &NodeId, sample: Option<NodeResources>) {
+    emit(
+        &RESOURCES,
+        NodeEvent {
+            node: node.clone(),
+            value: sample,
         },
     );
 }
@@ -154,6 +170,10 @@ pub fn on_metrics(handler: impl Fn(NodeEvent<Option<MetricsSnapshot>>) + 'static
     register(&METRICS, handler);
 }
 
+pub fn on_node_resources(handler: impl Fn(NodeEvent<Option<NodeResources>>) + 'static) {
+    register(&RESOURCES, handler);
+}
+
 pub async fn get_status(node: &NodeId) -> Result<Status, String> {
     if is_main(node) {
         return Ok(super::get_status().await);
@@ -184,6 +204,17 @@ pub async fn get_node_details(node: &NodeId) -> Result<Option<NodeDetails>, Stri
 pub async fn get_metrics(node: &NodeId) -> Result<Option<MetricsSnapshot>, String> {
     if is_main(node) {
         return Ok(super::metrics::get_metrics().await);
+    }
+    sleep(50).await;
+    herd::status(node)
+        .map(|_| None)
+        .ok_or_else(|| not_found(node))
+}
+
+/// The herd's nodes report no resources yet.
+pub async fn get_node_resources(node: &NodeId) -> Result<Option<NodeResources>, String> {
+    if is_main(node) {
+        return Ok(super::resources::get_node_resources().await);
     }
     sleep(50).await;
     herd::status(node)
