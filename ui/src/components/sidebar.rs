@@ -14,13 +14,15 @@ use crate::{
 /// The networks in the order the sidebar lists them.
 const NETWORKS: [Network; 2] = [Network::Mainnet, Network::Testnet];
 
-/// What a node is called in the sidebar, under its network's heading: its kind while it has
-/// its default name ("Zebra"), its own name otherwise.
+/// What a node is called in the sidebar, under its network's heading: a default name without
+/// its network ("Zebra", "Zebra 2"), any other name as it is.
 pub fn short_name(info: &NodeInfo) -> String {
-    if info.name == NodeInfo::default_name(info.kind, info.network) {
-        info.kind.label().to_owned()
-    } else {
-        info.name.clone()
+    match info
+        .name
+        .strip_prefix(&NodeInfo::default_name(info.kind, info.network))
+    {
+        Some(rest) => format!("{}{rest}", info.kind.label()),
+        None => info.name.clone(),
     }
 }
 
@@ -202,6 +204,7 @@ mod tests {
     #[test]
     fn a_default_name_shortens_to_the_kind() {
         assert_eq!(short_name(&info("Zebra · Mainnet")), "Zebra");
+        assert_eq!(short_name(&info("Zebra · Mainnet 2")), "Zebra 2");
         assert_eq!(short_name(&info("Archive node")), "Archive node");
     }
 }

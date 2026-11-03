@@ -317,6 +317,24 @@ impl NodeInfo {
     pub fn default_name(kind: NodeKind, network: Network) -> String {
         format!("{} · {network}", kind.label())
     }
+
+    /// The default name for a new node that none of `taken` has: "Zebra · Testnet", then
+    /// "Zebra · Testnet 2", "Zebra · Testnet 3" and so on.
+    pub fn unique_default_name<'a>(
+        kind: NodeKind,
+        network: Network,
+        taken: impl IntoIterator<Item = &'a str> + Clone,
+    ) -> String {
+        let base = Self::default_name(kind, network);
+        let free = |candidate: &str| taken.clone().into_iter().all(|name| name != candidate);
+        if free(&base) {
+            return base;
+        }
+        (2u32..)
+            .map(|n| format!("{base} {n}"))
+            .find(|candidate| free(candidate))
+            .expect("an unbounded range has a free number")
+    }
 }
 
 #[cfg(test)]
@@ -415,6 +433,18 @@ mod tests {
         assert_eq!(
             NodeInfo::default_name(NodeKind::Zebrad, Network::Testnet),
             "Zebra · Testnet"
+        );
+        assert_eq!(
+            NodeInfo::unique_default_name(NodeKind::Zebrad, Network::Testnet, ["Zebra · Mainnet"]),
+            "Zebra · Testnet"
+        );
+        assert_eq!(
+            NodeInfo::unique_default_name(
+                NodeKind::Zebrad,
+                Network::Testnet,
+                ["Zebra · Testnet", "Zebra · Testnet 2"]
+            ),
+            "Zebra · Testnet 3"
         );
     }
 }

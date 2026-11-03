@@ -113,9 +113,17 @@ pub fn AddNode(open: RwSignal<bool>) -> impl IntoView {
             error.set(None);
         }
     });
-    // The name follows the kind and network until the user types one.
+    // The name follows the kind and network until the user types one, and is not one that a
+    // node already has.
     Effect::new(move |_| {
-        let default = NodeInfo::default_name(kind.get(), network.get());
+        let (kind, network) = (kind.get(), network.get());
+        let default = state.nodes.with(|nodes| {
+            let names: Vec<String> = nodes
+                .iter()
+                .map(|node| node.info.with(|info| info.name.clone()))
+                .collect();
+            NodeInfo::unique_default_name(kind, network, names.iter().map(String::as_str))
+        });
         if !name_edited.get_untracked() {
             name.set(default);
         }
