@@ -605,6 +605,11 @@ pub struct NodeStats {
     pub updated_at: SystemTime,
 }
 
+/// Synced: within a block of the estimated tip, or a progress of 99.99 % or more.
+pub fn at_tip(height: u64, estimated_height: u64, verification_progress: f64) -> bool {
+    estimated_height.saturating_sub(height) <= 1 || verification_progress >= 0.9999
+}
+
 /// When the running zebrad release reaches its end of support and halts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EosInfo {
