@@ -20,6 +20,11 @@ pub const WHOLE_SAMPLES: usize = 12;
 /// The window of the card's rates: the one-minute average Resource Monitor uses.
 pub const RATE_WINDOW: Duration = Duration::from_secs(60);
 
+/// A rate since the spawn, or since a process started, is averaged over at least this long,
+/// like the backend's first CPU rate: a sample taken right at the spawn does not turn the
+/// first reads from disk into many MB/s.
+const MIN_RATE_SECS: f64 = 1.0;
+
 /// One sample reduced to its totals.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
@@ -178,7 +183,7 @@ impl ResourceHistory {
     }
 
     /// Bytes read and written per second over the last `span`, like [`Self::cpu_cores`]; a
-    /// run's only sample gives its average since the spawn.
+    /// run's only sample gives its average since the spawn, over at least a second.
     pub fn io_rates(&self, span: Duration, now: SystemTime) -> (Option<f64>, Option<f64>) {
         let Some(newest) = self.fresh(span, now) else {
             return (None, None);
@@ -192,7 +197,7 @@ impl ResourceHistory {
                 Some(bytes / secs)
             } else {
                 let total = field(&Point::of(newest))? as f64;
-                (newest.run_secs > 0.0).then(|| total / newest.run_secs)
+                Some(total / newest.run_secs.max(MIN_RATE_SECS))
             }
         };
         (rate(|p| p.read), rate(|p| p.written))
@@ -200,7 +205,7 @@ impl ResourceHistory {
 
     /// What each process of the newest sample used over the kept minute: its growth since
     /// the oldest whole sample of the run that lists it, or, for a process seen once, its
-    /// totals since it started. In the newest sample's order.
+    /// totals since it started, over at least a second. In the newest sample's order.
     pub fn process_rates(&self) -> Vec<ProcessRate> {
         let Some(newest) = self.latest() else {
             return Vec::new();
@@ -227,7 +232,8 @@ impl ResourceHistory {
                         newest
                             .at
                             .duration_since(member.started_at)
-                            .map_or(0.0, |age| age.as_secs_f64()),
+                            .map_or(0.0, |age| age.as_secs_f64())
+                            .max(MIN_RATE_SECS),
                     ),
                 };
                 let per_sec = |now: Option<u64>, then: Option<u64>| {
@@ -256,7 +262,8 @@ impl ResourceHistory {
 
     /// A sparkline's values over the newest run's samples in the range (all of them for
     /// `None`), at most [`MAX_POINTS`]. Each rate is over the interval that ends at its
-    /// sample: since the run's previous sample, or since the spawn for its first.
+    /// sample: since the run's previous sample, or since the spawn for its first, over at
+    /// least a second.
     pub fn spark(&self, kind: SparkKind, span: Option<Duration>, now: SystemTime) -> Vec<f64> {
         let Some(run) = self.points.last().map(|p| p.run) else {
             return Vec::new();
@@ -275,9 +282,10 @@ impl ResourceHistory {
                     .checked_sub(1)
                     .and_then(|i| window.get(i))
                     .filter(|previous| previous.run == run && previous.run_secs < point.run_secs);
-                let (base_secs, base_cpu, base_written) =
-                    previous.map_or((0.0, 0.0, Some(0)), |p| (p.run_secs, p.cpu_secs, p.written));
-                let secs = point.run_secs - base_secs;
+                let (secs, base_cpu, base_written) = match previous {
+                    Some(p) => (point.run_secs - p.run_secs, p.cpu_secs, p.written),
+                    None => (point.run_secs.max(MIN_RATE_SECS), 0.0, Some(0)),
+                };
                 match kind {
                     SparkKind::Memory => point.memory as f64,
                     _ if secs <= 0.0 => 0.0,
@@ -416,6 +424,30 @@ mod tests {
             history.io_rates(RATE_WINDOW, at(1175)).1.unwrap(),
             10.0
         ));
+    }
+
+    #[test]
+    fn rates_right_at_the_spawn_are_over_a_second() {
+        // The first sample, 2 ms after the spawn: the exec already read 147,456 bytes from a
+        // cold disk and used 10 ms of CPU, and zebrad started 3 ms before the sample.
+        let mut first = sample(1, 0, 0.01, 0);
+        first.run_secs = 0.002;
+        first.at = at(1000) + Duration::from_millis(3);
+        first.read_bytes = Some(147_456);
+        first.members[0].read_bytes = Some(147_456);
+        let mut history = ResourceHistory::default();
+        history.push(&first);
+        let now = first.at;
+        let (read, written) = history.io_rates(RATE_WINDOW, now);
+        assert!(close(read.unwrap(), 147_456.0), "{read:?}");
+        assert!(close(written.unwrap(), 0.0));
+        let rates = history.process_rates();
+        assert!(close(rates[0].cores.unwrap(), 0.01), "{rates:?}");
+        assert!(
+            close(rates[0].read_per_sec.unwrap(), 147_456.0),
+            "{rates:?}"
+        );
+        assert_eq!(history.spark(SparkKind::Cpu, None, now), vec![0.01]);
     }
 
     #[test]
