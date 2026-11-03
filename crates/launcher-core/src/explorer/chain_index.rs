@@ -3,6 +3,18 @@
 //! (1,000 below the tip, zebrad's reorg limit) are trusted as they are; hashes above are
 //! trusted only while the tip was checked a moment ago. A reorganisation drops every height
 //! above the highest one its check proved shared, and bumps the epoch once.
+//!
+//! The hashes come two ways. The tip follower vouches for the ones it read from the node: the
+//! tips it checked, the blocks they build on and the answers to its probes, and so for their
+//! parents, which the blocks pages read show. Pages teach the others. Only vouched hashes lie on
+//! one chain for sure, so only they go into a search for where two chains part; a page may
+//! have read its block on either side of a reorganisation the follower has not seen yet. A
+//! block a page read that disagrees with the index at its height, or at its parent's, is such a
+//! reorganisation: the page's hashes from there up are dropped and the tip counts as unchecked
+//! until the follower checks it. The vouched hashes stay for that check: either the old tip is
+//! still in the node's chain, and so is every vouched hash, which all lie below it on one
+//! chain; or the check's search over them bounds the reorganisation, and everything above the
+//! height it proved shared goes.
 
 use std::{
     collections::BTreeMap,
@@ -47,10 +59,19 @@ pub(crate) struct Replaced {
     pub(crate) blocks: u32,
 }
 
+/// One known height: its hash, whether the tip follower vouches for it, and its block's
+/// parent, once a read of the block showed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Known {
+    hash: BlockHash,
+    vouched: bool,
+    parent: Option<BlockHash>,
+}
+
 #[derive(Debug)]
 pub(crate) struct ChainIndex {
     tip: Option<(u32, BlockHash)>,
-    known: BTreeMap<u32, BlockHash>,
+    known: BTreeMap<u32, Known>,
     epoch: u64,
     checked: Option<Instant>,
     /// How long a check of the tip vouches for the hashes above the final ones.
@@ -94,22 +115,72 @@ impl ChainIndex {
         if height > tip {
             return None;
         }
-        let hash = *self.known.get(&height)?;
+        let hash = self.known.get(&height)?.hash;
         let is_final = tip - height >= REORG_WINDOW;
         (is_final || self.is_fresh(now)).then_some(hash)
     }
 
-    /// Records the hash a read found at `height`, at or below the tip.
-    pub(crate) fn learn(&mut self, height: u32, hash: BlockHash) {
-        if self.tip.is_some_and(|(tip, _)| height <= tip) {
-            self.known.insert(height, hash);
-            while self.known.len() > MAX_KNOWN {
-                self.known.pop_first();
+    /// Records a block a page read in the node's best chain: `hash` at `height`, on top of
+    /// `parent`. A block whose hash the follower vouches for vouches for its parent. A block
+    /// that disagrees with what the index holds at its height or its parent's means the node
+    /// replaced blocks the follower has not seen yet: the pages' hashes from the lower
+    /// disagreement up are dropped, the tip counts as unchecked, and the answer is `true`.
+    /// Blocks above the tip teach nothing.
+    pub(crate) fn learn_block(
+        &mut self,
+        height: u32,
+        hash: BlockHash,
+        parent: Option<BlockHash>,
+    ) -> bool {
+        if self.tip.is_none_or(|(tip, _)| height > tip) {
+            return false;
+        }
+        let below = parent.zip(height.checked_sub(1));
+        if let Some((parent, below)) = below
+            && self.disagrees(below, parent)
+        {
+            self.forget_from(below);
+            return true;
+        }
+        if self.disagrees(height, hash) {
+            self.forget_from(height);
+            return true;
+        }
+        let vouched = match self.known.get_mut(&height) {
+            Some(known) => {
+                known.parent = known.parent.or(parent);
+                known.vouched
+            }
+            None => {
+                self.insert(
+                    height,
+                    Known {
+                        hash,
+                        vouched: false,
+                        parent,
+                    },
+                );
+                false
+            }
+        };
+        if let Some((parent, below)) = below {
+            if vouched {
+                self.vouch(below, parent);
+            } else if !self.known.contains_key(&below) {
+                self.insert(
+                    below,
+                    Known {
+                        hash: parent,
+                        vouched: false,
+                        parent: None,
+                    },
+                );
             }
         }
+        false
     }
 
-    /// The known hashes within the reorg window of the tip, lowest first: what a fork search
+    /// The vouched hashes within the reorg window of the tip, lowest first: what a fork search
     /// compares against the node.
     pub(crate) fn window(&self) -> Vec<(u32, BlockHash)> {
         let Some((tip, _)) = self.tip else {
@@ -117,7 +188,8 @@ impl ChainIndex {
         };
         self.known
             .range(tip.saturating_sub(REORG_WINDOW)..=tip)
-            .map(|(height, hash)| (*height, *hash))
+            .filter(|(_, known)| known.vouched)
+            .map(|(height, known)| (*height, known.hash))
             .collect()
     }
 
@@ -147,9 +219,9 @@ impl ChainIndex {
         }
         self.tip = Some(update.tip);
         for (height, hash) in update.learned {
-            self.learn(height, hash);
+            self.vouch(height, hash);
         }
-        self.learn(update.tip.0, update.tip.1);
+        self.vouch(update.tip.0, update.tip.1);
         self.checked = Some(now);
         replaced
     }
@@ -162,6 +234,63 @@ impl ChainIndex {
     /// Forgets the hashes above `height`.
     fn drop_above(&mut self, height: u32) {
         self.known.split_off(&height.saturating_add(1));
+    }
+
+    /// Forgets the hashes from `height` up that the follower does not vouch for, and that the
+    /// tip was checked.
+    fn forget_from(&mut self, height: u32) {
+        let mut above = self.known.split_off(&height);
+        above.retain(|_, known| known.vouched);
+        self.known.append(&mut above);
+        self.checked = None;
+    }
+
+    fn disagrees(&self, height: u32, hash: BlockHash) -> bool {
+        self.known
+            .get(&height)
+            .is_some_and(|known| known.hash != hash)
+    }
+
+    fn insert(&mut self, height: u32, known: Known) {
+        self.known.insert(height, known);
+        while self.known.len() > MAX_KNOWN {
+            self.known.pop_first();
+        }
+    }
+
+    /// Records a hash the follower vouches for, at or below the tip, in place of whatever the
+    /// index held there; and the parents it vouches for in turn, as far down as the index saw
+    /// them.
+    fn vouch(&mut self, height: u32, hash: BlockHash) {
+        let mut next = Some((height, hash));
+        while let Some((height, hash)) = next.take() {
+            if self.tip.is_none_or(|(tip, _)| height > tip) {
+                return;
+            }
+            let parent = match self.known.get_mut(&height) {
+                Some(known) if known.hash == hash => {
+                    if known.vouched {
+                        return;
+                    }
+                    known.vouched = true;
+                    known.parent
+                }
+                _ => {
+                    self.insert(
+                        height,
+                        Known {
+                            hash,
+                            vouched: true,
+                            parent: None,
+                        },
+                    );
+                    None
+                }
+            };
+            next = parent
+                .zip(height.checked_sub(1))
+                .map(|(parent, below)| (below, parent));
+        }
     }
 }
 
@@ -255,18 +384,78 @@ mod tests {
         let mut index = ChainIndex::new(FRESH);
         assert_eq!(index.hash_at(10, start), None);
         index.apply(update(5_000, 0), start);
-        index.learn(3_000, hash(3_000, 0));
-        index.learn(4_990, hash(4_990, 0));
-        index.learn(6_000, hash(6_000, 0));
+        for height in [3_000, 4_990, 6_000] {
+            assert!(!index.learn_block(height, hash(height, 0), None));
+        }
         assert_eq!(index.hash_at(6_000, start), None, "above the tip");
         assert_eq!(index.hash_at(4_990, start), Some(hash(4_990, 0)));
         let later = start + FRESH + Duration::from_secs(1);
         assert_eq!(index.hash_at(4_990, later), None, "the check is stale");
         assert_eq!(index.hash_at(3_000, later), Some(hash(3_000, 0)), "final");
+    }
+
+    #[test]
+    fn only_the_followers_hashes_go_into_a_fork_search() {
+        let now = Instant::now();
+        let mut index = ChainIndex::new(FRESH);
+        index.apply(
+            TipUpdate {
+                learned: vec![(4_990, hash(4_990, 0))],
+                ..update(5_000, 0)
+            },
+            now,
+        );
+        // A block a page read: known, but not vouched for.
+        assert!(!index.learn_block(4_995, hash(4_995, 1), None));
+        assert_eq!(index.hash_at(4_995, now), Some(hash(4_995, 1)));
         assert_eq!(
             index.window(),
             vec![(4_990, hash(4_990, 0)), (5_000, hash(5_000, 0))]
         );
+    }
+
+    #[test]
+    fn a_block_on_a_vouched_one_vouches_for_its_parents() {
+        let now = Instant::now();
+        let mut index = ChainIndex::new(FRESH);
+        index.apply(update(100, 0), now);
+        // Pages read the blocks below the tip first, in any order, then the tip's.
+        for height in [98, 97, 99] {
+            index.learn_block(height, hash(height, 0), Some(hash(height - 1, 0)));
+        }
+        assert_eq!(index.window(), vec![(100, hash(100, 0))]);
+        index.learn_block(100, hash(100, 0), Some(hash(99, 0)));
+        let vouched: Vec<u32> = index.window().iter().map(|(height, _)| *height).collect();
+        assert_eq!(vouched, [96, 97, 98, 99, 100]);
+    }
+
+    #[test]
+    fn a_block_that_disagrees_leaves_only_the_vouched_heights_from_there_up() {
+        let now = Instant::now();
+        let mut index = ChainIndex::new(FRESH);
+        index.apply(update(100, 0), now);
+        // The tip's block vouches for 99; pages taught 89 to 91.
+        index.learn_block(100, hash(100, 0), Some(hash(99, 0)));
+        index.learn_block(90, hash(90, 0), Some(hash(89, 0)));
+        index.learn_block(91, hash(91, 0), Some(hash(90, 0)));
+        // A block of another branch: its parent at 91 is another block.
+        assert!(index.learn_block(92, hash(92, 1), Some(hash(91, 1))));
+        assert!(!index.is_fresh(now), "the tip counts as unchecked");
+        assert_eq!(index.hash_at(90, now), None);
+        // The check finds the same tip.
+        index.apply(update(100, 0), now);
+        assert_eq!(index.hash_at(90, now), Some(hash(90, 0)), "below it");
+        assert_eq!(index.hash_at(91, now), None, "a page's, dropped");
+        assert_eq!(index.hash_at(92, now), None, "not learned");
+        assert_eq!(
+            index.hash_at(99, now),
+            Some(hash(99, 0)),
+            "vouched for, kept"
+        );
+        // A block that disagrees with a vouched hash at its own height.
+        assert!(index.learn_block(99, hash(99, 2), None));
+        index.apply(update(100, 0), now);
+        assert_eq!(index.hash_at(99, now), Some(hash(99, 0)));
     }
 
     #[test]
@@ -275,7 +464,7 @@ mod tests {
         let mut index = ChainIndex::new(FRESH);
         index.apply(update(100, 0), now);
         for height in 90..100 {
-            index.learn(height, hash(height, 0));
+            index.learn_block(height, hash(height, 0), None);
         }
         let replaced = index.apply(
             TipUpdate {
@@ -309,8 +498,8 @@ mod tests {
         let now = Instant::now();
         let mut index = ChainIndex::new(FRESH);
         index.apply(update(10_000, 0), now);
-        index.learn(8_000, hash(8_000, 0));
-        index.learn(9_999, hash(9_999, 0));
+        index.learn_block(8_000, hash(8_000, 0), None);
+        index.learn_block(9_999, hash(9_999, 0), None);
         index.apply(
             TipUpdate {
                 change: Change::Jumped,
@@ -381,8 +570,8 @@ mod tests {
         let now = Instant::now();
         let mut index = ChainIndex::new(FRESH);
         index.apply(update(5_000, 0), now);
-        index.learn(3_000, hash(3_000, 0));
-        index.learn(4_990, hash(4_990, 0));
+        index.learn_block(3_000, hash(3_000, 0), None);
+        index.learn_block(4_990, hash(4_990, 0), None);
         // The chains share 4,000 at least and differ at 4,990: at least 11 blocks were replaced.
         let replaced = index.apply(
             TipUpdate {

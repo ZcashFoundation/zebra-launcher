@@ -606,6 +606,105 @@ impl Harness {
     }
 }
 
+/// The statistics of a node still catching up with a network 100 blocks ahead of `chain`.
+fn syncing(chain: &SynthChain) -> NodeStats {
+    NodeStats {
+        estimated_height: u64::from(chain.tip()) + 100,
+        verification_progress: 0.99,
+        ..stats_for(chain)
+    }
+}
+
+#[tokio::test]
+async fn blocks_read_while_the_tip_is_unchecked_do_not_mislead_the_fork_search() {
+    let fresh = Duration::from_millis(200);
+    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
+        config.fresh = fresh;
+    });
+    // The node syncs, so nothing follows the tip between pages.
+    harness
+        .stats
+        .send_replace(Some(syncing(&harness.chain.borrow())));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    // Long enough that the check no longer vouches for the heights near the tip, and that the
+    // Chain page checks the tip again.
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
+    // The node replaces its top ten blocks and mines five more.
+    let mut fork = 0;
+    harness.chain.send_modify(|chain| {
+        fork = chain.reorg(10);
+        chain.mine(5);
+    });
+    harness
+        .stats
+        .send_replace(Some(syncing(&harness.chain.borrow())));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    // A block asked for by height comes from the node's new branch.
+    let ExplorerResponse::Block(_) = harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Height(TIP - 4),
+        })
+        .await
+    else {
+        panic!("a block page");
+    };
+    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    let reorg = harness.next_reorg().await;
+    assert_eq!(
+        (reorg.fork_height, reorg.first_replaced, reorg.replaced),
+        (fork, fork + 1, 10),
+        "{reorg:?}"
+    );
+    // A replaced height asked for by height is the node's block, not the cached one.
+    let ExplorerResponse::Block(page) = harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Height(TIP - 8),
+        })
+        .await
+    else {
+        panic!("a block page");
+    };
+    assert_eq!(
+        Some(page.summary.hash),
+        harness.chain.borrow().hash(TIP - 8)
+    );
+}
+
+#[tokio::test]
+async fn a_block_found_on_a_new_branch_checks_the_tip_again() {
+    // Hidden: the follower does not poll.
+    let harness = harness();
+    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    let fork = harness.change_chain(|chain| {
+        let fork = chain.reorg(3);
+        chain.mine(1);
+        fork
+    });
+    // A search finds a block of the new branch before anything checked the tip.
+    let found = harness.chain.borrow().hash(TIP - 1).unwrap();
+    let ExplorerResponse::Resolve(Resolution::Go { .. }) = harness
+        .reply(ExplorerRequest::Resolve {
+            query: found.to_hex(),
+        })
+        .await
+    else {
+        panic!("the block");
+    };
+    let reorg = harness.next_reorg().await;
+    assert_eq!(
+        (reorg.fork_height, reorg.first_replaced, reorg.replaced),
+        (fork, fork + 1, 3),
+        "{reorg:?}"
+    );
+}
+
 #[tokio::test]
 async fn without_a_known_height_below_it_a_reorganisation_is_a_lower_bound() {
     let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {

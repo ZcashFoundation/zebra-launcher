@@ -228,6 +228,13 @@ enum CacheKey {
     Header { height: u32, epoch: u64 },
 }
 
+/// A read under way: who waits for it, and the epoch it was asked for in.
+#[derive(Default)]
+struct Inflight {
+    epoch: u64,
+    waiters: Vec<ReadReply>,
+}
+
 /// The source of one zebrad run.
 struct Run<S> {
     addr: SocketAddr,
@@ -275,11 +282,14 @@ struct Actor<S, F> {
     index: ChainIndex,
     sched: Scheduler<ReadCall>,
     permits: Arc<Semaphore>,
-    inflight: HashMap<ReadCall, Vec<ReadReply>>,
+    inflight: HashMap<ReadCall, Inflight>,
     tip_waiters: Vec<TipReply>,
     following: bool,
-    /// Bumped when the chain is forgotten, so a follower that started before is ignored.
+    /// Bumped when the chain is forgotten, or a read shows the index out of date, so a check
+    /// of the tip that started before is ignored.
     generation: u64,
+    /// The ignored check is to be made again once it ends.
+    recheck: bool,
     visible: bool,
     hidden_since: Option<Instant>,
     /// The network zebrad last reported, kept while it is stopped.
@@ -316,6 +326,7 @@ pub(super) fn start<S: ChainSource>(
         tip_waiters: Vec::new(),
         following: false,
         generation: 0,
+        recheck: false,
         visible: false,
         hidden_since: None,
         reported: None,
@@ -490,7 +501,7 @@ where
     fn stop_reading(&mut self) {
         self.run = None;
         for call in self.sched.clear_queue() {
-            for waiter in self.inflight.remove(&call).unwrap_or_default() {
+            for waiter in self.inflight.remove(&call).unwrap_or_default().waiters {
                 let _ = waiter.send(Err(not_running()));
             }
         }
@@ -700,15 +711,20 @@ where
             }
             Internal::Done { call, lane, result } => {
                 self.sched.done(lane);
-                let waiters = self.inflight.remove(&call).unwrap_or_default();
+                let inflight = self.inflight.remove(&call);
                 let result = match result {
                     Ok(value) => {
-                        self.remember(call, &value);
+                        if let Some(inflight) = &inflight {
+                            self.remember(call, &value, inflight.epoch);
+                        }
                         Ok(value)
                     }
                     Err(err) => Err(read_error(err)),
                 };
-                for waiter in waiters {
+                for waiter in inflight
+                    .map(|inflight| inflight.waiters)
+                    .unwrap_or_default()
+                {
                     let _ = waiter.send(result.clone());
                 }
                 self.pump();
@@ -716,8 +732,9 @@ where
             Internal::Followed { generation, result } => {
                 self.following = false;
                 if generation != self.generation {
-                    // The chain was forgotten meanwhile: check again for whoever waits.
-                    if !self.tip_waiters.is_empty() {
+                    // The index changed meanwhile: check again if asked to, or for whoever
+                    // waits.
+                    if std::mem::take(&mut self.recheck) || !self.tip_waiters.is_empty() {
                         self.follow();
                     }
                     return;
@@ -750,14 +767,18 @@ where
             _ => call,
         };
         match self.inflight.get_mut(&call) {
-            Some(waiters) => {
-                waiters.push(reply);
+            Some(inflight) => {
+                inflight.waiters.push(reply);
                 if lane == Lane::Interactive {
                     self.sched.promote(&call);
                 }
             }
             None => {
-                self.inflight.insert(call, vec![reply]);
+                let inflight = Inflight {
+                    epoch: self.index.epoch(),
+                    waiters: vec![reply],
+                };
+                self.inflight.insert(call, inflight);
                 self.sched.push(call, lane);
                 self.pump();
             }
@@ -799,18 +820,22 @@ where
         }
     }
 
-    /// Keeps what a read found: cacheable answers, and the hashes it shows at heights.
-    fn remember(&mut self, call: ReadCall, value: &ReadResult) {
+    /// Keeps what a read found: cacheable answers, and the hashes a block shows at heights.
+    /// A read asked for before the index followed a reorganisation may show the replaced chain,
+    /// so it teaches the index nothing, and only what no reorganisation changes is kept: a
+    /// block by its hash, a subsidy by its height. The follower's probes of block hashes reach
+    /// the index through its checks only, so a check that fails half way leaves nothing behind.
+    fn remember(&mut self, call: ReadCall, value: &ReadResult, epoch: u64) {
+        let current = epoch == self.index.epoch();
         match value {
             ReadResult::Block(block) => {
-                if block.confirmations > 0
+                if current
+                    && block.confirmations > 0
                     && let Some(height) = block.height
+                    && self.index.learn_block(height, block.hash, block.previous)
                 {
-                    self.index.learn(height, block.hash);
-                    if let (Some(previous), Some(parent)) = (block.previous, height.checked_sub(1))
-                    {
-                        self.index.learn(parent, previous);
-                    }
+                    // The node replaced blocks the follower has not seen yet.
+                    self.recheck();
                 }
                 let bytes = 400 + 32 * block.tx.len();
                 self.cache
@@ -822,7 +847,7 @@ where
                     && tx
                         .confirmations
                         .is_some_and(|confirmations| confirmations > 0);
-                if mined {
+                if current && mined {
                     let bytes = 300 + 80 * (tx.vin.len() + tx.vout.len());
                     self.cache
                         .insert(CacheKey::Tx(tx.txid), value.clone(), bytes);
@@ -835,18 +860,25 @@ where
                 }
             }
             ReadResult::Header(header) => {
-                if matches!(call, ReadCall::Header(BlockId::Height(_)))
+                if current
+                    && matches!(call, ReadCall::Header(BlockId::Height(_)))
                     && let Some(key) = self.header_key(header.height, Instant::now())
                 {
                     self.cache.insert(key, value.clone(), 120);
                 }
             }
-            ReadResult::BlockHash(hash) => {
-                if let ReadCall::BlockHash(height) = call {
-                    self.index.learn(height, *hash);
-                }
-            }
-            ReadResult::Best(_) => {}
+            ReadResult::BlockHash(_) | ReadResult::Best(_) => {}
+        }
+    }
+
+    /// Checks the tip again, after a read showed the index out of date. A check under way
+    /// started before that read: its answer is ignored, and another check follows it.
+    fn recheck(&mut self) {
+        if self.following {
+            self.generation += 1;
+            self.recheck = true;
+        } else {
+            self.follow();
         }
     }
 
@@ -932,6 +964,8 @@ async fn follow(
         if best.height == height + 1 && block.previous == Some(hash) {
             return Ok(update(Change::Follows, vec![(height, hash)]));
         }
+        // The new tip vouches for its parent.
+        learned.extend(block.previous.map(|previous| (best.height - 1, previous)));
         let at_old = hash_at(height).await?;
         learned.push((height, at_old));
         if at_old == hash {
