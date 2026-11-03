@@ -210,7 +210,15 @@ pub fn classify_query(input: &str, network: Network) -> Classified {
         return Classified::Unrecognised;
     }
     if text.contains('/') || text.starts_with("search?") {
-        return ExplorerRoute::parse(text).map_or(Classified::Unrecognised, Classified::Route);
+        return match ExplorerRoute::parse(text) {
+            // A search route carries a query of its own, refused like any other.
+            Some(ExplorerRoute::Search { query }) => match classify_query(&query, network) {
+                Classified::Secret(kind) => Classified::Secret(kind),
+                _ => Classified::Route(ExplorerRoute::Search { query }),
+            },
+            Some(route) => Classified::Route(route),
+            None => Classified::Unrecognised,
+        };
     }
     classify_plain(text, network)
 }
@@ -494,6 +502,16 @@ mod tests {
             Classified::Unrecognised,
             "three words"
         );
+        // A secret inside a search route is refused too, in either spelling.
+        assert_eq!(
+            main("search?q=uview1abc"),
+            Classified::Secret(SecretKind::ViewingKey)
+        );
+        assert_eq!(
+            main("https://example.com/search?q=zxviews1qqqq"),
+            Classified::Secret(SecretKind::ViewingKey)
+        );
+        assert!(matches!(main("search?q=3120000"), Classified::Route(_)));
         // A secret inside quotes is still refused.
         assert_eq!(
             main("\"uview1abc\""),
