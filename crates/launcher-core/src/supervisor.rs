@@ -8,10 +8,14 @@
 //!
 //! ```text
 //!   SupervisorHandle ──Cmd──▶ actor ──▶ watch<Status>
-//!        ▲                     │ ▲ ──▶ broadcast<Arc<LogLine>>
+//!        ▲                     │ ▲ ──▶ watch<Option<TreeProbe>>
+//!        │                     │ │ ──▶ broadcast<Arc<LogLine>>
 //!        └── status/logs ──────┘ │
 //!                 stdout/stderr readers, exit waiter ──ChildEvent──┘
 //! ```
+//!
+//! The probe watch tells a resource sampler which process tree to read: `Some` from the spawn
+//! until the run is finalized, after its exit drain.
 //!
 //! The log stream also carries the launcher's own lines (`LogStream::Launcher`):
 //! the actor's notes about what it did (`zebrad started`, `restarting zebrad
@@ -31,8 +35,10 @@ use launcher_types::{ExitInfo, LogLevel, LogLine, Status};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::{
-    logfile::RotatingLogConfig, pidfile::StaleProcess, policy::RestartPolicy,
-    process::ZebradCommand,
+    logfile::RotatingLogConfig,
+    pidfile::StaleProcess,
+    policy::RestartPolicy,
+    process::{TreeProbe, ZebradCommand},
 };
 
 mod actor;
@@ -176,6 +182,7 @@ enum Cmd {
 pub struct SupervisorHandle {
     cmd: mpsc::Sender<Cmd>,
     status: watch::Receiver<Status>,
+    probe: watch::Receiver<Option<TreeProbe>>,
     stop_grace: Duration,
 }
 
@@ -188,12 +195,14 @@ pub fn spawn(config: SupervisorConfig) -> io::Result<SupervisorHandle> {
         stop_is_graceful: config.command.stop_is_graceful(),
         ..Status::default()
     });
+    let (probe_tx, probe_rx) = watch::channel(None);
     let stop_grace = config.stop_grace;
-    let actor = actor::Actor::new(config, cmd_rx, status_tx)?;
+    let actor = actor::Actor::new(config, cmd_rx, status_tx, probe_tx)?;
     tokio::spawn(actor.run());
     Ok(SupervisorHandle {
         cmd: cmd_tx,
         status: status_rx,
+        probe: probe_rx,
         stop_grace,
     })
 }
@@ -220,6 +229,13 @@ impl SupervisorHandle {
     /// A receiver that wakes on every status change.
     pub fn watch_status(&self) -> watch::Receiver<Status> {
         self.status.clone()
+    }
+
+    /// A receiver of the current run's [`TreeProbe`]: `Some` from the spawn until the run is
+    /// finalized (after its exit drain), `None` between runs. A new run has a higher run id.
+    /// The sender closes when the actor ends.
+    pub fn watch_probe(&self) -> watch::Receiver<Option<TreeProbe>> {
+        self.probe.clone()
     }
 
     /// Waits until `predicate` holds for the status, checking the current
