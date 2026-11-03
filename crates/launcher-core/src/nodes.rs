@@ -694,7 +694,9 @@ mod tests {
 
     #[test]
     fn a_draft_that_breaks_a_rule_is_refused() {
-        let paths = Paths::under("/root");
+        // An absolute root on every OS: a draft's folder must be absolute, and "/root" is
+        // not on Windows.
+        let paths = Paths::under(if cfg!(windows) { r"C:\root" } else { "/root" });
         let first = NodeSpec::first(Network::Mainnet);
         let nodes = vec![first.clone()];
         let refused = |draft: NodeDraft| {
@@ -810,16 +812,16 @@ mod tests {
             NodeError::RelativeDataDir(_)
         ));
         // A folder of its own elsewhere is fine.
-        let elsewhere = plan_new_node(
-            &with_dir("/mnt/big/testnet"),
-            &nodes,
-            &paths,
-            &nothing_in_use,
-        )
-        .expect("a folder elsewhere");
+        let big = if cfg!(windows) {
+            r"D:\big\testnet"
+        } else {
+            "/mnt/big/testnet"
+        };
+        let elsewhere = plan_new_node(&with_dir(big), &nodes, &paths, &nothing_in_use)
+            .expect("a folder elsewhere");
         assert_eq!(
             elsewhere.state_dir(&paths),
-            PathBuf::from("/mnt/big/testnet/state")
+            PathBuf::from(big).join("state")
         );
         // At most MAX_NODES.
         let full: Vec<NodeSpec> = (0..MAX_NODES)
