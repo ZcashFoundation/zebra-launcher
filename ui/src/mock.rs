@@ -907,12 +907,17 @@ pub async fn free_space(path: String) -> Option<u64> {
     // Slower than `get_first_run_info`, so the wizard's data step shows "checking" while Next
     // is already enabled.
     sleep(1500).await;
-    let path = path.trim().trim_end_matches('/');
-    match path {
-        DEFAULT_DATA_DIR => Some(FREE_AT_DEFAULT),
-        PICKED_DATA_DIR => Some(FREE_AT_PICKED),
-        _ if path.starts_with('/') => Some(FREE_ELSEWHERE),
-        _ => None,
+    // A folder inside one of the mock's folders is on the same drive, as a new node's own
+    // folder in the launcher's data folder is.
+    let path = std::path::Path::new(path.trim());
+    if path.starts_with(DEFAULT_DATA_DIR) {
+        Some(FREE_AT_DEFAULT)
+    } else if path.starts_with(PICKED_DATA_DIR) {
+        Some(FREE_AT_PICKED)
+    } else if path.is_absolute() {
+        Some(FREE_ELSEWHERE)
+    } else {
+        None
     }
 }
 

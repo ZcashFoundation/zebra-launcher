@@ -102,7 +102,9 @@ every node command and event carries a node's id, and the mock's zebrad below is
   each node's pages and the add-node dialog. The dialog offers Zebra on either network (the
   other kinds show as coming later), and its Add creates one more simulated zebrad node, with
   its own folder, ports and `zebrad.toml`, under the backend's rules: at most eight nodes, and
-  a name, ports and data folder no other node has. A node's Node settings tab renames it,
+  a name, ports and data folder no other node has. Its data folder shows the free space there
+  (212.4 GB in the launcher's data folder, with the low-space warning on Mainnet), and its
+  Change… picks `/mnt/storage/zebra` (1,834.5 GB free). A node's Node settings tab renames it,
   turns its start at launch on or off and removes it, keeping or deleting its data (the last
   node cannot be removed). The mock's own zebrad, the first node, can be removed too, after
   which a Testnet node may be first while the window stays on the network shown; with

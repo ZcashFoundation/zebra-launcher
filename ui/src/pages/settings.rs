@@ -685,8 +685,9 @@ fn Nodes() -> impl IntoView {
 }
 
 /// The free space at the folder in use: `212.4 GB free`, in the warning tone with an icon when
-/// Mainnet would not fit, or `free space unknown`.
-fn free_space_view(free: Option<u64>) -> impl IntoView {
+/// Mainnet would not fit, or `free space unknown`: the data folder row here and the add-node
+/// dialog's.
+pub(crate) fn free_space_view(free: Option<u64>) -> impl IntoView {
     let low = is_low_space(free);
     view! {
         <span class="data-dir-free" class:warn=low class:muted=!low>

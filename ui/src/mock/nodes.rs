@@ -334,6 +334,17 @@ pub async fn add_node(draft: NodeDraft) -> Result<NodeInfo, String> {
             &taken_ports(&nodes),
         )
     });
+    if let Some(dir) = &draft.data_dir {
+        if !dir.starts_with('/') {
+            return Err(format!("the data folder {dir:?} is not an absolute path"));
+        }
+        if let Some(holder) = nodes.iter().find(|node| &node.data_dir == dir) {
+            return Err(format!(
+                "{dir} is {}'s data folder, or overlaps it",
+                holder.name
+            ));
+        }
+    }
     let own_folder = format!("{DEFAULT_DATA_DIR}/nodes/{id}");
     let info = NodeInfo {
         data_dir: draft.data_dir.unwrap_or_else(|| own_folder.clone()),

@@ -431,8 +431,10 @@ impl RegistryHandle {
     }
 
     /// Adds the node `draft` describes, stopped, after the checks of
-    /// [`nodes::plan_new_node`]: its folder is created with a minimal
-    /// `zebrad.toml`, and it is saved to the node list.
+    /// [`nodes::plan_new_node`] and, for a data folder of the user's
+    /// choosing, that Zeal can write there ([`firstrun::check_chosen_dir`]):
+    /// its folder is created with a minimal `zebrad.toml`, and it is saved to
+    /// the node list.
     pub async fn add(&self, draft: NodeDraft) -> Result<NodeInfo, NodeError> {
         self.ask(|reply| Cmd::Add { draft, reply }).await
     }
@@ -876,9 +878,23 @@ impl Actor {
         }
         let specs = self.specs();
         let in_use = self.config.port_in_use.clone();
-        let spec = nodes::plan_new_node(&draft, &specs, &self.config.paths, &|role, port| {
+        let mut spec = nodes::plan_new_node(&draft, &specs, &self.config.paths, &|role, port| {
             in_use(role, port)
         })?;
+        // A data folder the user chose must be one Zeal can write to, as for
+        // `choose_data_dir`; the node's own folder chosen by hand is the
+        // default.
+        if let Some(dir) = spec.data_dir.clone() {
+            let own = spec.paths(&self.config.paths).data_dir().to_path_buf();
+            let (_, is_own) = blocking(move || {
+                firstrun::check_chosen_dir(Path::new(&dir), &own).map_err(io::Error::other)
+            })
+            .await
+            .map_err(|err| NodeError::Failed(err.to_string()))?;
+            if is_own {
+                spec.data_dir = None;
+            }
+        }
         // The folder is new: a removed node's folder keeps its id from being
         // planned. Created before the list is saved, and removed again if the
         // save fails.

@@ -88,8 +88,12 @@ from the node's spec (`NodeSpec`, `crates/launcher-core/src/nodes.rs`).
   other node has and no other program holds (assigned from the kind's defaults with
   `assign_ports` around every node's ports, then around ports in use, when the draft
   leaves them out); and a data folder that is not another node's and whose state does not
-  overlap another node's. The node's folder and minimal `zebrad.toml` are written before
-  the list is saved, and removed again if the save fails.
+  overlap another node's, and that Zeal can write to when the user chose it
+  (`check_chosen_dir`, as for `choose_data_dir`; the node's own folder chosen by hand
+  counts as its default). The add-node dialog shows the free space where the chain would
+  go, with the low-space warning for Mainnet, and its Change… picks another folder. The
+  node's folder and minimal `zebrad.toml` are written before the list is saved, and
+  removed again if the save fails.
 - **Changing** (`plan_update`): a name, start at launch, stop grace (next launch), or
   network. A new network moves the ports to that network's defaults around the other
   nodes', renames a default name ("Zebra · Testnet"), and rewrites the managed keys at

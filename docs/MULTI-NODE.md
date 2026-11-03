@@ -394,11 +394,11 @@ The last step mentions that other nodes can be added later from Settings → Nod
    - **2a, built**: the registry, per-node runtimes, port assignment and the port check at
      every start, settings v3 and its migration, node-scoped commands and events, the
      add-node dialog on the real backend (zebrad on Mainnet or Testnet, running the bundled
-     zebrad; the other kinds visible as coming later; the warning for a second node on one
-     network), Node settings with the name, the start at launch and Remove, Settings → Nodes
-     as the single-node entry point to the dialog, an update that stops and starts every
-     node, Quit that stops every node, and the tray's node counts with Start all and Stop
-     all.
+     zebrad; the other kinds visible as coming later; the data folder with its free space;
+     the warning for a second node on one network), Node settings with the name, the start
+     at launch and Remove, Settings → Nodes as the single-node entry point to the dialog, an
+     update that stops and starts every node, Quit that stops every node, and the tray's
+     node counts with Start all and Stop all.
    - **2b**: a tray submenu per node and "Add a node…" in the tray, the stop grace, data
      folder and ports in Node settings, and the first run's pointer to Settings → Nodes.
 3. **Zakura**, as a variant of the zebrad adapter: its binary, `zakura.toml`, pruning and

@@ -1,7 +1,8 @@
 //! The add-node dialog (docs/MULTI-NODE.md): pick a kind, fill in its details (network, name,
-//! program, the node a service uses), and review what Zeal will set up, with the ports moved
-//! out of the way of the nodes that exist. This release adds zebrad nodes, which run the
-//! bundled zebrad; the other kinds show what they will need and cannot be picked yet.
+//! program, the node a service uses, the data folder with its free space), and review what
+//! Zeal will set up, with the ports moved out of the way of the nodes that exist. This release
+//! adds zebrad nodes, which run the bundled zebrad; the other kinds show what they will need
+//! and cannot be picked yet.
 
 use launcher_types::{
     DEFAULT_STOP_GRACE_SECS, MAX_NODES, Network, NodeDraft, NodeId, NodeInfo, NodeKind, NodePort,
@@ -10,7 +11,11 @@ use launcher_types::{
 use leptos::{ev, html, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
 
-use crate::{api, app::AppState};
+use crate::{
+    api,
+    app::AppState,
+    pages::settings::{free_space_text, free_space_view},
+};
 
 /// A new node's own folder in the launcher's data folder `base`, `<base>/nodes/<id>`, with the
 /// separator `base` uses.
@@ -134,6 +139,9 @@ pub fn AddNode(
     let name_edited = RwSignal::new(false);
     let program = RwSignal::new(String::new());
     let uses = RwSignal::new(None::<NodeId>);
+    // The data folder picked with Change…; `None`: a folder of its own in Zeal's data folder.
+    let chosen_dir = RwSignal::new(None::<String>);
+    let picking = RwSignal::new(false);
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
 
@@ -146,6 +154,7 @@ pub fn AddNode(
             name_edited.set(false);
             program.set(String::new());
             uses.set(None);
+            chosen_dir.set(None);
             error.set(None);
         }
     });
@@ -214,8 +223,9 @@ pub fn AddNode(
             .default_data_dir
             .with(|base| base.as_deref().map(|base| node_folder(base, &id)));
         NodeInfo {
-            data_dir: own_folder
-                .clone()
+            data_dir: chosen_dir
+                .get()
+                .or_else(|| own_folder.clone())
                 .unwrap_or_else(|| "a folder of its own in Zeal's data folder".to_owned()),
             own_folder,
             id,
@@ -233,6 +243,56 @@ pub fn AddNode(
             stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
         }
     });
+    // Where the chain would go, once it is known: the folder picked, or the node's own.
+    let target_dir = Memo::new(move |_| {
+        chosen_dir
+            .get()
+            .or_else(|| draft.with(|info| info.own_folder.clone()))
+    });
+    // The free space there (`Some(None)` when it cannot be read), read whenever the folder
+    // changes; a folder that does not exist yet is measured on the drive it would be on.
+    let free_at = RwSignal::new(None::<(String, Option<u64>)>);
+    Effect::new(move |_| {
+        let Some(dir) = target_dir.get().filter(|_| open.get()) else {
+            return;
+        };
+        spawn_local(async move {
+            let free = api::free_space(dir.clone()).await.ok().flatten();
+            // Unless the folder changed meanwhile.
+            if target_dir.with_untracked(|current| current.as_ref() == Some(&dir)) {
+                free_at.set(Some((dir, free)));
+            }
+        });
+    });
+    let free_here = move || {
+        let target = target_dir.get()?;
+        free_at.with(|read| {
+            read.as_ref()
+                .filter(|(dir, _)| *dir == target)
+                .map(|(_, free)| *free)
+        })
+    };
+    // The free space, with the warning when Mainnet would not fit; Testnet's chain is smaller.
+    let free_view = move || match free_here() {
+        None => view! { <span class="muted">"Checking the free space…"</span> }.into_any(),
+        Some(free) if network.get() == Network::Mainnet => free_space_view(free).into_any(),
+        Some(free) => view! { <span class="muted">{free_space_text(free)}</span> }.into_any(),
+    };
+    let change_dir = move |_| {
+        picking.set(true);
+        error.set(None);
+        spawn_local(async move {
+            match api::pick_data_dir().await {
+                Ok(Some(path)) => chosen_dir.set(Some(path)),
+                Ok(None) => {}
+                Err(failure) => {
+                    error.set(Some(format!("Could not open the folder picker: {failure}")));
+                }
+            }
+            picking.set(false);
+        });
+    };
+
     // Ports that moved, and who has the one they wanted.
     let moved = move || {
         let info = draft.get();
@@ -274,6 +334,14 @@ pub fn AddNode(
         if program_prompt(info.kind).is_some() && program.with(|p| p.trim().is_empty()) {
             let (what, _) = program_prompt(info.kind).unwrap_or_default();
             return Some(format!("Choose the {what}."));
+        }
+        if let Some(chosen) = chosen_dir.get()
+            && let Some(holder) = existing().into_iter().find(|node| node.data_dir == chosen)
+        {
+            return Some(format!(
+                "{chosen} is {}'s data folder: choose another.",
+                holder.name
+            ));
         }
         if !info.kind.uses().is_empty() && info.depends_on.is_none() {
             let wanted: Vec<&str> = info.kind.uses().iter().map(|kind| kind.label()).collect();
@@ -342,7 +410,7 @@ pub fn AddNode(
             name: info.name,
             id: None,
             ports: None,
-            data_dir: None,
+            data_dir: chosen_dir.get_untracked(),
             program: NodeProgram::Bundled,
             autostart: true,
         };
@@ -526,7 +594,30 @@ pub fn AddNode(
                         }
                     })}
                 <span class="form-label">"Data folder"</span>
-                <code class="form-value">{move || draft.with(|info| info.data_dir.clone())}</code>
+                <div class="form-value">
+                    <code>{move || draft.with(|info| info.data_dir.clone())}</code>
+                    <p class="form-note">{free_view}</p>
+                    <div class="buttons">
+                        <button type="button" disabled=move || picking.get() on:click=change_dir>
+                            "Change…"
+                        </button>
+                        {move || {
+                            chosen_dir
+                                .get()
+                                .is_some()
+                                .then(|| {
+                                    view! {
+                                        <button type="button" on:click=move |_| chosen_dir.set(None)>
+                                            "Use a folder of its own"
+                                        </button>
+                                    }
+                                })
+                        }}
+                    </div>
+                    <p class="muted form-note">
+                        "The chain state goes into its state folder; its configuration and log stay in its own folder."
+                    </p>
+                </div>
                 <span class="form-label">"Ports"</span>
                 <div class="form-value">
                     <span>{move || draft.with(|info| ports_line(&info.ports))}</span>
@@ -575,7 +666,11 @@ pub fn AddNode(
                 <dd><code>{program_text}</code></dd>
                 {uses_name.map(|used| view! { <dt>"Uses"</dt><dd>{used}</dd> })}
                 <dt>"Data folder"</dt>
-                <dd><code>{info.data_dir.clone()}</code></dd>
+                <dd>
+                    <code>{info.data_dir.clone()}</code>
+                    <br />
+                    {free_view}
+                </dd>
                 <dt>"Ports"</dt>
                 <dd>{ports_line(&info.ports)}</dd>
                 <dt>"Id"</dt>

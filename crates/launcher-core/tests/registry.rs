@@ -396,6 +396,51 @@ async fn adding_refuses_a_draft_that_breaks_a_rule_and_leaves_nothing_behind() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_node_can_keep_its_chain_in_a_folder_of_the_users_choosing() {
+    let fx = fixture().await;
+    let big = fx.dir.path().join("big-disk");
+    let added = within(fx.registry.add(NodeDraft {
+        data_dir: Some(big.display().to_string()),
+        ..draft(Network::Testnet, "Zebra · Testnet")
+    }))
+    .await
+    .expect("add");
+    assert_eq!(added.data_dir, big.display().to_string());
+    let node = fx.registry.node(&added.id).expect("lookup");
+    assert_eq!(node.state_dir(), big.join("state"));
+    assert!(big.is_dir(), "the folder is created");
+    let toml = fs::read_to_string(node.paths.zebrad_config()).expect("zebrad.toml");
+    assert!(
+        toml.contains(&*big.join("state").to_string_lossy()),
+        "{toml}"
+    );
+
+    // A folder Zeal cannot write to is refused, and nothing is added.
+    let file = fx.dir.path().join("a-file");
+    fs::write(&file, b"").expect("a file");
+    let err = within(fx.registry.add(NodeDraft {
+        data_dir: Some(file.join("inside").display().to_string()),
+        ..draft(Network::Testnet, "Elsewhere")
+    }))
+    .await
+    .expect_err("not a folder");
+    assert!(err.to_string().contains("as the data folder"), "{err}");
+    assert_eq!(fx.registry.infos().len(), 2);
+
+    // The node's own folder, chosen by hand, is its default.
+    let own = fx.paths.nodes_dir().join("zebrad-testnet-2");
+    let added = within(fx.registry.add(NodeDraft {
+        data_dir: Some(own.display().to_string()),
+        ..draft(Network::Testnet, "Own")
+    }))
+    .await
+    .expect("add");
+    assert_eq!(added.id.as_str(), "zebrad-testnet-2");
+    assert_eq!(fx.settings.nodes()[2].data_dir, None);
+    within(fx.registry.shutdown()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_port_another_program_holds_fails_the_start_as_port_in_use() {
     let fx = fixture().await;
     let first = fx.registry.first().expect("first");
