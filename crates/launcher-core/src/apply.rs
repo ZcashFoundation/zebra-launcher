@@ -20,7 +20,7 @@ use tokio::task::{JoinError, spawn_blocking};
 
 use crate::{
     config::{self, ConfigEditError, ManagedKeys},
-    paths::Paths,
+    paths::NodePaths,
     supervisor::{SupervisorError, SupervisorHandle},
 };
 
@@ -119,7 +119,7 @@ async fn blocking<T: Send + 'static>(
 /// The caller keeps zebrad's data from changing underneath the restart
 /// (the Tauri app holds its start permit across the call).
 pub async fn apply_and_restart<N: ApplyNode>(
-    paths: &Paths,
+    paths: &NodePaths,
     node: &N,
     text: String,
     token: String,
@@ -203,6 +203,7 @@ mod tests {
     use tokio::sync::watch;
 
     use super::*;
+    use crate::paths::Paths;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -314,10 +315,11 @@ mod tests {
     }
 
     /// A managed `zebrad.toml` in a temporary layout, with what `read` returns.
-    fn setup() -> (tempfile::TempDir, Paths, ManagedKeys, ConfigDocument) {
+    fn setup() -> (tempfile::TempDir, NodePaths, ManagedKeys, ConfigDocument) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let paths = Paths::under(dir.path());
-        paths.ensure_dirs().expect("dirs");
+        let launcher = Paths::under(dir.path());
+        launcher.ensure_dirs().expect("dirs");
+        let paths = launcher.launcher_node();
         let keys = ManagedKeys::defaults(Network::Mainnet, &paths, paths.default_state_dir());
         config::ensure(&paths, &keys).expect("ensure");
         let original = config::read(&paths).expect("read");
@@ -329,7 +331,7 @@ mod tests {
     }
 
     async fn apply(
-        paths: &Paths,
+        paths: &NodePaths,
         node: &ScriptedNode,
         keys: &ManagedKeys,
         original: &ConfigDocument,
@@ -345,11 +347,11 @@ mod tests {
         .await
     }
 
-    fn file(paths: &Paths) -> String {
+    fn file(paths: &NodePaths) -> String {
         fs::read_to_string(paths.zebrad_config()).expect("read zebrad.toml")
     }
 
-    fn assert_new_file_kept(paths: &Paths, original: &ConfigDocument) {
+    fn assert_new_file_kept(paths: &NodePaths, original: &ConfigDocument) {
         assert_eq!(file(paths), new_text(original));
         assert!(!paths.pending_apply_marker().exists(), "marker removed");
         assert_eq!(
@@ -358,7 +360,7 @@ mod tests {
         );
     }
 
-    fn assert_restored(paths: &Paths, original: &ConfigDocument) {
+    fn assert_restored(paths: &NodePaths, original: &ConfigDocument) {
         assert_eq!(file(paths), original.text);
         assert!(!paths.pending_apply_marker().exists(), "marker removed");
     }

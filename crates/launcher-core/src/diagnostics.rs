@@ -207,7 +207,7 @@ pub fn bundle(
     }
 
     section(&mut out, "zebrad.toml");
-    let config = paths.zebrad_config();
+    let config = paths.launcher_node().zebrad_config();
     let _ = writeln!(out, "# {}", config.display());
     match fs::read_to_string(&config) {
         Ok(text) => push_block(&mut out, &text),
@@ -222,7 +222,10 @@ pub fn bundle(
         &log_tail(latest_launcher_log(&paths.launcher_log())),
     );
     section(&mut out, &format!("zebrad log, last {TAIL_LINES} lines"));
-    push_block(&mut out, &log_tail(Some(paths.zebrad_log())));
+    push_block(
+        &mut out,
+        &log_tail(Some(paths.launcher_node().zebrad_log())),
+    );
     out
 }
 
@@ -507,8 +510,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = Paths::under(dir.path());
         paths.ensure_dirs().expect("dirs");
-        fs::write(paths.zebrad_config(), "[network]\nnetwork = \"Mainnet\"\n").expect("config");
-        fs::write(paths.rpc_cookie_file(), "__cookie__:supersecretcookie").expect("cookie");
+        let node = paths.launcher_node();
+        fs::write(node.zebrad_config(), "[network]\nnetwork = \"Mainnet\"\n").expect("config");
+        fs::write(node.rpc_cookie_file(), "__cookie__:supersecretcookie").expect("cookie");
         // The newest dated launcher log is the one included, not the plain file.
         fs::write(paths.launcher_log(), "plain launcher line\n").expect("launcher log");
         fs::write(
@@ -516,7 +520,7 @@ mod tests {
             "dated launcher line\n",
         )
         .expect("dated launcher log");
-        fs::write(paths.zebrad_log(), "zebrad line").expect("zebrad log");
+        fs::write(node.zebrad_log(), "zebrad line").expect("zebrad log");
         updates::save_record(
             &updates::record_path(&paths),
             &updates::UpdaterRecord {
@@ -675,7 +679,7 @@ mod tests {
         assert!(
             text.contains(&format!(
                 "(could not read {}: ",
-                paths.zebrad_log().display()
+                paths.launcher_node().zebrad_log().display()
             )),
             "{text}"
         );

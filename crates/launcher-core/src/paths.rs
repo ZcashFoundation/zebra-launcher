@@ -52,6 +52,71 @@ impl Paths {
         &self.log_dir
     }
 
+    /// The files of the node kept in the launcher's own directories, where
+    /// the single zebrad has always kept them: `zebrad.toml` in the config
+    /// directory, the pid file, RPC cookie and chain state in the data
+    /// directory, and `zebrad.log` in the log directory.
+    pub fn launcher_node(&self) -> NodePaths {
+        NodePaths {
+            config_dir: self.config_dir.clone(),
+            data_dir: self.data_dir.clone(),
+            log_dir: self.log_dir.clone(),
+        }
+    }
+
+    /// The launcher's own settings.
+    pub fn settings_file(&self) -> PathBuf {
+        self.config_dir.join("launcher.json")
+    }
+
+    /// Where the zebrad sidecar is copied when the launcher runs from a read-only
+    /// or transient location such as an AppImage mount.
+    pub fn sidecar_dir(&self) -> PathBuf {
+        self.data_dir.join("sidecar")
+    }
+
+    /// The launcher's own log.
+    pub fn launcher_log(&self) -> PathBuf {
+        self.log_dir.join("launcher.log")
+    }
+
+    /// Creates every directory the layout needs.
+    pub fn ensure_dirs(&self) -> io::Result<()> {
+        for dir in [
+            self.config_dir.as_path(),
+            self.data_dir.as_path(),
+            self.log_dir.as_path(),
+            &self.launcher_node().rpc_cookie_dir(),
+            &self.sidecar_dir(),
+        ] {
+            std::fs::create_dir_all(dir)?;
+        }
+        Ok(())
+    }
+}
+
+/// Where one node keeps its files: its `zebrad.toml` with the backup and the
+/// pending-apply marker beside it, its pid file, RPC cookie and default chain
+/// state, and its log.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodePaths {
+    config_dir: PathBuf,
+    data_dir: PathBuf,
+    log_dir: PathBuf,
+}
+
+impl NodePaths {
+    /// The directory of the node's `zebrad.toml`.
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
+    }
+
+    /// The directory of the node's pid file and RPC cookie, where its chain
+    /// state goes unless the user chooses another data directory.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     /// The `zebrad.toml` the launcher manages and passes with `-c`.
     pub fn zebrad_config(&self) -> PathBuf {
         self.config_dir.join("zebrad.toml")
@@ -66,11 +131,6 @@ impl Paths {
     /// mid-apply is rolled back on the next launch.
     pub fn pending_apply_marker(&self) -> PathBuf {
         self.config_dir.join("zebrad.toml.pending")
-    }
-
-    /// The launcher's own settings.
-    pub fn settings_file(&self) -> PathBuf {
-        self.config_dir.join("launcher.json")
     }
 
     /// The pid of the zebrad the launcher started, for stale-process detection.
@@ -93,34 +153,9 @@ impl Paths {
         self.data_dir.join("state")
     }
 
-    /// Where the zebrad sidecar is copied when the launcher runs from a read-only
-    /// or transient location such as an AppImage mount.
-    pub fn sidecar_dir(&self) -> PathBuf {
-        self.data_dir.join("sidecar")
-    }
-
     /// zebrad's output, rotated by the supervisor.
     pub fn zebrad_log(&self) -> PathBuf {
         self.log_dir.join("zebrad.log")
-    }
-
-    /// The launcher's own log.
-    pub fn launcher_log(&self) -> PathBuf {
-        self.log_dir.join("launcher.log")
-    }
-
-    /// Creates every directory the layout needs.
-    pub fn ensure_dirs(&self) -> io::Result<()> {
-        for dir in [
-            self.config_dir.as_path(),
-            self.data_dir.as_path(),
-            self.log_dir.as_path(),
-            &self.rpc_cookie_dir(),
-            &self.sidecar_dir(),
-        ] {
-            std::fs::create_dir_all(dir)?;
-        }
-        Ok(())
     }
 }
 
@@ -133,17 +168,18 @@ mod tests {
     #[test]
     fn every_path_is_distinct_and_under_a_base_dir() {
         let paths = Paths::under("/root");
+        let node = paths.launcher_node();
         let all = [
-            paths.zebrad_config(),
-            paths.zebrad_config_backup(),
-            paths.pending_apply_marker(),
+            node.zebrad_config(),
+            node.zebrad_config_backup(),
+            node.pending_apply_marker(),
             paths.settings_file(),
-            paths.pidfile(),
-            paths.rpc_cookie_dir(),
-            paths.rpc_cookie_file(),
-            paths.default_state_dir(),
+            node.pidfile(),
+            node.rpc_cookie_dir(),
+            node.rpc_cookie_file(),
+            node.default_state_dir(),
             paths.sidecar_dir(),
-            paths.zebrad_log(),
+            node.zebrad_log(),
             paths.launcher_log(),
         ];
         let distinct: BTreeSet<_> = all.iter().collect();
@@ -167,7 +203,7 @@ mod tests {
             paths.config_dir().to_path_buf(),
             paths.data_dir().to_path_buf(),
             paths.log_dir().to_path_buf(),
-            paths.rpc_cookie_dir(),
+            paths.launcher_node().rpc_cookie_dir(),
             paths.sidecar_dir(),
         ] {
             assert!(dir.is_dir(), "{dir:?} was not created");

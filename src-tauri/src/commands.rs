@@ -125,7 +125,7 @@ pub async fn restart_zebrad(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn read_config(state: State<'_, AppState>) -> Result<ConfigDocument, String> {
     let paths = state.paths.clone();
-    blocking(move || config::read(&paths))
+    blocking(move || config::read(&paths.launcher_node()))
         .await?
         .map_err(message)
 }
@@ -141,7 +141,7 @@ pub async fn reset_config(state: State<'_, AppState>) -> Result<ConfigDocument, 
     let _config = state.gates.try_config_permit()?;
     let paths = state.paths.clone();
     let keys = managed_keys(&state.settings.current(), &paths);
-    blocking(move || config::reset(&paths, &keys))
+    blocking(move || config::reset(&paths.launcher_node(), &keys))
         .await?
         // The UI says what failed ("Could not reset the config"), so only the cause here.
         .map_err(message)
@@ -195,7 +195,7 @@ pub async fn apply_config(
 
     let keys = managed_keys(&state.settings.current(), &state.paths);
     apply::apply_and_restart(
-        &state.paths,
+        &state.paths.launcher_node(),
         &state.supervisor,
         text,
         token,
@@ -247,7 +247,7 @@ pub async fn set_settings(
 
     if config_permit.is_some() {
         let keys = managed_keys(&saved, &paths);
-        blocking(move || config::ensure(&paths, &keys))
+        blocking(move || config::ensure(&paths.launcher_node(), &keys))
             .await?
             .map_err(|err| {
                 format!("settings saved, but zebrad.toml could not be updated: {err}")
@@ -430,7 +430,7 @@ pub async fn choose_data_dir(
         .map_err(message)?;
     let paths = state.paths.clone();
     let keys = managed_keys(&saved, &paths);
-    blocking(move || config::ensure(&paths, &keys))
+    blocking(move || config::ensure(&paths.launcher_node(), &keys))
         .await?
         .map_err(|err| {
             format!("the data directory was saved, but zebrad.toml could not be updated: {err}")

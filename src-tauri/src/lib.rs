@@ -233,7 +233,7 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
         "Zeal starting"
     );
 
-    match config::recover(&paths) {
+    match config::recover(&paths.launcher_node()) {
         Ok(Some(_)) => tracing::warn!(
             "a configuration change was interrupted by a launcher exit; restored the previous zebrad.toml"
         ),
@@ -247,16 +247,17 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
     let current = settings.current();
     // A broken zebrad.toml is not fatal: zebrad reports it, and the user can
     // fix it in the editor.
-    if let Err(err) = config::ensure(&paths, &managed_keys(&current, &paths)) {
+    let node = paths.launcher_node();
+    if let Err(err) = config::ensure(&node, &managed_keys(&current, &paths)) {
         tracing::error!(%err, "could not update the managed keys in zebrad.toml");
     }
 
-    let mut command = ZebradCommand::new(sidecar::resolve(&paths), paths.zebrad_config());
+    let mut command = ZebradCommand::new(sidecar::resolve(&paths), node.zebrad_config());
     command.shutdown_on_stdin_close = std::env::var_os(STDIN_CLOSE_ENV).is_some_and(|v| v == "1");
     let mut supervisor_config = SupervisorConfig::new(command);
     supervisor_config.stop_grace = Duration::from_secs(current.stop_grace_secs);
-    supervisor_config.pidfile = Some(paths.pidfile());
-    supervisor_config.log_file = Some(RotatingLogConfig::new(paths.zebrad_log()));
+    supervisor_config.pidfile = Some(node.pidfile());
+    supervisor_config.log_file = Some(RotatingLogConfig::new(node.zebrad_log()));
     let supervisor = supervisor::spawn(supervisor_config)?;
     // From here on the launcher's own events show in the Logs tab too.
     if let Some(notes) = notes {
@@ -265,7 +266,7 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
 
     let MonitorOutput { stats, details } = Monitor::spawn(
         supervisor.watch_status(),
-        paths.rpc_cookie_file(),
+        node.rpc_cookie_file(),
         monitor::DEFAULT_INTERVAL,
     );
     let metrics = MetricsPoller::spawn(supervisor.watch_status());

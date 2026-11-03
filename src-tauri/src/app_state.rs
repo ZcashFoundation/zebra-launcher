@@ -119,15 +119,20 @@ pub fn legacy_cache_dir() -> Result<PathBuf, String> {
 }
 
 /// The chain state directory: `<settings.data_dir>/state` when the user
-/// chose a data directory, otherwise [`Paths::default_state_dir`].
+/// chose a data directory, otherwise the default one
+/// ([`NodePaths::default_state_dir`](launcher_core::paths::NodePaths::default_state_dir)).
 pub fn state_dir(settings: &Settings, paths: &Paths) -> PathBuf {
     match &settings.data_dir {
         Some(dir) => PathBuf::from(dir).join("state"),
-        None => paths.default_state_dir(),
+        None => paths.launcher_node().default_state_dir(),
     }
 }
 
 /// The `zebrad.toml` keys the launcher manages for `settings`.
 pub fn managed_keys(settings: &Settings, paths: &Paths) -> ManagedKeys {
-    ManagedKeys::defaults(settings.network, paths, state_dir(settings, paths))
+    ManagedKeys::defaults(
+        settings.network,
+        &paths.launcher_node(),
+        state_dir(settings, paths),
+    )
 }

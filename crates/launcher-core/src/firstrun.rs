@@ -757,12 +757,13 @@ mod tests {
         let dir = tempdir();
         let paths = Paths::under(dir.path());
         paths.ensure_dirs().expect("dirs");
-        let state = paths.default_state_dir();
+        let node = paths.launcher_node();
+        let state = node.default_state_dir();
         write_file(&state.join("state/v27/mainnet/a.sst"), 40);
         write_file(&state.join("b"), 2);
-        write_file(&paths.zebrad_config(), 1);
-        write_file(&paths.rpc_cookie_file(), 1);
-        write_file(&paths.zebrad_log(), 1);
+        write_file(&node.zebrad_config(), 1);
+        write_file(&node.rpc_cookie_file(), 1);
+        write_file(&node.zebrad_log(), 1);
 
         // Without a measured size the bytes freed are unknown (0)...
         let freed =
@@ -779,9 +780,9 @@ mod tests {
             5
         );
         assert!(!state.exists());
-        assert!(paths.zebrad_config().exists());
-        assert!(paths.rpc_cookie_file().exists());
-        assert!(paths.zebrad_log().exists());
+        assert!(node.zebrad_config().exists());
+        assert!(node.rpc_cookie_file().exists());
+        assert!(node.zebrad_log().exists());
         assert!(paths.data_dir().is_dir());
         // Already gone.
         assert_eq!(
