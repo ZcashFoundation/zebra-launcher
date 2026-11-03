@@ -104,10 +104,10 @@ fn gib(value: f64) -> u64 {
     (value * GIB).round() as u64
 }
 
-/// A value from -1 to 1 for sample `count` of a stream named `salt`: a hash of the two
-/// (splitmix64), so a test sees the same numbers as the page.
-pub(super) fn jitter(count: u64, salt: u64) -> f64 {
-    let mut z = (count ^ salt.rotate_left(32)).wrapping_add(0x9E37_79B9_7F4A_7C15);
+/// A value from -1 to 1 for sample `count` of the series numbered `series`: a hash of the two
+/// (splitmix64), so a test sees the same numbers as the page. Not cryptographic.
+pub(super) fn jitter(count: u64, series: u64) -> f64 {
+    let mut z = (count ^ series.rotate_left(32)).wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^= z >> 31;
@@ -154,7 +154,7 @@ fn memory_gib(state: &RunState) -> f64 {
 
 /// What zebrad uses in `state`.
 pub(super) fn load(state: &RunState) -> Load {
-    let j = |salt| jitter(state.count, salt);
+    let j = |series| jitter(state.count, series);
     let (cores, read_mb, written_mb) = if state.stopping {
         (0.6 + 0.05 * j(2), 2.0 + j(3), 20.0 + 5.0 * j(4))
     } else if state.run_secs < OPENING_SECS {
