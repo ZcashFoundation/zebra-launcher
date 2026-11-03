@@ -15,6 +15,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+pub mod explorer;
 mod nodes;
 mod resources;
 
@@ -60,6 +61,9 @@ pub mod events {
     /// ([`MetricsSnapshot`](crate::MetricsSnapshot)): zebrad's Prometheus
     /// metrics, read every 10 s while it runs.
     pub const METRICS: &str = "metrics";
+    /// A node's explorer changed what it publishes on its own: an
+    /// [`ExplorerLiveEvent`](crate::explorer::ExplorerLiveEvent), at most four a second.
+    pub const EXPLORER_LIVE: &str = "explorer_live";
     /// Every `Option<NodeResources>` change of a node
     /// ([`NodeResources`](crate::NodeResources)): what its processes use, read
     /// every 5 s from the spawn until the run ends.
@@ -621,6 +625,11 @@ pub struct NodeStats {
     pub updated_at: SystemTime,
 }
 
+/// Synced: within a block of the estimated tip, or a progress of 99.99 % or more.
+pub fn at_tip(height: u64, estimated_height: u64, verification_progress: f64) -> bool {
+    estimated_height.saturating_sub(height) <= 1 || verification_progress >= 0.9999
+}
+
 /// When the running zebrad release reaches its end of support and halts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EosInfo {
@@ -661,6 +670,14 @@ pub struct NodeDetails {
     /// `getblockchaininfo.upgrades` with the highest activation height.
     #[serde(default)]
     pub active_upgrade: Option<String>,
+    /// Every network upgrade zebrad knows for its network, by activation height: the
+    /// explorer keys its rules to these heights.
+    #[serde(default)]
+    pub upgrades: Vec<NetworkUpgrade>,
+    /// The consensus branches of the tip and of the next block, which differ when the next
+    /// block activates an upgrade.
+    #[serde(default)]
+    pub consensus: Option<ConsensusBranches>,
     /// zebrad's P2P user agent, such as `/Zebra:7.0.0/`.
     #[serde(default)]
     pub subversion: Option<String>,
@@ -675,6 +692,41 @@ pub struct NodeDetails {
     pub mempool_usage: Option<u64>,
     /// When these details were last refreshed.
     pub updated_at: SystemTime,
+}
+
+/// A network upgrade as zebrad reports it in `getblockchaininfo.upgrades`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkUpgrade {
+    /// zebrad's name for it, such as `NU6.1`.
+    pub name: String,
+    /// Its consensus branch id in hex, such as `4dec4df0`.
+    pub branch_id: String,
+    /// The height of its first block.
+    pub activation_height: u64,
+    /// Whether it is active yet.
+    pub status: UpgradeStatus,
+}
+
+/// Whether a network upgrade is active ([`NetworkUpgrade::status`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradeStatus {
+    /// Activated at or below the tip.
+    Active,
+    /// It has an activation height above the tip.
+    Pending,
+    /// It has no activation height on this network.
+    Disabled,
+}
+
+/// The consensus branch ids of the tip and of the next block, in hex
+/// (`getblockchaininfo.consensus`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsensusBranches {
+    /// The branch the tip was validated with.
+    pub chain_tip: String,
+    /// The branch the next block is validated with.
+    pub next_block: String,
 }
 
 /// One peer, from `getpeerinfo`.
@@ -1415,6 +1467,8 @@ mod tests {
         assert_eq!(details.chain_supply_zec, None);
         assert!(details.value_pools.is_empty());
         assert_eq!(details.active_upgrade, None);
+        assert!(details.upgrades.is_empty());
+        assert_eq!(details.consensus, None);
         assert_eq!(details.mempool_usage, None);
         assert_eq!(
             details.updated_at,
@@ -1434,8 +1488,21 @@ mod tests {
                 zec: 0.5,
             }],
             active_upgrade: Some("NU6".into()),
+            upgrades: vec![NetworkUpgrade {
+                name: "NU6".into(),
+                branch_id: "c8e71055".into(),
+                activation_height: 2_726_400,
+                status: UpgradeStatus::Active,
+            }],
+            consensus: Some(ConsensusBranches {
+                chain_tip: "c8e71055".into(),
+                next_block: "c8e71055".into(),
+            }),
             ..details
         };
+        let json = serde_json::to_value(&full).unwrap();
+        assert_eq!(json["upgrades"][0]["status"], "active");
+        assert_eq!(json["consensus"]["next_block"], "c8e71055");
         let round_trip: NodeDetails =
             serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
         assert_eq!(round_trip, full);

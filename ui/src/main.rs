@@ -17,6 +17,7 @@ mod clock;
 mod config_editor;
 mod config_form;
 mod config_view;
+mod explorer;
 mod format;
 mod grafana_url;
 mod health;

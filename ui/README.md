@@ -118,6 +118,18 @@ every node command and event carries a node's id, and the mock's zebrad below is
   started (0.2 cores, 2.4 GiB); a zebrad the dialog adds uses what the mock's zebrad does at
   the tip. With `?herd` the computer has 16 CPUs and 32 GiB, and its figures count every
   node. The real backend has the same API and rules; there every node is a zebrad for now.
+- the Explorer (Ctrl/Cmd+3, or Ctrl/Cmd+K for its search): each zebrad and Zakura node has its
+  own synthetic chain from explorer-model, answered with the backend's own page builders, and
+  the dashboard's best block, pools, supply, difficulty and upgrades read the same chain.
+  Amounts are in ZEC, or TAZ on Testnet. The default mock syncs, so the Explorer shows what the
+  node has and does not follow the tip. `?attip` puts zebrad at the tip near block 3,551,000
+  (past NU7, a block every 25 s), so Ironwood, the burn and the shielded budget show;
+  `?tip=<h>` does the same at height `h`. `?explorer=slow` makes every answer take 300 to
+  800 ms, `?explorer=empty` gives a chain of ten blocks, and `?explorer=nobi` takes zebrad's
+  value-pool row from every seventh block, so that block and the next show their fees as
+  unknown. `?reorg` replaces the main node's top two blocks about every 90 s at the tip (with
+  `?attip`), and the Explorer shows the banner. With `?herd` the Testnet nodes have Testnet
+  chains, and Zakura's chain is complete for now (pruning comes later).
 
 The flags are read from the query string once, when the page loads; the table at the top of
 [`src/mock.rs`](src/mock.rs) lists every one.
@@ -162,6 +174,7 @@ to the CSP when it serves the bundled assets.
 | `src/tauri.rs` | `#[wasm_bindgen]` externs to `window.__TAURI__`, JSON-compatible (de)serialization |
 | `src/api.rs` | One typed function per backend command or event, Tauri or mock; the node commands and events carry the node's id |
 | `src/mock.rs`, `src/mock/` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads. `nodes.rs` is the node-scoped API and the node list's rules, `herd.rs` the light simulation of every node but the first, and `resources.rs` the resource samples, pure and tested natively |
+| `src/mock/explorer.rs` | The mock's block explorers: one synthetic chain per zebrad or Zakura node, answered with explorer-model's views, and the chain facts the mock's dashboard details read |
 | `src/app.rs` | Shared state (`AppState`: the node list from `list_nodes` and the `nodes` event, matched by id, and the selected node), backend subscriptions, the shell: header, the tab bar for one node or the sidebar for several, and the first-run wizard |
 | `src/node_state.rs` | One node's state: what the backend reports about it and the histories and log analysis the UI keeps for it |
 | `src/node_summary.rs` | A node's state in a few words, for the sidebar and the overview. Pure, tested natively |
@@ -179,6 +192,8 @@ to the CSP when it serves the bundled assets.
 | `src/config_view.rs` | Helpers for the Configure page's file pane: changed lines, where a key is written, how far to scroll. Pure, tested natively |
 | `src/components/` | `nav.rs` (header and tabs), `sidebar.rs` and `herd_header.rs` (the shell for several nodes), `add_node.rs` (the add-node dialog), `status_strip.rs` (phase, progress, Start/Stop/Restart), `stale_banner.rs`, `updates.rs` (update banner, buttons, "Check for updates", recovery panel), `update_mode_choice.rs` (radio buttons shared by the wizard and Settings), `config_form.rs` (the two-view configuration editor), `log_insights.rs` (analysis cards), `reset_config.rs`, `tooltip.rs` |
 | `src/pages/` | The pages (`overview.rs` with several nodes, `dashboard.rs`, `logs.rs`, `grafana.rs`, `configure.rs`, `node_settings.rs` with several nodes, `settings.rs`) and the first-run wizard (`first_run.rs`) |
+| `src/explorer.rs`, `src/explorer/` | The Explorer tab: the shell (back and forward, the search box, the source line, the banner) and the Chain, Block, Transaction and Search pages, with their shared parts, text (pure, tested natively), navigation history and per-node state |
+| `styles/explorer.css` | The Explorer's styles, with the `--pool-*` colour tokens from `styles.css` |
 
 The crate also compiles natively so `cargo clippy --workspace --all-targets` and
 `cargo test --workspace` cover it; the native binary only prints a hint. Check the wasm build with

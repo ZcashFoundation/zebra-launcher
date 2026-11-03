@@ -12,6 +12,7 @@ pub mod app_state;
 pub mod bridge;
 pub mod commands;
 pub mod exit;
+pub mod explorer;
 pub mod logging;
 pub mod paths;
 pub mod sidecar;
@@ -102,6 +103,7 @@ pub fn run() {
             commands::check_for_update,
             commands::install_update,
             commands::cancel_update,
+            commands::explorer,
         ])
         .setup(|app| {
             setup(app.handle());
@@ -146,6 +148,9 @@ fn setup(app: &AppHandle) {
             app.manage(updater::start(app, &state, &plan));
             bridge::forward_nodes(app.clone(), state.registry.clone());
             bridge::forward_machine_resources(app.clone(), state.machine.clone());
+            let explorer = explorer::start(&state);
+            bridge::forward_explorer_live(app.clone(), explorer.live());
+            app.manage(explorer);
             tray::install(app, &state);
             for id in &plan.start_now {
                 if let Ok(node) = state.node(id) {

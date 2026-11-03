@@ -1,11 +1,14 @@
-//! The mock's node details: the peer list, the best block, the chain's supply and value pools,
-//! derived from the node statistics so the two agree.
+//! The mock's node details: the peer list from the node statistics, and the best block, the
+//! supply, the value pools and the upgrades from the chain the mock's Explorer shows, so the
+//! dashboard and the Explorer agree.
 
 use std::time::Duration;
 
-use launcher_types::{NodeDetails, NodeStats, PeerInfo, ValuePool};
+use launcher_types::{
+    ConsensusBranches, NodeDetails, NodeStats, PeerInfo, UpgradeStatus, ValuePool, explorer::Pool,
+};
 
-use super::{Scenario, log_lines::mock_hash};
+use super::{Scenario, explorer::ChainFacts};
 
 /// The protocol version zebrad 7.0.0 speaks.
 const PROTOCOL_VERSION: u32 = 170_120;
@@ -69,27 +72,14 @@ const PEERS: [(&str, bool, &str, u32, f64); 12] = [
     ("192.0.2.77:8233", true, "/Zebra:7.0.0/", 170_120, 0.152),
 ];
 
-/// The value pools in zebrad's order, with their balances in ZEC at the mock's first height.
-const POOLS: [(&str, f64); 5] = [
-    ("transparent", 13_980_123.45),
-    ("sprout", 23_456.78),
-    ("sapling", 512_345.67),
-    ("orchard", 1_654_321.0),
-    ("lockbox", 345_678.9),
-];
-
-/// The height the pool balances are quoted at.
-const POOLS_HEIGHT: u64 = 2_950_000;
-
-/// How much ZEC a block adds to the supply after the second halving.
-const SUBSIDY_PER_BLOCK: f64 = 1.5625;
-
-/// The details at `tick`, for `stats`.
+/// The details at `tick`, for `stats`, on `chain`: the facts of the block at the node's
+/// height.
 pub(super) fn details(
     stats: &NodeStats,
     tick: u64,
     state_bytes: u64,
     scenario: Scenario,
+    chain: &ChainFacts,
 ) -> NodeDetails {
     let peers = if scenario == Scenario::NoPeers {
         Vec::new()
@@ -114,27 +104,34 @@ pub(super) fn details(
             )
             .collect()
     };
-    let minted = stats.height.saturating_sub(POOLS_HEIGHT) as f64 * SUBSIDY_PER_BLOCK;
-    let value_pools: Vec<ValuePool> = POOLS
-        .iter()
-        .map(|&(id, zec)| ValuePool {
-            id: id.into(),
-            // New coins go to the orchard pool, where mining rewards land.
-            zec: if id == "orchard" { zec + minted } else { zec },
+    let zec = |zat: u64| zat as f64 / 100_000_000.0;
+    let value_pools: Vec<ValuePool> = Pool::ALL
+        .into_iter()
+        .map(|pool| ValuePool {
+            id: pool.id().into(),
+            zec: zec(chain.pools[pool.index()]),
         })
         .collect();
-    let supply = value_pools.iter().map(|pool| pool.zec).sum();
-    // Block hashes start with zeros: the proof of work.
-    let hash = format!("00000000{}", &mock_hash(stats.height)[8..]);
+    let supply = zec(chain.pools.iter().sum());
+    let upgrades = chain.upgrades.clone();
     NodeDetails {
         peers,
-        best_block_hash: Some(hash),
+        best_block_hash: Some(chain.best_block_hash.to_hex()),
         headers: Some(stats.height + tick % 2),
-        difficulty: Some(118_462_377.5 + (tick % 90) as f64 * 1_024.0),
+        difficulty: Some(chain.difficulty),
         size_on_disk: Some(state_bytes + tick * 2_500_000),
         chain_supply_zec: Some(supply),
         value_pools,
-        active_upgrade: Some("NU6.1".into()),
+        active_upgrade: upgrades
+            .iter()
+            .rev()
+            .find(|upgrade| upgrade.status == UpgradeStatus::Active)
+            .map(|upgrade| upgrade.name.clone()),
+        upgrades,
+        consensus: Some(ConsensusBranches {
+            chain_tip: chain.chain_tip_branch.into(),
+            next_block: chain.next_block_branch.into(),
+        }),
         subversion: Some("/Zebra:7.0.0/".into()),
         protocol_version: Some(PROTOCOL_VERSION),
         mempool_bytes: Some(stats.mempool_transactions * 1_850),
@@ -146,6 +143,9 @@ pub(super) fn details(
 #[cfg(test)]
 mod tests {
     use std::time::UNIX_EPOCH;
+
+    use explorer_model::synth::SynthChain;
+    use launcher_types::Network;
 
     use super::*;
 
@@ -164,9 +164,15 @@ mod tests {
         }
     }
 
+    fn chain_at(height: u32) -> ChainFacts {
+        let chain = SynthChain::new(Network::Mainnet, height, 1_800_000_000);
+        ChainFacts::of(&chain, height)
+    }
+
     #[test]
-    fn details_follow_the_stats() {
-        let full = details(&stats(10, 2_950_400), 3, 1_000, Scenario::Normal);
+    fn details_follow_the_stats_and_the_chain() {
+        let chain = chain_at(2_950_400);
+        let full = details(&stats(10, 2_950_400), 3, 1_000, Scenario::Normal, &chain);
         assert_eq!(full.peers.len(), 10);
         assert_eq!(
             full.peers.iter().filter(|peer| peer.inbound).count(),
@@ -183,30 +189,54 @@ mod tests {
                 .iter()
                 .all(|peer| peer.last_seen.unwrap() <= full.updated_at)
         );
-        assert_eq!(full.best_block_hash.as_ref().unwrap().len(), 64);
+        // The best block is the chain's own, as the Explorer shows it.
+        assert_eq!(
+            full.best_block_hash.as_deref(),
+            Some(chain.best_block_hash.to_hex().as_str())
+        );
         assert!(full.best_block_hash.unwrap().starts_with("00000000"));
         assert_eq!(full.headers, Some(2_950_401));
         assert_eq!(full.size_on_disk, Some(1_000 + 3 * 2_500_000));
         assert_eq!(full.mempool_bytes, Some(24 * 1_850));
-        assert_eq!(full.value_pools.len(), 5);
-        let supply: f64 = full.value_pools.iter().map(|pool| pool.zec).sum();
-        assert_eq!(full.chain_supply_zec, Some(supply));
-        // 400 blocks of subsidy went to the orchard pool.
-        let orchard = full
+        // Six pools in zebrad's order, adding up to the supply.
+        let ids: Vec<&str> = full
             .value_pools
             .iter()
-            .find(|pool| pool.id == "orchard")
-            .unwrap();
-        assert_eq!(orchard.zec, 1_654_321.0 + 400.0 * SUBSIDY_PER_BLOCK);
+            .map(|pool| pool.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "transparent",
+                "sprout",
+                "sapling",
+                "orchard",
+                "lockbox",
+                "ironwood"
+            ]
+        );
+        let supply: f64 = full.value_pools.iter().map(|pool| pool.zec).sum();
+        assert!((full.chain_supply_zec.unwrap() - supply).abs() < 1e-6);
+        assert_eq!(full.value_pools[5].zec, 0.0, "no Ironwood before NU6.3");
+        // Below NU6.1 the mock runs NU6, and the next block too.
+        assert_eq!(full.active_upgrade.as_deref(), Some("NU6"));
+        assert_eq!(full.upgrades.len(), 11);
+        assert_eq!(full.consensus.as_ref().unwrap().chain_tip, "c8e71055");
+        let at_activation = chain_at(3_146_399);
+        assert_eq!(at_activation.chain_tip_branch, "c8e71055");
+        assert_eq!(
+            at_activation.next_block_branch, "4dec4df0",
+            "the next block activates NU6.1"
+        );
         // Twelve peers at most, none without peers.
         assert_eq!(
-            details(&stats(30, 2_950_400), 3, 0, Scenario::Normal)
+            details(&stats(30, 2_950_400), 3, 0, Scenario::Normal, &chain)
                 .peers
                 .len(),
             12
         );
         assert!(
-            details(&stats(10, 2_950_400), 3, 0, Scenario::NoPeers)
+            details(&stats(10, 2_950_400), 3, 0, Scenario::NoPeers, &chain)
                 .peers
                 .is_empty()
         );

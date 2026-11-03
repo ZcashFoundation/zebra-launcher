@@ -498,6 +498,18 @@ fn find(node: &NodeId) -> Option<HerdNode> {
     })
 }
 
+/// What the mock's explorer reads of an extra node: who it is, whether it runs, and its
+/// latest statistics.
+pub(super) fn explorer_view(node: &NodeId) -> Option<(NodeInfo, bool, Option<NodeStats>)> {
+    let node = find(node)?;
+    let running = node.phase() == Phase::Running;
+    Some((
+        node.info.get_untracked(),
+        running,
+        node.stats.get_untracked(),
+    ))
+}
+
 /// The extra nodes, in the order they were added.
 pub fn infos() -> Vec<NodeInfo> {
     HERD.with_borrow(|herd| herd.iter().map(|node| node.info.get_untracked()).collect())

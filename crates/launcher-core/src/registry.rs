@@ -209,6 +209,12 @@ impl NodeHandle {
         self.spec.borrow().clone()
     }
 
+    /// The node's spec, following its changes (a rename, or a first run that moves the
+    /// network).
+    pub fn watch_spec(&self) -> watch::Receiver<NodeSpec> {
+        self.spec.clone()
+    }
+
     /// The node as the UI sees it.
     pub fn info(&self) -> NodeInfo {
         self.spec.borrow().info(&self.launcher)

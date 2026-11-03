@@ -21,6 +21,7 @@ use crate::{
         status_strip::StatusStrip,
         updates::{HealthFailureBanner, UpdateBanner},
     },
+    explorer::Explorer,
     insights::{
         RunEvent,
         events::{config_outcome_event, config_replaced_event, update_events},
@@ -34,13 +35,14 @@ use crate::{
     update_text::update_needs_attention,
 };
 
-/// The pages: the five of the tab bar, and the overview and a node's settings of a launcher
+/// The pages: the six of the tab bar, and the overview and a node's settings of a launcher
 /// that runs several nodes, which the sidebar and the node header show instead of the tab bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     Overview,
     Dashboard,
     Logs,
+    Explorer,
     Grafana,
     Configure,
     NodeSettings,
@@ -76,9 +78,10 @@ impl Badge {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Dashboard,
         Tab::Logs,
+        Tab::Explorer,
         Tab::Grafana,
         Tab::Configure,
         Tab::Settings,
@@ -87,7 +90,13 @@ impl Tab {
     /// The pages about the selected node, as opposed to the overview and the launcher's own.
     /// Node settings has a tab in the node header of several nodes only: with one node,
     /// Settings holds what it would.
-    pub const NODE: [Tab; 4] = [Tab::Dashboard, Tab::Logs, Tab::Configure, Tab::NodeSettings];
+    pub const NODE: [Tab; 5] = [
+        Tab::Dashboard,
+        Tab::Logs,
+        Tab::Explorer,
+        Tab::Configure,
+        Tab::NodeSettings,
+    ];
 
     pub fn is_node_tab(self) -> bool {
         Tab::NODE.contains(&self)
@@ -98,6 +107,7 @@ impl Tab {
             Tab::Overview => "Overview",
             Tab::Dashboard => "Dashboard",
             Tab::Logs => "Logs",
+            Tab::Explorer => "Explorer",
             Tab::Grafana => "Grafana",
             Tab::Configure => "Configure",
             Tab::NodeSettings => "Node settings",
@@ -105,7 +115,7 @@ impl Tab {
         }
     }
 
-    /// The tab's position, 1 to 5: its keyboard shortcut is Ctrl (or Cmd) plus this digit.
+    /// The tab's position, 1 to 6: its keyboard shortcut is Ctrl (or Cmd) plus this digit.
     pub fn number(self) -> usize {
         Tab::ALL.iter().position(|tab| *tab == self).unwrap_or(0) + 1
     }
@@ -124,6 +134,7 @@ impl Tab {
             Tab::Overview => "overview",
             Tab::Dashboard => "dashboard",
             Tab::Logs => "logs",
+            Tab::Explorer => "explorer",
             Tab::Grafana => "grafana",
             Tab::Configure => "configure",
             Tab::NodeSettings => "node-settings",
@@ -141,8 +152,8 @@ impl Tab {
         format!("page-{}", self.slug())
     }
 
-    /// The tab for a keyboard shortcut, from a keydown's `key` and `code`: `1` to `5`, or the
-    /// layout-independent `Digit1` to `Digit5`. The caller checks the modifier.
+    /// The tab for a keyboard shortcut, from a keydown's `key` and `code`: `1` to `6`, or the
+    /// layout-independent `Digit1` to `Digit6`. The caller checks the modifier.
     pub fn from_shortcut(key: &str, code: &str) -> Option<Tab> {
         let digit = if key.len() == 1 && key.bytes().all(|b| b.is_ascii_digit()) {
             key
@@ -171,9 +182,12 @@ impl Tab {
                     .with(|insights| insights.unseen_problems());
                 (unseen > 0).then_some(Badge::Count(unseen))
             }
-            Tab::Overview | Tab::Dashboard | Tab::Grafana | Tab::Configure | Tab::NodeSettings => {
-                None
-            }
+            Tab::Overview
+            | Tab::Dashboard
+            | Tab::Explorer
+            | Tab::Grafana
+            | Tab::Configure
+            | Tab::NodeSettings => None,
         }
     }
 }
@@ -761,7 +775,7 @@ pub fn App() -> impl IntoView {
         }
     });
 
-    // Ctrl (or Cmd) + 1..5 switch tabs. The modifier keeps the shortcut out of the way of typing,
+    // Ctrl (or Cmd) + 1..6 switch tabs. The modifier keeps the shortcut out of the way of typing,
     // so it works while an input has focus too; a handler that already claimed the key wins.
     let shortcuts = window_event_listener(ev::keydown, move |event| {
         if event.default_prevented() || !(event.ctrl_key() || event.meta_key()) || event.alt_key() {
@@ -919,6 +933,15 @@ pub fn App() -> impl IntoView {
                     <Logs />
                 </section>
                 <section
+                    class="page page-explorer"
+                    role="tabpanel"
+                    id=Tab::Explorer.page_id()
+                    aria-labelledby=Tab::Explorer.button_id()
+                    hidden=hidden(Tab::Explorer)
+                >
+                    <Explorer />
+                </section>
+                <section
                     class="page page-grafana"
                     role=panel_role
                     id=Tab::Grafana.page_id()
@@ -1067,19 +1090,20 @@ mod tests {
     #[test]
     fn tabs_are_numbered_in_order() {
         assert_eq!(Tab::Dashboard.number(), 1);
-        assert_eq!(Tab::Settings.number(), 5);
+        assert_eq!(Tab::Explorer.number(), 3);
+        assert_eq!(Tab::Settings.number(), 6);
     }
 
     #[test]
     fn steps_wrap_around_the_tab_bar() {
         assert_eq!(Tab::Dashboard.step(1), Tab::Logs);
-        assert_eq!(Tab::Grafana.step(-1), Tab::Logs);
+        assert_eq!(Tab::Grafana.step(-1), Tab::Explorer);
         // Past either end, the bar wraps.
         assert_eq!(Tab::Settings.step(1), Tab::Dashboard);
         assert_eq!(Tab::Dashboard.step(-1), Tab::Settings);
         assert_eq!(Tab::Logs.step(0), Tab::Logs);
-        assert_eq!(Tab::Logs.step(5), Tab::Logs);
-        assert_eq!(Tab::Logs.step(-7), Tab::Settings);
+        assert_eq!(Tab::Logs.step(6), Tab::Logs);
+        assert_eq!(Tab::Logs.step(-8), Tab::Settings);
     }
 
     #[test]
@@ -1096,11 +1120,12 @@ mod tests {
     #[test]
     fn shortcuts_map_digits_to_tabs() {
         assert_eq!(Tab::from_shortcut("1", "Digit1"), Some(Tab::Dashboard));
-        assert_eq!(Tab::from_shortcut("5", "Digit5"), Some(Tab::Settings));
+        assert_eq!(Tab::from_shortcut("3", "Digit3"), Some(Tab::Explorer));
+        assert_eq!(Tab::from_shortcut("6", "Digit6"), Some(Tab::Settings));
         // Layouts where Ctrl changes the key: the code still names the digit.
         assert_eq!(Tab::from_shortcut("&", "Digit1"), Some(Tab::Dashboard));
         assert_eq!(Tab::from_shortcut("0", "Digit0"), None);
-        assert_eq!(Tab::from_shortcut("6", "Digit6"), None);
+        assert_eq!(Tab::from_shortcut("7", "Digit7"), None);
         assert_eq!(Tab::from_shortcut("a", "KeyA"), None);
         assert_eq!(Tab::from_shortcut("Enter", "Enter"), None);
         assert_eq!(Tab::from_shortcut("1", "Numpad1"), Some(Tab::Dashboard));

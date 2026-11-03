@@ -662,3 +662,14 @@ pub async fn cancel_update(
 ) -> Result<(), String> {
     updater.cancel().await.map_err(message)
 }
+
+/// One request to the block explorer of `node` (docs/EXPLORER.md). Rejects with an
+/// [`ExplorerError`](launcher_types::explorer::ExplorerError).
+#[tauri::command]
+pub async fn explorer(
+    explorer: State<'_, launcher_core::explorer::ExplorerHandle>,
+    node: launcher_types::NodeId,
+    call: launcher_types::explorer::ExplorerCall,
+) -> Result<launcher_types::explorer::ExplorerReply, launcher_types::explorer::ExplorerError> {
+    explorer.call(&node, call).await
+}

@@ -6,7 +6,9 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use launcher_types::{ExitClass, ExitInfo, Phase};
+use launcher_types::{ExitClass, ExitInfo, Phase, ValuePool};
+
+use crate::charts::compact;
 
 /// A short label for a phase, for the badge.
 pub fn phase_label(phase: &Phase) -> &'static str {
@@ -354,6 +356,49 @@ pub fn local_datetime_short(time: SystemTime) -> String {
 /// [`date_short`] in the user's zone: `3 Dec 2026`.
 pub fn local_date_short(time: SystemTime) -> String {
     date_short(time, tz_offset_min_at(time))
+}
+
+/// A block hash cut to its ends: `0000…a3f1`.
+pub fn short_hash(hash: &str) -> String {
+    const ENDS: usize = 4;
+    let count = hash.chars().count();
+    if count <= 2 * ENDS + 1 {
+        return hash.to_owned();
+    }
+    let start: String = hash.chars().take(ENDS).collect();
+    let end: String = hash.chars().skip(count - ENDS).collect();
+    format!("{start}…{end}")
+}
+
+/// An amount in ZEC with separators and two decimals: `21,234,567.89 ZEC`.
+pub fn zec_text(zec: f64) -> String {
+    let zec = if zec.is_finite() { zec.max(0.0) } else { 0.0 };
+    let hundredths = (zec * 100.0).round() as u64;
+    format!(
+        "{}.{:02} ZEC",
+        thousands(hundredths / 100),
+        hundredths % 100
+    )
+}
+
+/// The value pools as text, in zebrad's order: `transparent 14.0M · sapling 512K · orchard
+/// 1.65M ZEC`.
+pub fn pools_text(pools: &[ValuePool]) -> Option<String> {
+    if pools.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = pools
+        .iter()
+        .map(|pool| {
+            let zec = if pool.zec.is_finite() {
+                pool.zec.max(0.0).round() as u64
+            } else {
+                0
+            };
+            format!("{} {}", pool.id, compact(zec))
+        })
+        .collect();
+    Some(format!("{} ZEC", parts.join(" · ")))
 }
 
 #[cfg(test)]

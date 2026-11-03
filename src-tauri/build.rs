@@ -51,6 +51,7 @@ const COMMANDS: &[&str] = &[
     "check_for_update",
     "install_update",
     "cancel_update",
+    "explorer",
 ];
 
 const LIB_RS: &str = "src/lib.rs";

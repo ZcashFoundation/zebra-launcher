@@ -15,7 +15,7 @@ kept as the historical design record; where the two differ, this file describes 
 +-------------------------------- Zeal (one process) --------------------------------+
 |                                                                                    |
 |  ui/  Leptos CSR (wasm) --- invoke / Channel<Vec<LogLine>> ---> src-tauri/         |
-|   |   Dashboard, Logs, Grafana, Configure, Settings              commands, tray,   |
+|   |   Dashboard, Logs, Explorer, Grafana, Configure, Settings    commands, tray,   |
 |   |                                                              updater, exit     |
 |   +-- <iframe> Grafana (no IPC)                                      |             |
 |                                                                      v             |
@@ -23,6 +23,7 @@ kept as the historical design record; where the two differ, this file describes 
 |    node registry: the node list, settings actor, one runtime per node:             |
 |      supervisor actor  <-- mpsc<Command>     watch<Status> -->                     |
 |        | log ring + broadcast<LogLine>       config, RPC monitor, metrics poller   |
+|        |                                     explorer actor (reads on request)     |
 |        v                                                                           |
 |      spawner thread (std::process::Command, PDEATHSIG / Job Object)                |
 +--------|---------------------------------------------------------------------------+
@@ -30,6 +31,7 @@ kept as the historical design record; where the two differ, this file describes 
          v
    zebrad (sidecar "zeal-zebrad"), one process per node; the first node's ports:
        RPC      127.0.0.1:8232  <-- cookie-auth JSON-RPC poll every 5 s (status strip)
+                                <-- the explorer's reads, while its pages ask
        metrics  127.0.0.1:9999  <-- Prometheus <-- Grafana 127.0.0.1:3000 (optional)
        P2P      [::]:8233
 ```
@@ -39,6 +41,7 @@ kept as the historical design record; where the two differ, this file describes 
 | Path | Role |
 | --- | --- |
 | `crates/launcher-types` | serde types shared by backend and UI (`Status`, `LogLine`, `Settings`, `NodeStats`, errors). Builds natively and to wasm; no tokio, no Tauri. |
+| `crates/explorer-model` | The block explorer's pure model: zebrad's response shapes, the block ledger and shielded budget, network upgrade heights, the search classifier, the pages' views and a synthetic chain for the mock and tests. serde only; builds natively and to wasm. |
 | `crates/launcher-core` | Logic that does not need Tauri: the node registry and node specs, supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind. |
 | `crates/launcher-core/src/bin/fake-zebrad.rs` | Scripted stand-in for zebrad, used by tests and PR bundle builds. |
 | `src-tauri` | Thin Tauri 2.12 app: commands, the `Channel` bridge, tray, updater, exit flow, capabilities. |
@@ -179,22 +182,31 @@ the same RPC poll), `metrics` (every `Option<MetricsSnapshot>` change: zebrad's
 Prometheus page, read every 10 s while it runs) and `stale_process` (a zebrad from an
 earlier launcher run blocked the start at launch). The bridge starts a node's forwarders
 when it appears and stops them when it leaves (by handle serial, so a node that gets a
-new id during the first run gets new ones). The resources carry no node id:
-`node_resources` (every `Option<NodeResources>` change of the first node: its process
-tree, read every 5 s from the spawn until the run is finalized) and `machine_resources`
-(every `Option<MachineResources>` change: the computer's CPU and memory, every 5 s), with
-the snapshots `get_node_resources` and `get_machine_resources`. For the updater there are
+new id during the first run gets new ones). `node_resources` carries each node's `Option<NodeResources>` the same way (its process
+tree, read every 5 s from the spawn until the run is finalized), with the snapshot
+`get_node_resources {node}`; `machine_resources` carries no node id (every
+`Option<MachineResources>` change: the computer's CPU and memory, every 5 s), with the
+snapshot `get_machine_resources`. For the updater there are
 `update_info` (every `UpdateInfo` change), `update_state` (its `UpdateState`, when that
 changed) and `update_health_failed` (an `UpdateHealthFailure` after an update that did not
 come back healthy), with the snapshot `get_update_info`.
 
 At startup the UI subscribes to every event first and then fetches the node list
-(`list_nodes`), `get_node_resources`, `get_machine_resources` and `get_update_info`, so no
+(`list_nodes`), `get_machine_resources` and `get_update_info`, so no
 change falls between the two; each node, once
 the list brings it, fetches its own snapshots (`get_status`, `get_node_stats`,
-`get_node_details`, `get_metrics`) and subscribes to its log, which streams the retained
+`get_node_details`, `get_metrics`, `get_node_resources`) and subscribes to its log, which streams the retained
 history before live lines, so logs need no snapshot request. An event for a node the list
 has not brought yet is dropped; that node's snapshots cover it.
+
+**Explorer IPC.** The block explorer has one command and one event. `explorer {node,
+call}` takes an `ExplorerCall` (an `ExplorerRequest`: `Status`, `Interest`, `Chain`,
+`Block`, `BlockTxs`, `Tx` or `Resolve`) and answers an `ExplorerReply` (the `ChainView` it
+was read against, and the `ExplorerResponse`), or rejects with an `ExplorerError {kind,
+message}`. `explorer_live` carries an `ExplorerLiveEvent {node, live}` when the explorer's
+state (not running, syncing, at the tip), tip or last reorganisation changes, at most
+every 250 ms, and always the latest value. Its snapshot is the `Status` request, which the
+UI sends for a node it has no news of yet.
 An event that arrives while a snapshot request is in flight is newer than the snapshot,
 so the UI drops a node's snapshot once an event of the same kind has arrived for that
 node, the list snapshot once a `nodes` event has, and the resource snapshots once an event
@@ -469,7 +481,9 @@ status. `rpc.rs` and `monitor.rs` poll zebrad's cookie-authenticated RPC every 5
 the same calls, `watch<Option<NodeDetails>>`: the peer list (address, direction, user
 agent, protocol version, state, last seen, ping), the best block hash, headers,
 difficulty, size on disk, the chain supply and value pools in ZEC, the active network
-upgrade, zebrad's user agent and protocol version, and the mempool's bytes and memory.
+upgrade, zebrad's user agent and protocol version, the mempool's bytes and memory, the
+network upgrades (name, branch id, activation height, status) and the consensus branches of
+the tip and the next block.
 `metrics.rs` parses the Prometheus text exposition format and `metrics/poller.rs` reads
 zebrad's `/metrics` page every 10 s while it runs, publishing
 `watch<Option<MetricsSnapshot>>` with the families and samples as exported
@@ -479,9 +493,18 @@ row. That feeds the status strip and the dashboard, the primary metrics view;
 `OpenTarget::MetricsEndpoint` opens the raw page in the browser. Grafana is optional and
 run by the user, embedded in its own tab; see [GRAFANA.md](GRAFANA.md).
 
+**RPC client.** `rpc.rs` decodes each response in one typed pass (`Envelope<T>`; a null
+result decodes into an `Option`). Every request carries its own timeout: `REQUEST_TIMEOUT`
+(10 s), or a longer one through `call_timeout` (`HEAVY_REQUEST_TIMEOUT` is 60 s). When
+zebrad answers with an HTTP status or an empty body (`RpcError::EmptyResponse`), or the
+request fails other than by timing out, the client reads the cookie file again and repeats
+the call once if the cookie changed. `RpcClient::owned_session` reads the cookie once for
+spawned tasks: an `OwnedSession` is `Clone` and `'static`, and a cookie one clone reads
+again reaches the others.
+
 **Resources.** `resources.rs` measures zebrad's process tree and the computer
-([RESOURCES.md](RESOURCES.md)). `ResourceSampler` follows a supervisor's probe watch (the
-app runs one, on the first node's): from the spawn until the run is finalized it reads the
+([RESOURCES.md](RESOURCES.md)). `ResourceSampler` follows a supervisor's probe watch (each
+node's runtime runs one, on its own supervisor's): from the spawn until the run is finalized it reads the
 tree at once and then every 5 s, and publishes `watch<Option<NodeResources>>` (`None`
 between runs); unlike the RPC monitor and the metrics poller it does not wait for
 `Running`. `MachineSampler` reads the computer's CPU and memory every 5 s into
@@ -597,6 +620,7 @@ restarts on This run), `?eos=soon` and `?eos=halt` (the end-of-support warning a
 (the install countdown and a launcher update that did not come back healthy). The mock samples
 its main zebrad's resources every 5 s while it has a pid; `?os=macos` and `?os=windows` give the
 Resources card those platforms' figures and labels.
+chains come from `?attip`, `?tip=<h>`, `?explorer=slow|empty|nobi` and `?reorg`.
 
 **Appearance.** `Settings.theme` (`system`, `light`, `dark`) is resolved against the
 system preference in `ui/src/theme.rs` and applied as `data-theme` on `<html>`; every
@@ -605,6 +629,43 @@ colour in the stylesheets is a token, and the embedded Grafana follows the same 
 On Mainnet, zebrad warns 42 days and halts 56 days after its estimated release height,
 so an install that never updates stops working. The UI shows an EOS countdown, a warning
 banner, and a blocking halt card with no restart loop.
+
+## Block explorer
+
+The Explorer tab is a block explorer over the node's own RPC: nothing it shows comes from
+anywhere else, and nothing searched leaves the computer. [EXPLORER.md](EXPLORER.md) is its
+design; phases P0 and P1 are built, and its "Built so far" section lists where the code
+differs.
+
+- **Backend.** `launcher-core/src/explorer.rs` spawns one actor (`ExplorerHandle`, Tauri
+  state of its own, started in `src-tauri/src/explorer.rs`) for the one zebrad the backend
+  runs. It answers the node id `zebrad-<network>` of the network zebrad runs on; the other
+  network's id is not running until zebrad's next start, and any other id has no explorer.
+  The actor owns, without locks, the source (`RpcSource` over an `OwnedSession`, rebuilt
+  when `rpc_addr` or `started_at` changes), the `ChainIndex`, a byte-weighted LRU (64 MiB;
+  8 MiB after 10 minutes hidden), the reads in flight and the scheduler. Reads run as
+  tasks that hold a semaphore permit (six, four while the node syncs; interactive reads
+  first, the newest first), their results come back over a channel, and reads of one key
+  merge. `assemble.rs` builds each page from explorer-model's views, and `source.rs` names
+  every RPC method in a closed `ReadCall`, so nothing from IPC picks a method.
+- **Reads only when asked.** Nothing is read until a page asks, and the pages ask only
+  once the tab has been opened. The UI sends `Interest` when the tab or the document is
+  shown or hidden; while shown and at the tip, the actor polls `getbestblockheightandhash`
+  every 2 s and follows the tip, finds a reorganisation's fork with at most ten
+  `getblockhash`, and bumps the epoch. Hashes and headers above the final 1,000 blocks are
+  trusted for 10 s after a tip check.
+- **Privacy.** The actor logs a read's method, duration and outcome, never a hash, txid,
+  height or query; a test captures the logs to check. Keys and recovery phrases pasted
+  into the search are refused by the classifier, in the UI before anything is sent and
+  again in the backend.
+- **UI.** `ui/src/explorer.rs` is the shell (back and forward, the search box, the source
+  line and one banner) and `ui/src/explorer/` holds the pages (Chain, Block, Transaction,
+  Search), their parts, text and per-node state; `ui/styles/explorer.css` uses the
+  `--pool-*` colour tokens. The tab is offered for nodes that keep the chain
+  (`NodeKind::has_explorer`), and amounts are in ZEC, or TAZ on Testnet.
+- **Mock.** `ui/src/mock/explorer.rs` answers the same requests from explorer-model's
+  synthetic chain, one chain per `?herd` node with an explorer, and the dashboard's
+  details read the same chain.
 
 ## Updater (opt-in)
 

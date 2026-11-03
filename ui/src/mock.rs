@@ -33,6 +33,12 @@
 //! | `?readerpanic` | The resource reader panics 30 s into the first run: the samples stop while zebrad keeps running, so the Resources card says it is not measured until zebrad's next run, which Restart starts ([`resources::reader_panicked`]). |
 //! | `?leftover` | Removing a node with its chain state deleted takes it off the list but leaves its folder behind, as when the backend cannot delete a file: the error banner names the folder. |
 //! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). Each node's process tree has samples of its own, and the computer has 16 CPUs and 32 GiB ([`resources`]). |
+//! | `?attip` | zebrad is at the tip near 3,551,000 (past NU7) and mines a block every 25 s, so the Explorer shows Ironwood, the burn and the shielded budget. The end of support keeps its distance above the tip. |
+//! | `?tip=<h>` | Like `?attip`, at height `h`, a block per the era's target spacing. |
+//! | `?explorer=slow` | Every Explorer answer takes 300 to 800 ms ([`explorer`]). |
+//! | `?explorer=empty` | A chain of ten blocks: zebrad at height 9, at the tip. |
+//! | `?explorer=nobi` | Every seventh block lacks zebrad's value-pool row, so its successor shows the zero-diff case. |
+//! | `?reorg` | About every 90 s at the tip, the main node's top two blocks are replaced. |
 //!
 //! The launcher's own notes (`zebrad started (pid N)`, `stop requested (stdin closed)`,
 //! `zebrad exited (exit code 0, Clean, stop requested)`, `restarting zebrad in 5s`) join the
@@ -45,6 +51,7 @@ mod metrics;
 mod resources;
 mod updates;
 
+pub mod explorer;
 pub mod herd;
 pub mod nodes;
 
@@ -104,6 +111,10 @@ const FIRST_HEIGHT: u64 = 2_950_000;
 
 /// zebrad's estimate of the chain tip when the mock starts.
 const FIRST_TIP: u64 = 3_120_000;
+
+/// Where `?attip` puts zebrad: past NU7 (3,543,405), so Ironwood, the burn and the shielded
+/// budget show.
+const AT_TIP_HEIGHT: u64 = 3_551_000;
 
 /// How long a `?crashloop` run lives before it panics.
 const CRASH_AFTER: Duration = Duration::from_secs(15);
@@ -167,6 +178,12 @@ struct Flags {
     no_peers: bool,
     /// `?crashloop`.
     crash_loop: bool,
+    /// `?attip` or `?tip=<h>`: zebrad at the tip at that height.
+    tip: Option<u64>,
+    /// `?explorer=…`.
+    explorer: ExplorerFlag,
+    /// `?reorg`.
+    reorg: bool,
     /// `?os=…`.
     os: OsFlag,
     /// `?children`.
@@ -219,6 +236,20 @@ impl Flags {
             reader_panic: flag("readerpanic"),
             leftover: flag("leftover"),
             herd: flag("herd"),
+            tip: value("tip")
+                .and_then(|tip| tip.parse().ok())
+                .or_else(|| flag("attip").then_some(AT_TIP_HEIGHT)),
+            explorer: ExplorerFlag::parse(value("explorer")),
+            reorg: flag("reorg"),
+        }
+    }
+
+    /// The height zebrad sits at the tip at, with `?attip`, `?tip=` or `?explorer=empty`.
+    fn at_tip(self) -> Option<u64> {
+        if self.explorer == ExplorerFlag::Empty {
+            Some(9)
+        } else {
+            self.tip
         }
     }
 
@@ -246,6 +277,30 @@ pub(crate) enum Scenario {
     Stalled,
     /// `?nopeers`: no peer answers.
     NoPeers,
+}
+
+/// What `?explorer=…` simulates ([`explorer`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ExplorerFlag {
+    #[default]
+    Normal,
+    /// `slow`: every answer takes 300 to 800 ms.
+    Slow,
+    /// `empty`: a chain of ten blocks.
+    Empty,
+    /// `nobi`: blocks without zebrad's value-pool row.
+    NoBlockInfo,
+}
+
+impl ExplorerFlag {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("slow") => ExplorerFlag::Slow,
+            Some("empty") => ExplorerFlag::Empty,
+            Some("nobi") => ExplorerFlag::NoBlockInfo,
+            _ => ExplorerFlag::Normal,
+        }
+    }
 }
 
 /// What `?eos=…` simulates.
@@ -368,7 +423,7 @@ impl Mock {
             }),
             next_seq: Arc::new(AtomicU64::new(0)),
             run_first_seq: Arc::new(AtomicU64::new(0)),
-            height_base: Arc::new(AtomicU64::new(FIRST_HEIGHT)),
+            height_base: Arc::new(AtomicU64::new(flags.at_tip().unwrap_or(FIRST_HEIGHT))),
             notes: ArcRwSignal::new(Vec::new()),
             crashes: Arc::new(AtomicU32::new(0)),
             generation: Arc::new(AtomicU64::new(0)),
@@ -659,9 +714,14 @@ impl Mock {
             41
         };
         let height_base = self.height_base.load(Ordering::Relaxed);
+        let at_tip = self.flags.at_tip();
         let mut stats = self.stats.get_untracked().unwrap_or_else(|| NodeStats {
             height: height_base,
-            estimated_height: FIRST_TIP.max(height_base),
+            estimated_height: if at_tip.is_some() {
+                height_base
+            } else {
+                FIRST_TIP.max(height_base)
+            },
             verification_progress: 0.0,
             peers: 8,
             mempool_transactions: 0,
@@ -669,13 +729,27 @@ impl Mock {
             zebrad_version: "7.0.0".into(),
             last_error: Some("(mock) no initial peers in the network config".into()),
             eos: Some(EosInfo {
-                block_height: 3_160_000,
+                // At the tip, the end of support keeps its distance: that many days of
+                // blocks above it.
+                block_height: match at_tip {
+                    Some(_) => height_base + eos_days * 24 * 3600 / target_spacing(height_base),
+                    None => 3_160_000,
+                },
                 estimated_time: clock::now() + Duration::from_secs(eos_days * 24 * 3600),
             }),
             updated_at: clock::now(),
         });
         let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
         match scenario {
+            Scenario::Normal if at_tip.is_some() => {
+                // At the tip: a block per target spacing.
+                if (tick + 1).is_multiple_of(target_spacing(stats.height + 1)) {
+                    stats.height += 1;
+                }
+                stats.estimated_height = stats.height;
+                stats.peers = 8 + jitter as u32 * 2;
+                stats.mempool_transactions = 10 + jitter * 7;
+            }
             Scenario::Normal => {
                 stats.height = (stats.height + 40 + jitter * 20).min(stats.estimated_height);
                 stats.estimated_height += jitter / 2;
@@ -708,8 +782,16 @@ impl Mock {
                 at: clock::now(),
             })));
         }
-        self.details
-            .set(Some(details::details(&stats, tick, state_bytes, scenario)));
+        // The best block, the pools and the upgrades come from the chain the Explorer shows.
+        if let Some(chain) = explorer::primary_facts(&stats) {
+            self.details.set(Some(details::details(
+                &stats,
+                tick,
+                state_bytes,
+                scenario,
+                &chain,
+            )));
+        }
         self.stats.set(Some(stats));
     }
 
@@ -742,6 +824,13 @@ impl Mock {
             dropped: None,
         }
     }
+}
+
+/// The target seconds between Mainnet blocks at `height`.
+fn target_spacing(height: u64) -> u64 {
+    let heights =
+        explorer_model::upgrades::UpgradeHeights::defaults(launcher_types::Network::Mainnet);
+    u64::from(heights.target_spacing(u32::try_from(height).unwrap_or(u32::MAX)))
 }
 
 /// Waits for `millis` milliseconds.
@@ -1035,7 +1124,7 @@ mod tests {
         // Every flag in the module doc's table, combined.
         assert_eq!(
             Flags::parse(
-                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&os=windows&children&unreadable&readerpanic&leftover&herd"
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&os=windows&children&unreadable&readerpanic&leftover&herd"
             ),
             Flags {
                 first_run: true,
@@ -1050,6 +1139,9 @@ mod tests {
                 stalled: true,
                 no_peers: true,
                 crash_loop: true,
+                tip: Some(AT_TIP_HEIGHT),
+                explorer: ExplorerFlag::NoBlockInfo,
+                reorg: true,
                 os: OsFlag::Windows,
                 children: true,
                 unreadable: true,
@@ -1058,6 +1150,13 @@ mod tests {
                 herd: true,
             }
         );
+        assert_eq!(Flags::parse("?tip=3100000").at_tip(), Some(3_100_000));
+        assert_eq!(Flags::parse("?tip=3100000&attip").at_tip(), Some(3_100_000));
+        assert_eq!(Flags::parse("?explorer=empty&attip").at_tip(), Some(9));
+        assert_eq!(Flags::parse("?explorer=slow").explorer, ExplorerFlag::Slow);
+        assert_eq!(Flags::parse("?tip=lots").at_tip(), None);
+        assert_eq!(target_spacing(3_543_405), 25);
+        assert_eq!(target_spacing(3_100_000), 75);
         assert_eq!(Flags::parse("?stalled").scenario(), Scenario::Stalled);
         assert_eq!(
             Flags::parse("?nopeers&stalled").scenario(),

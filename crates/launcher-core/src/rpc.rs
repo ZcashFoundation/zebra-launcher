@@ -3,7 +3,10 @@
 //! zebrad writes `__cookie__:<secret>` to `<rpc.cookie_dir>/.cookie` on every
 //! start and expects it back as HTTP Basic credentials. The cookie changes on
 //! each start, so [`RpcClient`] reads the file before every call; a batch of
-//! calls shares one read through an [`RpcSession`].
+//! calls shares one read through an [`RpcSession`], and spawned tasks share one
+//! through an [`OwnedSession`]. zebrad answers a wrong cookie without a JSON
+//! error (an empty response), so a session that gets an HTTP error or an empty
+//! body reads the cookie once more and, if it changed, repeats the call with it.
 //!
 //! Only the fields the launcher shows are decoded; zebrad may add others.
 //! Beyond the handful of required fields every field is optional, so a field
@@ -13,16 +16,21 @@ use std::{
     collections::BTreeMap,
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, UNIX_EPOCH},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use launcher_types::PeerInfo;
+use launcher_types::{NetworkUpgrade, PeerInfo, UpgradeStatus};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
-/// How long one call may take.
+/// How long one call may take, unless it names its own limit with `call_timeout`.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a heavy call may take, such as a block with every transaction and the outputs
+/// they spend (`getblock` at verbosity 3).
+pub const HEAVY_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A call to zebrad failed.
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +50,9 @@ pub enum RpcError {
     /// zebrad answered with an HTTP error status.
     #[error("RPC request failed with HTTP status {0}")]
     Status(u16),
+    /// zebrad answered without a body, as it does when the cookie is wrong.
+    #[error("zebrad sent an empty response; the RPC cookie may be out of date")]
+    EmptyResponse,
     /// zebrad returned a JSON-RPC error.
     #[error("RPC error {code}: {message}")]
     Rpc {
@@ -89,6 +100,20 @@ pub struct BlockchainInfo {
     /// The network upgrades by consensus branch id (hex).
     #[serde(default)]
     pub upgrades: BTreeMap<String, UpgradeInfo>,
+    /// The consensus branches of the tip and the next block.
+    #[serde(default)]
+    pub consensus: Option<Consensus>,
+}
+
+/// `getblockchaininfo.consensus`: the branch ids (hex) of the tip and the next block.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct Consensus {
+    /// The branch the tip was validated with.
+    #[serde(rename = "chaintip")]
+    pub chain_tip: String,
+    /// The branch the next block is validated with.
+    #[serde(rename = "nextblock")]
+    pub next_block: String,
 }
 
 /// A value pool's balance: `chainSupply` and the `valuePools` entries.
@@ -124,6 +149,30 @@ pub const ZATOSHIS_PER_ZEC: u64 = 100_000_000;
 /// supply needs 51 bits and an `f64` has 53.
 pub fn zat_to_zec(zat: u64) -> f64 {
     zat as f64 / ZATOSHIS_PER_ZEC as f64
+}
+
+/// The upgrades as the UI receives them, by activation height. An entry whose status is not
+/// one of zebrad's three is left out.
+pub fn upgrade_list(upgrades: &BTreeMap<String, UpgradeInfo>) -> Vec<NetworkUpgrade> {
+    let mut list: Vec<NetworkUpgrade> = upgrades
+        .iter()
+        .filter_map(|(branch_id, upgrade)| {
+            let status = match upgrade.status.as_str() {
+                "active" => UpgradeStatus::Active,
+                "pending" => UpgradeStatus::Pending,
+                "disabled" => UpgradeStatus::Disabled,
+                _ => return None,
+            };
+            Some(NetworkUpgrade {
+                name: upgrade.name.clone(),
+                branch_id: branch_id.clone(),
+                activation_height: upgrade.activation_height,
+                status,
+            })
+        })
+        .collect();
+    list.sort_by_key(|upgrade| upgrade.activation_height);
+    list
 }
 
 /// The name of the active network upgrade: among the entries with status
@@ -261,7 +310,7 @@ pub struct EndOfService {
 #[derive(Clone, Debug)]
 pub struct RpcClient {
     http: reqwest::Client,
-    url: String,
+    url: Arc<str>,
     cookie_file: PathBuf,
 }
 
@@ -276,7 +325,7 @@ impl RpcClient {
             .build()?;
         Ok(Self {
             http,
-            url: format!("http://{addr}/"),
+            url: Arc::from(format!("http://{addr}/")),
             cookie_file,
         })
     }
@@ -289,15 +338,22 @@ impl RpcClient {
     /// Reads the cookie once and returns a session that reuses it, for a batch
     /// of calls.
     pub async fn session(&self) -> Result<RpcSession<'_>, RpcError> {
-        let cookie = tokio::fs::read_to_string(&self.cookie_file)
-            .await
-            .map_err(|source| RpcError::Cookie {
-                path: self.cookie_file.clone(),
-                source,
-            })?;
         Ok(RpcSession {
             client: self,
-            authorization: format!("Basic {}", STANDARD.encode(cookie.trim())),
+            authorization: read_authorization(&self.cookie_file).await?,
+        })
+    }
+
+    /// Reads the cookie once and returns a session that owns what it needs, for
+    /// calls from spawned tasks. Clones share the HTTP client, the URL and the
+    /// credentials.
+    pub async fn owned_session(&self) -> Result<OwnedSession, RpcError> {
+        let authorization: Arc<str> = Arc::from(read_authorization(&self.cookie_file).await?);
+        Ok(OwnedSession {
+            http: self.http.clone(),
+            url: self.url.clone(),
+            cookie_file: Arc::from(self.cookie_file.as_path()),
+            authorization: Arc::new(watch::Sender::new(authorization)),
         })
     }
 
@@ -381,36 +437,178 @@ impl RpcSession<'_> {
         self.call("getdeprecationinfo", json!([])).await
     }
 
-    /// Calls `method` with `params` and decodes the result.
+    /// Calls `method` with `params` and decodes the result, within [`REQUEST_TIMEOUT`].
     pub async fn call<T: DeserializeOwned>(
         &self,
         method: &str,
         params: Value,
     ) -> Result<T, RpcError> {
-        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-        let response = self
-            .client
-            .http
-            .post(&self.client.url)
-            .header(reqwest::header::AUTHORIZATION, &self.authorization)
-            .json(&body)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(RpcError::Status(status.as_u16()));
-        }
-        let bytes = response.bytes().await?;
-        decode(&bytes)
+        self.call_timeout(method, params, REQUEST_TIMEOUT).await
     }
+
+    /// Like [`RpcSession::call`], within `timeout` instead.
+    pub async fn call_timeout<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<T, RpcError> {
+        let (result, _) = exchange_or_reread(
+            &self.client.http,
+            &self.client.url,
+            &self.client.cookie_file,
+            &self.authorization,
+            method,
+            params,
+            timeout,
+        )
+        .await;
+        result
+    }
+}
+
+/// An [`RpcClient`] with the cookie read once, from [`RpcClient::owned_session`]:
+/// like an [`RpcSession`], but `'static`, for spawned tasks.
+#[derive(Clone)]
+pub struct OwnedSession {
+    http: reqwest::Client,
+    url: Arc<str>,
+    cookie_file: Arc<Path>,
+    /// The credentials, shared by the clones: a re-read cookie replaces them for all.
+    authorization: Arc<watch::Sender<Arc<str>>>,
+}
+
+impl std::fmt::Debug for OwnedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The credentials are left out on purpose.
+        f.debug_struct("OwnedSession")
+            .field("url", &self.url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OwnedSession {
+    /// Calls `method` with `params` and decodes the result, within [`REQUEST_TIMEOUT`].
+    pub async fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<T, RpcError> {
+        self.call_timeout(method, params, REQUEST_TIMEOUT).await
+    }
+
+    /// Like [`OwnedSession::call`], within `timeout` instead.
+    pub async fn call_timeout<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<T, RpcError> {
+        let authorization = self.authorization.borrow().clone();
+        let (result, fresh) = exchange_or_reread(
+            &self.http,
+            &self.url,
+            &self.cookie_file,
+            &authorization,
+            method,
+            params,
+            timeout,
+        )
+        .await;
+        if let Some(fresh) = fresh {
+            self.authorization.send_replace(Arc::from(fresh));
+        }
+        result
+    }
+}
+
+/// zebrad's cookie file as the `Authorization` header value.
+async fn read_authorization(cookie_file: &Path) -> Result<String, RpcError> {
+    let cookie = tokio::fs::read_to_string(cookie_file)
+        .await
+        .map_err(|source| RpcError::Cookie {
+            path: cookie_file.to_path_buf(),
+            source,
+        })?;
+    Ok(format!("Basic {}", STANDARD.encode(cookie.trim())))
+}
+
+/// Whether `err` may come from a cookie zebrad no longer accepts: an HTTP error status, an
+/// empty body, or a connection that failed for any reason but a timeout.
+fn may_be_stale_cookie(err: &RpcError) -> bool {
+    match err {
+        RpcError::Status(_) | RpcError::EmptyResponse => true,
+        RpcError::Http(err) => !err.is_timeout(),
+        RpcError::Cookie { .. } | RpcError::Rpc { .. } | RpcError::InvalidResponse(_) => false,
+    }
+}
+
+/// [`exchange`], and once more with a re-read cookie when the answer suggests the one sent is
+/// out of date and the file now holds another. Returns the result and the new credentials, if
+/// the cookie was read again and changed.
+async fn exchange_or_reread<T: DeserializeOwned>(
+    http: &reqwest::Client,
+    url: &str,
+    cookie_file: &Path,
+    authorization: &str,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> (Result<T, RpcError>, Option<String>) {
+    let first = exchange(http, url, authorization, method, params.clone(), timeout).await;
+    match first {
+        Err(err) if may_be_stale_cookie(&err) => match read_authorization(cookie_file).await {
+            Ok(fresh) if fresh != authorization => {
+                let retried = exchange(http, url, &fresh, method, params, timeout).await;
+                (retried, Some(fresh))
+            }
+            _ => (Err(err), None),
+        },
+        other => (other, None),
+    }
+}
+
+/// One request and its decoded result. `timeout` replaces the client's own for this
+/// request.
+async fn exchange<T: DeserializeOwned>(
+    http: &reqwest::Client,
+    url: &str,
+    authorization: &str,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<T, RpcError> {
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let response = http
+        .post(url)
+        .timeout(timeout)
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .json(&body)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(RpcError::Status(status.as_u16()));
+    }
+    let bytes = response.bytes().await?;
+    if bytes.is_empty() {
+        return Err(RpcError::EmptyResponse);
+    }
+    decode(&bytes)
 }
 
 /// Decodes a JSON-RPC response body.
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, RpcError> {
+    /// A JSON-RPC response, decoded in one pass: `result` straight into `U`, without an
+    /// intermediate `Value` that would allocate every string in it (a block's
+    /// 2,688-character solution included).
     #[derive(Deserialize)]
-    struct Response {
-        #[serde(default)]
-        result: Option<Value>,
+    #[serde(bound = "U: DeserializeOwned")]
+    struct Envelope<U> {
+        /// `None` when the key is absent; a `null` result is passed to `U`, so a method that
+        /// may answer `null` decodes into an `Option`.
+        #[serde(default, deserialize_with = "present")]
+        result: Option<U>,
         #[serde(default)]
         error: Option<ErrorObject>,
     }
@@ -420,16 +618,21 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, RpcError> {
         #[serde(default)]
         message: String,
     }
+    /// A key that is present, `null` included.
+    fn present<'de, D: serde::Deserializer<'de>, U: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<Option<U>, D::Error> {
+        U::deserialize(deserializer).map(Some)
+    }
 
-    let response: Response =
+    let response: Envelope<T> =
         serde_json::from_slice(bytes).map_err(|err| RpcError::InvalidResponse(err.to_string()))?;
     if let Some(ErrorObject { code, message }) = response.error {
         return Err(RpcError::Rpc { code, message });
     }
-    let result = response
+    response
         .result
-        .ok_or_else(|| RpcError::InvalidResponse("no result".to_string()))?;
-    serde_json::from_value(result).map_err(|err| RpcError::InvalidResponse(err.to_string()))
+        .ok_or_else(|| RpcError::InvalidResponse("no result".to_string()))
 }
 
 #[cfg(test)]
@@ -463,6 +666,78 @@ mod tests {
             decode::<MempoolInfo>(br#"{"result":{"bytes":1}}"#),
             Err(RpcError::InvalidResponse(_))
         ));
+        assert!(matches!(
+            decode::<MempoolInfo>(br#"{"jsonrpc":"2.0","id":1}"#),
+            Err(RpcError::InvalidResponse(_))
+        ));
+    }
+
+    #[test]
+    fn a_null_result_decodes_into_an_option() {
+        let none: Option<MempoolInfo> =
+            decode(br#"{"jsonrpc":"2.0","id":1,"result":null}"#).expect("ok");
+        assert_eq!(none, None);
+        // Without an `Option`, `null` is not a result.
+        assert!(matches!(
+            decode::<MempoolInfo>(br#"{"jsonrpc":"2.0","id":1,"result":null}"#),
+            Err(RpcError::InvalidResponse(_))
+        ));
+        // Fields the type does not name are skipped, however large.
+        let solution = "ab".repeat(1344);
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"size":2,"solution":"{solution}","hex":["a"]}}}}"#
+        );
+        let info: MempoolInfo = decode(body.as_bytes()).expect("ok");
+        assert_eq!(info.size, 2);
+    }
+
+    #[tokio::test]
+    async fn a_call_gives_up_at_its_own_timeout() {
+        // A server that accepts and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cookie_file = dir.path().join(".cookie");
+        std::fs::write(&cookie_file, "__cookie__:x").expect("write");
+        let client = RpcClient::new(addr, cookie_file).expect("client");
+        let session = client.owned_session().await.expect("session");
+        let started = std::time::Instant::now();
+        let err = session
+            .call_timeout::<Value>("getinfo", json!([]), Duration::from_millis(200))
+            .await
+            .expect_err("no answer");
+        assert!(
+            matches!(&err, RpcError::Http(err) if err.is_timeout()),
+            "{err:?}"
+        );
+        // Well before the client's own limit.
+        assert!(
+            started.elapsed() < REQUEST_TIMEOUT / 2,
+            "{:?}",
+            started.elapsed()
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn sessions_do_not_print_the_credentials() {
+        let session = OwnedSession {
+            http: reqwest::Client::new(),
+            url: Arc::from("http://127.0.0.1:8232/"),
+            cookie_file: Arc::from(Path::new("/nonexistent/.cookie")),
+            authorization: Arc::new(watch::Sender::new(Arc::from("Basic c2VjcmV0"))),
+        };
+        let printed = format!("{session:?}");
+        assert!(printed.contains("127.0.0.1:8232"), "{printed}");
+        assert!(!printed.contains("c2VjcmV0"), "{printed}");
     }
 
     #[test]
@@ -505,6 +780,7 @@ mod tests {
         assert_eq!(bare.chain_supply, None);
         assert!(bare.value_pools.is_empty());
         assert!(bare.upgrades.is_empty());
+        assert_eq!(bare.consensus, None);
         assert_eq!(active_upgrade(&bare.upgrades), None);
 
         let full: BlockchainInfo = decode(
@@ -535,6 +811,22 @@ mod tests {
         assert_eq!(full.value_pools[1].id, "sapling");
         assert_eq!(full.value_pools[1].chain_value_zat, Some(50_000_000));
         assert_eq!(active_upgrade(&full.upgrades).as_deref(), Some("NU6"));
+        assert_eq!(
+            full.consensus,
+            Some(Consensus {
+                chain_tip: "c8e71055".into(),
+                next_block: "c8e71055".into()
+            })
+        );
+        let list = upgrade_list(&full.upgrades);
+        let names: Vec<&str> = list.iter().map(|upgrade| upgrade.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Sapling", "NU6", "NU6.1"],
+            "by height, not by branch id"
+        );
+        assert_eq!(list[2].branch_id, "4dec4df0");
+        assert_eq!(list[2].status, UpgradeStatus::Pending);
     }
 
     #[test]

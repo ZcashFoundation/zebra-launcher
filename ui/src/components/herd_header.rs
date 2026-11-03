@@ -13,11 +13,13 @@ use crate::{
 };
 
 /// The tabs a node offers: Configure edits a zebrad node's `zebrad.toml`, so other kinds have
-/// none yet.
+/// none yet; the Explorer is for the kinds that keep the chain and answer zebrad's RPC
+/// ([`NodeKind::has_explorer`]).
 fn node_tabs(kind: NodeKind) -> Vec<Tab> {
     Tab::NODE
         .into_iter()
         .filter(|tab| kind == NodeKind::Zebrad || *tab != Tab::Configure)
+        .filter(|tab| kind.has_explorer() || *tab != Tab::Explorer)
         .collect()
 }
 
@@ -25,10 +27,10 @@ fn node_tabs(kind: NodeKind) -> Vec<Tab> {
 pub fn HerdHeader() -> impl IntoView {
     let state = AppState::get();
     let node = move || state.node();
-    // A node without a Configure tab shows its dashboard when picked from Configure.
+    // A node without a Configure or an Explorer tab shows its dashboard when picked from it.
     Effect::new(move |_| {
         let kind = state.node().info.with(|info| info.kind);
-        if state.tab.get() == Tab::Configure && kind != NodeKind::Zebrad {
+        if !node_tabs(kind).contains(&state.tab.get()) && state.tab.get().is_node_tab() {
             state.tab.set(Tab::Dashboard);
         }
     });
@@ -106,5 +108,32 @@ pub fn HerdHeader() -> impl IntoView {
                 </span>
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_explorer_is_for_nodes_that_keep_the_chain() {
+        assert_eq!(
+            node_tabs(NodeKind::Zebrad),
+            [
+                Tab::Dashboard,
+                Tab::Logs,
+                Tab::Explorer,
+                Tab::Configure,
+                Tab::NodeSettings
+            ]
+        );
+        assert_eq!(
+            node_tabs(NodeKind::Zakura),
+            [Tab::Dashboard, Tab::Logs, Tab::Explorer, Tab::NodeSettings]
+        );
+        assert_eq!(
+            node_tabs(NodeKind::Zaino),
+            [Tab::Dashboard, Tab::Logs, Tab::NodeSettings]
+        );
     }
 }

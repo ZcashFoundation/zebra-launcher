@@ -5,22 +5,20 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_types::{
-    EosInfo, ExitInfo, NodeDetails, NodeStats, OpenTarget, Phase, Status, ValuePool,
-};
+use launcher_types::{EosInfo, ExitInfo, NodeDetails, NodeStats, OpenTarget, Phase, Status};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
     api,
-    charts::{byte_rate, compact, hhmm, tz_offset_min_at, uptime_text},
+    charts::{byte_rate, hhmm, tz_offset_min_at, uptime_text},
     clipboard::copy_to_clipboard,
     components::{
         rows::{Row, Rows},
         transient::Transient,
     },
     format::{
-        bytes, exit_class_text, local_date_short, local_datetime_short, relative, rough_duration,
-        thousands,
+        bytes, exit_class_text, local_date_short, local_datetime_short, pools_text, relative,
+        rough_duration, short_hash, thousands, zec_text,
     },
     health::CHECKPOINT_NEAR_BLOCKS,
     stats_history::Sample,
@@ -104,18 +102,6 @@ pub fn zebrad_text(version: &str, subversion: Option<&str>) -> String {
     }
 }
 
-/// A block hash cut to its ends: `0000…a3f1`.
-pub fn short_hash(hash: &str) -> String {
-    const ENDS: usize = 4;
-    let count = hash.chars().count();
-    if count <= 2 * ENDS + 1 {
-        return hash.to_owned();
-    }
-    let start: String = hash.chars().take(ENDS).collect();
-    let end: String = hash.chars().skip(count - ENDS).collect();
-    format!("{start}…{end}")
-}
-
 /// The network difficulty: whole with separators from a thousand up, two decimals below
 /// (a test network's difficulty is about one).
 pub fn difficulty_text(difficulty: f64) -> String {
@@ -127,37 +113,6 @@ pub fn difficulty_text(difficulty: f64) -> String {
     } else {
         format!("{difficulty:.2}")
     }
-}
-
-/// An amount in ZEC with separators and two decimals: `21,234,567.89 ZEC`.
-pub fn zec_text(zec: f64) -> String {
-    let zec = if zec.is_finite() { zec.max(0.0) } else { 0.0 };
-    let hundredths = (zec * 100.0).round() as u64;
-    format!(
-        "{}.{:02} ZEC",
-        thousands(hundredths / 100),
-        hundredths % 100
-    )
-}
-
-/// The value pools as text, in zebrad's order: `transparent 14.0M · sapling 512K · orchard
-/// 1.65M ZEC`.
-pub fn pools_text(pools: &[ValuePool]) -> Option<String> {
-    if pools.is_empty() {
-        return None;
-    }
-    let parts: Vec<String> = pools
-        .iter()
-        .map(|pool| {
-            let zec = if pool.zec.is_finite() {
-                pool.zec.max(0.0).round() as u64
-            } else {
-                0
-            };
-            format!("{} {}", pool.id, compact(zec))
-        })
-        .collect();
-    Some(format!("{} ZEC", parts.join(" · ")))
 }
 
 /// The Mempool row: `24 transactions, 1.2 MB`; the size only when the details carry it.
@@ -537,7 +492,7 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use launcher_types::ExitClass;
+    use launcher_types::{ExitClass, ValuePool};
 
     use super::*;
 
@@ -717,6 +672,8 @@ mod tests {
                 },
             ],
             active_upgrade: Some("NU6.1".into()),
+            upgrades: Vec::new(),
+            consensus: None,
             subversion: Some("/Zebra:7.0.0/".into()),
             protocol_version: Some(170_120),
             mempool_bytes: Some(44_400),
