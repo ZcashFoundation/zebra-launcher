@@ -129,6 +129,30 @@ pub struct NodeSummary {
     pub phase: Phase,
 }
 
+/// The nodes' phases as one, for the updater, which stops and restarts them
+/// together: `Failed { EosHalt }` when a node halted at its end of support
+/// (they all run the bundled zebrad), else `Running` while any node runs or
+/// will without the user ([`Phase::is_active`]), else `Stopped`.
+pub fn herd_phase<'a>(phases: impl IntoIterator<Item = &'a Phase>) -> Phase {
+    let mut active = false;
+    for phase in phases {
+        if matches!(
+            phase,
+            Phase::Failed {
+                class: launcher_types::ExitClass::EosHalt
+            }
+        ) {
+            return phase.clone();
+        }
+        active |= phase.is_active();
+    }
+    if active {
+        Phase::Running
+    } else {
+        Phase::Stopped
+    }
+}
+
 /// One node's runtime: cheap to clone, every part a handle to the node's own
 /// actors or a channel.
 #[derive(Clone, Debug)]
@@ -486,6 +510,87 @@ impl RegistryHandle {
         if self.cmd.send(Cmd::Shutdown { reply }).await.is_ok() {
             let _ = response.await;
         }
+    }
+
+    /// The nodes' status as the updater follows it: [`herd_phase`] of their
+    /// phases, kept up to date by a task until the receiver or the registry
+    /// is gone.
+    pub fn watch_herd(&self) -> watch::Receiver<launcher_types::Status> {
+        let fold = |summaries: &[NodeSummary]| launcher_types::Status {
+            phase: herd_phase(summaries.iter().map(|summary| &summary.phase)),
+            ..launcher_types::Status::default()
+        };
+        let mut summaries = self.summaries.clone();
+        let (tx, rx) = watch::channel(fold(&summaries.borrow_and_update()));
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    changed = summaries.changed() => if changed.is_err() {
+                        return;
+                    },
+                    () = tx.closed() => return,
+                }
+                let status = fold(&summaries.borrow_and_update());
+                tx.send_if_modified(|current| {
+                    let changed = *current != status;
+                    *current = status;
+                    changed
+                });
+            }
+        });
+        rx
+    }
+
+    /// The statistics the updater reads the end of support from: those of
+    /// the first zebrad node on Mainnet, the only network with one (every
+    /// node runs the same zebrad, so one is enough), and `None` while there
+    /// is no such node. Kept up to date by a task, which follows the node
+    /// list too, until the receiver or the registry is gone.
+    pub fn eos_stats(&self) -> watch::Receiver<Option<NodeStats>> {
+        let registry = self.clone();
+        let (tx, rx) = watch::channel(None);
+        tokio::spawn(async move {
+            let mut summaries = registry.summaries.clone();
+            loop {
+                summaries.borrow_and_update();
+                let source = registry
+                    .nodes()
+                    .iter()
+                    .find(|node| {
+                        let spec = node.spec();
+                        spec.kind == launcher_types::NodeKind::Zebrad
+                            && spec.network == launcher_types::Network::Mainnet
+                    })
+                    .cloned();
+                let Some(node) = source else {
+                    tx.send_if_modified(|current| current.take().is_some());
+                    tokio::select! {
+                        changed = summaries.changed() => if changed.is_err() {
+                            return;
+                        },
+                        () = tx.closed() => return,
+                    }
+                    continue;
+                };
+                let mut stats = node.stats.clone();
+                loop {
+                    tx.send_replace(stats.borrow_and_update().clone());
+                    tokio::select! {
+                        changed = stats.changed() => if changed.is_err() {
+                            break;
+                        },
+                        changed = summaries.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            break;
+                        }
+                        () = tx.closed() => return,
+                    }
+                }
+            }
+        });
+        rx
     }
 
     /// Adds a launcher line to the log of `node`, or of every node: what the
@@ -1014,4 +1119,34 @@ async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(f)
         .await
         .map_err(io::Error::other)?
+}
+
+#[cfg(test)]
+mod tests {
+    use launcher_types::ExitClass;
+
+    use super::*;
+
+    #[test]
+    fn the_herds_phase_is_running_while_any_node_is_and_halted_when_one_is() {
+        let backoff = Phase::Backoff {
+            until: std::time::SystemTime::UNIX_EPOCH,
+            crashes: 1,
+        };
+        let halted = Phase::Failed {
+            class: ExitClass::EosHalt,
+        };
+        let failed = Phase::Failed {
+            class: ExitClass::ConfigError,
+        };
+        assert_eq!(herd_phase([]), Phase::Stopped);
+        assert_eq!(herd_phase([&Phase::Stopped, &failed]), Phase::Stopped);
+        assert_eq!(
+            herd_phase([&Phase::Stopped, &Phase::Starting]),
+            Phase::Running
+        );
+        assert_eq!(herd_phase([&backoff]), Phase::Running);
+        assert_eq!(herd_phase([&Phase::Stopping]), Phase::Stopped);
+        assert_eq!(herd_phase([&Phase::Running, &halted]), halted);
+    }
 }

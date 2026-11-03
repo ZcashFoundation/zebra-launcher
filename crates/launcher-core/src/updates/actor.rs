@@ -718,6 +718,7 @@ impl<B: UpdateBackend, N: NodeControl> Actor<B, N> {
             from_version: self.config.current_version.clone(),
             to_version: version.clone(),
             zebrad_was_running: self.status.borrow().phase.is_active(),
+            running_nodes: self.node.running_nodes(),
             written_at: SystemTime::now(),
         };
         // The supervisor's grace is fixed at launch; the settings may have

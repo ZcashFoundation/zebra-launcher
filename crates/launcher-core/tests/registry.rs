@@ -605,3 +605,45 @@ async fn a_note_goes_to_the_node_it_names_or_to_every_node() {
     assert!(contains(&history_b, "about every node"));
     within(fx.registry.shutdown()).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_updater_follows_the_herd_and_the_mainnet_nodes_statistics() {
+    let fx = fixture().await;
+    let testnet = within(fx.registry.add(draft(Network::Testnet, "Zebra · Testnet")))
+        .await
+        .expect("add");
+    let mut herd = fx.registry.watch_herd();
+    let mut eos = fx.registry.eos_stats();
+    assert_eq!(herd.borrow().phase, Phase::Stopped);
+
+    // Only the Testnet node runs: the herd runs, but nothing reports an end of support.
+    let testnet = fx.registry.node(&testnet.id).expect("lookup");
+    within(testnet.start(&done(), StartOptions::default()))
+        .await
+        .expect("start");
+    within(herd.wait_for(|status| status.phase == Phase::Running))
+        .await
+        .expect("the herd runs");
+    let mut testnet_stats = testnet.stats.clone();
+    within(testnet_stats.wait_for(Option::is_some))
+        .await
+        .expect("Testnet stats");
+    assert_eq!(*eos.borrow(), None, "not the Testnet node's statistics");
+
+    // The Mainnet node's statistics are the ones.
+    let first = fx.registry.first().expect("first");
+    within(first.start(&done(), StartOptions::default()))
+        .await
+        .expect("start");
+    within(eos.wait_for(Option::is_some))
+        .await
+        .expect("the Mainnet node's statistics");
+    within(fx.registry.stop_all()).await.expect("stop all");
+    within(herd.wait_for(|status| status.phase == Phase::Stopped))
+        .await
+        .expect("the herd stops");
+    within(eos.wait_for(Option::is_none))
+        .await
+        .expect("no statistics while it is stopped");
+    within(fx.registry.shutdown()).await;
+}

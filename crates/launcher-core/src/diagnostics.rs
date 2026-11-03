@@ -536,6 +536,7 @@ mod tests {
                 from_version: "0.1.0".into(),
                 to_version: "0.2.0".into(),
                 zebrad_was_running: true,
+                running_nodes: Vec::new(),
                 written_at: SystemTime::UNIX_EPOCH,
             },
         )

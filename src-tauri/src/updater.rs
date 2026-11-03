@@ -260,8 +260,13 @@ pub fn start<R: Runtime>(
         let gate = updates::run_health_gate(
             &marker_file,
             &current_version,
-            &node,
-            gate_may_start,
+            |_| {
+                vec![updates::GateNode {
+                    node,
+                    start: gate_may_start,
+                    name: None,
+                }]
+            },
             updates::HEALTH_GATE_TIMEOUT,
             RELEASES_URL,
         )

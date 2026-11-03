@@ -28,8 +28,8 @@ use std::{
 
 pub use launcher_types::EOS_WARNING_WINDOW;
 use launcher_types::{
-    EosInfo, ExitClass, Phase, RecoveryAction, StaleProcessInfo, Status, UpdateHealthFailure,
-    UpdateMode,
+    EosInfo, ExitClass, NodeId, Phase, RecoveryAction, StaleProcessInfo, Status,
+    UpdateHealthFailure, UpdateMode,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{sync::watch, time::Instant};
@@ -215,6 +215,11 @@ pub struct PendingUpdate {
     /// Whether zebrad was running (or starting) before the update, so the
     /// next launch must bring it back.
     pub zebrad_was_running: bool,
+    /// The nodes that were running, so the next launch brings back and
+    /// checks each. Empty in a marker from a single-node launcher, whose node
+    /// `zebrad_was_running` covers.
+    #[serde(default)]
+    pub running_nodes: Vec<NodeId>,
     /// When the marker was written.
     pub written_at: SystemTime,
 }
@@ -324,6 +329,11 @@ pub trait NodeControl: Clone + Send + Sync + 'static {
     fn stop(&self) -> impl Future<Output = Result<(), String>> + Send;
     /// Starts zebrad and waits until it accepted its configuration.
     fn start(&self) -> impl Future<Output = Result<(), String>> + Send;
+    /// The nodes that run now, for [`PendingUpdate::running_nodes`]. None
+    /// for a single node, which `zebrad_was_running` covers.
+    fn running_nodes(&self) -> Vec<NodeId> {
+        Vec::new()
+    }
 }
 
 impl NodeControl for SupervisorHandle {
@@ -495,17 +505,30 @@ fn failed_message(class: ExitClass, exit: Option<&launcher_types::ExitInfo>) -> 
     format!("zebrad stopped after the update ({class:?}){detail}.")
 }
 
+/// A node the health gate checks ([`run_health_gate`]).
+pub struct GateNode<N> {
+    /// The node.
+    pub node: N,
+    /// Start it first when it was running before the update: the launcher
+    /// will not start it by itself.
+    pub start: bool,
+    /// Its name, to say which node failed when the gate checks several.
+    pub name: Option<String>,
+}
+
 /// Runs the health gate if the marker at `marker` exists, then removes it.
 ///
-/// When zebrad was running before the update and `start_node` is set (the
-/// launcher will not start it by itself), zebrad is started first, also when
-/// the update did not complete, since the update stopped it. Returns `None`
-/// when there was no marker.
+/// `nodes` picks from the marker the nodes to check: every node that was
+/// running before the update. Each one whose [`GateNode::start`] is set is
+/// started first when zebrad was running, also when the update did not
+/// complete, since the update stopped it. The nodes are checked side by side
+/// by [`health_gate`], and the first failure is the result, its message led
+/// by the node's name when there is one. Without a node to check, only the
+/// version is. Returns `None` when there was no marker.
 pub async fn run_health_gate<N: NodeControl>(
     marker: &Path,
     current_version: &str,
-    node: &N,
-    start_node: bool,
+    nodes: impl FnOnce(&PendingUpdate) -> Vec<GateNode<N>>,
     timeout: Duration,
     releases_url: &str,
 ) -> Option<Result<(), UpdateHealthFailure>> {
@@ -523,23 +546,57 @@ pub async fn run_health_gate<N: NodeControl>(
         to = %pending.to_version,
         "checking the launcher's health after an update"
     );
-    if start_node && pending.zebrad_was_running {
-        // The gate below reports a failure to reach Running.
-        let node = node.clone();
-        tokio::spawn(async move {
-            if let Err(err) = node.start().await {
-                tracing::warn!(%err, "zebrad did not start after the update");
+    let nodes = nodes(&pending);
+    let result = if nodes.is_empty() {
+        // Nothing to bring back: only the version counts.
+        let idle = PendingUpdate {
+            zebrad_was_running: false,
+            ..pending.clone()
+        };
+        let status = watch::channel(Status::default()).1;
+        health_gate(&idle, current_version, status, timeout, releases_url).await
+    } else {
+        let mut gates = tokio::task::JoinSet::new();
+        for GateNode { node, start, name } in nodes {
+            if start && pending.zebrad_was_running {
+                // The gate below reports a failure to reach Running.
+                let node = node.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = node.start().await {
+                        tracing::warn!(%err, "zebrad did not start after the update");
+                    }
+                });
             }
-        });
-    }
-    let result = health_gate(
-        &pending,
-        current_version,
-        node.watch_status(),
-        timeout,
-        releases_url,
-    )
-    .await;
+            let (pending, version, url) = (
+                pending.clone(),
+                current_version.to_string(),
+                releases_url.to_string(),
+            );
+            gates.spawn(async move {
+                health_gate(&pending, &version, node.watch_status(), timeout, &url)
+                    .await
+                    .map_err(|mut failure| {
+                        if let Some(name) = name {
+                            failure.message = format!("{name}: {}", failure.message);
+                        }
+                        failure
+                    })
+            });
+        }
+        let mut result = Ok(());
+        while let Some(gate) = gates.join_next().await {
+            match gate {
+                Ok(Ok(())) => {}
+                Ok(Err(failure)) => {
+                    if result.is_ok() {
+                        result = Err(failure);
+                    }
+                }
+                Err(err) => tracing::warn!(%err, "a health gate task failed"),
+            }
+        }
+        result
+    };
     if let Err(err) = clear_marker(marker) {
         tracing::warn!(%err, "could not remove the pending-update marker");
     }
@@ -707,6 +764,7 @@ mod tests {
             from_version: "0.1.0".into(),
             to_version: to.into(),
             zebrad_was_running: was_running,
+            running_nodes: Vec::new(),
             written_at: SystemTime::UNIX_EPOCH,
         }
     }
@@ -979,6 +1037,18 @@ mod tests {
         }
     }
 
+    /// The gate's nodes: `node`, started when it was running.
+    fn one(node: &InstantNode) -> impl FnOnce(&PendingUpdate) -> Vec<GateNode<InstantNode>> {
+        let node = node.clone();
+        move |_| {
+            vec![GateNode {
+                node,
+                start: true,
+                name: None,
+            }]
+        }
+    }
+
     #[tokio::test]
     async fn run_health_gate_starts_zebrad_when_asked_and_clears_the_marker() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -991,7 +1061,7 @@ mod tests {
         assert_eq!(
             tokio::time::timeout(
                 T,
-                run_health_gate(&marker, "0.2.0", &node, true, HEALTH_GATE_TIMEOUT, "u")
+                run_health_gate(&marker, "0.2.0", one(&node), HEALTH_GATE_TIMEOUT, "u")
             )
             .await
             .expect("in time"),
@@ -1001,7 +1071,7 @@ mod tests {
         write_marker(&marker, &pending("0.2.0", true)).expect("write");
         let result = tokio::time::timeout(
             T,
-            run_health_gate(&marker, "0.2.0", &node, true, HEALTH_GATE_TIMEOUT, "u"),
+            run_health_gate(&marker, "0.2.0", one(&node), HEALTH_GATE_TIMEOUT, "u"),
         )
         .await
         .expect("in time");
@@ -1014,7 +1084,7 @@ mod tests {
         write_marker(&marker, &pending("0.3.0", true)).expect("write");
         let result = tokio::time::timeout(
             T,
-            run_health_gate(&marker, "0.2.0", &node, true, HEALTH_GATE_TIMEOUT, "u"),
+            run_health_gate(&marker, "0.2.0", one(&node), HEALTH_GATE_TIMEOUT, "u"),
         )
         .await
         .expect("in time");
@@ -1031,11 +1101,102 @@ mod tests {
         fs::write(&marker, b"garbage").expect("corrupt marker");
         let result = tokio::time::timeout(
             T,
-            run_health_gate(&marker, "0.2.0", &node, true, HEALTH_GATE_TIMEOUT, "u"),
+            run_health_gate(&marker, "0.2.0", one(&node), HEALTH_GATE_TIMEOUT, "u"),
         )
         .await
         .expect("in time");
         assert_eq!(result, None);
         assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn run_health_gate_checks_every_node_that_was_running_and_names_a_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(PENDING_UPDATE_MARKER);
+        let fresh = || InstantNode {
+            status: Arc::new(watch::channel(Status::default()).0),
+            starts: Arc::default(),
+        };
+        let (main, test) = (fresh(), fresh());
+        // The Testnet node fails as soon as it is checked.
+        test.status.send_replace(Status {
+            phase: Phase::Failed {
+                class: ExitClass::ConfigError,
+            },
+            ..Status::default()
+        });
+        let both = |main: &InstantNode, test: &InstantNode| {
+            let (main, test) = (main.clone(), test.clone());
+            move |pending: &PendingUpdate| {
+                assert_eq!(pending.running_nodes.len(), 2, "the marker's nodes");
+                vec![
+                    GateNode {
+                        node: main,
+                        start: true,
+                        name: Some("Zebra · Mainnet".into()),
+                    },
+                    // It starts at launch by itself: the gate does not start it.
+                    GateNode {
+                        node: test,
+                        start: false,
+                        name: Some("Zebra · Testnet".into()),
+                    },
+                ]
+            }
+        };
+        let marked = PendingUpdate {
+            running_nodes: vec![
+                NodeId::new("zebrad-mainnet").unwrap(),
+                NodeId::new("zebrad-testnet").unwrap(),
+            ],
+            ..pending("0.2.0", true)
+        };
+        write_marker(&marker, &marked).expect("write");
+        let result = tokio::time::timeout(
+            T,
+            run_health_gate(
+                &marker,
+                "0.2.0",
+                both(&main, &test),
+                HEALTH_GATE_TIMEOUT,
+                "u",
+            ),
+        )
+        .await
+        .expect("in time")
+        .expect("a marker");
+        let failure = result.expect_err("the Testnet node failed");
+        assert!(
+            failure
+                .message
+                .starts_with("Zebra · Testnet: zebrad stopped after the update"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(main.starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(test.starts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!marker.exists());
+
+        // Nothing was running: only the version is checked.
+        write_marker(&marker, &pending("0.2.0", false)).expect("write");
+        let result = tokio::time::timeout(
+            T,
+            run_health_gate(
+                &marker,
+                "0.2.0",
+                |_: &PendingUpdate| Vec::<GateNode<InstantNode>>::new(),
+                HEALTH_GATE_TIMEOUT,
+                "u",
+            ),
+        )
+        .await
+        .expect("in time");
+        assert_eq!(result, Some(Ok(())));
+        // A marker from a single-node launcher reads with no node list.
+        let old: PendingUpdate = serde_json::from_str(
+            r#"{"from_version":"0.1.0","to_version":"0.2.0","zebrad_was_running":true,"written_at":{"secs_since_epoch":0,"nanos_since_epoch":0}}"#,
+        )
+        .expect("an old marker");
+        assert!(old.running_nodes.is_empty());
     }
 }
