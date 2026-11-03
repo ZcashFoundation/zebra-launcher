@@ -20,6 +20,7 @@ pub mod paths;
 pub mod pidfile;
 pub mod policy;
 pub mod process;
+pub mod registry;
 pub mod resources;
 pub mod rpc;
 pub mod runtime;

@@ -146,7 +146,7 @@ pub fn check_writable_dir(dir: &Path) -> io::Result<()> {
 /// could be read, and whether it is `default`.
 pub fn check_chosen_dir(dir: &Path, default: &Path) -> Result<(Option<u64>, bool), String> {
     check_writable_dir(dir)
-        .map_err(|err| format!("cannot use {} as the data directory: {err}", dir.display()))?;
+        .map_err(|err| format!("cannot use {} as the data folder: {err}", dir.display()))?;
     let free = free_space(dir).ok();
     Ok((free, same_dir(dir, default)))
 }

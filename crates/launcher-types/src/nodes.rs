@@ -349,6 +349,9 @@ fn stop_grace_default() -> u64 {
 }
 
 impl NodeInfo {
+    /// The longest name a node can have, in characters.
+    pub const MAX_NAME_LEN: usize = 64;
+
     /// The default name of a node: its kind and network, "Zebra · Mainnet".
     pub fn default_name(kind: NodeKind, network: Network) -> String {
         format!("{} · {network}", kind.label())
@@ -370,6 +373,18 @@ impl NodeInfo {
             .map(|n| format!("{base} {n}"))
             .find(|candidate| free(candidate))
             .expect("an unbounded range has a free number")
+    }
+
+    /// Whether `name` is a default name of a node of `kind` on `network`: "Zebra · Mainnet",
+    /// or a numbered one such as "Zebra · Mainnet 2".
+    pub fn is_default_name(name: &str, kind: NodeKind, network: Network) -> bool {
+        match name.strip_prefix(&Self::default_name(kind, network)) {
+            Some("") => true,
+            Some(rest) => rest
+                .strip_prefix(' ')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+            None => false,
+        }
     }
 
     /// The port the node listens on for `role`, if it has one.
@@ -592,5 +607,19 @@ mod tests {
             ),
             "Zebra · Testnet 3"
         );
+        for (name, default) in [
+            ("Zebra · Testnet", true),
+            ("Zebra · Testnet 3", true),
+            ("Zebra · Testnet node", false),
+            ("Zebra · Testnet ", false),
+            ("Zebra · Mainnet", false),
+            ("My node", false),
+        ] {
+            assert_eq!(
+                NodeInfo::is_default_name(name, NodeKind::Zebrad, Network::Testnet),
+                default,
+                "{name:?}"
+            );
+        }
     }
 }

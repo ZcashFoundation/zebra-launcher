@@ -53,15 +53,21 @@ impl NodeGates {
     /// failed ([`launcher_types::Phase::is_settled`]) and no start or other
     /// data change is running.
     pub fn data_change_permit(&self) -> Result<OwnedSemaphorePermit, String> {
-        let permit = self
-            .data_gate
-            .clone()
-            .try_acquire_many_owned(DATA_GATE_PERMITS)
-            .map_err(|_| "zebrad is starting, or another data change is running".to_string())?;
+        let permit = self.block_starts()?;
         if !self.status.borrow().phase.is_settled() {
             return Err("stop zebrad first".to_string());
         }
         Ok(permit)
+    }
+
+    /// Holds every start permit, whatever zebrad is doing: no start can begin
+    /// until it is dropped. A removal takes it before it stops the node. Fails
+    /// while a start or a data change is running.
+    pub fn block_starts(&self) -> Result<OwnedSemaphorePermit, String> {
+        self.data_gate
+            .clone()
+            .try_acquire_many_owned(DATA_GATE_PERMITS)
+            .map_err(|_| "zebrad is starting, or another data change is running".to_string())
     }
 
     /// Held while `zebrad.toml` is written by a command that does not wait

@@ -1,19 +1,21 @@
-//! One node's runtime: its `zebrad.toml` brought up to date, then the zebrad
+//! One node's runtime: its files brought up to date, then the zebrad
 //! supervisor, the RPC monitor and the metrics poller that run it.
 
-use std::{io, path::PathBuf, time::Duration};
+use std::{io, time::Duration};
 
 use launcher_types::{MetricsSnapshot, NodeDetails, NodeStats};
 use tokio::sync::watch;
 
 use crate::{
-    config::{self, ManagedKeys},
+    config,
     logfile::RotatingLogConfig,
     metrics::poller::MetricsPoller,
-    monitor::{self, Monitor, MonitorOutput},
-    paths::NodePaths,
+    monitor::{Monitor, MonitorOutput},
+    nodes::NodeSpec,
+    paths::Paths,
     process::ZebradCommand,
-    supervisor::{self, SupervisorConfig, SupervisorHandle},
+    registry::RegistryConfig,
+    supervisor::{self, Listener, SupervisorConfig, SupervisorHandle},
 };
 
 /// What [`spawn`] starts for a node.
@@ -30,37 +32,62 @@ pub struct NodeActors {
     pub metrics: watch::Receiver<Option<MetricsSnapshot>>,
 }
 
-/// Brings the managed keys of `node`'s `zebrad.toml` up to date (`keys`),
-/// then starts its supervisor, which runs `zebrad` and kills it when a stop
-/// takes longer than `stop_grace_secs`, its RPC monitor and its metrics
-/// poller. Fails only when the supervisor cannot start.
-pub fn spawn(
-    node: &NodePaths,
-    keys: &ManagedKeys,
-    zebrad: PathBuf,
-    shutdown_on_stdin_close: bool,
-    stop_grace_secs: u64,
-) -> io::Result<NodeActors> {
+/// Rolls back an interrupted configuration change of `spec`'s node, then
+/// creates its folders and brings the managed keys of its `zebrad.toml` up
+/// to date. What fails is logged.
+pub fn prepare_files(paths: &Paths, spec: &NodeSpec) {
+    let files = spec.paths(paths);
+    match config::recover(&files) {
+        Ok(Some(_)) => tracing::warn!(
+            node = %spec.id,
+            "a configuration change was interrupted by a launcher exit; restored the previous zebrad.toml"
+        ),
+        Ok(None) => {}
+        Err(err) => tracing::error!(
+            node = %spec.id,
+            %err,
+            "could not check for an interrupted configuration change"
+        ),
+    }
     // A broken zebrad.toml is not fatal: zebrad reports it, and the user can
     // fix it in the editor.
-    if let Err(err) = config::ensure(node, keys) {
-        tracing::error!(%err, "could not update the managed keys in zebrad.toml");
+    if let Err(err) = files
+        .ensure_dirs()
+        .map_err(config::ConfigError::from)
+        .and_then(|()| config::ensure(&files, &spec.managed_keys(paths)))
+    {
+        tracing::error!(node = %spec.id, %err, "could not update the managed keys in zebrad.toml");
     }
+}
 
-    let mut command = ZebradCommand::new(zebrad, node.zebrad_config());
-    command.shutdown_on_stdin_close = shutdown_on_stdin_close;
+/// Starts the actors of `spec`'s node as `config` says: its supervisor, which
+/// runs the zebrad in `config`, checks `listeners` before every start and
+/// kills zebrad when a stop takes longer than the node's stop grace, its RPC
+/// monitor and its metrics poller. Fails only when the supervisor cannot
+/// start.
+pub fn spawn(
+    config: &RegistryConfig,
+    spec: &NodeSpec,
+    listeners: watch::Receiver<Vec<Listener>>,
+) -> io::Result<NodeActors> {
+    let node = spec.paths(&config.paths);
+    let command = ZebradCommand::new(&config.zebrad, node.zebrad_config());
     let mut supervisor_config = SupervisorConfig::new(command);
-    supervisor_config.stop_grace = Duration::from_secs(stop_grace_secs);
+    supervisor_config.stop_grace = Duration::from_secs(spec.stop_grace_secs);
     supervisor_config.pidfile = Some(node.pidfile());
     supervisor_config.log_file = Some(RotatingLogConfig::new(node.zebrad_log()));
+    supervisor_config.listeners = listeners;
+    if let Some(customize) = &config.customize {
+        customize(spec, &mut supervisor_config);
+    }
     let supervisor = supervisor::spawn(supervisor_config)?;
 
     let MonitorOutput { stats, details } = Monitor::spawn(
         supervisor.watch_status(),
         node.rpc_cookie_file(),
-        monitor::DEFAULT_INTERVAL,
+        config.monitor_interval,
     );
-    let metrics = MetricsPoller::spawn(supervisor.watch_status());
+    let metrics = MetricsPoller::spawn_with(supervisor.watch_status(), config.metrics_interval);
     Ok(NodeActors {
         supervisor,
         stats,

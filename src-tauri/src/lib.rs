@@ -17,11 +17,13 @@ pub mod sidecar;
 pub mod tray;
 pub mod updater;
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use launcher_core::{
     config, firstrun,
+    nodes::NodeSpec,
     pidfile::StaleProcess,
+    registry::RegistryConfig,
     resources::{MachineSampler, ResourceSampler},
     runtime::{self, NodeActors},
     settings::SettingsStore,
@@ -30,8 +32,9 @@ use launcher_core::{
 use launcher_types::{StaleProcessInfo, events};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tokio::sync::watch;
 
-use crate::app_state::{AppState, ResourceWatches, managed_keys};
+use crate::app_state::{AppState, ResourceWatches};
 
 /// Set to `1` to run zebrad with `--shutdown-on-stdin-close`, for testing
 /// with a zebrad that has the upstream change.
@@ -242,18 +245,22 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
 
     let settings = SettingsStore::open(&paths)?;
     let current = settings.current();
+    // The one node, as the settings describe it.
+    let mut node = NodeSpec::first(current.network);
+    node.data_dir = current.data_dir.clone();
+    node.stop_grace_secs = current.stop_grace_secs;
+    runtime::prepare_files(&paths, &node);
+    let stdin_close = std::env::var_os(STDIN_CLOSE_ENV).is_some_and(|v| v == "1");
+    let mut config = RegistryConfig::new(paths.clone(), sidecar::resolve(&paths));
+    config.customize = Some(Arc::new(move |_node, supervisor| {
+        supervisor.command.shutdown_on_stdin_close = stdin_close;
+    }));
     let NodeActors {
         supervisor,
         stats,
         details,
         metrics,
-    } = runtime::spawn(
-        &paths.launcher_node(),
-        &managed_keys(&current, &paths),
-        sidecar::resolve(&paths),
-        std::env::var_os(STDIN_CLOSE_ENV).is_some_and(|v| v == "1"),
-        current.stop_grace_secs,
-    )?;
+    } = runtime::spawn(&config, &node, watch::channel(Vec::new()).1)?;
     // From here on the launcher's own events show in the Logs tab too.
     if let Some(notes) = notes {
         logging::forward_notes(notes, supervisor.clone());
