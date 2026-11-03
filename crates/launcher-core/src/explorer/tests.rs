@@ -883,6 +883,134 @@ async fn a_new_run_is_checked_before_heights_near_its_tip_are_trusted() {
 }
 
 #[tokio::test]
+async fn a_syncing_node_is_not_followed_and_gets_fewer_reads_at_once() {
+    let poll = Duration::from_millis(30);
+    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
+        config.tip_poll = poll;
+    });
+    harness
+        .stats
+        .send_replace(Some(syncing(&harness.chain.borrow())));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    harness.show(PageKind::Chain).await;
+    tokio::time::sleep(poll * 8).await;
+    assert_eq!(harness.counts()[0], 0, "no tip checks while the node syncs");
+    // Eight Block pages at once: four reads run while the node syncs, six at the tip.
+    for (stats, limit) in [
+        (syncing(&harness.chain.borrow()), 4),
+        (stats_for(&harness.chain.borrow()), 6),
+    ] {
+        harness.stats.send_replace(Some(stats));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        harness.gate.send_replace(false);
+        let before = harness.counts()[1];
+        let pages: Vec<_> = (0..8)
+            .map(|back| {
+                let explorer = harness.explorer.clone();
+                let request = ExplorerRequest::Block {
+                    id: BlockId::Height(TIP - 2_000 - 10 * back - limit),
+                };
+                tokio::spawn(
+                    async move { explorer.call(&mainnet(), ExplorerCall { request }).await },
+                )
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(harness.counts()[1] - before, u64::from(limit));
+        harness.gate.send_replace(true);
+        for page in pages {
+            page.await.expect("no panic").expect("a block page");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_new_run_of_zebrad_keeps_the_cache() {
+    let harness = harness();
+    let ExplorerResponse::Chain(first) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    // zebrad stops, and starts again on another RPC port.
+    harness.status.send_replace(Status::default());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    harness.status.send_replace(Status {
+        rpc_addr: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 18232))),
+        ..running_since(100)
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let before = harness.counts();
+    let ExplorerResponse::Chain(again) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    assert_eq!(again, first);
+    assert_eq!(
+        delta(harness.counts(), before),
+        [1, 0, 0, 0, 0, 0],
+        "one tip check; the rest from the cache"
+    );
+}
+
+#[tokio::test]
+async fn a_hidden_explorer_shrinks_its_cache() {
+    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
+        config.idle_after = Duration::from_millis(20);
+        config.idle_cache_bytes = 0;
+        config.tip_poll = Duration::from_millis(10);
+    });
+    let id = BlockId::Hash(harness.chain.borrow().hash(TIP - 2_000).unwrap());
+    harness.reply(ExplorerRequest::Block { id }).await;
+    let before = harness.counts();
+    harness.reply(ExplorerRequest::Block { id }).await;
+    assert_eq!(delta(harness.counts(), before), [0; 6], "from the cache");
+    // Shown, then hidden for longer than `idle_after`.
+    harness.show(PageKind::Block).await;
+    harness
+        .reply(ExplorerRequest::Interest {
+            visible: false,
+            page: PageKind::Block,
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let before = harness.counts();
+    harness.reply(ExplorerRequest::Block { id }).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0, 2, 0, 0, 1, 1],
+        "read again"
+    );
+}
+
+#[tokio::test]
+async fn a_height_near_the_tip_is_read_again_once_the_check_is_stale() {
+    let fresh = Duration::from_millis(100);
+    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
+        config.fresh = fresh;
+    });
+    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    let (near, deep) = (BlockId::Height(TIP - 5), BlockId::Height(TIP - 2_000));
+    for id in [near, deep] {
+        harness.reply(ExplorerRequest::Block { id }).await;
+    }
+    let before = harness.counts();
+    for id in [near, deep] {
+        harness.reply(ExplorerRequest::Block { id }).await;
+    }
+    assert_eq!(delta(harness.counts(), before), [0; 6], "from the cache");
+    tokio::time::sleep(fresh + Duration::from_millis(50)).await;
+    let before = harness.counts();
+    for id in [near, deep] {
+        harness.reply(ExplorerRequest::Block { id }).await;
+    }
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0, 1, 0, 0, 0, 0],
+        "the block near the tip is read again; the final one is not"
+    );
+}
+
+#[tokio::test]
 async fn the_follower_checks_the_tip_at_every_poll() {
     let poll = Duration::from_millis(100);
     let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
