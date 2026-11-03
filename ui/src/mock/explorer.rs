@@ -21,7 +21,7 @@ use explorer_model::{
     views, zec_to_zat,
 };
 use launcher_types::{
-    Network, NodeId, NodeKind, NodeStats, Phase,
+    Network, NetworkUpgrade, NodeId, NodeKind, NodeStats, Phase,
     explorer::{
         BlockHash, BlockId, ChainPage, ChainView, ExplorerCall, ExplorerError, ExplorerErrorKind,
         ExplorerLive, ExplorerLiveEvent, ExplorerReply, ExplorerRequest, ExplorerResponse,
@@ -242,6 +242,43 @@ fn with_explorer<T>(
         explorer.follow(height);
         Ok(answer(explorer))
     })
+}
+
+/// The best block hash, the pools, the upgrades and the branch ids the main node reports at
+/// its height, from the same chain its explorer shows, for the dashboard's details.
+pub(super) struct ChainFacts {
+    pub(super) best_block_hash: BlockHash,
+    pub(super) pools: [u64; 6],
+    pub(super) upgrades: Vec<NetworkUpgrade>,
+    pub(super) chain_tip_branch: &'static str,
+    pub(super) next_block_branch: &'static str,
+    pub(super) difficulty: f64,
+}
+
+impl ChainFacts {
+    pub(super) fn of(chain: &SynthChain, height: u32) -> Self {
+        ChainFacts {
+            best_block_hash: chain.hash(height).unwrap_or_default(),
+            pools: chain.pools(height),
+            upgrades: chain.upgrades(height),
+            chain_tip_branch: chain.branch_id_at(height),
+            next_block_branch: chain.branch_id_at(height + 1),
+            difficulty: chain.difficulty(height),
+        }
+    }
+}
+
+/// The facts of the main node with the statistics `stats`, about to be published.
+pub(super) fn primary_facts(stats: &NodeStats) -> Option<ChainFacts> {
+    let network = network_of(&stats.chain)?;
+    let view = NodeView {
+        id: NodeId::suggest(NodeKind::Zebrad, network, &Vec::new()),
+        network,
+        running: true,
+        stats: Some(stats.clone()),
+    };
+    let height = u32::try_from(stats.height).ok()?;
+    with_explorer(&view, |explorer| ChainFacts::of(&explorer.chain, height)).ok()
 }
 
 /// Every second: the explorers follow their nodes, `?reorg` replaces the main node's top
@@ -598,5 +635,18 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn the_dashboard_and_the_explorer_share_one_chain() {
+        let chain = SynthChain::new(Network::Mainnet, 3_551_000, NOW);
+        let facts = ChainFacts::of(&chain, 3_551_000);
+        assert_eq!(Some(facts.best_block_hash), chain.hash(3_551_000));
+        let tip = chain.block(BlockId::Height(3_551_000)).unwrap();
+        assert_eq!(
+            Some(facts.pools.iter().sum::<u64>()),
+            tip.chain_supply.map(|supply| supply.chain_value_zat)
+        );
+        assert_eq!(facts.chain_tip_branch, "77190ad9");
     }
 }

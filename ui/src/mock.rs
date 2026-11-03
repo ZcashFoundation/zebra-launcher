@@ -738,8 +738,16 @@ impl Mock {
                 at: clock::now(),
             })));
         }
-        self.details
-            .set(Some(details::details(&stats, tick, state_bytes, scenario)));
+        // The best block, the pools and the upgrades come from the chain the Explorer shows.
+        if let Some(chain) = explorer::primary_facts(&stats) {
+            self.details.set(Some(details::details(
+                &stats,
+                tick,
+                state_bytes,
+                scenario,
+                &chain,
+            )));
+        }
         self.stats.set(Some(stats));
     }
 
