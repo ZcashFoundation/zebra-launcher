@@ -7,6 +7,7 @@
 //! dependencies (ACME, the keychain, HTTPS) in one place, reviewed and cargo-denied as a unit.
 
 pub mod awake;
+pub mod ddns;
 pub mod dns;
 pub mod firewall;
 pub mod grpc;
