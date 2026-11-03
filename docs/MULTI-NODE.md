@@ -290,31 +290,33 @@ one log subscription per node it shows and folds each node's log analysis separa
 A sidebar replaces the top tab bar once there is more than one node:
 
 ```text
-+--------------------+----------------------------------------------------------------+
-| (zebra) Zeal       |  Zebra · Mainnet   zebrad 7.0.0  [Running]   [Stop] [Restart]  |
-|                    |  Dashboard   Logs   Configure   Node settings                  |
-| [Mainnet 4|Testnet 2] +------------------------------------------------------------+ |
-|                    | |  (today's dashboard, for this node)                         | |
-|  Overview      4/4 | |                                                            | |
-|  * Zebra      94 % | |                                                            | |
-|  * Zakura     97 % | |                                                            | |
-|  * Zaino   serving | |                                                            | |
-|  o zcashd  stopped | |                                                            | |
-|                    | |                                                            | |
-|                    | |                                                            | |
-|  + Add node        | |                                                            | |
-|                    | |                                                            | |
-|  Grafana           | |                                                            | |
-|  Settings          | +------------------------------------------------------------+ |
-+--------------------+----------------------------------------------------------------+
++------------------------+------------------------------------------------------------+
+| (zebra) Zeal           |  Zebra · Mainnet  zebrad 7.0.0  [Running] [Stop] [Restart] |
+|                        |  Dashboard   Logs   Configure   Node settings              |
+| [Mainnet 4|Testnet 2]  | +--------------------------------------------------------+ |
+|                        | |  (today's dashboard, for this node)                    | |
+|  Overview          3/4 | |                                                        | |
+|  * Zebra          94 % | |                                                        | |
+|  * Zakura         97 % | |                                                        | |
+|  * Zaino       serving | |                                                        | |
+|  o zcashd      stopped | |                                                        | |
+|                        | |                                                        | |
+|                        | |                                                        | |
+|  + Add node            | |                                                        | |
+|                        | |                                                        | |
+|  Grafana               | |                                                        | |
+|  Settings              | +--------------------------------------------------------+ |
++------------------------+------------------------------------------------------------+
 ```
 
 - Mainnet and Testnet tabs at the top of the sidebar, each with its node count, scope the
   whole window to one network: the sidebar, the overview, the node pages, and later the
   explorer, the herd's health and the wallet. Testnet is marked everywhere in the warning
   tone (a band over the page, the tab, the network chips), so Testnet coins are never
-  mistaken for real ones. The window opens on the backend node's network; the add-node
-  dialog starts on the network shown.
+  mistaken for real ones; a single Testnet node, which keeps the tab bar, gets the band too.
+  The window shows the backend node's network and moves with it when that changes; the
+  add-node dialog starts on the network shown, and a node added on the other network takes
+  the window there.
 - The sidebar lists the network's nodes with a status dot and one fact (sync percentage,
   "at tip", "serving", "stopped"). Under 900 px it folds to a rail of dots.
 - A node's page has today's tabs scoped to it (Dashboard, Logs, Configure) plus Node
@@ -334,13 +336,13 @@ stops every node, dependents first, each within its own stop grace.
 ### Overview
 
 ```text
-  4 nodes · 3 running · 1 stopped                 [Start all] [Stop all] [+ Add node]
+  Mainnet · 4 nodes · 3 running · 1 stopped           [Start all] [Stop all] [+ Add node]
 
   +-----------------------------+ +-----------------------------+ +---------------------+
-  | * Zebra · Mainnet    zebrad | | * Zebra · Testnet    zebrad | | o zcashd · Mainnet  |
-  | Syncing 94.5 %              | | At the tip                  | | Stopped 2 days ago  |
-  | ##############....  2.95M   | | ##################  3.61M   | |                     |
-  | 12 peers · block 4 s ago    | | 8 peers · block 31 s ago    | | 290 GB              |
+  | * Zebra · Mainnet    zebrad | | * Zakura · Mainnet   zakura | | o zcashd · Mainnet  |
+  | Syncing 94.5 %              | | Syncing 97.1 %              | | Stopped 2 days ago  |
+  | ##############....  2.95M   | | ###############...  3.03M   | |                     |
+  | 12 peers · block 4 s ago    | | 9 peers · block 6 s ago     | | 290 GB              |
   | [Open] [Stop] [...]         | | [Open] [Stop] [...]         | | [Start] [...]       |
   +-----------------------------+ +-----------------------------+ +---------------------+
   +-----------------------------+
@@ -350,7 +352,7 @@ stops every node, dependents first, each within its own stop grace.
   +-----------------------------+
 
   Disk   /mnt/zebra  1.2 TB free, 540 GB used by 2 nodes
-  Ports  8233 8232 9999 Zebra · Mainnet · 18233 18232 10000 Zebra · Testnet · ...
+  Ports  8233 8232 9999 Zebra · 18233 18232 19999 Zakura · 8137 Zaino · 28232 zcashd
 ```
 
 Each card carries the node's verdict from today's health rules where the kind supports
