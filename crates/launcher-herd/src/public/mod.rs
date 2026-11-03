@@ -62,6 +62,8 @@ pub struct Facts {
     pub endpoint: Option<SocketAddr>,
     /// zebrad's last start failed because the endpoint's port was taken.
     pub endpoint_port_taken: bool,
+    /// Writing the endpoint into `zebrad.toml` and restarting zebrad failed, with why.
+    pub endpoint_error: Option<String>,
     /// zebrad's height and its estimate of the network's.
     pub height: Option<u64>,
     pub tip: Option<u64>,
@@ -106,6 +108,7 @@ impl Facts {
             phase: Phase::Stopped,
             endpoint: None,
             endpoint_port_taken: false,
+            endpoint_error: None,
             height: None,
             tip: None,
             eta_secs: None,

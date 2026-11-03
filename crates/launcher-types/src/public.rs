@@ -670,6 +670,11 @@ pub enum Finding {
     EndpointPortTaken {
         port: u16,
     },
+    /// Zeal could not write the endpoint into `zebrad.toml` and restart zebrad, for example
+    /// while a configuration change was being applied.
+    EndpointNotWritten {
+        detail: String,
+    },
     WalletCheck {
         problem: WalletProblem,
     },

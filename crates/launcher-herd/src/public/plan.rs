@@ -179,7 +179,15 @@ fn service(spec: &PublicServiceSpec, facts: &Facts) -> Vec<CheckResult> {
                 port: spec.backend_port.unwrap_or_default(),
             },
         ),
-        None => not_run(CheckId::EndpointOpened),
+        None => match &facts.endpoint_error {
+            Some(detail) => fail(
+                CheckId::EndpointOpened,
+                Finding::EndpointNotWritten {
+                    detail: detail.clone(),
+                },
+            ),
+            None => not_run(CheckId::EndpointOpened),
+        },
         Some(_) if opened => pass(CheckId::EndpointOpened),
         Some(_) if matches!(facts.phase, Phase::Stopped | Phase::Failed { .. }) => {
             fail(CheckId::EndpointOpened, Finding::ZebradNotRunning)

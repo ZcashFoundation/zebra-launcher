@@ -17,4 +17,7 @@ pub mod light;
 pub mod netcheck;
 pub mod secrets;
 pub mod selftest;
+pub mod service;
 pub mod store;
+
+pub use service::{EndpointHost, Options, PublicServices, Wiring, prepare_launch};
