@@ -62,7 +62,7 @@
 }
 
 /* Wide: three cards in a row, the activity chart full width under them. */
-@media (min-width: 1100px) {
+@container page (min-width: 1100px) {
   .insight-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }

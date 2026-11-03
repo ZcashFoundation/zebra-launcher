@@ -341,9 +341,12 @@ summary:focus-visible,
   border-bottom: 1px solid var(--border);
 }
 
+/* The pages lay out by their own width, not the window's: with several nodes the sidebar takes
+   part of the window (herd.css). Their breakpoints are `@container page (…)`. */
 .app-main {
   flex: 1;
   min-height: 0;
+  container: page / inline-size;
 }
 
 .page {

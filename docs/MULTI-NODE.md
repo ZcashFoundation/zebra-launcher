@@ -323,11 +323,12 @@ A sidebar replaces the top tab bar once there is more than one node:
   settings (name, autostart, stop grace, data folder, ports, binary, remove). The status
   strip becomes the page header.
 - Grafana and Settings stay global.
-- The pages' breakpoints follow the window's width today (`@media`), which a sidebar
-  would break: the dashboard would lay out three cards across in a window of 1,360 px
-  whose content is 1,140 px wide. They move to the content's width with CSS container
-  queries, which every webview Zeal supports has (WebKitGTK 2.38, Safari 16, WebView2).
-  An older webview ignores them and gets the narrow layouts, which still work.
+- The pages' breakpoints follow the page's width, not the window's (CSS container queries
+  on the page area), so the sidebar narrows them as it narrows the page: a window of
+  1,400 px has a page 1,184 px wide, and the dashboard lays out two cards across, not
+  three. With one node the page is as wide as the window, so nothing changes there. Every
+  webview Zeal supports has container queries (WebKitGTK 2.38, Safari 16, WebView2); an
+  older one would ignore them and keep each page's base layout, which still works.
 
 The tray follows: its tooltip summarises the nodes ("Zeal: 3 running, 1 stopped"), and its
 menu has Show, a submenu per node with Start and Stop, Start all, Stop all and Quit. Quit
