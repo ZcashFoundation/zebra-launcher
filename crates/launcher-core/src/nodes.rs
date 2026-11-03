@@ -694,7 +694,9 @@ mod tests {
 
     #[test]
     fn a_draft_that_breaks_a_rule_is_refused() {
-        let paths = Paths::under("/root");
+        // An absolute root on every OS: a draft's folder must be absolute, and "/root" is
+        // not on Windows.
+        let paths = Paths::under(if cfg!(windows) { r"C:\root" } else { "/root" });
         let first = NodeSpec::first(Network::Mainnet);
         let nodes = vec![first.clone()];
         let refused = |draft: NodeDraft| {
