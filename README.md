@@ -1,6 +1,8 @@
-# Zebra Launcher
+# Zeal
 
-A Desktop app for installing and running Zebra.
+A desktop app for installing and running [Zebra](https://github.com/ZcashFoundation/zebra),
+the Zcash Foundation's Zcash node. A group of zebras is called a zeal. The project was
+called Zebra Launcher until November 2026.
 
 ## Installation
 

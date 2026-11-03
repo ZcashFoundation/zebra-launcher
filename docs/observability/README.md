@@ -1,6 +1,6 @@
 # Observability stack
 
-Prometheus and Grafana in Docker, scraping the zebrad that Zebra Launcher runs and
+Prometheus and Grafana in Docker, scraping the zebrad that Zeal runs and
 serving Zebra's own Grafana dashboards. It is optional and the advanced option: the
 launcher's Dashboard and Logs tabs show the node's state without it, from zebrad's RPC
 and log. Run this stack when you want every metric zebrad exports, history that outlives
@@ -151,13 +151,13 @@ Two named volumes, listed by `docker volume ls`:
 
 | Volume | Holds |
 | --- | --- |
-| `zebra-launcher-observability_prometheus-data` | the Prometheus time series, kept 15 days (Prometheus's default retention); a few hundred megabytes at most for one zebrad |
-| `zebra-launcher-observability_grafana-data` | Grafana's database: the admin password, dashboards saved with "Save as", preferences |
+| `zeal-observability_prometheus-data` | the Prometheus time series, kept 15 days (Prometheus's default retention); a few hundred megabytes at most for one zebrad |
+| `zeal-observability_grafana-data` | Grafana's database: the admin password, dashboards saved with "Save as", preferences |
 
 The dashboards, the provisioning and the Prometheus config are read from this directory
 (read-only bind mounts) and are not in the volumes. `down -v` deletes both volumes; the
 next `up -d` starts from scratch, with `admin`/`admin` again. To drop only the
-measurements, `down`, then `docker volume rm zebra-launcher-observability_prometheus-data`,
+measurements, `down`, then `docker volume rm zeal-observability_prometheus-data`,
 then `up -d`.
 
 ## Dashboards

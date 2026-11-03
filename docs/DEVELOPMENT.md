@@ -1,6 +1,6 @@
 # Development
 
-How to build, run and test Zebra Launcher. For how the pieces fit, read
+How to build, run and test Zeal. For how the pieces fit, read
 [ARCHITECTURE.md](ARCHITECTURE.md) first.
 
 ## Prerequisites
@@ -51,7 +51,7 @@ WebView2 runtime (preinstalled on Windows 11). See Tauri's
 ## Run the app
 
 The Tauri build needs a sidecar file at
-`src-tauri/binaries/zebra-launcher-zebrad-<host target triple>` (`.exe` on Windows).
+`src-tauri/binaries/zeal-zebrad-<host target triple>` (`.exe` on Windows).
 Binaries are never committed.
 
 - **Fake sidecar:** `scripts/dev-sidecar.sh` (Windows: `scripts/dev-sidecar.ps1`) builds
@@ -83,7 +83,7 @@ it, rebuilding on changes. Useful environment variables:
 | `LAUNCHER_STDIN_CLOSE=1` | Spawn zebrad with `--shutdown-on-stdin-close` and stop it by closing its stdin (fake-zebrad, or a zebrad with the proposed upstream flag; the pinned zebrad does not have it yet). |
 
 The launcher keeps its files in the per-user directories for the identifier
-`org.zfnd.zebra-launcher` (`zebrad.toml` and `launcher.json` in the config directory,
+`org.zfnd.zeal` (`zebrad.toml` and `launcher.json` in the config directory,
 the chain state, pidfile and RPC cookie in the local data directory, `launcher.*.log`
 and `zebrad.log` in the log directory). The `open_path` command opens them.
 
@@ -140,9 +140,9 @@ shellcheck scripts/*.sh docs/observability/*.sh && actionlint   # CI pins their 
 
 Run `scripts/dev-sidecar.sh` first: the app crate's build script fails without the
 sidecar file. On Linux the app also needs the WebKitGTK packages listed above; without
-them, check everything else with `--exclude zebra-launcher`, and the app with
+them, check everything else with `--exclude zeal`, and the app with
 [`scripts/check-windows.sh`](../scripts/check-windows.sh), which type-checks it for
-Windows (`cargo clippy -p zebra-launcher --target x86_64-pc-windows-msvc --all-targets`).
+Windows (`cargo clippy -p zeal --target x86_64-pc-windows-msvc --all-targets`).
 Tauri's Windows backend needs no system libraries to type-check; the script installs the
 target, creates the placeholder sidecar file the build script wants, and provides the
 stub C compiler and archiver that the `ring`, `embed-resource` and `vswhom-sys` build

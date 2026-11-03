@@ -113,12 +113,12 @@ updater artifacts in the `release` environment.
   pins (`TAURI_CLI_VERSION`):
 
   ```sh
-  cargo tauri signer generate -w zebra-launcher-updater.key
+  cargo tauri signer generate -w zeal-updater.key
   ```
 
   It asks for a password; always set one (never `--ci`, which leaves the key
-  unencrypted). It writes `zebra-launcher-updater.key` (the encrypted private key) and
-  `zebra-launcher-updater.key.pub` (the public key, base64). Record the public key's
+  unencrypted). It writes `zeal-updater.key` (the encrypted private key) and
+  `zeal-updater.key.pub` (the public key, base64). Record the public key's
   SHA-256 in this file, then copy the `.pub` contents into `plugins.updater.pubkey`
   in a reviewed PR. TODO: date, participants, public key fingerprint.
 - **The placeholder:** until that PR merges, `pubkey` is `REPLACE_WITH_MINISIGN_PUBLIC_KEY`.
@@ -196,7 +196,7 @@ TODO: exact commands and identities, tested against a real release.
   --certificate-identity <release workflow identity>
   --certificate-oidc-issuer https://token.actions.githubusercontent.com`.
 - **Attestation:** `gh attestation verify <file> --repo ZcashFoundation/zebra-launcher`.
-- **macOS:** `spctl -a -vv "/Applications/Zebra Launcher.app"` reports a notarized
+- **macOS:** `spctl -a -vv "/Applications/Zeal.app"` reports a notarized
   Developer ID.
 - **Windows:** `Get-AuthenticodeSignature <installer>` reports `Valid`.
 

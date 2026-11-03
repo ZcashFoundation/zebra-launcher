@@ -5,7 +5,7 @@ hundreds of GB.
 
 ## Where things live
 
-The app identifier is `org.zfnd.zebra-launcher`.
+The app identifier is `org.zfnd.zeal`.
 
 | What | Location |
 | --- | --- |
@@ -16,13 +16,13 @@ The app identifier is `org.zfnd.zebra-launcher`.
 
 | OS | `app_local_data_dir` / `app_config_dir` |
 | --- | --- |
-| Linux | `~/.local/share/org.zfnd.zebra-launcher` / `~/.config/org.zfnd.zebra-launcher` |
-| macOS | `~/Library/Application Support/org.zfnd.zebra-launcher` (both) |
-| Windows | `%LOCALAPPDATA%\org.zfnd.zebra-launcher` / `%APPDATA%\org.zfnd.zebra-launcher` |
+| Linux | `~/.local/share/org.zfnd.zeal` / `~/.config/org.zfnd.zeal` |
+| macOS | `~/Library/Application Support/org.zfnd.zeal` (both) |
+| Windows | `%LOCALAPPDATA%\org.zfnd.zeal` / `%APPDATA%\org.zfnd.zeal` |
 
-`<app_log_dir>` is `~/.local/share/org.zfnd.zebra-launcher/logs` on Linux,
-`~/Library/Logs/org.zfnd.zebra-launcher` on macOS and
-`%LOCALAPPDATA%\org.zfnd.zebra-launcher\logs` on Windows.
+`<app_log_dir>` is `~/.local/share/org.zfnd.zeal/logs` on Linux,
+`~/Library/Logs/org.zfnd.zeal` on macOS and
+`%LOCALAPPDATA%\org.zfnd.zeal\logs` on Windows.
 
 These are Tauri's `app_config_dir`, `app_local_data_dir` and `app_log_dir` for the
 identifier (`src-tauri/src/paths.rs`), so they follow Tauri's path resolver on each OS.
@@ -31,7 +31,7 @@ identifier (`src-tauri/src/paths.rs`), so they follow Tauri's path resolver on e
 
 | Data dir | Chain state (`state.cache_dir`) |
 | --- | --- |
-| Default | `<app_local_data_dir>/state`, for example `~/.local/share/org.zfnd.zebra-launcher/state` (Linux), `~/Library/Application Support/org.zfnd.zebra-launcher/state` (macOS), `%LOCALAPPDATA%\org.zfnd.zebra-launcher\state` (Windows) |
+| Default | `<app_local_data_dir>/state`, for example `~/.local/share/org.zfnd.zeal/state` (Linux), `~/Library/Application Support/org.zfnd.zeal/state` (macOS), `%LOCALAPPDATA%\org.zfnd.zeal\state` (Windows) |
 | Chosen at first run or in Settings | `<chosen dir>/state` |
 
 zebrad creates `state/v<N>/<network>` below that. Changing the data dir does not move
@@ -50,23 +50,23 @@ yourself is never removed by an uninstaller; delete it by hand if you no longer 
 
 - **AppImage:** delete the `.AppImage` file, and the copy of zebrad the launcher keeps
   outside the AppImage mount:
-  `~/.local/share/org.zfnd.zebra-launcher/sidecar/<launcher version>/zebra-launcher-zebrad`
+  `~/.local/share/org.zfnd.zeal/sidecar/<launcher version>/zeal-zebrad`
   (the launcher deletes other versions' copies, never the current one).
-- **deb:** `sudo apt remove zebra-launcher` (the package installs `/usr/bin/zebra-launcher`
-  and `/usr/bin/zebra-launcher-zebrad`).
+- **deb:** `sudo apt remove zeal` (the package installs `/usr/bin/zeal`
+  and `/usr/bin/zeal-zebrad`).
 
 Then remove the directories above to delete state, config and logs.
 
 ## macOS
 
-Quit the launcher (tray → Quit), then move "Zebra Launcher" from Applications to the
-Trash. Remove `~/Library/Application Support/org.zfnd.zebra-launcher` (state and config)
-and `~/Library/Logs/org.zfnd.zebra-launcher` (logs). Whether macOS keeps a webview cache
+Quit the launcher (tray → Quit), then move "Zeal" from Applications to the
+Trash. Remove `~/Library/Application Support/org.zfnd.zeal` (state and config)
+and `~/Library/Logs/org.zfnd.zeal` (logs). Whether macOS keeps a webview cache
 for the identifier elsewhere has not been checked on an installed bundle.
 
 ## Windows
 
-Settings → Apps → Installed apps → Zebra Launcher → Uninstall. The NSIS uninstaller
+Settings → Apps → Installed apps → Zeal → Uninstall. The NSIS uninstaller
 offers to delete app data, which covers the default data dir. A data dir you chose
 yourself stays. The uninstaller's exact wording has not been checked on an installed
 bundle.

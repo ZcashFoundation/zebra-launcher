@@ -1,4 +1,4 @@
-# Prometheus scrape config for the zebrad started by Zebra Launcher, mounted by
+# Prometheus scrape config for the zebrad started by Zeal, mounted by
 # docker-compose.linux.yml: the Linux (Docker Engine) layout, where Prometheus runs on
 # the host network.
 #

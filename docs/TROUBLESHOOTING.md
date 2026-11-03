@@ -6,9 +6,9 @@ versions, the OS, the node status, the settings, the managed `zebrad.toml` and t
 It never includes the RPC cookie, and credentials in the Grafana URL are redacted. If the
 clipboard cannot be written, the text is shown below the button to copy by hand.
 
-The logs live in the app log directory: `~/.local/share/org.zfnd.zebra-launcher/logs`
-(Linux), `~/Library/Logs/org.zfnd.zebra-launcher` (macOS),
-`%LOCALAPPDATA%\org.zfnd.zebra-launcher\logs` (Windows). The launcher writes one
+The logs live in the app log directory: `~/.local/share/org.zfnd.zeal/logs`
+(Linux), `~/Library/Logs/org.zfnd.zeal` (macOS),
+`%LOCALAPPDATA%\org.zfnd.zeal\logs` (Windows). The launcher writes one
 `launcher.<date>.log` per day (14 kept); zebrad's output goes to `zebrad.log`, rotated at
 10 MB. If the launcher cannot start at all, an error dialog names this directory.
 
@@ -70,11 +70,11 @@ Some GPU drivers (often NVIDIA, or VMs) leave the WebKitGTK window blank. Start 
 launcher with the DMA-BUF renderer disabled:
 
 ```sh
-WEBKIT_DISABLE_DMABUF_RENDERER=1 zebra-launcher
+WEBKIT_DISABLE_DMABUF_RENDERER=1 zeal
 ```
 
-For the AppImage: `WEBKIT_DISABLE_DMABUF_RENDERER=1 ./zebra-launcher_<version>_x86_64.AppImage`.
-The deb installs the binary as `/usr/bin/zebra-launcher`. To make the setting permanent
+For the AppImage: `WEBKIT_DISABLE_DMABUF_RENDERER=1 ./zeal_<version>_x86_64.AppImage`.
+The deb installs the binary as `/usr/bin/zeal`. To make the setting permanent
 for the desktop entry, copy the `.desktop` file the package installs under
 `/usr/share/applications/` to `~/.local/share/applications/` and prefix its `Exec=` line
 with `env WEBKIT_DISABLE_DMABUF_RENDERER=1`.
@@ -96,7 +96,7 @@ Choose More info → Run anyway after checking the signature
 
 zebrad listens for peers on `[::]:8233` (P2P; `18233` on Testnet). The first time the
 node starts, macOS and Windows ask whether to allow incoming connections for
-`zebra-launcher-zebrad`; the first-run screen warns about this prompt. Allowing it helps
+`zeal-zebrad`; the first-run screen warns about this prompt. Allowing it helps
 the network; denying it still lets your node sync through outbound connections. RPC and
 metrics are loopback-only and never need a firewall rule. To change your answer later:
 Windows Security → Firewall & network protection → Allow an app through firewall; macOS
