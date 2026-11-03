@@ -10,6 +10,9 @@
 > to be checked before the phase that relies on them; numbers marked "proposal" are starting
 > values, to be tuned.
 
+> **PS1 is built** (Linux, experimental): see [PS1 as built](#ps1-as-built) for what landed,
+> what moved to a point release and where the code differs from this design.
+
 The maintainer asked for two optional services that a user can turn on at home. First: "an
 optional DNS seeder, pull in zeeder", and "The DNS seeder should let you expose the port and
 direct your domain name to your server at home so other nodes can bootstrap". Then: "Add a
@@ -42,6 +45,66 @@ Three upstream facts shape the plan (checked 2026-11-03):
 
 Both services share one guided flow for what they have in common: the name, the router, the
 firewall and the checks from outside.
+
+## PS1 as built
+
+PS1's light client server landed as this design describes it, on Zeal as it is today (one
+supervised zebrad, today's `launcher.json`), Linux only and labelled experimental.
+[ARCHITECTURE.md](ARCHITECTURE.md#public-services) describes the code.
+
+**Built:**
+
+- zebrad's endpoint as a managed loopback key (`config::LightwalletdKey`): written while the
+  service is on, removed while it is off (`ensure` can now remove a key), the user's while
+  nothing is set up; `validate` still refuses any non-loopback value. The app restarts zebrad
+  behind its permits; the `Opened lightwalletd gRPC endpoint at` line and the bind failure are
+  read from fixtures captured from zebrad 7.0.0; the light monitor runs Zodl's check every 10
+  minutes; a network change pauses the service and removes the key for zebrad's next start.
+- Front door v1 (`launcher-gateway`) in Zeal's process, on its own runtime and thread: the four
+  modes, the SNI and ALPN checks, TLS-ALPN-01 answers, the v1 limits (128 connections, 8 per
+  IPv4 address or IPv6 /64, 2 new a second with a burst of 16, a 10 s handshake, 10 minutes
+  idle, a 2 hour age, the upload budget), closing at once on pause and at quit.
+- The `AcmeActor`: instant-acme with ring, rcgen and x509-parser, TLS-ALPN-01, staging then
+  production, verification with the platform verifier, renewal at two thirds of the lifetime,
+  the attempts budget; tested against Pebble in CI.
+- The name step with DuckDNS and names kept by hand, the `DdnsActor`, the token in the OS
+  keychain (`keyring` 4.2).
+- The read-only network checks (default route, VPN, NAT-PMP's external address) and "Check my
+  connection"; the forward by hand with generic steps; the firewall commands for ufw and
+  firewalld, shown and never run; the test on this computer and the hairpin test.
+- Open, pause and resume, "Turn off and forget" with what stays public, resume at launch,
+  keep-awake (`systemd-inhibit`), the monthly cap; the spec out of reach of `set_settings`.
+- The types (`launcher_types::public`), the pure rules (`launcher-herd`), and the screens:
+  consent, setup, the status panel with the Share strings, the banners; in Settings → Public
+  services, with a card on the node's dashboard and the banner on the node's pages, all in the
+  mock (`?public=setup`, `serving`, `unconfirmed`, `cgnat`, `expiring`).
+
+**Moved to a point release:** deSEC; ARI (`renewal_info`, `replaces`); "Test now" and the phone
+test (the setup's staging validation is the evidence from outside meanwhile); UPnP IGD's
+`GetExternalIPAddress` and the router's model for vendor guides (the guide is generic); the
+authoritative-servers, TTL and CAA lookups through hickory-resolver (the name is checked
+through the system resolver, and a CAA refusal comes back from Let's Encrypt with its fix);
+the 0600-file token store as a user's choice (the store exists, the UI does not offer it);
+Configure showing the key read-only (an edit is still overridden); the QR code; the tray
+items; the zebrad's Public tab (the dashboard card and Settings stand in); the wallet runs,
+which gate the release on each network.
+
+**Where the code differs from this design:**
+
+- `grpc.rs` is in `launcher-public`, not `launcher-core`, and decodes the few protobuf messages
+  by hand without prost; its decoder is pinned to `LightdInfo` bytes captured from zebrad.
+- The front door's `Unavailable` answers with h2's server directly, not hyper's.
+- The network checks read the default route from `/proc/net/route` and send NAT-PMP's
+  two-byte external-address request themselves: no netdev or crab_nat in PS1.
+- Consent given at step 1, before a name exists, binds to the first name chosen; another name
+  asks again.
+- A network change waits for the user's Resume even after switching back (the pause holds),
+  and removes the key without restarting zebrad (`EndpointHost::apply(restart)`).
+- The commands take no node in PS1, which has one light client server; the UI reads the steps
+  from the status instead of a `public_plan` command, and the upload preset is a step answer
+  instead of `set_public_limits`.
+- The bind failure's text is confirmed: zebrad logs `shutting down Zebra due to an error
+  error=Address already in use (os error 98) report=` at ERROR on stdout and exits 1.
 
 ## Goals and non-goals
 
@@ -296,9 +359,9 @@ listener; it has neither (an upstream ask, [Phases](#phases)).
 - **A taken port** fails zebrad's start with an error, not a panic: `init` returns the bind
   error, the start command returns it (`zebrad/src/commands/start.rs:576-596`), and zebrad logs
   `shutting down Zebra due to an error` at ERROR before it exits
-  (`zebrad/src/components/tokio.rs:101-106`). Zeal's classifier finds `PortInUse` in panics
-  only (`logs.rs:285-295`), so it gains a rule for this line, from a captured fixture (the exact
-  text is unconfirmed). Zeal also checks the port when it writes the key.
+  (`zebrad/src/components/tokio.rs:101-106`). Zeal's classifier found `PortInUse` in panics
+  only (`logs.rs:285-295`), so it gained a rule for this line, from a captured fixture
+  (`error=Address already in use (os error 98)`, exit code 1). Zeal also checks the port when it writes the key.
 - **The endpoint is part of zebrad**: if its task ends, zebrad shuts down
   (`start.rs:789-793, 883-888`).
 - **The front door reaches it** with a plain TCP connection to the logged address and copies
