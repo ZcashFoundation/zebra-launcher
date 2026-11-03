@@ -7,3 +7,4 @@ merged.
 
 - `rebuild/`: the state of the `rebuild` branch (PR #79).
 - `ui-polish-1/`: before and after images of the fixes in the `ui-polish-1` branch.
+- `rename-zeal/`: before and after images of the rename to Zeal.
