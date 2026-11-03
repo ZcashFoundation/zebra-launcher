@@ -1,0 +1,399 @@
+/* Several nodes (docs/MULTI-NODE.md): the sidebar that replaces the tab bar, the node
+   header, the overview and the add-node dialog. A single node never shows any of it. */
+
+/* The sidebar: brand, overview, nodes by network, add, then the launcher's own pages. */
+
+.sidebar {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 216px;
+  padding: 10px 8px;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  overflow-y: auto;
+}
+
+.sidebar-brand {
+  padding: 2px 8px 12px;
+}
+
+.side-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+}
+
+.side-item:hover {
+  background: var(--hover);
+}
+
+.side-item.active {
+  background: var(--hover);
+  box-shadow: inset 3px 0 0 var(--accent);
+  font-weight: 600;
+}
+
+.side-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-fact {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.side-group {
+  margin-top: 12px;
+}
+
+.side-group-title {
+  padding: 4px 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.side-add {
+  margin-top: 12px;
+  color: var(--muted);
+}
+
+.side-plus {
+  width: 9px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.side-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--muted);
+}
+
+.side-item.active .side-icon {
+  color: var(--text);
+}
+
+.side-spacer {
+  flex: 1;
+  min-height: 12px;
+}
+
+/* A node's state as a dot: running and where it should be, working towards it, stopped by
+   choice (a ring), or in trouble. */
+
+.status-dot {
+  flex: none;
+  box-sizing: border-box;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.status-dot.tone-ok {
+  background: var(--ok);
+}
+
+.status-dot.tone-busy {
+  background: var(--series-1);
+}
+
+.status-dot.tone-idle {
+  background: transparent;
+  border: 2px solid var(--muted);
+}
+
+.status-dot.tone-problem {
+  background: var(--error);
+}
+
+/* Narrow windows: the sidebar folds to a rail of dots. */
+@media (max-width: 899.98px) {
+  .sidebar {
+    width: 52px;
+    padding: 10px 6px;
+  }
+
+  .sidebar .side-label,
+  .sidebar .side-fact,
+  .sidebar .side-group-title,
+  .sidebar .brand-name {
+    display: none;
+  }
+
+  /* New problems stay visible as a dot on the node's item; the count is in its name. */
+  .sidebar .side-node .tab-badge {
+    position: absolute;
+    top: 5px;
+    right: 9px;
+    width: 8px;
+    min-width: 0;
+    height: 8px;
+    padding: 0;
+    font-size: 0;
+  }
+
+  .side-item {
+    justify-content: center;
+    padding: 9px 0;
+  }
+}
+
+/* The node header: the node and its tabs, or the page's name. As tall as the tab bar it
+   replaces, with or without tabs. */
+
+.herd-header {
+  min-height: 44px;
+}
+
+.herd-header .herd-title {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+  padding-right: 8px;
+}
+
+.herd-title h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.chip-muted {
+  color: var(--muted);
+}
+
+/* The overview */
+
+.overview {
+  max-width: 1400px;
+}
+
+.overview-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.overview-line {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 15px;
+}
+
+.node-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.node-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.node-card-problem {
+  border-color: var(--error);
+}
+
+.node-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.node-card-head h3 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 15px;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.node-card-state {
+  margin: 4px 0 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.node-card-meter {
+  margin-top: 0;
+}
+
+.node-card-facts {
+  margin: 0;
+  font-size: 12px;
+}
+
+.node-card-actions {
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+.overview-tables {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.overview-table .chart-table td,
+.overview-table .chart-table th {
+  text-align: left;
+}
+
+.overview-folder {
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* The add-node dialog */
+
+.modal-wide {
+  width: min(880px, 100%);
+}
+
+.kind-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.kind-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+}
+
+.kind-card:hover {
+  border-color: var(--muted);
+}
+
+.kind-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.kind-card-name {
+  font-weight: 600;
+}
+
+.kind-card-summary {
+  font-size: 13px;
+}
+
+.kind-card-role,
+.kind-card-needs {
+  font-size: 12px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px 16px;
+  margin: 8px 0 12px;
+}
+
+.form-label {
+  color: var(--muted);
+}
+
+.form-grid .dash-segmented {
+  justify-self: start;
+}
+
+.form-row {
+  display: flex;
+  gap: 8px;
+}
+
+.form-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.form-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.form-note {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
+.uses-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.radio-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}

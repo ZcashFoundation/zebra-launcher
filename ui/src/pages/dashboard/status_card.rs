@@ -162,9 +162,9 @@ fn run_action(dash: Dash, action: Action, busy: RwSignal<bool>, failure: Transie
     failure.clear();
     spawn_local(async move {
         let result = match &action {
-            Action::Start | Action::StartNow => api::start_zebrad().await,
+            Action::Start | Action::StartNow => state.node_untracked().start().await,
             Action::StartKillingStale => api::start_zebrad_killing_stale().await,
-            Action::Restart => api::restart_zebrad().await,
+            Action::Restart => state.node_untracked().restart().await,
             Action::Install => api::install_update().await,
             Action::CancelUpdate => api::cancel_update().await,
             Action::OpenLogsFolder => api::open_path(OpenTarget::LogDir).await,
@@ -228,7 +228,7 @@ pub(super) fn StatusCard(dash: Dash) -> impl IntoView {
     let copied = Transient::<()>::new();
     let copy = move |_| {
         let now = state.now.get_untracked();
-        let phase_since = state.phase_since.get_untracked();
+        let phase_since = state.node_untracked().phase_since.get_untracked();
         let text = verdict.with_untracked(|verdict| {
             with_health_input(state, now, phase_since, |input| {
                 summary_text(input, verdict)
@@ -250,25 +250,28 @@ pub(super) fn StatusCard(dash: Dash) -> impl IntoView {
     let rate = Memo::new(move |_| {
         let now = state.now.get();
         state
+            .node()
             .history
             .with(|history| history.block_rate(Some(HERO_RATE_WINDOW), now))
     });
     let eta = Memo::new(move |_| {
         let now = state.now.get();
         state
+            .node()
             .history
             .with(|history| history.eta_to_tip(Some(HERO_RATE_WINDOW), now))
     });
     let hero = Memo::new(move |_| {
-        let note = state.status.with(|status| phase_note(&status.phase));
+        let note = state.node().status.with(|status| phase_note(&status.phase));
         sync_summary(dash.latest.get().as_ref(), rate.get(), eta.get(), note)
     });
     let last_block = Memo::new(move |_| {
         let now = state.now.get();
         let change_at = state
+            .node()
             .history
             .with(|history| history.last_height_change_at());
-        let words = state.insights.with(|insights| {
+        let words = state.node().insights.with(|insights| {
             insights
                 .sync()
                 .and_then(|sync| Some((sync.since_last_block.clone()?, sync.at)))
@@ -280,8 +283,8 @@ pub(super) fn StatusCard(dash: Dash) -> impl IntoView {
         )
     });
     let stage = Memo::new(move |_| {
-        let started = state.status.with(|status| status.started_at);
-        state.insights.with(|insights| {
+        let started = state.node().status.with(|status| status.started_at);
+        state.node().insights.with(|insights| {
             insights
                 .sync()
                 .and_then(|sync| stage_prefix(sync.stage, sync.at, started))
@@ -301,6 +304,7 @@ pub(super) fn StatusCard(dash: Dash) -> impl IntoView {
         let height = dash.latest.get()?.height;
         let checkpoint = dash.metrics.get().and_then(|facts| facts.checkpoint_height);
         let full_since = state
+            .node()
             .insights
             .with(|insights| insights.checkpoints().final_reached.map(local_hhmm));
         verification_note(checkpoint, height, full_since.as_deref())

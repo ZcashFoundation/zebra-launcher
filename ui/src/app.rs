@@ -4,37 +4,40 @@
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
-    ApplyOutcome, LogLine, MetricsSnapshot, NodeDetails, NodeStats, Phase, Settings,
-    StaleProcessInfo, Status, Theme, UpdateHealthFailure, UpdateInfo, UpdateState,
+    ApplyOutcome, LogLine, Settings, Theme, UpdateHealthFailure, UpdateInfo, UpdateState,
 };
 use leptos::{ev, prelude::*, task::spawn_local};
+use wasm_bindgen::JsCast;
 
 use crate::{
     api, clock,
     components::{
+        add_node::AddNode,
+        herd_header::HerdHeader,
         nav::Nav,
+        sidebar::Sidebar,
         stale_banner::StaleBanner,
         status_strip::StatusStrip,
         updates::{HealthFailureBanner, UpdateBanner},
     },
     insights::{
-        Insights, RunEvent,
-        events::{config_outcome_event, config_replaced_event, status_events, update_events},
+        RunEvent,
+        events::{config_outcome_event, config_replaced_event, update_events},
     },
-    log_view::LogBuffer,
-    metrics_history::MetricsHistory,
+    node_state::{self, NodeState},
     pages::{
         configure::Configure, dashboard::Dashboard, first_run::FirstRun, grafana::Grafana,
-        logs::Logs, settings::SettingsPage,
+        logs::Logs, overview::Overview, settings::SettingsPage,
     },
-    stats_history::StatsHistory,
     theme,
     update_text::update_needs_attention,
 };
 
-/// The five pages.
+/// The pages: the five of the tab bar, and the overview of a launcher that runs several nodes,
+/// which the sidebar shows instead of the tab bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
+    Overview,
     Dashboard,
     Logs,
     Grafana,
@@ -79,8 +82,16 @@ impl Tab {
         Tab::Settings,
     ];
 
+    /// The pages about the selected node, as opposed to the overview and the launcher's own.
+    pub const NODE: [Tab; 3] = [Tab::Dashboard, Tab::Logs, Tab::Configure];
+
+    pub fn is_node_tab(self) -> bool {
+        Tab::NODE.contains(&self)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
+            Tab::Overview => "Overview",
             Tab::Dashboard => "Dashboard",
             Tab::Logs => "Logs",
             Tab::Grafana => "Grafana",
@@ -105,6 +116,7 @@ impl Tab {
     /// The tab's name in element ids.
     pub fn slug(self) -> &'static str {
         match self {
+            Tab::Overview => "overview",
             Tab::Dashboard => "dashboard",
             Tab::Logs => "logs",
             Tab::Grafana => "grafana",
@@ -147,10 +159,13 @@ impl Tab {
                 .then_some(Badge::Dot),
             // Warnings, errors and stderr lines that arrived while the Logs page was not shown.
             Tab::Logs => {
-                let unseen = state.insights.with(|insights| insights.unseen_problems());
+                let unseen = state
+                    .node()
+                    .insights
+                    .with(|insights| insights.unseen_problems());
                 (unseen > 0).then_some(Badge::Count(unseen))
             }
-            Tab::Dashboard | Tab::Grafana | Tab::Configure => None,
+            Tab::Overview | Tab::Dashboard | Tab::Grafana | Tab::Configure => None,
         }
     }
 }
@@ -159,33 +174,17 @@ impl Tab {
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub tab: RwSignal<Tab>,
-    pub status: RwSignal<Status>,
-    /// Whether a status has arrived from the backend: until then `status` is the default
-    /// (Stopped) and the dashboard is still connecting.
-    pub status_loaded: RwSignal<bool>,
-    pub stats: RwSignal<Option<NodeStats>>,
-    /// The details behind `stats` (the peer list, the best block, the chain's supply and
-    /// pools), from the same poll; `None` whenever `stats` is. The peer list's counts by
-    /// direction also go onto the sample of the same poll in `history`.
-    pub details: RwSignal<Option<NodeDetails>>,
+    /// The nodes the backend runs, in its order. One until it runs several.
+    pub nodes: RwSignal<Vec<NodeState>>,
+    /// The node the node pages (Dashboard, Logs, Configure) show; read it with
+    /// [`AppState::node`].
+    pub selected: RwSignal<NodeState>,
+    /// The node the backend's single-node commands control (`start_zebrad`, `reset_config`,
+    /// the data folder): what the launcher's own pages and banners are about, whichever node
+    /// is selected.
+    pub primary: NodeState,
     /// `None` until loaded.
     pub settings: RwSignal<Option<Settings>>,
-    pub logs: RwSignal<LogBuffer>,
-    /// What the log stream says about the node, folded in as batches arrive.
-    pub insights: RwSignal<Insights>,
-    /// The node statistics published since the launcher opened, for charts and rates.
-    pub history: RwSignal<StatsHistory>,
-    /// The newest reading of zebrad's metrics page, `None` while it does not run.
-    pub metrics: RwSignal<Option<MetricsSnapshot>>,
-    /// The metrics snapshots since the launcher opened.
-    pub metrics_history: RwSignal<MetricsHistory>,
-    /// Since when the dashboard's verdict has read as it does, for its "for N min" and "stop
-    /// requested N s ago". One rule, the dashboard's: the page resets it to now whenever the
-    /// verdict's rule or level changes; the first status seeds it here, from `started_at`
-    /// while zebrad is starting or running (the launcher may have been opened long after
-    /// zebrad started) and from now otherwise. A phase change on its own does not touch it:
-    /// the verdict that follows it does.
-    pub phase_since: RwSignal<SystemTime>,
     /// Whether the resolved appearance is dark (the setting, or the system preference when
     /// the setting follows it). Embedded pages pick their theme from it.
     pub resolved_dark: RwSignal<bool>,
@@ -201,9 +200,6 @@ pub struct AppState {
     /// An `update_health_failed` event. The same failure is usually in
     /// `update.health_failure` too; see [`AppState::health_failure`].
     pub update_health: RwSignal<Option<UpdateHealthFailure>>,
-    /// Bumped whenever `zebrad.toml` was replaced outside the Configure page's own save (a
-    /// `reset_config` from any page), so the Configure page (always mounted) re-reads it.
-    pub config_changed: RwSignal<u64>,
     /// A text filter another page asks the Logs page to apply (a problem picked on the
     /// dashboard). The Logs page takes it and clears it.
     pub log_filter_request: RwSignal<Option<String>>,
@@ -225,41 +221,25 @@ impl AppState {
         move |message| self.backend_error.set(Some(message))
     }
 
-    /// Publishes a status, turning what changed since the last one into session events
-    /// ([`status_events`]). The first status is the baseline: it says where the node is, not
-    /// that anything happened, and it seeds `phase_since`.
-    fn record_status(&self, status: Status) {
-        let now = clock::now();
-        let previous = self.status.get_untracked();
-        if self.status_loaded.get_untracked() {
-            for event in status_events(&previous, &status, now) {
-                self.record_event(event);
+    /// The node the node pages show, tracked: a page that reads it follows a change of the
+    /// selected node.
+    pub fn node(&self) -> NodeState {
+        self.selected.get()
+    }
+
+    /// [`AppState::node`] without tracking, for event handlers and the shell's own steps.
+    pub fn node_untracked(&self) -> NodeState {
+        self.selected.get_untracked()
+    }
+
+    /// Keeps an event that concerns every node (a launcher update stops and restarts them
+    /// all) on each node's timeline.
+    fn record_event_everywhere(&self, event: RunEvent) {
+        self.nodes.with_untracked(|nodes| {
+            for node in nodes {
+                node.record_event(event.clone());
             }
-        } else {
-            self.status_loaded.set(true);
-            let since = match status.phase {
-                Phase::Starting | Phase::Running => status.started_at.unwrap_or(now),
-                _ => now,
-            };
-            self.phase_since.set(since);
-        }
-        self.status.set(status);
-    }
-
-    /// The backend found a zebrad from an earlier launcher run: a status change too.
-    fn record_stale(&self, stale: StaleProcessInfo) {
-        let status = Status {
-            stale: Some(stale),
-            ..self.status.get_untracked()
-        };
-        self.record_status(status);
-    }
-
-    /// Keeps an event the UI observed, for the dashboard's timeline ([`Insights::events`]
-    /// merges it with what the log says).
-    fn record_event(&self, event: RunEvent) {
-        self.insights
-            .update(|insights| insights.record_session_event(event));
+        });
     }
 
     /// Publishes what the updater reports, turning its steps into session events
@@ -268,7 +248,7 @@ impl AppState {
         let now = clock::now();
         self.update.with_untracked(|previous| {
             for event in update_events(previous.as_ref(), &info, now) {
-                self.record_event(event);
+                self.record_event_everywhere(event);
             }
         });
         self.update.set(Some(info));
@@ -288,62 +268,18 @@ impl AppState {
         }
     }
 
-    /// The Configure page saved `zebrad.toml`: the outcome joins the dashboard's timeline
+    /// The Configure page saved the selected node's config: the outcome joins its timeline
     /// ("Configuration applied", or rolled back when zebrad rejected it).
     pub fn record_config_outcome(&self, outcome: &ApplyOutcome) {
-        self.record_event(config_outcome_event(outcome, clock::now()));
+        self.primary
+            .record_event(config_outcome_event(outcome, clock::now()));
     }
 
-    /// Publishes new node statistics and keeps them in the history.
-    fn record_stats(&self, stats: Option<NodeStats>) {
-        if let Some(stats) = &stats {
-            self.history.update(|history| history.push(stats));
-        }
-        self.stats.set(stats);
-    }
-
-    /// Publishes the details behind the statistics; the peer list's counts by direction go
-    /// onto the sample of the same poll.
-    fn record_details(&self, details: Option<NodeDetails>) {
-        if let Some(details) = &details {
-            self.history.update(|history| history.record_peers(details));
-        }
-        self.details.set(details);
-    }
-
-    /// Publishes a metrics reading and keeps it in the history.
-    fn record_metrics(&self, snapshot: Option<MetricsSnapshot>) {
-        if let Some(snapshot) = &snapshot {
-            self.metrics_history
-                .update(|history| history.push(snapshot));
-        }
-        self.metrics.set(snapshot);
-    }
-
-    /// Folds a batch of log lines into the insights and the log buffer.
-    fn record_logs(&self, batch: Vec<LogLine>) {
-        let now = clock::now();
-        let on_logs_page = self.tab.get_untracked() == Tab::Logs;
-        self.insights.update(|insights| {
-            insights.ingest(&batch, now);
-            // Problems that arrive while the Logs page is shown are seen as they come.
-            if on_logs_page {
-                insights.mark_seen();
-            }
-        });
-        self.logs.update(|logs| logs.merge(batch));
-    }
-
-    /// Clears the Logs tab's badge: the user is looking at the page. The shell calls it when
-    /// the Logs tab opens; [`AppState::record_logs`] covers the batches that arrive while the
-    /// tab is open. The Logs page itself has no part in the rule.
-    pub fn mark_problems_seen(&self) {
-        if self
-            .insights
-            .with_untracked(|insights| insights.unseen_problems() > 0)
-        {
-            self.insights.update(Insights::mark_seen);
-        }
+    /// Folds a batch of `node`'s log lines into its state; problems in it count as seen when
+    /// its Logs page is the one shown.
+    fn record_logs(&self, node: NodeState, batch: Vec<LogLine>) {
+        let on_logs_page = self.tab.get_untracked() == Tab::Logs && self.node_untracked() == node;
+        node.record_logs(batch, on_logs_page);
     }
 
     /// The post-update health failure, from the event or the update info.
@@ -353,6 +289,14 @@ impl AppState {
                 .with(|info| info.as_ref().and_then(|info| info.health_failure.clone()))
         })
     }
+}
+
+/// Feeds an extra node's state from its events (the mock's `?herd` nodes).
+pub fn subscribe_extra(state: AppState, extra: NodeState) {
+    let id = extra.id();
+    api::on_extra_node_status(&id, move |status| extra.record_status(status));
+    api::on_extra_node_stats(&id, move |stats| extra.record_stats(stats));
+    api::subscribe_extra_node_logs(&id, move |batch| state.record_logs(extra, batch));
 }
 
 /// Whether a subscription of [`subscribe_then_fetch`] has delivered an event yet.
@@ -391,26 +335,31 @@ async fn subscribe_then_fetch<T, F>(
 
 #[component]
 pub fn App() -> impl IntoView {
+    // The backend's own node: every single-node event below is about it. The mock's `?herd`
+    // adds more, which come with their own subscriptions.
+    let node = NodeState::new(node_state::placeholder_primary(), true);
+    let extra: Vec<NodeState> = api::extra_nodes()
+        .into_iter()
+        .map(|info| NodeState::new(info, false))
+        .collect();
+    // Several nodes open on the overview; one node opens on its dashboard, as before.
+    let first_tab = if extra.is_empty() {
+        Tab::Dashboard
+    } else {
+        Tab::Overview
+    };
     let state = AppState {
-        tab: RwSignal::new(Tab::Dashboard),
-        status: RwSignal::new(Status::default()),
-        status_loaded: RwSignal::new(false),
-        stats: RwSignal::new(None),
-        details: RwSignal::new(None),
+        tab: RwSignal::new(first_tab),
+        nodes: RwSignal::new(std::iter::once(node).chain(extra.iter().copied()).collect()),
+        selected: RwSignal::new(node),
+        primary: node,
         settings: RwSignal::new(None),
-        logs: RwSignal::new(LogBuffer::default()),
-        insights: RwSignal::new(Insights::default()),
-        history: RwSignal::new(StatsHistory::default()),
-        metrics: RwSignal::new(None),
-        metrics_history: RwSignal::new(MetricsHistory::default()),
-        phase_since: RwSignal::new(clock::now()),
         resolved_dark: RwSignal::new(true),
         preview_theme: RwSignal::new(None),
         now: RwSignal::new(clock::now()),
         backend_error: RwSignal::new(None),
         update: RwSignal::new(None),
         update_health: RwSignal::new(None),
-        config_changed: RwSignal::new(0),
         log_filter_request: RwSignal::new(None),
     };
     provide_context(state);
@@ -426,7 +375,7 @@ pub fn App() -> impl IntoView {
             let result = api::on_status(
                 move |status| {
                     seen.mark();
-                    state.record_status(status);
+                    node.record_status(status);
                 },
                 state.payload_error(),
             )
@@ -434,16 +383,14 @@ pub fn App() -> impl IntoView {
             state.report("Listening for status", result);
             // `stale_process` may have been emitted before this listener existed; the
             // snapshot's `stale` covers that case.
-            let result = api::on_stale_process(
-                move |stale| state.record_stale(stale),
-                state.payload_error(),
-            )
-            .await;
+            let result =
+                api::on_stale_process(move |stale| node.record_stale(stale), state.payload_error())
+                    .await;
             state.report("Listening for stale processes", result);
         },
         api::get_status,
         "Reading status",
-        move |status| state.record_status(status),
+        move |status| node.record_status(status),
     ));
     spawn_local(subscribe_then_fetch(
         state,
@@ -451,7 +398,7 @@ pub fn App() -> impl IntoView {
             let result = api::on_node_stats(
                 move |stats| {
                     seen.mark();
-                    state.record_stats(stats);
+                    node.record_stats(stats);
                 },
                 state.payload_error(),
             )
@@ -460,7 +407,7 @@ pub fn App() -> impl IntoView {
         },
         api::get_node_stats,
         "Reading node stats",
-        move |stats| state.record_stats(stats),
+        move |stats| node.record_stats(stats),
     ));
     spawn_local(subscribe_then_fetch(
         state,
@@ -468,7 +415,7 @@ pub fn App() -> impl IntoView {
             let result = api::on_node_details(
                 move |details| {
                     seen.mark();
-                    state.record_details(details);
+                    node.record_details(details);
                 },
                 state.payload_error(),
             )
@@ -477,7 +424,7 @@ pub fn App() -> impl IntoView {
         },
         api::get_node_details,
         "Reading node details",
-        move |details| state.record_details(details),
+        move |details| node.record_details(details),
     ));
     spawn_local(subscribe_then_fetch(
         state,
@@ -485,7 +432,7 @@ pub fn App() -> impl IntoView {
             let result = api::on_metrics(
                 move |snapshot| {
                     seen.mark();
-                    state.record_metrics(snapshot);
+                    node.record_metrics(snapshot);
                 },
                 state.payload_error(),
             )
@@ -494,7 +441,7 @@ pub fn App() -> impl IntoView {
         },
         api::get_metrics,
         "Reading metrics",
-        move |snapshot| state.record_metrics(snapshot),
+        move |snapshot| node.record_metrics(snapshot),
     ));
     // `update_info` carries the state too, and the backend sends it right after each
     // `update_state`, so the info event and the snapshot are enough. An `update_state` only
@@ -537,8 +484,11 @@ pub fn App() -> impl IntoView {
     // The subscription streams the retained history before the live lines, so no separate
     // history request is needed.
     spawn_local(async move {
-        let result =
-            api::subscribe_logs(move |batch| state.record_logs(batch), state.payload_error()).await;
+        let result = api::subscribe_logs(
+            move |batch| state.record_logs(node, batch),
+            state.payload_error(),
+        )
+        .await;
         state.report("Subscribing to logs", result);
     });
 
@@ -555,18 +505,37 @@ pub fn App() -> impl IntoView {
     });
     on_cleanup(move || shortcuts.remove());
 
-    // Opening the Logs page clears its badge.
+    // Opening the Logs page clears its badge, and so does picking another node while it is
+    // open; `AppState::record_logs` covers the batches that arrive while it is shown. The Logs
+    // page itself has no part in the rule.
     Effect::new(move |_| {
+        let node = state.node();
         if state.tab.get() == Tab::Logs {
-            state.mark_problems_seen();
+            node.mark_problems_seen();
         }
     });
 
-    // A reset of `zebrad.toml` from any page is an event of the run.
+    // The backend's node is named after the network and folder in the settings.
+    Effect::new(move |_| {
+        let named = state.settings.with(|settings| {
+            settings.as_ref().map(|settings| {
+                node_state::primary_info(settings.network, settings.data_dir.as_deref())
+            })
+        });
+        if let Some(info) = named {
+            node.info.set(info);
+        }
+    });
+
+    for extra in extra {
+        subscribe_extra(state, extra);
+    }
+
+    // A reset of the node's config from any page is an event of its run.
     Effect::new(move |previous: Option<u64>| {
-        let changed = state.config_changed.get();
+        let changed = node.config_changed.get();
         if previous.is_some_and(|previous| previous != changed) {
-            state.record_event(config_replaced_event(clock::now()));
+            node.record_event(config_replaced_event(clock::now()));
         }
         changed
     });
@@ -576,12 +545,35 @@ pub fn App() -> impl IntoView {
     let hidden = move |tab: Tab| move || state.tab.get() != tab;
     // While the first-run wizard is open, the app behind it takes no input.
     let first_run_open = RwSignal::new(false);
+    // Several nodes: a sidebar of nodes replaces the tab bar (docs/MULTI-NODE.md).
+    let herd = Memo::new(move |_| state.nodes.with(|nodes| nodes.len() > 1));
+    let adding = RwSignal::new(false);
+    // The launcher's own pages are tab panels of the tab bar; with several nodes the sidebar
+    // opens them instead, so they are named regions without a tab.
+    let panel_role = move || if herd.get() { "region" } else { "tabpanel" };
+    let labelled_by = move |tab: Tab| move || (!herd.get()).then(|| tab.button_id());
+    let labelled = move |tab: Tab| move || herd.get().then(|| tab.label());
+    // What had focus before the add-node dialog opened: the app turns inert under it, which
+    // takes focus away, so the opener notes it first.
+    let return_focus = StoredValue::new_local(None::<web_sys::HtmlElement>);
+    let open_add = Callback::new(move |()| {
+        let active = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+        return_focus.set_value(active);
+        adding.set(true);
+    });
 
     view! {
-        <div class="app" inert=move || first_run_open.get()>
+        <div class="app" class:app-herd=herd inert=move || first_run_open.get() || adding.get()>
+            {move || herd.get().then(|| view! { <Sidebar on_add=open_add /> })}
+            <div class="app-body">
             <header class="app-header">
-                <Nav />
-                <StatusStrip />
+                {move || if herd.get() { view! { <HerdHeader /> }.into_any() } else { view! { <Nav /> }.into_any() }}
+                <Show when=move || !herd.get() || state.tab.get().is_node_tab()>
+                    <StatusStrip />
+                </Show>
                 <StaleBanner />
                 <UpdateBanner />
                 <HealthFailureBanner />
@@ -606,6 +598,15 @@ pub fn App() -> impl IntoView {
             </header>
             <main class="app-main">
                 <section
+                    class="page page-overview"
+                    role="region"
+                    id=Tab::Overview.page_id()
+                    aria-label="Overview"
+                    hidden=hidden(Tab::Overview)
+                >
+                    <Overview on_add=open_add />
+                </section>
+                <section
                     class="page"
                     role="tabpanel"
                     id=Tab::Dashboard.page_id()
@@ -625,9 +626,10 @@ pub fn App() -> impl IntoView {
                 </section>
                 <section
                     class="page page-grafana"
-                    role="tabpanel"
+                    role=panel_role
                     id=Tab::Grafana.page_id()
-                    aria-labelledby=Tab::Grafana.button_id()
+                    aria-labelledby=labelled_by(Tab::Grafana)
+                    aria-label=labelled(Tab::Grafana)
                     hidden=hidden(Tab::Grafana)
                 >
                     <Grafana />
@@ -643,16 +645,19 @@ pub fn App() -> impl IntoView {
                 </section>
                 <section
                     class="page"
-                    role="tabpanel"
+                    role=panel_role
                     id=Tab::Settings.page_id()
-                    aria-labelledby=Tab::Settings.button_id()
+                    aria-labelledby=labelled_by(Tab::Settings)
+                    aria-label=labelled(Tab::Settings)
                     hidden=hidden(Tab::Settings)
                 >
                     <SettingsPage />
                 </section>
             </main>
+            </div>
         </div>
         <FirstRun open=first_run_open />
+        <AddNode open=adding return_focus />
     }
 }
 

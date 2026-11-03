@@ -26,6 +26,7 @@
 //! | `?stalled` | The sync stalls: the height stops moving while the tip estimate creeps on, no blocks are committed, and zebrad's progress lines report the stall (the verdict's "Sync stalled"). |
 //! | `?nopeers` | zebrad finds no peers: 0 peers in every sample and gauge, an empty peer list, the initial connections fail and the log waits for ready peers (the verdict's "No peers" once two minutes of samples agree). |
 //! | `?crashloop` | zebrad panics about 15 s after every start and the launcher restarts it after a backoff that doubles (5, 10, 20 s): "zebrad crashed", then "Crash loop" from the third crash, with the exits and restarts in the log and on the timeline. |
+//! | `?herd` | Four more nodes run beside zebrad (Zebra on Testnet, Zakura, Zaino and the zcashd compatibility build), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). |
 //!
 //! The launcher's own notes (`zebrad started (pid N)`, `stop requested (stdin closed)`,
 //! `zebrad exited (exit code 0, Clean, stop requested)`, `restarting zebrad in 5s`) join the
@@ -36,6 +37,8 @@ mod details;
 mod log_lines;
 mod metrics;
 mod updates;
+
+pub mod herd;
 
 use std::{
     sync::{

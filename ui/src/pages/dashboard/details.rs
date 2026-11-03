@@ -322,7 +322,7 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
     // Rebuilt when the status, stats, settings, metrics facts or log facts change; the cells
     // that show a time follow the clock on their own.
     let node_rows = move || {
-        let status = state.status.get();
+        let status = state.node().status.get();
         let live = matches!(
             status.phase,
             Phase::Running | Phase::Starting | Phase::Stopping
@@ -337,9 +337,11 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
             ));
         }
         let version = state
+            .node()
             .stats
             .with(|stats| stats.as_ref().map(|stats| stats.zebrad_version.clone()));
         let last_version = state
+            .node()
             .insights
             .with(|insights| insights.current_run().and_then(|run| run.version.clone()));
         if live {
@@ -372,7 +374,7 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
                         .and_then(|details| details.active_upgrade.clone())
                 })
                 .or_else(|| {
-                    state.insights.with(|insights| {
+                    state.node().insights.with(|insights| {
                         insights
                             .sync()
                             .and_then(|sync| sync.network_upgrade.clone())
@@ -382,6 +384,7 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
                 rows.push(("Network upgrade", text_cell(upgrade)));
             }
             let eos = state
+                .node()
                 .stats
                 .with(|stats| stats.as_ref().and_then(|stats| stats.eos.clone()));
             if let Some(eos) = eos {
@@ -412,7 +415,7 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
             if let Some(memory) = dash.metrics.get().and_then(|facts| facts.memory_bytes) {
                 rows.push(("State memory", text_cell(bytes(memory))));
             }
-            let network = state.metrics_history.with(|history| {
+            let network = state.node().metrics_history.with(|history| {
                 history.net_rate(Some(NETWORK_RATE_WINDOW), state.now.get_untracked())
             });
             if let Some((in_bps, out_bps)) = network {
@@ -431,6 +434,7 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
             ));
         }
         let restarts = state
+            .node()
             .insights
             .with(|insights| insights.runs().len().saturating_sub(1));
         if let Some(text) = restarts_text(restarts) {
@@ -451,10 +455,11 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
 
     let chain = Memo::new(move |_| {
         let full_since = state
+            .node()
             .insights
             .with(|insights| insights.checkpoints().final_reached.map(local_hhmm));
         let facts = dash.metrics.get();
-        state.stats.with(|stats| {
+        state.node().stats.with(|stats| {
             dash.details.with(|details| {
                 chain_rows(
                     stats.as_ref(),

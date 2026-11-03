@@ -127,12 +127,12 @@ pub fn Logs() -> impl IntoView {
             text: text.get(),
             target: target.get(),
         };
-        state.logs.with(|logs| logs.entries(&filter))
+        state.node().logs.with(|logs| logs.entries(&filter))
     });
     // The targets on offer: the most frequent in the buffer, plus the chosen one so the
     // select never shows a target that is not in its list.
     let targets = Memo::new(move |_| {
-        let mut targets: Vec<String> = state.logs.with(|logs| {
+        let mut targets: Vec<String> = state.node().logs.with(|logs| {
             logs.targets_by_count(TARGET_CHOICES)
                 .into_iter()
                 .map(|(name, _)| name)
@@ -147,7 +147,7 @@ pub fn Logs() -> impl IntoView {
     });
     let problems_only = Memo::new(move |_| min_level.get() == Some(LogLevel::Warn));
     let level_count = move |level: Option<LogLevel>| {
-        state.insights.with(|insights| match level {
+        state.node().insights.with(|insights| match level {
             None => insights.lines_total(),
             Some(level) => insights.totals().at_or_above(level),
         })
@@ -305,9 +305,9 @@ pub fn Logs() -> impl IntoView {
                     let shown = entries.with(|entries| {
                         entries.iter().filter(|e| matches!(e, LogEntry::Line(_))).count()
                     });
-                    let dropped = state.insights.with(|insights| insights.dropped_lines());
+                    let dropped = state.node().insights.with(|insights| insights.dropped_lines());
                     let mut text =
-                        format!("{shown} of {} lines", state.logs.with(|logs| logs.len()));
+                        format!("{shown} of {} lines", state.node().logs.with(|logs| logs.len()));
                     if dropped > 0 {
                         text.push_str(&format!(" · {dropped} dropped"));
                     }
@@ -335,14 +335,21 @@ pub fn Logs() -> impl IntoView {
             on:scroll=on_scroll
         >
             <Show
-                when=move || !state.logs.with(|logs| logs.is_empty())
+                when=move || !state.node().logs.with(|logs| logs.is_empty())
                 fallback=|| view! { <div class="log-row muted">"Waiting for zebrad output…"</div> }
             >
-                <For
-                    each=move || entries.get()
-                    key=LogEntry::key
-                    children=move |entry| entry_view(entry, text)
-                />
+                // Keys are per-node sequence numbers: picking another node rebuilds the list, or
+                // rows whose number both nodes have would keep the previous node's line.
+                {move || {
+                    let _node = state.node();
+                    view! {
+                        <For
+                            each=move || entries.get()
+                            key=LogEntry::key
+                            children=move |entry| entry_view(entry, text)
+                        />
+                    }
+                }}
             </Show>
         </div>
     }

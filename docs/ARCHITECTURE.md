@@ -375,7 +375,7 @@ are the named constants at the top of the file (`STALE_AFTER` 30 s, `RPC_FIRST_A
 60 s, `RPC_SILENT_PROBLEM` and `SLOW_START` 5 min, `NO_PEERS_FOR` 2 min, `FEW_PEERS` 3 for
 `FEW_PEERS_FOR` 5 min, `STALL_ATTENTION` 2 min and `STALL_PROBLEM` 10 min behind the tip,
 `STALL_AT_TIP` 10 min, `RECENT_ERRORS` 10 min, `RECENT_CRASH` 1 h, `CRASH_LOOP` 3,
-`EOS_URGENT` 3 days). `AppState.phase_since` records when the phase or the rule last
+`EOS_URGENT` 3 days). `NodeState.phase_since` records when the phase or the rule last
 changed, for the "for N min" in the reason. `summary_text` builds the plain-text report
 that "Copy summary" puts on the clipboard (verdict, versions, phase, sync, peers, mempool,
 disk, ports, end of support, the newest problems and the run's events, with absolute local

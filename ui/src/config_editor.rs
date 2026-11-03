@@ -486,7 +486,7 @@ impl ConfigEditor {
         // The file was replaced elsewhere (a reset from the update recovery panel, or the one
         // below the panes): re-read it, keeping a pending draft.
         Effect::new(move |previous: Option<u64>| {
-            let changed = state.config_changed.get();
+            let changed = state.primary.config_changed.get();
             if previous.is_some_and(|previous| previous != changed) {
                 spawn_local(editor.reload_pending());
             }
@@ -695,6 +695,7 @@ impl ConfigEditor {
     /// True while saving restarts zebrad.
     pub fn restarts(self) -> bool {
         self.state
+            .primary
             .status
             .with(|status| restarts_zebrad(&status.phase))
     }

@@ -642,7 +642,7 @@ fn HealthFailurePanel() -> impl IntoView {
             <li>
                 <ResetConfigButton />
                 {move || {
-                    let stopped = state.status.with(|status| data_change_allowed(&status.phase));
+                    let stopped = state.primary.status.with(|status| data_change_allowed(&status.phase));
                     (!stopped)
                         .then(|| {
                             view! {

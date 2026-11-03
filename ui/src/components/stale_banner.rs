@@ -23,7 +23,7 @@ pub fn StaleBanner() -> impl IntoView {
     };
 
     move || {
-        let stale = state.status.with(|status| status.stale.clone())?;
+        let stale = state.primary.status.with(|status| status.stale.clone())?;
         Some(view! {
             <div class="banner banner-warn" role="alert">
                 <span>

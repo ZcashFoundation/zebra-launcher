@@ -175,15 +175,16 @@ pub(super) fn RangeRow(dash: Dash) -> impl IntoView {
         let now = state.now.get();
         // A sample from before this run says nothing about this run's RPC: until the first
         // answer the sentence waits, as the verdict's rule 7 does.
-        let started = state.status.with(|status| status.started_at);
+        let started = state.node().status.with(|status| status.started_at);
         let rpc_at = dash
             .latest
             .get()
             .map(|sample| sample.at)
             .filter(|at| started.is_none_or(|started| *at >= started));
         let metrics_at = dash.metrics.get().map(|facts| facts.at);
-        let log_at = state.insights.with(|insights| insights.last_at());
+        let log_at = state.node().insights.with(|insights| insights.last_at());
         state
+            .node()
             .status
             .with(|status| freshness(&status.phase, rpc_at, metrics_at, log_at, now))
     });
@@ -212,6 +213,7 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
     let delta = move |field: Field| {
         let now = state.now.get();
         state
+            .node()
             .history
             .with(|history| history.delta(field, dash.span(), now))
     };
@@ -251,9 +253,15 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
         let now = state.now.get();
         let span = dash.span();
         state
+            .node()
             .metrics_history
             .with(|metrics| metrics.verified_block_rate(span, now))
-            .or_else(|| state.history.with(|history| history.block_rate(span, now)))
+            .or_else(|| {
+                state
+                    .node()
+                    .history
+                    .with(|history| history.block_rate(span, now))
+            })
     });
     let rate_value = Signal::derive(move || {
         if !running.get() {
@@ -275,6 +283,7 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
     let rate_detail = Signal::derive(move || {
         let from_logs = if running.get() {
             state
+                .node()
                 .insights
                 .with(|insights| insights.sync_rate_from_logs())
         } else {
@@ -306,6 +315,7 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
             return false;
         };
         let active_since = state
+            .node()
             .insights
             .with(|insights| insights.mempool().active_since);
         mempool_inactive(active_since, sample.at_tip(), sample.mempool_transactions)
@@ -350,13 +360,14 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
         }
         let now = state.now.get();
         let delta = state
+            .node()
             .metrics_history
             .with(|history| history.disk_delta(dash.span(), now));
         disk_detail(delta, range.get())
     });
 
     // Uptime: since the run was spawned; stopped, how the last run ended.
-    let started = Memo::new(move |_| state.status.with(|status| status.started_at));
+    let started = Memo::new(move |_| state.node().status.with(|status| status.started_at));
     let uptime_value = Signal::derive(move || match started.get() {
         Some(started) => {
             let now = state.now.get();
@@ -381,6 +392,7 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
     let uptime_detail = Signal::derive(move || match since.get() {
         Some(since) => {
             let restarts = state
+                .node()
                 .insights
                 .with(|insights| insights.runs().len().saturating_sub(1));
             uptime_detail(&since, restarts)
@@ -388,6 +400,7 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
         None => {
             let now = state.now.get();
             state
+                .node()
                 .status
                 .with(|status| stopped_detail(status.last_exit.as_ref(), now))
         }
