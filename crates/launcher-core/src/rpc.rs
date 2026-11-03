@@ -407,10 +407,16 @@ impl RpcSession<'_> {
 
 /// Decodes a JSON-RPC response body.
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, RpcError> {
+    /// A JSON-RPC response, decoded in one pass: `result` straight into `U`, without an
+    /// intermediate `Value` that would allocate every string in it (a block's
+    /// 2,688-character solution included).
     #[derive(Deserialize)]
-    struct Response {
-        #[serde(default)]
-        result: Option<Value>,
+    #[serde(bound = "U: DeserializeOwned")]
+    struct Envelope<U> {
+        /// `None` when the key is absent; a `null` result is passed to `U`, so a method that
+        /// may answer `null` decodes into an `Option`.
+        #[serde(default, deserialize_with = "present")]
+        result: Option<U>,
         #[serde(default)]
         error: Option<ErrorObject>,
     }
@@ -420,16 +426,21 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, RpcError> {
         #[serde(default)]
         message: String,
     }
+    /// A key that is present, `null` included.
+    fn present<'de, D: serde::Deserializer<'de>, U: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<Option<U>, D::Error> {
+        U::deserialize(deserializer).map(Some)
+    }
 
-    let response: Response =
+    let response: Envelope<T> =
         serde_json::from_slice(bytes).map_err(|err| RpcError::InvalidResponse(err.to_string()))?;
     if let Some(ErrorObject { code, message }) = response.error {
         return Err(RpcError::Rpc { code, message });
     }
-    let result = response
+    response
         .result
-        .ok_or_else(|| RpcError::InvalidResponse("no result".to_string()))?;
-    serde_json::from_value(result).map_err(|err| RpcError::InvalidResponse(err.to_string()))
+        .ok_or_else(|| RpcError::InvalidResponse("no result".to_string()))
 }
 
 #[cfg(test)]
@@ -463,6 +474,29 @@ mod tests {
             decode::<MempoolInfo>(br#"{"result":{"bytes":1}}"#),
             Err(RpcError::InvalidResponse(_))
         ));
+        assert!(matches!(
+            decode::<MempoolInfo>(br#"{"jsonrpc":"2.0","id":1}"#),
+            Err(RpcError::InvalidResponse(_))
+        ));
+    }
+
+    #[test]
+    fn a_null_result_decodes_into_an_option() {
+        let none: Option<MempoolInfo> =
+            decode(br#"{"jsonrpc":"2.0","id":1,"result":null}"#).expect("ok");
+        assert_eq!(none, None);
+        // Without an `Option`, `null` is not a result.
+        assert!(matches!(
+            decode::<MempoolInfo>(br#"{"jsonrpc":"2.0","id":1,"result":null}"#),
+            Err(RpcError::InvalidResponse(_))
+        ));
+        // Fields the type does not name are skipped, however large.
+        let solution = "ab".repeat(1344);
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"size":2,"solution":"{solution}","hex":["a"]}}}}"#
+        );
+        let info: MempoolInfo = decode(body.as_bytes()).expect("ok");
+        assert_eq!(info.size, 2);
     }
 
     #[test]
