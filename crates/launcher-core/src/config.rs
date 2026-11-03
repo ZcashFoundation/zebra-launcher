@@ -6,10 +6,11 @@
 //! the node as soon as a newer zebrad drops it. Edits go through
 //! [`toml_edit`], which keeps the user's comments and layout.
 //!
-//! The managed keys ([`ManagedKeys`]: `network.network`, `rpc.listen_addr`,
-//! `rpc.enable_cookie_auth`, `rpc.cookie_dir`, `metrics.endpoint_addr` and
-//! `state.cache_dir`) are launcher-owned: the supervisor and the RPC monitor
-//! rely on their values. [`ensure`] rewrites them at every start, and
+//! The managed keys ([`ManagedKeys`]: `network.network`, the port of
+//! `network.listen_addr`, `rpc.listen_addr`, `rpc.enable_cookie_auth`,
+//! `rpc.cookie_dir`, `metrics.endpoint_addr` and `state.cache_dir`) are
+//! launcher-owned: the supervisor and the RPC monitor rely on their values,
+//! and two nodes must not share a port, a cookie or a state folder. [`ensure`] rewrites them at every start, and
 //! [`begin_apply_with_managed`] overrides any user edit to them before saving,
 //! so an edit to a managed key never takes effect.
 //!
@@ -29,7 +30,7 @@ use std::{
     fs,
     hash::{DefaultHasher, Hasher},
     io,
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
 };
 
@@ -39,6 +40,10 @@ use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::{fsutil, paths::NodePaths};
 
+/// The default Mainnet P2P port.
+pub const MAINNET_P2P_PORT: u16 = 8233;
+/// The default Testnet P2P port.
+pub const TESTNET_P2P_PORT: u16 = 18233;
 /// The default Mainnet RPC port.
 pub const MAINNET_RPC_PORT: u16 = 8232;
 /// The default Testnet RPC port.
@@ -50,8 +55,9 @@ pub const METRICS_PORT: u16 = 9999;
 const HEADER: &str = "\
 # zebrad configuration managed by Zeal.
 #
-# The launcher keeps network.network, rpc.listen_addr, rpc.enable_cookie_auth,
-# rpc.cookie_dir, metrics.endpoint_addr and state.cache_dir up to date.
+# The launcher keeps network.network, the port of network.listen_addr,
+# rpc.listen_addr, rpc.enable_cookie_auth, rpc.cookie_dir,
+# metrics.endpoint_addr and state.cache_dir up to date.
 # Add your own settings below; the reference shows every option with its
 # default. Keys you do not set use zebrad's defaults.
 
@@ -62,6 +68,11 @@ const HEADER: &str = "\
 pub struct ManagedKeys {
     /// `network.network`.
     pub network: Network,
+    /// The port of `network.listen_addr`, where zebrad accepts peers. Only
+    /// the port is the launcher's: the address stays as written. The key is
+    /// written only when the port is not the one zebrad uses without it
+    /// ([`default_p2p_port`]), so a file that never set it is left alone.
+    pub p2p_port: u16,
     /// `rpc.listen_addr`. Always loopback.
     pub rpc_addr: SocketAddr,
     /// `metrics.endpoint_addr`. Always loopback.
@@ -73,9 +84,9 @@ pub struct ManagedKeys {
 }
 
 impl ManagedKeys {
-    /// The defaults for `network`: RPC on `127.0.0.1:8232` (Mainnet) or
-    /// `127.0.0.1:18232` (Testnet), metrics on `127.0.0.1:9999`, and the cookie
-    /// in [`NodePaths::rpc_cookie_dir`].
+    /// The defaults for `network`: P2P on zebrad's default port, RPC on
+    /// `127.0.0.1:8232` (Mainnet) or `127.0.0.1:18232` (Testnet), metrics on
+    /// `127.0.0.1:9999`, and the cookie in [`NodePaths::rpc_cookie_dir`].
     pub fn defaults(network: Network, paths: &NodePaths, state_dir: impl Into<PathBuf>) -> Self {
         let rpc_port = match network {
             Network::Mainnet => MAINNET_RPC_PORT,
@@ -83,6 +94,7 @@ impl ManagedKeys {
         };
         Self {
             network,
+            p2p_port: default_p2p_port(network),
             rpc_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, rpc_port)),
             metrics_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, METRICS_PORT)),
             cookie_dir: paths.rpc_cookie_dir(),
@@ -213,8 +225,94 @@ fn set_managed(doc: &mut DocumentMut, keys: &ManagedKeys) -> Result<bool, Config
     let mut changed = false;
     for (section, key, value) in keys.entries()? {
         changed |= set_key(doc, section, key, value)?;
+        if (section, key) == ("network", "network") {
+            changed |= set_p2p_port(doc, keys.network, keys.p2p_port)?;
+        }
     }
     Ok(changed)
+}
+
+/// The port zebrad listens on for peers when `network.listen_addr` names
+/// none: 8233 on Mainnet, 18233 on Testnet.
+pub fn default_p2p_port(network: Network) -> u16 {
+    match network {
+        Network::Mainnet => MAINNET_P2P_PORT,
+        Network::Testnet => TESTNET_P2P_PORT,
+    }
+}
+
+/// A `network.listen_addr` value split into its address, as written, and its
+/// port, if it names one: `[::]:8233`, `0.0.0.0`, `localhost:18233`.
+fn split_listen_addr(text: &str) -> (String, Option<u16>) {
+    if let Ok(addr) = text.parse::<SocketAddr>() {
+        return (bracketed(addr.ip()), Some(addr.port()));
+    }
+    if let Ok(ip) = text.parse::<IpAddr>() {
+        return (bracketed(ip), None);
+    }
+    match text.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => match port.parse::<u16>() {
+            Ok(port) => (host.to_string(), Some(port)),
+            Err(_) => (text.to_string(), None),
+        },
+        _ => (text.to_string(), None),
+    }
+}
+
+/// An address as it goes before `:<port>`: IPv6 in brackets.
+fn bracketed(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
+    }
+}
+
+/// The P2P port zebrad uses with `doc`: the one in `network.listen_addr`, or
+/// the network's default.
+fn p2p_port_of(doc: &DocumentMut, network: Network) -> u16 {
+    lookup(doc, "network", "listen_addr")
+        .and_then(Item::as_str)
+        .and_then(|text| split_listen_addr(text).1)
+        .unwrap_or_else(|| default_p2p_port(network))
+}
+
+/// Makes zebrad listen for peers on `port`: sets the port of
+/// `network.listen_addr`, keeping its address, or adds `[::]:<port>` when
+/// the key is missing and `port` is not the network's default. A value that
+/// is not a string is replaced, unless zebrad would use the default port
+/// anyway. Returns whether anything changed.
+fn set_p2p_port(doc: &mut DocumentMut, network: Network, port: u16) -> Result<bool, ConfigError> {
+    let default = default_p2p_port(network);
+    let host = match lookup(doc, "network", "listen_addr") {
+        None if port == default => return Ok(false),
+        None => bracketed(Ipv6Addr::UNSPECIFIED.into()),
+        Some(item) => match item.as_str().map(split_listen_addr) {
+            Some((_, Some(current))) if current == port => return Ok(false),
+            Some((_, None)) if port == default => return Ok(false),
+            Some((host, _)) => host,
+            None if port == default => return Ok(false),
+            None => bracketed(Ipv6Addr::UNSPECIFIED.into()),
+        },
+    };
+    set_key(
+        doc,
+        "network",
+        "listen_addr",
+        Value::from(format!("{host}:{port}")),
+    )
+}
+
+/// The P2P port zebrad uses with the `zebrad.toml` in `paths`: the port of
+/// `network.listen_addr`, or the network's default when it names none or
+/// the file is missing or cannot be read.
+pub fn read_p2p_port(paths: &NodePaths, network: Network) -> u16 {
+    fs::read_to_string(paths.zebrad_config())
+        .ok()
+        .and_then(|text| text.parse::<DocumentMut>().ok())
+        .map_or_else(
+            || default_p2p_port(network),
+            |doc| p2p_port_of(&doc, network),
+        )
 }
 
 /// Sets `section.key` to `new`, keeping the existing key's comments.
@@ -636,6 +734,88 @@ tx_cost_limit = 1000
         let before = read(&paths).expect("read").token;
         ensure(&paths, &keys).expect("ensure again");
         assert_eq!(read(&paths).expect("read").token, before);
+    }
+
+    #[test]
+    fn the_p2p_port_is_written_only_when_zebrad_would_not_use_it_anyway() {
+        let (_dir, paths, keys) = setup();
+        // The default port: a file without the key keeps going without it.
+        ensure(&paths, &keys).expect("ensure");
+        let text = fs::read_to_string(paths.zebrad_config()).expect("read");
+        assert!(!text.contains("listen_addr = \"[::]"), "{text}");
+        assert_eq!(read_p2p_port(&paths, Network::Mainnet), MAINNET_P2P_PORT);
+
+        // Another port is added to the [network] section, on every address.
+        let moved = ManagedKeys {
+            p2p_port: 28233,
+            ..keys.clone()
+        };
+        ensure(&paths, &moved).expect("ensure");
+        let text = fs::read_to_string(paths.zebrad_config()).expect("read");
+        assert!(
+            text.contains("[network]\nnetwork = \"Mainnet\"\nlisten_addr = \"[::]:28233\"\n"),
+            "{text}"
+        );
+        assert_eq!(read_p2p_port(&paths, Network::Mainnet), 28233);
+        // Once written, the same port leaves the file alone.
+        let token = read(&paths).expect("read").token;
+        ensure(&paths, &moved).expect("ensure again");
+        assert_eq!(read(&paths).expect("read").token, token);
+        // A missing file reads as the network's default.
+        let other = Paths::under(_dir.path().join("elsewhere")).launcher_node();
+        assert_eq!(read_p2p_port(&other, Network::Testnet), TESTNET_P2P_PORT);
+    }
+
+    #[test]
+    fn the_p2p_port_keeps_the_address_the_user_wrote() {
+        let (_dir, paths, keys) = setup();
+        fs::create_dir_all(paths.config_dir()).expect("mkdir");
+        for (written, port, expected) in [
+            // The port already matches: nothing to change.
+            ("0.0.0.0:8233", 8233, "0.0.0.0:8233"),
+            ("[::1]:18233", 18233, "[::1]:18233"),
+            // No port is the network's default port.
+            ("127.0.0.1", 8233, "127.0.0.1"),
+            ("localhost", 8233, "localhost"),
+            // Another port replaces the written one; the address stays.
+            ("0.0.0.0:8233", 28233, "0.0.0.0:28233"),
+            ("127.0.0.1", 9233, "127.0.0.1:9233"),
+            ("::", 9233, "[::]:9233"),
+            ("[::1]", 9233, "[::1]:9233"),
+            ("localhost:8233", 18234, "localhost:18234"),
+        ] {
+            fs::write(
+                paths.zebrad_config(),
+                format!("[network]\nlisten_addr = \"{written}\" # mine\n"),
+            )
+            .expect("write");
+            let keys = ManagedKeys {
+                p2p_port: port,
+                ..keys.clone()
+            };
+            ensure(&paths, &keys).expect("ensure");
+            let text = fs::read_to_string(paths.zebrad_config()).expect("read");
+            assert!(
+                text.contains(&format!("listen_addr = \"{expected}\" # mine")),
+                "{written} with port {port}:\n{text}"
+            );
+            assert_eq!(read_p2p_port(&paths, Network::Mainnet), port, "{written}");
+        }
+
+        // An edit in the editor keeps its address and gets the node's port back.
+        let keys = ManagedKeys {
+            p2p_port: 28233,
+            ..keys
+        };
+        ensure(&paths, &keys).expect("ensure");
+        let current = read(&paths).expect("read");
+        let edited = current.text.replace("localhost:28233", "localhost:9000");
+        begin_apply_with_managed(&paths, &edited, &current.token, &keys)
+            .expect("begin")
+            .commit()
+            .expect("commit");
+        let text = read(&paths).expect("read").text;
+        assert!(text.contains("listen_addr = \"localhost:28233\""), "{text}");
     }
 
     #[test]
