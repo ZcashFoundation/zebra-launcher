@@ -287,7 +287,7 @@ pub(super) fn ActivityRow(dash: Dash) -> impl IntoView {
     };
 
     // The table: the connected peers of the newest list, eight by last seen until "Show all";
-    // under 1100 px the card is full width and collapsed to its caption behind "Show peers".
+    // under 1360 px the card is full width and collapsed to its caption behind "Show peers".
     let rows = Memo::new(move |_| {
         state
             .details
