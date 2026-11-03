@@ -295,23 +295,28 @@ pub fn tx_page(tx: &Tx, rules_height: u32, heights: &UpgradeHeights) -> TxPage {
     }
 }
 
-/// A height above the tip: how far away it is and what happens on the way.
+/// A height above the node's tip `tip`: how far away it is and what happens on the way,
+/// counted from `network_tip`. That is the node's tip once it has caught up, and zebrad's
+/// estimate of the network's while it syncs, so the blocks the node has yet to download do not
+/// count as the future.
 pub fn future_block(
     height: u32,
     tip: u32,
+    network_tip: u32,
     heights: &UpgradeHeights,
     end_of_support: Option<u64>,
 ) -> FutureBlock {
+    let from = network_tip.max(tip);
     FutureBlock {
         height,
         tip,
-        blocks_left: height.saturating_sub(tip),
-        eta_secs: heights.spacing_between(tip, height),
+        blocks_left: height.saturating_sub(from),
+        eta_secs: heights.spacing_between(from, height),
         activates: heights
             .activating_at(height)
             .map(|upgrade| upgrade.name().to_owned()),
         upgrades_before: heights
-            .between(tip, height.saturating_sub(1))
+            .between(from, height.saturating_sub(1))
             .into_iter()
             .map(|(upgrade, start)| (upgrade.name().to_owned(), start))
             .collect(),
@@ -577,12 +582,21 @@ mod tests {
     #[test]
     fn future_heights_count_down_across_eras() {
         let heights = heights();
-        let future = future_block(3_543_407, 3_543_403, &heights, Some(3_700_000));
+        let future = future_block(3_543_407, 3_543_403, 3_543_403, &heights, Some(3_700_000));
         assert_eq!(future.blocks_left, 4);
         assert_eq!(future.eta_secs, 75 + 25 * 3);
         assert_eq!(future.upgrades_before, vec![("NU7".to_owned(), 3_543_405)]);
         assert_eq!(future.activates, None);
-        let at = future_block(3_543_405, 3_543_400, &heights, None);
+        // A node still syncing at 2,000,000 counts from the network's tip, not its own.
+        let syncing = future_block(3_551_010, 2_000_000, 3_551_000, &heights, None);
+        assert_eq!(syncing.blocks_left, 10);
+        assert_eq!(syncing.eta_secs, 250);
+        assert!(syncing.upgrades_before.is_empty(), "already active");
+        assert_eq!(
+            syncing.tip, 2_000_000,
+            "the link goes to a block the node has"
+        );
+        let at = future_block(3_543_405, 3_543_400, 3_543_400, &heights, None);
         assert_eq!(at.activates.as_deref(), Some("NU7"));
         assert!(at.upgrades_before.is_empty());
         let next = next_upgrade(3_500_000, &heights).expect("NU7 is ahead");

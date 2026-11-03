@@ -383,6 +383,16 @@ async fn a_height_above_the_tip_counts_down() {
             node_height: TIP
         }
     );
+    // Past the network's tip, the count starts there, not at the node's.
+    let ExplorerResponse::Future(future) = harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Height(TIP + 110),
+        })
+        .await
+    else {
+        panic!("a countdown");
+    };
+    assert_eq!((future.blocks_left, future.tip), (10, TIP));
 }
 
 #[tokio::test]

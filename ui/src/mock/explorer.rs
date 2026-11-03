@@ -487,9 +487,11 @@ fn future(
         .as_ref()
         .and_then(|stats| stats.eos.as_ref())
         .map(|eos| eos.block_height);
+    let network_tip = if view.at_tip() { tip } else { estimated };
     Ok(ExplorerResponse::Future(views::future_block(
         height,
         tip,
+        network_tip,
         chain.heights(),
         end_of_support,
     )))

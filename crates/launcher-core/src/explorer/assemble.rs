@@ -205,7 +205,8 @@ async fn block(context: &Context, id: BlockId) -> Result<ExplorerResponse, Explo
     Ok(ExplorerResponse::Block(Box::new(page)))
 }
 
-/// A height the node has no block at: past its tip while it syncs, else in the future.
+/// A height the node has no block at: past its tip while it syncs, else in the future,
+/// counted from the network's tip while the node syncs.
 async fn future(context: &Context, height: u32) -> Result<ExplorerResponse, ExplorerError> {
     let tip = context.fetch.tip(TIP_AGE).await?.height;
     if height <= tip {
@@ -214,11 +215,8 @@ async fn future(context: &Context, height: u32) -> Result<ExplorerResponse, Expl
             "Your node does not have this block",
         ));
     }
-    if context.syncing
-        && context
-            .estimated_height
-            .is_some_and(|estimated| height <= estimated)
-    {
+    let estimated = context.estimated_height.filter(|_| context.syncing);
+    if estimated.is_some_and(|estimated| height <= estimated) {
         return Err(ExplorerError::new(
             ExplorerErrorKind::PastTip {
                 height,
@@ -230,6 +228,7 @@ async fn future(context: &Context, height: u32) -> Result<ExplorerResponse, Expl
     Ok(ExplorerResponse::Future(views::future_block(
         height,
         tip,
+        estimated.unwrap_or(tip),
         &context.heights,
         context.end_of_support,
     )))
