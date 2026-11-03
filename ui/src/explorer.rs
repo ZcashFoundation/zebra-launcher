@@ -13,6 +13,7 @@ mod parts;
 mod search;
 mod state;
 pub mod text;
+mod tx;
 
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -35,6 +36,7 @@ use block::BlockPage;
 use chain::ChainPage;
 use search::{SearchBox, SearchPage};
 use state::{Explorers, NodeExplorer};
+use tx::TxPage;
 
 /// How long a reorganisation stays in the banner.
 const REORG_SHOWN_FOR: Duration = Duration::from_secs(10 * 60);
@@ -148,8 +150,10 @@ pub fn Explorer() -> impl IntoView {
         match nav.route() {
             ExplorerRoute::Chain => view! { <ChainPage node nav network /> }.into_any(),
             ExplorerRoute::Block { id } => view! { <BlockPage node nav network id /> }.into_any(),
+            ExplorerRoute::Tx { txid, out } => {
+                view! { <TxPage node nav network txid out /> }.into_any()
+            }
             ExplorerRoute::Search { query } => view! { <SearchPage node nav query /> }.into_any(),
-            route => view! { <Unbuilt route /> }.into_any(),
         }
     };
 
@@ -349,10 +353,4 @@ fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
         }
     };
     view! { {banner} }
-}
-
-/// A page the Explorer does not have yet.
-#[component]
-fn Unbuilt(route: ExplorerRoute) -> impl IntoView {
-    view! { <p class="muted">{format!("This page is not built yet: /{}", route.to_text())}</p> }
 }

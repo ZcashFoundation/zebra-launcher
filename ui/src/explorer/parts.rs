@@ -1,12 +1,14 @@
-//! Pieces the Explorer's pages share: a hash with Copy, links between pages, pool chips, and
-//! what a page shows while it loads or after it failed.
+//! Pieces the Explorer's pages share: a hash with Copy, links between pages, amounts, pool
+//! chips, kind badges and the mark of a hidden amount.
 
 use std::time::Duration;
 
-use launcher_types::explorer::{ExplorerError, ExplorerErrorKind, ExplorerRoute, Hash32, Pool};
+use launcher_types::explorer::{
+    ExplorerError, ExplorerErrorKind, ExplorerRoute, Hash32, Pool, TxKind,
+};
 use leptos::{prelude::*, task::spawn_local};
 
-use super::state::NodeExplorer;
+use super::{state::NodeExplorer, text};
 use crate::{clipboard::copy_to_clipboard, components::transient::Transient, format::short_hash};
 
 /// How long "Copied" stays beside a Copy button.
@@ -78,6 +80,30 @@ pub fn PoolChip(pool: Pool) -> impl IntoView {
         <span class=format!("ex-pool ex-pool-{}", pool.id())>
             <span class="ex-swatch" aria-hidden="true"></span>
             {pool.label()}
+        </span>
+    }
+}
+
+/// A transaction kind's badge.
+#[component]
+pub fn KindBadge(kind: TxKind) -> impl IntoView {
+    let shielded = !matches!(kind, TxKind::Transparent | TxKind::Coinbase { .. });
+    view! {
+        <span class="ex-kind" class:ex-kind-shielded=shielded>
+            {text::kind_label(&kind)}
+        </span>
+    }
+}
+
+/// An amount the chain hides: a lock and "hidden", never a number.
+#[component]
+pub fn Hidden() -> impl IntoView {
+    view! {
+        <span class="ex-hidden" title="Hidden by design: only the owner's keys can read it">
+            <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+                <path class="icon-frame" d="M4 7.5h8v6H4zM5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5" />
+            </svg>
+            "hidden"
         </span>
     }
 }

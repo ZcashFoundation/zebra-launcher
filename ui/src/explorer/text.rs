@@ -1,10 +1,14 @@
-//! The Explorer's words and numbers: amounts in ZEC (TAZ on Testnet), block sentences,
-//! budgets, confirmations, search hints and refusals. Pure, tested natively.
+//! The Explorer's words and numbers: amounts in ZEC (TAZ on Testnet), pool movements, block
+//! and transaction sentences, budgets, confirmations, search hints and refusals. Pure, tested
+//! natively. A hidden amount has no number here: callers show "hidden" instead.
 
 use explorer_model::classify::{Classified, Later};
 use launcher_types::{
     Network,
-    explorer::{BlockSummary, Budget, LedgerCheck, NotFoundHint, PerPool, Pool, SecretKind},
+    explorer::{
+        BlockSummary, Budget, LedgerCheck, NotFoundHint, PerPool, Pool, SecretKind, Shown, TxKind,
+        TxPage, UnknownWhy,
+    },
 };
 
 use crate::format::{bytes, thousands};
@@ -52,6 +56,16 @@ pub fn amount_rounded(zat: u64, unit: &str) -> String {
         thousands(hundredths / 100),
         hundredths % 100
     )
+}
+
+/// What a transaction or a block did to one pool, as a movement: `1.2 ZEC entered the
+/// Ironwood pool`, `0.5 ZEC left the Orchard pool`.
+pub fn movement(pool: Pool, into: i64, unit: &str) -> String {
+    match into {
+        0 => format!("No change in the {} pool", pool.label()),
+        into if into > 0 => format!("{} entered the {} pool", amount(into, unit), pool.label()),
+        out => format!("{} left the {} pool", amount(-out, unit), pool.label()),
+    }
 }
 
 /// What users moved into the shielded pools in a block, net of what they took out.
@@ -149,6 +163,110 @@ pub fn check_text(check: &LedgerCheck, unit: &str) -> String {
     }
 }
 
+fn pools_list(pools: &[Pool]) -> String {
+    let names: Vec<&str> = pools.iter().map(|pool| pool.label()).collect();
+    match names.as_slice() {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// A transaction kind's badge: `Shielding`, `Orchard → Ironwood`.
+pub fn kind_label(kind: &TxKind) -> String {
+    match kind {
+        TxKind::Coinbase { .. } => "Coinbase".to_owned(),
+        TxKind::Transparent => "Transparent".to_owned(),
+        TxKind::Shielded { pool, .. } => format!("Fully shielded · {}", pool.label()),
+        TxKind::Migration { from, to, .. } => format!("{} → {}", from.label(), to.label()),
+        TxKind::Shielding { .. } => "Shielding".to_owned(),
+        TxKind::Deshielding { .. } => "Deshielding".to_owned(),
+        TxKind::Mixed => "Mixed".to_owned(),
+    }
+}
+
+/// A transaction in a sentence, from its public parts only.
+pub fn tx_sentence(page: &TxPage, unit: &str) -> String {
+    let counts: Vec<String> = page
+        .shielded
+        .iter()
+        .map(|part| match part.pool {
+            Pool::Sapling => format!(
+                "{} Sapling spend{} and {} output{}",
+                part.spends,
+                plural(part.spends),
+                part.outputs,
+                plural(part.outputs)
+            ),
+            Pool::Sprout => format!("{} JoinSplit{}", part.joinsplits, plural(part.joinsplits)),
+            pool => format!(
+                "{} {} action{}",
+                part.actions,
+                pool.label(),
+                plural(part.actions)
+            ),
+        })
+        .collect();
+    let what = match &page.kind {
+        TxKind::Coinbase { shielded_to } if shielded_to.is_empty() => {
+            "The block's coinbase: the subsidy and the fees, paid to transparent outputs."
+                .to_owned()
+        }
+        TxKind::Coinbase { shielded_to } => format!(
+            "The block's coinbase, paying into {}; shielded coinbase amounts are public by \
+             consensus.",
+            pools_list(shielded_to)
+        ),
+        TxKind::Transparent => "Moved value between transparent addresses.".to_owned(),
+        TxKind::Shielded { pool, .. } => {
+            format!("Moved value within the {} pool.", pool.label())
+        }
+        TxKind::Migration { from, to, zat } => format!(
+            "Moved {} from {} to {}.",
+            amount(*zat as i64, unit),
+            from.label(),
+            to.label()
+        ),
+        TxKind::Shielding {
+            into,
+            transparent_change,
+        } => {
+            let change = if *transparent_change {
+                ", with transparent change"
+            } else {
+                ""
+            };
+            format!("Moved transparent value into {}{change}.", pools_list(into))
+        }
+        TxKind::Deshielding { from } => {
+            format!(
+                "Moved value out of {} to transparent outputs.",
+                pools_list(from)
+            )
+        }
+        TxKind::Mixed => "Moved value between transparent and shielded pools.".to_owned(),
+    };
+    let mut sentence = what;
+    if !counts.is_empty() {
+        sentence.push_str(&format!(
+            " {}; amounts per note hidden.",
+            capitalise(&counts.join(" and "))
+        ));
+    }
+    match page.fee {
+        Some(Shown::Public { zat }) => sentence.push_str(&format!(" Fee {}.", amount(zat, unit))),
+        Some(Shown::Unknown {
+            why: UnknownWhy::InputValues,
+        }) => sentence.push_str(" The fee needs the values of the spent outputs."),
+        Some(Shown::Unknown { .. } | Shown::Hidden) | None => {}
+    }
+    sentence
+}
+
+fn plural(count: u32) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
 fn capitalise(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
@@ -186,6 +304,14 @@ pub fn finality_text(finality: Finality) -> String {
         Finality::Final => "Final in Zebra".to_owned(),
         Finality::Provisional { deep } => format!("Provisional · {deep} of 1,000 deep"),
     }
+}
+
+/// Where a confirmation count sits on the meter's log scale from 1 to 1,001, from 0 to 1.
+pub fn confirmations_fraction(confirmations: u32) -> f64 {
+    if confirmations == 0 {
+        return 0.0;
+    }
+    (f64::from(confirmations).log10() / 1_001f64.log10()).min(1.0)
 }
 
 /// `about 2 h 5 min`, `about 4 d 3 h`, `under a minute`.
@@ -291,7 +417,7 @@ pub fn not_found_text(hint: &NotFoundHint) -> String {
 
 #[cfg(test)]
 mod tests {
-    use launcher_types::explorer::{BlockLedger, Hash32};
+    use launcher_types::explorer::{BlockLedger, Hash32, PoolPart, TxStatus};
 
     use super::*;
 
@@ -311,6 +437,22 @@ mod tests {
             "14,654,995.77 ZEC"
         );
         assert_eq!(amount_rounded(12_345_678, "ZEC"), "0.12345678 ZEC");
+    }
+
+    #[test]
+    fn movements_read_as_value_entering_or_leaving() {
+        assert_eq!(
+            movement(Pool::Ironwood, 120_000_000, "ZEC"),
+            "1.2 ZEC entered the Ironwood pool"
+        );
+        assert_eq!(
+            movement(Pool::Orchard, -50_000_000, "ZEC"),
+            "0.5 ZEC left the Orchard pool"
+        );
+        assert_eq!(
+            movement(Pool::Sapling, 0, "ZEC"),
+            "No change in the Sapling pool"
+        );
     }
 
     fn summary(users: Option<[i64; 6]>, fees: Option<u64>, burned: Option<u64>) -> BlockSummary {
@@ -367,6 +509,63 @@ mod tests {
     }
 
     #[test]
+    fn transactions_in_a_sentence_never_show_hidden_amounts() {
+        let page = TxPage {
+            txid: Hash32([1; 32]),
+            status: TxStatus::Mempool,
+            kind: TxKind::Migration {
+                from: Pool::Orchard,
+                to: Pool::Ironwood,
+                zat: 10_000_000_000,
+            },
+            version: 6,
+            size: Some(9_000),
+            lock_time: 0,
+            expiry_height: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            shielded: vec![
+                PoolPart {
+                    pool: Pool::Orchard,
+                    spends: 0,
+                    outputs: 0,
+                    actions: 2,
+                    joinsplits: 0,
+                    net_out: 10_000_004_000,
+                },
+                PoolPart {
+                    pool: Pool::Ironwood,
+                    spends: 0,
+                    outputs: 0,
+                    actions: 2,
+                    joinsplits: 0,
+                    net_out: -10_000_000_000,
+                },
+            ],
+            fee: Some(Shown::Public { zat: 4_000 }),
+        };
+        assert_eq!(
+            tx_sentence(&page, "ZEC"),
+            "Moved 100 ZEC from Orchard to Ironwood. 2 Orchard actions and 2 Ironwood actions; \
+             amounts per note hidden. Fee 0.00004 ZEC."
+        );
+        assert_eq!(kind_label(&page.kind), "Orchard → Ironwood");
+        let unknown_fee = TxPage {
+            fee: Some(Shown::Unknown {
+                why: UnknownWhy::InputValues,
+            }),
+            kind: TxKind::Shielding {
+                into: vec![Pool::Sapling, Pool::Orchard],
+                transparent_change: true,
+            },
+            ..page
+        };
+        assert!(tx_sentence(&unknown_fee, "ZEC").starts_with(
+            "Moved transparent value into Sapling and Orchard, with transparent change."
+        ));
+    }
+
+    #[test]
     fn confirmations_and_finality() {
         assert_eq!(confirmations(100, 100), 1);
         assert_eq!(confirmations(90, 100), 11);
@@ -377,6 +576,10 @@ mod tests {
             finality_text(Finality::Provisional { deep: 3 }),
             "Provisional · 3 of 1,000 deep"
         );
+        assert_eq!(confirmations_fraction(0), 0.0);
+        assert_eq!(confirmations_fraction(1), 0.0);
+        assert_eq!(confirmations_fraction(1_001), 1.0);
+        assert!(confirmations_fraction(10) > 0.3 && confirmations_fraction(10) < 0.35);
     }
 
     #[test]
