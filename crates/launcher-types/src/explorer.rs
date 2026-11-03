@@ -665,7 +665,9 @@ fn percent_encode(text: &str) -> String {
     out
 }
 
-fn percent_decode(text: &str) -> Option<String> {
+/// A URL's percent-encoded text, with `+` as a space, as a query string writes it. `None`
+/// when an escape is malformed or the bytes are not UTF-8.
+pub fn percent_decode(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -1003,5 +1005,7 @@ mod tests {
         ] {
             assert_eq!(ExplorerRoute::parse(bad), None, "{bad}");
         }
+        assert_eq!(percent_decode("a+b%2Fc").as_deref(), Some("a b/c"));
+        assert_eq!(percent_decode("%E2%82").as_deref(), None, "not UTF-8");
     }
 }

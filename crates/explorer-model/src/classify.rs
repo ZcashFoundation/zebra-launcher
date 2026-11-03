@@ -3,12 +3,19 @@
 //! Classification). This phase looks up heights, block hashes and transaction ids; the other
 //! classes are recognised, so the hint can say what they are, and looked up in later phases.
 //!
+//! The work is linear in the query, whatever it holds: a pasted link is unwrapped one level,
+//! a route parsed once, and a search route's query read one level down. A key anywhere in a
+//! link or a route is still refused, by a scan of its parts and of the runs of characters keys
+//! are written in.
+//!
 //! Address and key prefixes are zcash_protocol 0.11.0's and, for ZIP 316 Revision 2,
 //! zcash_address 0.14.0's. zebrad checks checksums; this only looks at the shape.
 
+use std::borrow::Cow;
+
 use launcher_types::{
     Network,
-    explorer::{ExplorerRoute, Hash32, OutPoint, SecretKind},
+    explorer::{ExplorerRoute, Hash32, OutPoint, SecretKind, percent_decode},
 };
 
 /// What a query is.
@@ -189,38 +196,101 @@ pub fn classify_query(input: &str, network: Network) -> Classified {
     if text.is_empty() {
         return Classified::Empty;
     }
-    if let Some(kind) = secret(text) {
+    if let Some(kind) = secret(text).or_else(|| secret_inside(text)) {
         return Classified::Secret(kind);
     }
-    // A pasted link: the fragment, a `q` parameter or the last path segment, when one of them
-    // classifies.
     if let Some((_, rest)) = text.split_once("://") {
-        let fragment = rest.split_once('#').map(|(_, fragment)| fragment);
-        let query = rest
-            .split_once('?')
-            .and_then(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix("q=")));
-        let path = rest.split(['?', '#']).next().unwrap_or(rest);
-        let last = path.rsplit('/').find(|segment| !segment.is_empty());
-        for part in [fragment, query, last].into_iter().flatten() {
-            match classify_query(part, network) {
-                Classified::Unrecognised | Classified::Empty => {}
-                found => return found,
-            }
-        }
-        return Classified::Unrecognised;
+        return link(rest, network);
     }
-    if text.contains('/') || text.starts_with("search?") {
-        return match ExplorerRoute::parse(text) {
-            // A search route carries a query of its own, refused like any other.
-            Some(ExplorerRoute::Search { query }) => match classify_query(&query, network) {
-                Classified::Secret(kind) => Classified::Secret(kind),
-                _ => Classified::Route(ExplorerRoute::Search { query }),
-            },
-            Some(route) => Classified::Route(route),
-            None => Classified::Unrecognised,
-        };
+    if is_route(text) {
+        return route(text, network);
     }
     classify_plain(text, network)
+}
+
+/// How many rounds of percent-encoding [`secret_inside`] undoes: enough for a search route
+/// nested four deep, as the Explorer writes routes. Deeper ones make no route ([`route`]).
+const DECODE_ROUNDS: usize = 4;
+
+/// A key or a recovery phrase inside a pasted link or route, at any depth: a part between the
+/// separators of links and routes that is one, or a run of the characters keys are written in
+/// that starts like one. Looked for again once percent-decoding has undone each of up to
+/// [`DECODE_ROUNDS`] rounds of encoding, so the work stays linear in the text.
+fn secret_inside(text: &str) -> Option<SecretKind> {
+    let mut decoded = Cow::Borrowed(text);
+    for _ in 0..DECODE_ROUNDS {
+        let parts = decoded.split(['?', '&', '#', '=', '/']).map(normalize);
+        let runs = decoded.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'));
+        if let Some(kind) = parts.chain(runs).find_map(secret) {
+            return Some(kind);
+        }
+        match percent_decode(&decoded) {
+            Some(next) if next != *decoded => decoded = Cow::Owned(next),
+            _ => break,
+        }
+    }
+    None
+}
+
+fn is_route(text: &str) -> bool {
+    text.contains('/') || text.starts_with("search?")
+}
+
+/// The part of a link after `scheme://`: its fragment, its `q` parameter or its last path
+/// segment, the first that is something the search reads. One level only: a link inside a
+/// link is not unwrapped.
+fn link(rest: &str, network: Network) -> Classified {
+    let (before, fragment) = match rest.split_once('#') {
+        Some((before, fragment)) => (before, Some(fragment)),
+        None => (rest, None),
+    };
+    let (path, query) = match before.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (before, None),
+    };
+    // The fragment may be one of the Explorer's routes.
+    if let Some(fragment) = fragment.and_then(percent_decode) {
+        let fragment = normalize(&fragment);
+        let found = if is_route(fragment) {
+            route(fragment, network)
+        } else {
+            classify_plain(fragment, network)
+        };
+        if !matches!(found, Classified::Unrecognised | Classified::Empty) {
+            return found;
+        }
+    }
+    let q = query.and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("q=")));
+    let last = path.rsplit('/').find(|segment| !segment.is_empty());
+    for part in [q, last].into_iter().flatten().filter_map(percent_decode) {
+        match classify_plain(normalize(&part), network) {
+            Classified::Unrecognised | Classified::Empty => {}
+            found => return found,
+        }
+    }
+    Classified::Unrecognised
+}
+
+/// One of the Explorer's own routes, parsed once. A search route's query is read one level
+/// down: a key there is refused, and a query the search does not read, such as another route,
+/// makes no route, so a route never carries text nothing looked at.
+fn route(text: &str, network: Network) -> Classified {
+    match ExplorerRoute::parse(text) {
+        Some(ExplorerRoute::Search { query }) => {
+            let query = normalize(&query);
+            if let Some(kind) = secret(query) {
+                return Classified::Secret(kind);
+            }
+            match classify_plain(query, network) {
+                Classified::Unrecognised | Classified::Empty => Classified::Unrecognised,
+                _ => Classified::Route(ExplorerRoute::Search {
+                    query: query.to_owned(),
+                }),
+            }
+        }
+        Some(route) => Classified::Route(route),
+        None => Classified::Unrecognised,
+    }
 }
 
 fn classify_plain(text: &str, network: Network) -> Classified {
@@ -292,7 +362,7 @@ fn secret(text: &str) -> Option<SecretKind> {
         return Some(SecretKind::ViewingKey);
     }
     // WIF private keys: base58 of 51 characters from `5` or `9`, or 52 from `K`, `L` or `c`.
-    let first = text.as_bytes()[0];
+    let first = *text.as_bytes().first()?;
     if base58
         && ((text.len() == 51 && matches!(first, b'5' | b'9'))
             || (text.len() == 52 && matches!(first, b'K' | b'L' | b'c')))
@@ -517,6 +587,50 @@ mod tests {
             main("\"uview1abc\""),
             Classified::Secret(SecretKind::ViewingKey)
         );
+        // A key in a link's `q` beside a fragment that is something else, a phrase written as
+        // a query string writes it, a key in another parameter, and a key one route further
+        // down.
+        for link in [
+            format!("https://x.example/?q=uview1qqqqqqqq#{HASH}"),
+            "https://x.example/?q=uview1qqqqqqqq#tip-5".to_owned(),
+            "https://x.example/search?q=abandon+ability+able+about+above+absent+absorb+abstract+\
+             absurd+abuse+access+accident"
+                .to_owned(),
+            "https://x.example/?vk=zxviews1qqqq&q=3120000".to_owned(),
+            "http://localhost:1420/#search?q=uview1qqqq".to_owned(),
+            "search?q=search%3Fq%3Duview1abc".to_owned(),
+        ] {
+            assert!(matches!(main(&link), Classified::Secret(_)), "{link}");
+        }
+        // Search routes nested as the Explorer writes them: refused four deep, and never a
+        // route deeper down.
+        let nest = |depth: usize| {
+            (0..depth).fold("uview1abc".to_owned(), |query, _| {
+                ExplorerRoute::Search { query }.to_text()
+            })
+        };
+        assert_eq!(main(&nest(4)), Classified::Secret(SecretKind::ViewingKey));
+        assert!(!matches!(main(&nest(12)), Classified::Route(_)));
+    }
+
+    #[test]
+    fn nested_links_and_routes_are_read_one_level_down() {
+        // However deep, a link or a route is unwrapped once: linear work, no recursion.
+        let routes = format!("{}3120000", "search?q=".repeat(10_000));
+        assert_eq!(
+            main(&routes),
+            Classified::Unrecognised,
+            "a route in a route"
+        );
+        let links = format!("{}{HASH}", "https://a/#".repeat(4_000));
+        assert_eq!(main(&links), Classified::Unrecognised, "a link in a link");
+        let fragments = format!("{}3120000", "s://a?q=#".repeat(40));
+        assert_eq!(main(&fragments), Classified::Unrecognised);
+        assert!(matches!(
+            main(&format!("https://x.example/#search?q={HASH}")),
+            Classified::Route(ExplorerRoute::Search { .. })
+        ));
+        assert_eq!(main("search?q=hello"), Classified::Unrecognised);
     }
 
     #[test]
