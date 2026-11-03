@@ -110,7 +110,9 @@ pub fn peers_caption(facts: &PeersFacts) -> (Icon, String) {
         parts.push(format!("{outbound} outbound"));
         parts.push(format!("{inbound} inbound"));
     }
-    if let Some(ready) = facts.ready {
+    // The ready count is the peer set's gauge from the metrics page, read at another moment
+    // than the RPC's peer list; one larger than the list would contradict the sentence.
+    if let Some(ready) = facts.ready.filter(|ready| *ready <= u64::from(peers)) {
         parts.push(format!("{ready} ready"));
     }
     match facts.obsolete {
@@ -458,6 +460,16 @@ mod tests {
                 ..running
             }),
             (Icon::Check, "1 peer · 1 ready".into())
+        );
+        assert_eq!(
+            peers_caption(&PeersFacts {
+                peers: Some(10),
+                split: Some((3, 7)),
+                ready: Some(11),
+                ..running
+            }),
+            (Icon::Check, "10 peers · 7 outbound · 3 inbound".into()),
+            "more ready than listed: the two reads disagree"
         );
         assert_eq!(
             peers_caption(&PeersFacts {
