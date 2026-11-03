@@ -23,8 +23,11 @@ use launcher_types::PeerInfo;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-/// How long one call may take.
+/// How long one call may take, unless it names its own limit with `call_timeout`.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a heavy call may take, such as a block with every transaction and the outputs
+/// they spend (`getblock` at verbosity 3).
+pub const HEAVY_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A call to zebrad failed.
 #[derive(Debug, thiserror::Error)]
@@ -388,11 +391,21 @@ impl RpcSession<'_> {
         self.call("getdeprecationinfo", json!([])).await
     }
 
-    /// Calls `method` with `params` and decodes the result.
+    /// Calls `method` with `params` and decodes the result, within [`REQUEST_TIMEOUT`].
     pub async fn call<T: DeserializeOwned>(
         &self,
         method: &str,
         params: Value,
+    ) -> Result<T, RpcError> {
+        self.call_timeout(method, params, REQUEST_TIMEOUT).await
+    }
+
+    /// Like [`RpcSession::call`], within `timeout` instead.
+    pub async fn call_timeout<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
     ) -> Result<T, RpcError> {
         exchange(
             &self.client.http,
@@ -400,6 +413,7 @@ impl RpcSession<'_> {
             &self.authorization,
             method,
             params,
+            timeout,
         )
         .await
     }
@@ -424,13 +438,31 @@ impl std::fmt::Debug for OwnedSession {
 }
 
 impl OwnedSession {
-    /// Calls `method` with `params` and decodes the result.
+    /// Calls `method` with `params` and decodes the result, within [`REQUEST_TIMEOUT`].
     pub async fn call<T: DeserializeOwned>(
         &self,
         method: &str,
         params: Value,
     ) -> Result<T, RpcError> {
-        exchange(&self.http, &self.url, &self.authorization, method, params).await
+        self.call_timeout(method, params, REQUEST_TIMEOUT).await
+    }
+
+    /// Like [`OwnedSession::call`], within `timeout` instead.
+    pub async fn call_timeout<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<T, RpcError> {
+        exchange(
+            &self.http,
+            &self.url,
+            &self.authorization,
+            method,
+            params,
+            timeout,
+        )
+        .await
     }
 }
 
@@ -445,17 +477,20 @@ async fn read_authorization(cookie_file: &Path) -> Result<String, RpcError> {
     Ok(format!("Basic {}", STANDARD.encode(cookie.trim())))
 }
 
-/// One request and its decoded result.
+/// One request and its decoded result. `timeout` replaces the client's own for this
+/// request.
 async fn exchange<T: DeserializeOwned>(
     http: &reqwest::Client,
     url: &str,
     authorization: &str,
     method: &str,
     params: Value,
+    timeout: Duration,
 ) -> Result<T, RpcError> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
     let response = http
         .post(url)
+        .timeout(timeout)
         .header(reqwest::header::AUTHORIZATION, authorization)
         .json(&body)
         .send()
@@ -560,6 +595,42 @@ mod tests {
         );
         let info: MempoolInfo = decode(body.as_bytes()).expect("ok");
         assert_eq!(info.size, 2);
+    }
+
+    #[tokio::test]
+    async fn a_call_gives_up_at_its_own_timeout() {
+        // A server that accepts and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cookie_file = dir.path().join(".cookie");
+        std::fs::write(&cookie_file, "__cookie__:x").expect("write");
+        let client = RpcClient::new(addr, cookie_file).expect("client");
+        let session = client.owned_session().await.expect("session");
+        let started = std::time::Instant::now();
+        let err = session
+            .call_timeout::<Value>("getinfo", json!([]), Duration::from_millis(200))
+            .await
+            .expect_err("no answer");
+        assert!(
+            matches!(&err, RpcError::Http(err) if err.is_timeout()),
+            "{err:?}"
+        );
+        // Well before the client's own limit.
+        assert!(
+            started.elapsed() < REQUEST_TIMEOUT / 2,
+            "{:?}",
+            started.elapsed()
+        );
+        server.abort();
     }
 
     #[test]
