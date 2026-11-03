@@ -365,27 +365,29 @@ impl SynthChain {
         (self.block_hash(height, branch) == *hash).then_some((height, branch))
     }
 
+    /// A transaction id: seeded bytes, with the height, branch and position in the middle, so
+    /// ids of one block do not share their first digits.
     fn txid(&self, height: u32, branch: u16, index: u16) -> TxId {
         let mut bytes = [0u8; 32];
-        bytes[0..4].copy_from_slice(&(height ^ TX_HEIGHT_KEY).to_be_bytes());
-        bytes[4..6].copy_from_slice(&(branch ^ BRANCH_KEY).to_be_bytes());
-        bytes[6..8].copy_from_slice(&(index ^ TX_INDEX_KEY).to_be_bytes());
         fill(
-            &mut bytes[8..],
+            &mut bytes,
             self.seed(KIND_TX, height, branch, u64::from(index)),
         );
+        bytes[12..16].copy_from_slice(&(height ^ TX_HEIGHT_KEY).to_be_bytes());
+        bytes[16..18].copy_from_slice(&(branch ^ BRANCH_KEY).to_be_bytes());
+        bytes[18..20].copy_from_slice(&(index ^ TX_INDEX_KEY).to_be_bytes());
         Hash32(bytes)
     }
 
     fn decode_txid(&self, txid: &TxId) -> Option<(u32, u16, u16)> {
-        let height = u32::from_be_bytes(txid.0[0..4].try_into().ok()?) ^ TX_HEIGHT_KEY;
-        let branch = u16::from_be_bytes(txid.0[4..6].try_into().ok()?) ^ BRANCH_KEY;
-        let index = u16::from_be_bytes(txid.0[6..8].try_into().ok()?) ^ TX_INDEX_KEY;
+        let height = u32::from_be_bytes(txid.0[12..16].try_into().ok()?) ^ TX_HEIGHT_KEY;
+        let branch = u16::from_be_bytes(txid.0[16..18].try_into().ok()?) ^ BRANCH_KEY;
+        let index = u16::from_be_bytes(txid.0[18..20].try_into().ok()?) ^ TX_INDEX_KEY;
         (self.txid(height, branch, index) == *txid).then_some((height, branch, index))
     }
 
-    /// The block time: the tip's time less the target spacing back to the block, give or take
-    /// a third of the block's spacing.
+    /// The block time: the tip's time less the target spacing back to the block, and up to two
+    /// thirds of the block's spacing earlier, so no block is stamped after the tip's time.
     fn time(&self, height: u32, branch: u16) -> i64 {
         let spacing = i64::from(self.heights.target_spacing(height));
         let base = if height <= self.tip {
@@ -394,7 +396,7 @@ impl SynthChain {
             self.tip_time + self.heights.spacing_between(self.tip, height) as i64
         };
         let jitter = self.noise(KIND_TIME, height, branch, (2 * spacing / 3) as u64) as i64;
-        base - spacing / 3 + jitter
+        base - jitter
     }
 
     fn at(&self, upgrade: Upgrade) -> u32 {
