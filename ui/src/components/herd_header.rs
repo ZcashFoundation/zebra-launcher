@@ -23,27 +23,6 @@ fn node_tabs(primary: bool, kind: NodeKind) -> Vec<Tab> {
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_explorer_is_for_nodes_that_keep_the_chain() {
-        assert_eq!(
-            node_tabs(true, NodeKind::Zebrad),
-            [Tab::Dashboard, Tab::Logs, Tab::Explorer, Tab::Configure]
-        );
-        assert_eq!(
-            node_tabs(false, NodeKind::Zakura),
-            [Tab::Dashboard, Tab::Logs, Tab::Explorer]
-        );
-        assert_eq!(
-            node_tabs(false, NodeKind::Zaino),
-            [Tab::Dashboard, Tab::Logs]
-        );
-    }
-}
-
 #[component]
 pub fn HerdHeader() -> impl IntoView {
     let state = AppState::get();
@@ -132,5 +111,26 @@ pub fn HerdHeader() -> impl IntoView {
                 </span>
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_explorer_is_for_nodes_that_keep_the_chain() {
+        assert_eq!(
+            node_tabs(true, NodeKind::Zebrad),
+            [Tab::Dashboard, Tab::Logs, Tab::Explorer, Tab::Configure]
+        );
+        assert_eq!(
+            node_tabs(false, NodeKind::Zakura),
+            [Tab::Dashboard, Tab::Logs, Tab::Explorer]
+        );
+        assert_eq!(
+            node_tabs(false, NodeKind::Zaino),
+            [Tab::Dashboard, Tab::Logs]
+        );
     }
 }
