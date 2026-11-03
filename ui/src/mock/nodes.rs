@@ -2,9 +2,10 @@
 //! node's id, routed to the mock's main zebrad (the full simulation, the first node) or to a
 //! node of `?herd` or one the add-node dialog added. Adding, changing and removing nodes keep
 //! the backend's rules (`launcher_core::nodes`), and every node's changes go to the handlers the
-//! UI registered, also those of nodes added later.
+//! UI registered, also those of nodes added later. The main node can be removed too, as long as
+//! another node stays; its commands then find no node.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, sync::atomic::Ordering};
 
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DEFAULT_STOP_GRACE_SECS, LogLine,
@@ -14,6 +15,7 @@ use launcher_types::{
 use leptos::prelude::*;
 
 use super::{DEFAULT_DATA_DIR, herd, mock, sleep};
+use crate::format;
 
 type Handlers<T> = RefCell<Vec<Rc<dyn Fn(T)>>>;
 
@@ -28,6 +30,12 @@ thread_local! {
     /// The ids of removed nodes whose data was kept: like the backend, a new node does not get
     /// one while its folder is there.
     static KEPT: RefCell<Vec<NodeId>> = const { RefCell::new(Vec::new()) };
+    /// The main node was removed.
+    static MAIN_REMOVED: RefCell<bool> = const { RefCell::new(false) };
+}
+
+fn main_removed() -> bool {
+    MAIN_REMOVED.with_borrow(|removed| *removed)
 }
 
 /// Calls every handler in `list` with `value`. The handlers are copied out first, so one may
@@ -106,15 +114,15 @@ pub(super) fn emit_nodes() {
     emit(&NODES, list());
 }
 
-/// The nodes, the main one first.
+/// The nodes, the main one first while it is there.
 fn list() -> Vec<NodeInfo> {
-    std::iter::once(mock().info.get_untracked())
-        .chain(herd::infos())
-        .collect()
+    let main = (!main_removed()).then(|| mock().info.get_untracked());
+    main.into_iter().chain(herd::infos()).collect()
 }
 
+/// Whether `node` is the main node, while it is there.
 fn is_main(node: &NodeId) -> bool {
-    mock().info.with_untracked(|info| &info.id == node)
+    !main_removed() && mock().info.with_untracked(|info| &info.id == node)
 }
 
 fn not_found(node: &NodeId) -> String {
@@ -402,14 +410,14 @@ pub async fn update_node(node: &NodeId, update: NodeUpdate) -> Result<NodeInfo, 
 
 pub async fn remove_node(node: &NodeId, delete_data: bool) -> Result<u64, String> {
     sleep(300).await;
-    if list().len() == 1 {
-        let name = mock().info.with_untracked(|info| info.name.clone());
+    if let [only] = list().as_slice() {
         return Err(format!(
-            "Zeal needs a node: add another before removing {name}"
+            "Zeal needs a node: add another before removing {}",
+            only.name
         ));
     }
     if is_main(node) {
-        return Err("(mock) the demo keeps its main node; remove one of the others".into());
+        return remove_main(delete_data).await;
     }
     let name = herd::infos()
         .into_iter()
@@ -431,6 +439,38 @@ pub async fn remove_node(node: &NodeId, delete_data: bool) -> Result<u64, String
         ));
     }
     Ok(freed)
+}
+
+/// Removes the main node, as the backend removes the first node: stopped first, refused while a
+/// zebrad from an earlier launcher run is still running (`?stale`), and with its data deleted
+/// its chain state goes while the launcher's own files stay. Its id is free again, as its files
+/// are not a folder of its own (`?leftover` leaves its chain state behind).
+async fn remove_main(delete_data: bool) -> Result<u64, String> {
+    let mock = mock();
+    if let Some(stale) = mock.status.with_untracked(|status| status.stale.clone()) {
+        return Err(format!(
+            "a zebrad from an earlier launcher run is still running (pid {}): stop it, or start \
+             the node and let Zeal stop it, then remove the node",
+            stale.pid
+        ));
+    }
+    if !format::data_change_allowed(&mock.phase()) {
+        mock.stop(false);
+        sleep(1600).await;
+    }
+    let name = mock.info.with_untracked(|info| info.name.clone());
+    MAIN_REMOVED.with_borrow_mut(|removed| *removed = true);
+    emit_nodes();
+    if !delete_data {
+        return Ok(0);
+    }
+    if mock.flags.leftover {
+        return Err(format!(
+            "{name} was removed, but {} could not be deleted: (mock) permission denied",
+            mock.state_dir()
+        ));
+    }
+    Ok(mock.state_bytes.swap(0, Ordering::Relaxed))
 }
 
 /// The main node at first: Zebra on Mainnet in the launcher's own folders, with zebrad's
