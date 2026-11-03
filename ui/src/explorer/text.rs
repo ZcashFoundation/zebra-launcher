@@ -4,7 +4,7 @@
 
 use explorer_model::classify::{Classified, Later};
 use launcher_types::{
-    Network,
+    Network, Phase,
     explorer::{
         BlockSummary, Budget, LedgerCheck, NotFoundHint, PerPool, Pool, ReorgNotice, SecretKind,
         Shown, TxKind, TxPage, UnknownWhy,
@@ -369,6 +369,21 @@ pub fn reorg_text(reorg: &ReorgNotice, at: &str) -> String {
     }
 }
 
+/// What the banner says while the node is not running, in its phase's words; `None` while it
+/// runs.
+pub fn not_running_text(phase: &Phase) -> Option<&'static str> {
+    Some(match phase {
+        Phase::Running => return None,
+        Phase::Stopped => "The node is not running, so the Explorer cannot read its chain.",
+        Phase::Starting => "The node is starting; the Explorer reads its chain once it runs.",
+        Phase::Stopping => "The node is stopping, so the Explorer cannot read its chain.",
+        Phase::Backoff { .. } => {
+            "The node stopped and restarts shortly; the Explorer reads its chain once it runs."
+        }
+        Phase::Failed { .. } => "The node failed, so the Explorer cannot read its chain.",
+    })
+}
+
 /// The hint under the search box, as the query is typed.
 pub fn hint(classified: &Classified, tip: Option<u32>, network: Network) -> String {
     match classified {
@@ -643,6 +658,21 @@ mod tests {
             reorg_text(&bounded, "14:02"),
             "At least 1 block was replaced at 14:02: the node switched to another branch above a \
              height between 3,550,000 and 3,550,999."
+        );
+    }
+
+    #[test]
+    fn the_banner_follows_the_phase() {
+        assert_eq!(not_running_text(&Phase::Running), None);
+        assert!(
+            not_running_text(&Phase::Starting)
+                .unwrap()
+                .contains("is starting")
+        );
+        assert!(
+            not_running_text(&Phase::Stopped)
+                .unwrap()
+                .contains("not running")
         );
     }
 

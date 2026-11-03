@@ -30,7 +30,7 @@ use crate::{
     api,
     app::{AppState, Tab},
     components::icons::info_icon,
-    format::{local_datetime_short, thousands},
+    format::{controls, local_datetime_short, thousands},
 };
 use block::BlockPage;
 use chain::ChainPage;
@@ -297,30 +297,44 @@ fn SourceLine(
 }
 
 /// One banner, the most important first: a node that does not run, one that syncs, a recent
-/// reorganisation.
+/// reorganisation. Start shows where the status strip offers it too.
 #[component]
 fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
     let app = AppState::get();
     let started = RwSignal::new(None::<String>);
+    let starting = RwSignal::new(false);
     let banner = move || {
         let node = app.node();
         let phase = node.status.with(|status| status.phase.clone());
         let live: Option<ExplorerLive> = nav.get().live.get();
-        if phase != Phase::Running {
+        if let Some(words) = text::not_running_text(&phase) {
             let start = move |_| {
+                starting.set(true);
                 spawn_local(async move {
-                    if let Err(error) = node.start().await {
-                        started.set(Some(format!("Could not start: {error}")));
-                    }
+                    let result = node.start().await;
+                    starting.try_set(false);
+                    started.try_set(
+                        result
+                            .err()
+                            .map(|error| format!("Could not start: {error}")),
+                    );
                 });
             };
+            let tone = match phase {
+                Phase::Starting | Phase::Backoff { .. } => "banner banner-update ex-banner",
+                _ => "banner banner-warn ex-banner",
+            };
             return view! {
-                <div class="banner banner-warn ex-banner" role="status">
-                    <span>"The node is not running, so the Explorer cannot read its chain."</span>
-                    <span class="buttons">
-                        <button type="button" on:click=start>"Start"</button>
-                        {move || started.get()}
-                    </span>
+                <div class=tone role="status">
+                    <span>{words}</span>
+                    {controls(&phase).start.then(|| view! {
+                        <span class="buttons">
+                            <button type="button" disabled=move || starting.get() on:click=start>
+                                "Start"
+                            </button>
+                            {move || started.get()}
+                        </span>
+                    })}
                 </div>
             }
             .into_any();
