@@ -86,8 +86,8 @@ from the node's spec (`NodeSpec`, `crates/launcher-core/src/nodes.rs`).
   other node has and that no removed node's kept folder uses (the backend picks the first
   free one, `zebrad-testnet`, `zebrad-mainnet-2`, when the draft leaves it out); ports no
   other node has and no other program holds (assigned from the kind's defaults with
-  `assign_ports` around every node's ports, then around ports in use, when the draft
-  leaves them out); and a data folder that is not another node's and whose state does not
+  `node_ports` around every node's ports and off the other network's defaults, then around
+  ports in use, when the draft leaves them out); and a data folder that is not another node's and whose state does not
   overlap another node's, and that Zeal can write to when the user chose it
   (`check_chosen_dir`, as for `choose_data_dir`; the node's own folder chosen by hand
   counts as its default). The add-node dialog shows the free space where the chain would

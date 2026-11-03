@@ -9,7 +9,7 @@ use std::{
 
 use launcher_types::{
     DEFAULT_STOP_GRACE_SECS, MAX_NODES, Network, NodeDraft, NodeId, NodeInfo, NodeKind, NodePort,
-    NodeProgram, NodeUpdate, PortRole, STOP_GRACE_SECS, assign_ports,
+    NodeProgram, NodeUpdate, PortRole, STOP_GRACE_SECS, node_ports,
 };
 use serde::{Deserialize, Serialize};
 
@@ -314,15 +314,15 @@ fn holder_of(nodes: &[NodeSpec], port: u16) -> Option<&NodeSpec> {
 }
 
 /// The ports a new node of `kind` on `network` gets: the kind's defaults, moved
-/// out of the way of every node's ports ([`assign_ports`]) and then of ports
-/// another program on this computer holds (`in_use`).
+/// out of the way of every node's ports and of the other network's defaults
+/// ([`node_ports`]), and then of ports another program on this computer holds
+/// (`in_use`).
 pub fn assign_free_ports(
     kind: NodeKind,
     network: Network,
     nodes: &[NodeSpec],
     in_use: &dyn Fn(PortRole, u16) -> bool,
 ) -> Vec<NodePort> {
-    let wanted = kind.default_ports(network);
     let mut taken: Vec<u16> = nodes
         .iter()
         .flat_map(|node| node.ports.iter().map(|port| port.port))
@@ -330,7 +330,7 @@ pub fn assign_free_ports(
     // Each round skips at least one port more; give up after a few rounds and
     // let the start report what is still taken.
     for _ in 0..16 {
-        let ports = assign_ports(&wanted, &taken);
+        let ports = node_ports(kind, network, &taken);
         let busy: Vec<u16> = ports
             .iter()
             .filter(|port| in_use(port.role, port.port))
@@ -341,7 +341,7 @@ pub fn assign_free_ports(
         }
         taken.extend(busy);
     }
-    assign_ports(&wanted, &taken)
+    node_ports(kind, network, &taken)
 }
 
 /// Whether two chain state folders are the same or one holds the other,
@@ -511,7 +511,7 @@ pub fn plan_update(
             .iter()
             .flat_map(|other| other.ports.iter().map(|port| port.port))
             .collect();
-        next.ports = assign_ports(&node.kind.default_ports(network), &taken);
+        next.ports = node_ports(node.kind, network, &taken);
         if update.name.is_none() && NodeInfo::is_default_name(&node.name, node.kind, node.network) {
             let names: Vec<&str> = others.iter().map(|other| other.name.as_str()).collect();
             next.name = NodeInfo::unique_default_name(node.kind, network, names);
@@ -647,7 +647,8 @@ mod tests {
             "a folder of its own"
         );
 
-        // A second Mainnet node moves out of the first's way.
+        // A second Mainnet node moves out of the first's way, and off Testnet's
+        // defaults.
         let second = plan_new_node(
             &draft(Network::Mainnet, "Zebra · Mainnet 2"),
             &nodes,
@@ -657,10 +658,10 @@ mod tests {
         .expect("a second Mainnet node");
         assert_eq!(second.id.as_str(), "zebrad-mainnet-2");
         let numbers: Vec<u16> = second.ports.iter().map(|port| port.port).collect();
-        assert_eq!(numbers, [18233, 18232, 19999]);
+        assert_eq!(numbers, [28233, 28232, 19999]);
 
         // A port another program holds is skipped too.
-        let held = |_: PortRole, port: u16| port == 18232;
+        let held = |_: PortRole, port: u16| port == 28232;
         let around = plan_new_node(
             &draft(Network::Mainnet, "Zebra · Mainnet 2"),
             &nodes,
@@ -668,8 +669,8 @@ mod tests {
             &held,
         )
         .expect("ports around the held one");
-        assert_eq!(around.port(PortRole::Rpc), Some(28232));
-        assert!(!around.ports.iter().any(|port| port.port == 18232));
+        assert_eq!(around.port(PortRole::Rpc), Some(38232));
+        assert!(!around.ports.iter().any(|port| port.port == 28232));
 
         // The folder a removed node left behind keeps its id from being reused.
         std::fs::create_dir_all(paths.node_folder(&testnet.id).data_dir()).expect("mkdir");

@@ -243,6 +243,27 @@ impl NodeKind {
     }
 }
 
+/// The ports a new node of `kind` on `network` gets beside nodes that hold `taken`: the kind's
+/// defaults for the network, moved with [`assign_ports`] out of the way of `taken` and of the
+/// kind's defaults on the other network. A second Mainnet zebrad so gets 28233 and 28232, not
+/// Testnet's 18233 and 18232, and a tool pointed at Testnet's default RPC port never reaches a
+/// Mainnet node.
+pub fn node_ports(kind: NodeKind, network: Network, taken: &[u16]) -> Vec<NodePort> {
+    let wanted = kind.default_ports(network);
+    let other = match network {
+        Network::Mainnet => Network::Testnet,
+        Network::Testnet => Network::Mainnet,
+    };
+    let mut avoid = taken.to_vec();
+    avoid.extend(
+        kind.default_ports(other)
+            .into_iter()
+            .map(|port| port.port)
+            .filter(|port| !wanted.iter().any(|own| own.port == *port)),
+    );
+    assign_ports(&wanted, &avoid)
+}
+
 /// `wanted` with every port that `taken` holds moved out of the way: up by 10,000 at a time
 /// (8233 becomes 18233, then 28233), which keeps a port recognisable, and up by one when that
 /// runs out of room. Ports are also kept apart from each other. The backend checks again,
@@ -414,7 +435,8 @@ pub struct NodeDraft {
     #[serde(default)]
     pub id: Option<NodeId>,
     /// The ports; `None`: the kind's defaults, moved out of the way of every other node's
-    /// ports and of ports already in use on this computer ([`assign_ports`]).
+    /// ports, of the other network's defaults and of ports already in use on this computer
+    /// ([`node_ports`]).
     #[serde(default)]
     pub ports: Option<Vec<NodePort>>,
     /// The data folder; `None`: a folder of its own in the launcher's data folder.
@@ -528,6 +550,39 @@ mod tests {
             &[60_000],
         );
         assert_eq!(high[0].port, 60_001);
+    }
+
+    #[test]
+    fn a_node_stays_off_the_other_networks_default_ports() {
+        let numbers =
+            |ports: Vec<NodePort>| -> Vec<u16> { ports.iter().map(|port| port.port).collect() };
+        let zebrad = NodeKind::Zebrad;
+        // Beside the first Mainnet node, a Testnet node keeps Testnet's defaults but the
+        // metrics port both share...
+        let first = [8233, 8232, 9999];
+        assert_eq!(
+            numbers(node_ports(zebrad, Network::Testnet, &first)),
+            [18233, 18232, 19999]
+        );
+        // ...and a second Mainnet node skips Testnet's.
+        assert_eq!(
+            numbers(node_ports(zebrad, Network::Mainnet, &first)),
+            [28233, 28232, 19999]
+        );
+        // A Testnet node after that still gets Testnet's own.
+        assert_eq!(
+            numbers(node_ports(
+                zebrad,
+                Network::Testnet,
+                &[8233, 8232, 9999, 28233, 28232, 19999]
+            )),
+            [18233, 18232, 29999]
+        );
+        // With nothing else, the defaults.
+        assert_eq!(
+            node_ports(zebrad, Network::Mainnet, &[]),
+            zebrad.default_ports(Network::Mainnet)
+        );
     }
 
     #[test]

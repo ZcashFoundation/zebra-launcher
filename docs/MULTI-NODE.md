@@ -230,9 +230,11 @@ pidfile and restart policy under `<app data>/nodes/<id>/`.
 
 Every Zcash node defaults to 8233 (P2P) and 8232 (RPC) on Mainnet, so two of them collide
 unless Zeal assigns ports. When a node is added, Zeal takes the kind's defaults if no other
-node claims them and they can be bound, otherwise the next free port in a per-kind range
-(for example 28233 and up for a second Mainnet P2P listener), and stores the result in the
-node's spec. The managed config keys or flags carry the ports, so zebrad's managed
+node claims them and they can be bound, otherwise it moves each one up by 10,000 until it is
+free, skipping the other network's defaults: a second Mainnet node gets 28233 and 28232, as
+18233 and 18232 are Testnet's, so a tool pointed at Testnet's default RPC port never reaches
+a Mainnet node. Near the top of the range a port moves up by one. The result is stored in
+the node's spec. The managed config keys or flags carry the ports, so zebrad's managed
 `rpc.listen_addr` becomes "this node's RPC port" instead of a constant. Ports are checked
 again at every start; a port taken by something outside Zeal fails the start as
 `PortInUse` with the owner named where the OS tells. The overview lists every node's ports
@@ -443,11 +445,11 @@ Where phase 2a's code differs from the design above:
 - **`add_node` fills in the draft.** A draft may leave out the id (the first free one for the
   kind and network, skipping removed nodes' kept folders; the first node's files are in the
   launcher's own folders, so its id is free again once it is removed, even with its data
-  kept), the ports (the kind's defaults
-  moved around every other node's and around ports in use) and the data folder (a folder of
-  its own). There is no `inspect_binary` or `suggest_ports` yet: the bundled zebrad needs no
-  inspection, and the dialog shows the ports `assign_ports` gives around the known nodes,
-  with a note that the backend checks them again.
+  kept), the ports (the kind's defaults moved around every other node's, off the other
+  network's defaults and around ports in use) and the data folder (a folder of its own).
+  There is no `inspect_binary` or `suggest_ports` yet: the bundled zebrad needs no
+  inspection, and the dialog shows the ports `node_ports` gives around the known nodes, with
+  a note that the backend checks them again.
 - **`update_node` also takes the network and the stop grace,** which the single-node Settings
   page and the first run edit; a node's own Node settings has the name and the start at
   launch so far.

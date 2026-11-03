@@ -20,7 +20,7 @@ mod resources;
 
 pub use nodes::{
     MAX_NODES, NodeDraft, NodeEvent, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram, NodeRole,
-    NodeUpdate, PortRole, assign_ports,
+    NodeUpdate, PortRole, assign_ports, node_ports,
 };
 pub use resources::{
     MAX_MEMBERS, MachineResources, MemoryPressure, NodeResources, Platform, ProcessUsage,

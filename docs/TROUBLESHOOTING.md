@@ -54,8 +54,8 @@ Start.
 | 9999 | metrics, loopback |
 
 These are a single node's ports. A node added later gets ports no other node has, moved
-up by 10,000 from the defaults (19999 for a second node's metrics), shown in its Node
-settings.
+up by 10,000 from the defaults and kept off the other network's defaults (28233 and 28232
+for a second Mainnet node, 19999 for a second node's metrics), shown in its Node settings.
 
 The usual cause is a second zebrad, for example one started from a terminal. Find it with
 `lsof -i :8233` (Linux, macOS) or `Get-NetTCPConnection -LocalPort 8233` (Windows).

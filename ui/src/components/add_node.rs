@@ -6,7 +6,7 @@
 
 use launcher_types::{
     DEFAULT_STOP_GRACE_SECS, MAX_NODES, Network, NodeDraft, NodeId, NodeInfo, NodeKind, NodePort,
-    NodeProgram, NodeRole, assign_ports,
+    NodeProgram, NodeRole, node_ports,
 };
 use leptos::{ev, html, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
@@ -217,8 +217,7 @@ pub fn AddNode(
             .iter()
             .flat_map(|info| info.ports.iter().map(|port| port.port))
             .collect();
-        let wanted = kind.default_ports(network);
-        let ports = assign_ports(&wanted, &taken_ports);
+        let ports = node_ports(kind, network, &taken_ports);
         let own_folder = state
             .default_data_dir
             .with(|base| base.as_deref().map(|base| node_folder(base, &id)));

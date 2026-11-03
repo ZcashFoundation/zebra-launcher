@@ -10,7 +10,7 @@ use std::{cell::RefCell, rc::Rc, sync::atomic::Ordering};
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, DEFAULT_STOP_GRACE_SECS, LogLine,
     MAX_NODES, MetricsSnapshot, NodeDataDirChoice, NodeDetails, NodeDraft, NodeEvent, NodeId,
-    NodeInfo, NodeKind, NodeProgram, NodeStats, NodeUpdate, STOP_GRACE_SECS, Status, assign_ports,
+    NodeInfo, NodeKind, NodeProgram, NodeStats, NodeUpdate, STOP_GRACE_SECS, Status, node_ports,
 };
 use leptos::prelude::*;
 
@@ -328,12 +328,9 @@ pub async fn add_node(draft: NodeDraft) -> Result<NodeInfo, String> {
         Some(id) => id,
         None => NodeId::suggest(draft.kind, draft.network, &taken),
     };
-    let ports = draft.ports.unwrap_or_else(|| {
-        assign_ports(
-            &draft.kind.default_ports(draft.network),
-            &taken_ports(&nodes),
-        )
-    });
+    let ports = draft
+        .ports
+        .unwrap_or_else(|| node_ports(draft.kind, draft.network, &taken_ports(&nodes)));
     if let Some(dir) = &draft.data_dir {
         if !dir.starts_with('/') {
             return Err(format!("the data folder {dir:?} is not an absolute path"));
@@ -394,7 +391,7 @@ pub async fn update_node(node: &NodeId, update: NodeUpdate) -> Result<NodeInfo, 
         && network != current.network
     {
         next.network = network;
-        next.ports = assign_ports(&current.kind.default_ports(network), &taken_ports(&others));
+        next.ports = node_ports(current.kind, network, &taken_ports(&others));
         if update.name.is_none()
             && NodeInfo::is_default_name(&current.name, current.kind, current.network)
         {
