@@ -558,9 +558,9 @@ pub async fn delete_node_data(state: State<'_, AppState>, node: NodeId) -> Resul
 /// The diagnostics text for a bug report ([`diagnostics::bundle`]): versions,
 /// OS, the zebrad binary, the settings, the updater's records and the
 /// launcher log, then for each node its spec, stop grace, status,
-/// statistics, `zebrad.toml` and the last lines of its log, and last the
-/// newest resource samples of the first node and the computer
-/// ([`diagnostics::resources_section`]). The UI copies it to the clipboard.
+/// statistics, newest process tree sample, `zebrad.toml` and the last lines
+/// of its log, and last the computer's newest sample
+/// ([`diagnostics::machine_section`]). The UI copies it to the clipboard.
 #[tauri::command]
 pub async fn copy_diagnostics(state: State<'_, AppState>) -> Result<String, String> {
     let paths = state.paths.clone();
@@ -575,31 +575,29 @@ pub async fn copy_diagnostics(state: State<'_, AppState>) -> Result<String, Stri
                 node.paths.clone(),
                 node.supervisor.status(),
                 node.stats.borrow().clone(),
+                node.resources.borrow().clone(),
                 node.supervisor.stop_grace(),
             )
         })
         .collect();
-    let resources = state.node_resources.borrow().clone();
     let machine = state.machine.borrow().clone();
     blocking(move || {
         let sidecar = sidecar::resolve(&paths);
         let reports: Vec<diagnostics::NodeReport<'_>> = nodes
             .iter()
             .map(
-                |(info, files, status, stats, stop_grace)| diagnostics::NodeReport {
+                |(info, files, status, stats, resources, stop_grace)| diagnostics::NodeReport {
                     info,
                     paths: files,
                     status,
                     stats: stats.as_ref(),
+                    resources: resources.as_ref(),
                     stop_grace: *stop_grace,
                 },
             )
             .collect();
         let mut text = diagnostics::bundle(&paths, &settings, &reports, Some(&sidecar));
-        text.push_str(&diagnostics::resources_section(
-            resources.as_ref(),
-            machine.as_ref(),
-        ));
+        text.push_str(&diagnostics::machine_section(machine.as_ref()));
         text
     })
     .await
