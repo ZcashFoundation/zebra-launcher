@@ -55,10 +55,15 @@ pub fn Explorer() -> impl IntoView {
         })
     });
 
-    // The explorers' own news, for every node; a node shown for the first time asks for it.
+    // The explorers' own news, for every node; a node shown for the first time asks for it,
+    // and keeps the reason when its explorer would not answer.
     spawn_local(async move {
         let result = api::on_explorer_live(
-            move |event| explorers.of(&event.node).live.set(Some(event.live)),
+            move |event| {
+                let explorer = explorers.of(&event.node);
+                explorer.unavailable.set(None);
+                explorer.live.set(Some(event.live));
+            },
             move |message| app.backend_error.set(Some(message)),
         )
         .await;
@@ -72,12 +77,18 @@ pub fn Explorer() -> impl IntoView {
         let explorer = explorers.of(&node);
         if explorer.live.with_untracked(Option::is_none) {
             spawn_local(async move {
-                if let Ok(reply) = api::explorer(&node, ExplorerRequest::Status).await
-                    && let ExplorerResponse::Status(live) = reply.response
-                {
-                    explorer.live.try_update(|current| {
-                        current.get_or_insert(live);
-                    });
+                match api::explorer(&node, ExplorerRequest::Status).await {
+                    Ok(reply) => {
+                        if let ExplorerResponse::Status(live) = reply.response {
+                            explorer.unavailable.try_set(None);
+                            explorer.live.try_update(|current| {
+                                current.get_or_insert(live);
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        explorer.unavailable.try_set(Some(error));
+                    }
                 }
             });
         }
@@ -190,7 +201,7 @@ pub fn Explorer() -> impl IntoView {
                 </div>
                 <SearchBox nav network tip input=search_input />
             </div>
-            <SourceLine network tip />
+            <SourceLine nav network tip />
             <Banner nav />
             <div class="ex-page" aria-live="off">{page}</div>
         </div>
@@ -226,13 +237,22 @@ fn in_text_field(event: &web_sys::KeyboardEvent) -> bool {
         || element.is_content_editable()
 }
 
-/// Which node, network and tip the page reads, and the promise that it all stays here.
+/// Which node, network and tip the page reads, and the promise that it all stays here. While
+/// the node's explorer would not answer, the zebrad that runs is another network's, so its
+/// version and address are left out.
 #[component]
-fn SourceLine(network: Signal<Network>, tip: Signal<Option<u32>>) -> impl IntoView {
+fn SourceLine(
+    nav: Signal<NodeExplorer>,
+    network: Signal<Network>,
+    tip: Signal<Option<u32>>,
+) -> impl IntoView {
     let app = AppState::get();
     let parts = move || {
         let node = app.node();
         let mut parts = vec![node.info.with(|info| info.name.clone())];
+        if nav.get().unavailable.with(Option::is_some) {
+            return parts.join(" · ");
+        }
         if let Some(version) = node
             .stats
             .with(|stats| stats.as_ref().map(|stats| stats.zebrad_version.clone()))
@@ -306,12 +326,20 @@ fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
             .into_any();
         }
         match live.as_ref().map(|live| live.state.clone()) {
-            None | Some(LiveState::NotRunning) => view! {
-                <div class="banner banner-warn ex-banner" role="status">
-                    <span>"Waiting for the node to open its RPC port."</span>
-                </div>
+            // Unless the explorer said why it would not answer: zebrad runs on the other
+            // network until its next start, say.
+            None | Some(LiveState::NotRunning) => {
+                let waiting = nav.get().unavailable.get().map_or_else(
+                    || "Waiting for the node to open its RPC port.".to_owned(),
+                    |error| error.message,
+                );
+                view! {
+                    <div class="banner banner-warn ex-banner" role="status">
+                        <span>{waiting}</span>
+                    </div>
+                }
+                .into_any()
             }
-            .into_any(),
             Some(LiveState::Syncing { height, estimated }) => view! {
                 <div class="banner banner-update ex-banner" role="status">
                     <span>

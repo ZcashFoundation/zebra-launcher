@@ -21,6 +21,9 @@ pub struct NodeExplorer {
     pub history: RwSignal<NavHistory>,
     /// The explorer's own news: its tip, whether the node syncs, the last reorganisation.
     pub live: RwSignal<Option<ExplorerLive>>,
+    /// Why the explorer would not say how it is, until it publishes its news: the node's
+    /// zebrad runs on the other network until its next start, say.
+    pub unavailable: RwSignal<Option<ExplorerError>>,
 }
 
 impl NodeExplorer {
@@ -78,6 +81,7 @@ impl Explorers {
             owner.with(|| NodeExplorer {
                 history: RwSignal::new(NavHistory::default()),
                 live: RwSignal::new(None),
+                unavailable: RwSignal::new(None),
             })
         });
         self.by_node.update_value(|map| {
