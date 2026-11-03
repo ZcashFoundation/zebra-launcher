@@ -1442,7 +1442,9 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      beside GiB.
    - fake-zebrad's `short` child starts 300 ms after `Starting zebrad`, as the sampler's
      reading at the spawn would see it otherwise. `FAKE_ZEBRAD_WRITE_MB` writes next to its
-     `-c` config, which the test keeps under `CARGO_TARGET_TMPDIR`.
+     `-c` config, which the test keeps under `CARGO_TARGET_TMPDIR`, and removes the file
+     after `sync_all`: under `cargo tauri dev` that config is the per-user `zebrad.toml`,
+     which an installed Zeal shares.
    - The `procfs.rs` tests use literal fixtures written for them; the captures from a
      syncing zebrad 7.0.0 under `tests/fixtures/proc/` are not made yet, and neither is the
      real-zebrad contract check, which needs the pinned zebrad. The live tests are gated to

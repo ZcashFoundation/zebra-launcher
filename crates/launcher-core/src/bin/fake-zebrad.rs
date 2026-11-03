@@ -39,7 +39,7 @@
 //! |---|---|
 //! | `FAKE_ZEBRAD_BURN_MS=1500` | one thread spins for that long |
 //! | `FAKE_ZEBRAD_ALLOC_MB=128` | allocates that much, touches every page, and holds it until exit |
-//! | `FAKE_ZEBRAD_WRITE_MB=32` | writes that much to a file next to the `-c` config, then `sync_all` |
+//! | `FAKE_ZEBRAD_WRITE_MB=32` | writes that much to a file next to the `-c` config, then `sync_all`, then removes the file |
 //! | `FAKE_ZEBRAD_CHILD=busy` | starts a `fake-zebrad child` that spins 500 ms and lives 10 s, and waits for it |
 //! | `FAKE_ZEBRAD_CHILD=session` | the same child, which calls `setsid()` first, like Zebend's services |
 //! | `FAKE_ZEBRAD_CHILD=short` | 300 ms later, a child that spins 100 ms and exits, waited for at once |
@@ -433,14 +433,17 @@ fn spin_for(duration: Duration) {
     }
 }
 
-/// Writes `megabytes` MiB to `path` and syncs them to the disk.
+/// Writes `megabytes` MiB to `path`, syncs them to the disk and removes the file: the bytes
+/// stay counted as written, and nothing is left beside the config.
 fn write_scratch(path: &Path, megabytes: u64) -> std::io::Result<()> {
     let chunk = vec![0x5a_u8; 1024 * 1024];
     let mut file = std::fs::File::create(path)?;
     for _ in 0..megabytes {
         file.write_all(&chunk)?;
     }
-    file.sync_all()
+    file.sync_all()?;
+    drop(file);
+    std::fs::remove_file(path)
 }
 
 /// Starts the child of `FAKE_ZEBRAD_CHILD` on a thread of its own and waits for
