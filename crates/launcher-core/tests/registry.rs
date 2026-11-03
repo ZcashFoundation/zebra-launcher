@@ -544,12 +544,19 @@ async fn an_update_stops_the_running_nodes_and_remembers_them_once() {
     within(first.start(&done(), StartOptions::default()))
         .await
         .expect("start");
+    assert_eq!(
+        fx.registry.running_nodes(),
+        std::slice::from_ref(&first.id),
+        "what the marker lists"
+    );
     within(fx.registry.stop_for_update())
         .await
         .expect("stop all");
     assert_eq!(first.supervisor.status().phase, Phase::Stopped);
+    assert!(fx.registry.running_nodes().is_empty());
+    let stopped = within(fx.registry.take_stopped_for_update()).await;
     assert_eq!(
-        within(fx.registry.take_stopped_for_update()).await,
+        stopped,
         std::slice::from_ref(&first.id),
         "only the running node comes back"
     );
@@ -566,6 +573,24 @@ async fn an_update_stops_the_running_nodes_and_remembers_them_once() {
             .status()
             .phase,
         Phase::Stopped
+    );
+
+    // A node removed since its id was noted is not brought back.
+    let noted = [second.id.clone(), first.id.clone()];
+    let ids = |nodes: Vec<registry::NodeHandle>| -> Vec<NodeId> {
+        nodes.into_iter().map(|node| node.id).collect()
+    };
+    assert_eq!(
+        ids(fx.registry.nodes_of(&noted)),
+        noted,
+        "in the order noted"
+    );
+    within(fx.registry.remove(&second.id, false))
+        .await
+        .expect("remove");
+    assert_eq!(
+        ids(fx.registry.nodes_of(&noted)),
+        std::slice::from_ref(&first.id)
     );
     within(fx.registry.shutdown()).await;
 }

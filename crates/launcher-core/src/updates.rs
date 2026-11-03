@@ -213,7 +213,8 @@ pub struct PendingUpdate {
     /// The version being installed.
     pub to_version: String,
     /// Whether zebrad was running (or starting) before the update, so the
-    /// next launch must bring it back.
+    /// next launch must bring it back: one node of [`Self::running_nodes`]
+    /// was, or the single node of a single-node launcher.
     pub zebrad_was_running: bool,
     /// The nodes that were running, so the next launch brings back and
     /// checks each. Empty in a marker from a single-node launcher, whose node
@@ -222,6 +223,21 @@ pub struct PendingUpdate {
     pub running_nodes: Vec<NodeId>,
     /// When the marker was written.
     pub written_at: SystemTime,
+}
+
+impl PendingUpdate {
+    /// The nodes the health gate brings back and checks: those the marker
+    /// lists, or for a marker from a single-node launcher whose node was
+    /// running, `first`, the node that launcher ran.
+    pub fn nodes_to_check(&self, first: Option<&NodeId>) -> Vec<NodeId> {
+        if !self.running_nodes.is_empty() {
+            self.running_nodes.clone()
+        } else if self.zebrad_was_running {
+            first.into_iter().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 /// `<config_dir>/pending_update_check`.
@@ -1106,6 +1122,73 @@ mod tests {
         .await
         .expect("in time");
         assert_eq!(result, None);
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn the_gate_checks_the_nodes_the_marker_lists_or_the_single_nodes() {
+        let main = NodeId::new("zebrad-mainnet").unwrap();
+        let test = NodeId::new("zebrad-testnet").unwrap();
+        let listed = PendingUpdate {
+            running_nodes: vec![test.clone()],
+            ..pending("0.2.0", true)
+        };
+        assert_eq!(listed.nodes_to_check(Some(&main)), vec![test]);
+        // A marker from a single-node launcher: its node is the first node.
+        assert_eq!(
+            pending("0.2.0", true).nodes_to_check(Some(&main)),
+            vec![main.clone()]
+        );
+        assert!(pending("0.2.0", true).nodes_to_check(None).is_empty());
+        // Nothing was running.
+        assert!(
+            pending("0.2.0", false)
+                .nodes_to_check(Some(&main))
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn run_health_gate_starts_and_checks_a_node_that_ran_beside_a_halted_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(PENDING_UPDATE_MARKER);
+        // The marker the updater writes when the Mainnet node halted at its
+        // end of support while the Testnet node ran.
+        let testnet = NodeId::new("zebrad-testnet").unwrap();
+        let marked = PendingUpdate {
+            running_nodes: vec![testnet.clone()],
+            ..pending("0.2.0", true)
+        };
+        write_marker(&marker, &marked).expect("write");
+        let node = InstantNode {
+            status: Arc::new(watch::channel(Status::default()).0),
+            starts: Arc::default(),
+        };
+        let main = NodeId::new("zebrad-mainnet").unwrap();
+        let picked = {
+            let node = node.clone();
+            move |pending: &PendingUpdate| {
+                let ids = pending.nodes_to_check(Some(&main));
+                assert_eq!(ids, vec![testnet], "only the node that ran");
+                vec![GateNode {
+                    node,
+                    start: true,
+                    name: None,
+                }]
+            }
+        };
+        let result = tokio::time::timeout(
+            T,
+            run_health_gate(&marker, "0.2.0", picked, HEALTH_GATE_TIMEOUT, "u"),
+        )
+        .await
+        .expect("in time");
+        assert_eq!(result, Some(Ok(())));
+        assert_eq!(
+            node.starts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the gate starts it, then sees it run"
+        );
         assert!(!marker.exists());
     }
 

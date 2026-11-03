@@ -252,12 +252,10 @@ impl<R: Runtime> NodeControl for Herd<R> {
     }
 
     async fn start(&self) -> Result<(), String> {
+        let stopped = self.state.registry.take_stopped_for_update().await;
         let mut starts = Vec::new();
-        for id in self.state.registry.take_stopped_for_update().await {
-            // A node removed since it was stopped stays gone.
-            let Ok(node) = self.state.node(&id) else {
-                continue;
-            };
+        // A node removed since it was stopped stays gone.
+        for node in self.state.registry.nodes_of(&stopped) {
             let (app, state) = (self.app.clone(), self.state.clone());
             starts.push(tauri::async_runtime::spawn(async move {
                 crate::start_node(&app, &state, &node).await
@@ -273,39 +271,27 @@ impl<R: Runtime> NodeControl for Herd<R> {
     }
 
     fn running_nodes(&self) -> Vec<NodeId> {
-        self.state
-            .registry
-            .nodes()
-            .iter()
-            .filter(|node| node.supervisor.status().phase.is_active())
-            .map(|node| node.id.clone())
-            .collect()
+        self.state.registry.running_nodes()
     }
 }
 
 /// The nodes the health gate checks after an update: those the marker lists
-/// as running (a marker from a single-node launcher means the first node),
-/// each started by the gate unless the launcher starts it anyway, and named
-/// when there are several.
+/// as running ([`PendingUpdate::nodes_to_check`]) that are still there, each
+/// started by the gate unless the launcher starts it anyway, and named when
+/// there are several.
 fn gate_nodes<R: Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     plan: &LaunchPlan,
     pending: &PendingUpdate,
 ) -> Vec<GateNode<GatedNode<R>>> {
-    let ids: Vec<NodeId> = if !pending.running_nodes.is_empty() {
-        pending.running_nodes.clone()
-    } else if pending.zebrad_was_running {
-        state
-            .first_node()
-            .map(|node| vec![node.id])
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let first = state.registry.first().map(|node| node.id);
+    let ids = pending.nodes_to_check(first.as_ref());
     let several = ids.len() > 1;
-    ids.iter()
-        .filter_map(|id| state.node(id).ok())
+    state
+        .registry
+        .nodes_of(&ids)
+        .into_iter()
         .map(|node| GateNode {
             start: plan.gate_may_start(&node.id),
             name: several.then(|| node.info().name),

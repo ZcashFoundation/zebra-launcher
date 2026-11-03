@@ -381,6 +381,26 @@ impl RegistryHandle {
         self.nodes.borrow().first().cloned()
     }
 
+    /// The nodes among `ids` that are in the list, in the order of `ids`: a
+    /// node removed since its id was noted is left out.
+    pub fn nodes_of(&self, ids: &[NodeId]) -> Vec<NodeHandle> {
+        let nodes = self.nodes.borrow();
+        ids.iter()
+            .filter_map(|id| nodes.iter().find(|node| &node.id == id).cloned())
+            .collect()
+    }
+
+    /// The ids of the nodes that run or will without the user
+    /// ([`Phase::is_active`]), in the list's order.
+    pub fn running_nodes(&self) -> Vec<NodeId> {
+        self.nodes
+            .borrow()
+            .iter()
+            .filter(|node| node.supervisor.status().phase.is_active())
+            .map(|node| node.id.clone())
+            .collect()
+    }
+
     /// Every node as the UI sees it, in the list's order.
     pub fn infos(&self) -> Vec<NodeInfo> {
         self.summaries

@@ -115,7 +115,10 @@ from the node's spec (`NodeSpec`, `crates/launcher-core/src/nodes.rs`).
 - **The updater** sees the nodes as one: `herd_phase` folds their phases (halted at the
   end of support when any node is, running while any is active), the end-of-support estimate
   comes from the first Mainnet zebrad node, and a stop for an update stops every node
-  that runs and remembers which, to start those again.
+  that runs and remembers which, to start those again. The nodes that run count as running
+  for the update also when another node halted, which the folded phase shows: a Testnet
+  node beside a halted Mainnet one is brought back after a failed install and checked
+  after the update.
 
 ## Supervisor
 
@@ -657,10 +660,12 @@ verifies inside `download` and `install`. The marker is written only after zebra
 stopped, so a crash or failed stop before the install leaves no marker behind.
 
 At the next launch, if `pending_update_check` exists, the health gate checks that the
-new version is running and that every node the marker lists as running (a marker from a
-single-node launcher means the first node) reaches `Running` with an RPC address within 5
+new version is running and that every node the marker lists as running
+(`PendingUpdate::nodes_to_check`: a marker from a single-node launcher means the first
+node, and a node removed since is left out) reaches `Running` with an RPC address within 5
 minutes, each checked side by side and started first unless it starts at launch by
-itself. Then the marker is removed. On failure the `update_health_failed` event (and
+itself. A node that had halted at its end of support is not in the list. Then the marker
+is removed. On failure the `update_health_failed` event (and
 `UpdateInfo.health_failure`) carries a message, led by the node's name when several were
 checked, and recovery hints:
 
