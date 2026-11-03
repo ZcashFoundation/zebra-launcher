@@ -22,6 +22,7 @@ pub mod policy;
 pub mod process;
 pub mod resources;
 pub mod rpc;
+pub mod runtime;
 pub mod settings;
 pub mod supervisor;
 pub mod updates;

@@ -141,6 +141,24 @@ pub fn check_writable_dir(dir: &Path) -> io::Result<()> {
     fs::remove_file(&probe)
 }
 
+/// Checks a data directory the user chose: it is created if needed and must
+/// be writable ([`check_writable_dir`]). Returns the free space there, if it
+/// could be read, and whether it is `default`.
+pub fn check_chosen_dir(dir: &Path, default: &Path) -> Result<(Option<u64>, bool), String> {
+    check_writable_dir(dir)
+        .map_err(|err| format!("cannot use {} as the data directory: {err}", dir.display()))?;
+    let free = free_space(dir).ok();
+    Ok((free, same_dir(dir, default)))
+}
+
+/// Whether two directories are the same after resolving links.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// The total size of the files under `dir`, without following symbolic
 /// links, and whether the walk stopped at `limit` entries (so the total is a
 /// lower bound). Unreadable entries are skipped. A missing `dir` is empty.

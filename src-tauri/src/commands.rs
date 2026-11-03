@@ -414,13 +414,8 @@ pub async fn choose_data_dir(
     let chosen = path.trim().to_string();
     let dir = PathBuf::from(&chosen);
     let default = state.paths.data_dir().to_path_buf();
-    let (free_bytes, is_default) = blocking(move || -> Result<_, String> {
-        firstrun::check_writable_dir(&dir)
-            .map_err(|err| format!("cannot use {} as the data directory: {err}", dir.display()))?;
-        let free = firstrun::free_space(&dir).ok();
-        Ok((free, same_dir(&dir, &default)))
-    })
-    .await??;
+    let (free_bytes, is_default) =
+        blocking(move || firstrun::check_chosen_dir(&dir, &default)).await??;
     let data_dir = (!is_default).then_some(chosen);
 
     let saved = state
@@ -440,14 +435,6 @@ pub async fn choose_data_dir(
         settings: saved,
         free_bytes,
     })
-}
-
-/// Whether two directories are the same after resolving links.
-fn same_dir(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
 }
 
 /// Moves the alpha.4 chain state from zebrad's default cache directory into

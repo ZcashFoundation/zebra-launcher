@@ -21,14 +21,11 @@ use std::time::Duration;
 
 use launcher_core::{
     config, firstrun,
-    logfile::RotatingLogConfig,
-    metrics::poller::MetricsPoller,
-    monitor::{self, Monitor, MonitorOutput},
     pidfile::StaleProcess,
-    process::ZebradCommand,
     resources::{MachineSampler, ResourceSampler},
+    runtime::{self, NodeActors},
     settings::SettingsStore,
-    supervisor::{self, SupervisorConfig, SupervisorError},
+    supervisor::SupervisorError,
 };
 use launcher_types::{StaleProcessInfo, events};
 use tauri::{AppHandle, Emitter, Manager};
@@ -245,31 +242,22 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
 
     let settings = SettingsStore::open(&paths)?;
     let current = settings.current();
-    // A broken zebrad.toml is not fatal: zebrad reports it, and the user can
-    // fix it in the editor.
-    let node = paths.launcher_node();
-    if let Err(err) = config::ensure(&node, &managed_keys(&current, &paths)) {
-        tracing::error!(%err, "could not update the managed keys in zebrad.toml");
-    }
-
-    let mut command = ZebradCommand::new(sidecar::resolve(&paths), node.zebrad_config());
-    command.shutdown_on_stdin_close = std::env::var_os(STDIN_CLOSE_ENV).is_some_and(|v| v == "1");
-    let mut supervisor_config = SupervisorConfig::new(command);
-    supervisor_config.stop_grace = Duration::from_secs(current.stop_grace_secs);
-    supervisor_config.pidfile = Some(node.pidfile());
-    supervisor_config.log_file = Some(RotatingLogConfig::new(node.zebrad_log()));
-    let supervisor = supervisor::spawn(supervisor_config)?;
+    let NodeActors {
+        supervisor,
+        stats,
+        details,
+        metrics,
+    } = runtime::spawn(
+        &paths.launcher_node(),
+        &managed_keys(&current, &paths),
+        sidecar::resolve(&paths),
+        std::env::var_os(STDIN_CLOSE_ENV).is_some_and(|v| v == "1"),
+        current.stop_grace_secs,
+    )?;
     // From here on the launcher's own events show in the Logs tab too.
     if let Some(notes) = notes {
         logging::forward_notes(notes, supervisor.clone());
     }
-
-    let MonitorOutput { stats, details } = Monitor::spawn(
-        supervisor.watch_status(),
-        node.rpc_cookie_file(),
-        monitor::DEFAULT_INTERVAL,
-    );
-    let metrics = MetricsPoller::spawn(supervisor.watch_status());
     let resources = ResourceWatches {
         node: ResourceSampler::spawn(supervisor.watch_probe()),
         machine: MachineSampler::spawn(),
