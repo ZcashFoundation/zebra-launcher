@@ -1,10 +1,12 @@
 # Resource monitoring
 
-> **Status, 2026-11-03: phases 1 and 2 are built (the Resources card, live on Linux);
-> phases 3 to 7 are the design.** [Phases](#phases) says what each built phase changed from
-> this design. [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built and
-> is updated phase by phase as this lands. [MULTI-NODE.md](MULTI-NODE.md) is the plan it fits
-> into.
+> **Status, 2026-11-03: phases 1 and 2 are built (the Resources card, live on Linux), and of
+> phase 7 the parts the node registry of MULTI-NODE phase 2a makes possible (a sampler per
+> node, the node-scoped event and command, the herd's figures in the mock); phases 3 to 6 and
+> the rest of phase 7 are the design.** [Phases](#phases) says what each built phase changed
+> from this design. [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built
+> and is updated phase by phase as this lands. [MULTI-NODE.md](MULTI-NODE.md) is the plan it
+> fits into.
 
 Yes, for each node and for every process a node starts. Zeal already draws the boundary of
 each node's process tree:
@@ -452,7 +454,7 @@ impl MachineSampler {
 
 | | One node (now) | Several nodes (MULTI-NODE phase 2) |
 | --- | --- | --- |
-| Event `node_resources` | `Option<NodeResources>` | `NodeResourcesEvent { node, resources }` |
+| Event `node_resources` | `Option<NodeResources>` | `NodeResourcesEvent { node, resources }`; built as `NodeEvent { node, value }`, see phase 7 |
 | Event `machine_resources` | `Option<MachineResources>` | unchanged |
 | Snapshot command | `get_node_resources()` | `get_node_resources(node)` |
 | Snapshot command | `get_machine_resources()` | unchanged |
@@ -1518,6 +1520,46 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      `start_new_session`.
    - `dir_size` for kinds without a size metric.
    - Leftover processes reported after the root exits.
+
+   **Built so far**, with MULTI-NODE phase 2a's registry, which runs zebrad nodes only:
+
+   - `runtime::spawn` starts a `ResourceSampler` beside each node's supervisor, RPC monitor
+     and metrics poller, on that supervisor's probe watch; `NodeHandle.resources` carries its
+     receiver, and the sampler ends with the node's supervisor. `RegistryConfig` gains
+     `resource_interval` (5 s) for the tests. The sampler is started in the node's tracing
+     span and its task runs in the span current at its spawn, so what it logs goes to that
+     node's log, not to every node's.
+   - `node_resources` carries a `NodeEvent { node, value }`, like every other node event
+     (MULTI-NODE.md, "Built differently"), not the `NodeResourcesEvent { node, resources }`
+     of [Types](#types), which is not added. `get_node_resources` takes the node's id;
+     `machine_resources` and `get_machine_resources` are unchanged. The bridge starts and
+     stops a node's resource forwarder with its other forwarders.
+   - The app keeps one `MachineSampler`, and `AppState` only its receiver: each node's
+     samples are in the registry. It is not fed the registry's data folders: it reads no
+     volumes until phase 5.
+   - Copy diagnostics gives each node's newest sample, with one line per process, in a
+     "resources" section of that node's part, after its statistics, and the computer's in a
+     "Computer" section after the nodes' parts (`diagnostics::machine_section`), instead of
+     one `resources_section(node, machine)`.
+   - The UI: every `NodeState` keeps its own `resources` and `resource_history` from the
+     node-scoped event and snapshot (a snapshot older than an event is dropped, as for the
+     other node events), so the Resources card shows the selected node's tree. The card's
+     footer still shows the computer on every node's card, as the overview's `MachineStrip`
+     (phase 6) is not built.
+   - The mock: every node of `?herd`, and every node the add-node dialog adds, has samples of
+     its own with the `?herd` figures of [Mock data](#mock-data-uisrcmockresourcesrs), and
+     `?herd`'s computer has 16 CPUs and 32 GiB. zcashd, stopped, has none; where the design
+     gives no figures the mock picks some (zcashd once started, 0.2 cores and 2.4 GiB; a
+     zebrad the dialog adds, what the main zebrad uses at the tip). The herd's nodes come
+     through the mock's node-scoped API, as the real backend's do, so `subscribe_extra` and
+     `on_extra_node_resources` are not needed: phase 2a removed `subscribe_extra`.
+   - A registry test runs two nodes on fake zebrads, one of them holding 128 MiB, and checks
+     that each node's samples name its own zebrad and only that node's show the memory
+     (Linux, like the other live tests).
+   - Not built yet: `NodeSummary`'s `cpu_cores` and `memory_bytes` (the tray shows no figures
+     per node before its per-node submenus, MULTI-NODE phase 2b), the machine sampler's data
+     folders (phase 5), Generic and Zebend trees (MULTI-NODE phase 4), `dir_size`, and
+     leftover processes after the root exits.
 
 Through every phase:
 
