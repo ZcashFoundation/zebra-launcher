@@ -7,8 +7,7 @@ use std::time::SystemTime;
 
 use launcher_types::{
     DEFAULT_STOP_GRACE_SECS, LogLine, MetricsSnapshot, Network, NodeDetails, NodeId, NodeInfo,
-    NodeKind, NodePort, NodeProgram, NodeResources, NodeStats, Phase, PortRole, StaleProcessInfo,
-    Status,
+    NodeKind, NodeProgram, NodeResources, NodeStats, Phase, StaleProcessInfo, Status,
 };
 use leptos::prelude::*;
 
@@ -21,14 +20,23 @@ use crate::{
     stats_history::StatsHistory,
 };
 
+/// Which of a node's events have arrived: a snapshot fetched while one was on its way is older
+/// than the event, so it is not applied over it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Seen {
+    pub status: bool,
+    pub stats: bool,
+    pub details: bool,
+    pub metrics: bool,
+}
+
 /// One node's signals. `Copy`, like [`AppState`](crate::app::AppState): every field is a signal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NodeState {
     /// Who the node is: id, name, kind, network, folder, ports.
     pub info: RwSignal<NodeInfo>,
-    /// The node the backend's single-node commands control (`start_zebrad` and so on). The
-    /// others are reached by id. Until the backend runs several nodes, it is the only one.
-    pub primary: bool,
+    /// The events that have arrived for the node, for its snapshots.
+    pub seen: StoredValue<Seen>,
     pub status: RwSignal<Status>,
     /// Whether a status has arrived from the backend: until then `status` is the default
     /// (Stopped) and the dashboard is still connecting.
@@ -66,10 +74,10 @@ pub struct NodeState {
 
 impl NodeState {
     /// A node nothing has been heard about yet.
-    pub fn new(info: NodeInfo, primary: bool) -> Self {
+    pub fn new(info: NodeInfo) -> Self {
         NodeState {
             info: RwSignal::new(info),
-            primary,
+            seen: StoredValue::new(Seen::default()),
             status: RwSignal::new(Status::default()),
             status_loaded: RwSignal::new(false),
             stats: RwSignal::new(None),
@@ -182,40 +190,18 @@ impl NodeState {
     }
 }
 
-/// The node the single-node backend runs, as far as the UI knows before the settings load:
-/// a zebrad on Mainnet with the default ports. [`primary_info`] fills in the rest.
-pub fn placeholder_primary() -> NodeInfo {
-    primary_info(Network::Mainnet, None)
-}
-
-/// The node the single-node backend runs: its zebrad, on the network and in the folder the
-/// settings name, with zebrad's default ports for that network.
-pub fn primary_info(network: Network, data_dir: Option<&str>) -> NodeInfo {
-    let (p2p, rpc) = match network {
-        Network::Mainnet => (8233, 8232),
-        Network::Testnet => (18233, 18232),
-    };
+/// The first node as the UI expects it before the backend's list arrives: the bundled zebrad
+/// on Mainnet with zebrad's default ports.
+pub fn placeholder() -> NodeInfo {
+    let (kind, network) = (NodeKind::Zebrad, Network::Mainnet);
     NodeInfo {
-        id: NodeId::suggest(NodeKind::Zebrad, network, &Vec::new()),
-        name: NodeInfo::default_name(NodeKind::Zebrad, network),
-        kind: NodeKind::Zebrad,
+        id: NodeId::suggest(kind, network, &Vec::new()),
+        name: NodeInfo::default_name(kind, network),
+        kind,
         network,
         depends_on: None,
-        data_dir: data_dir.unwrap_or("the launcher's data folder").to_owned(),
-        ports: vec![
-            NodePort {
-                role: PortRole::P2p,
-                port: p2p,
-            },
-            NodePort {
-                role: PortRole::Rpc,
-                port: rpc,
-            },
-            NodePort {
-                role: PortRole::Metrics,
-                port: 9999,
-            },
-        ],
+        data_dir: String::new(),
+        ports: kind.default_ports(network),
         program: NodeProgram::Bundled,
         autostart: true,
         stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
@@ -229,26 +215,24 @@ impl NodeState {
     }
 
     pub async fn start(self) -> api::ApiResult<()> {
-        if self.primary {
-            api::start_zebrad().await
-        } else {
-            api::start_extra_node(&self.id()).await
-        }
+        api::start_node(&self.id()).await
     }
 
     pub async fn stop(self) -> api::ApiResult<()> {
-        if self.primary {
-            api::stop_zebrad().await
-        } else {
-            api::stop_extra_node(&self.id()).await
-        }
+        api::stop_node(&self.id()).await
     }
 
     pub async fn restart(self) -> api::ApiResult<()> {
-        if self.primary {
-            api::restart_zebrad().await
-        } else {
-            api::restart_extra_node(&self.id()).await
-        }
+        api::restart_node(&self.id()).await
+    }
+
+    /// Notes that an event of the kind `pick` names arrived.
+    pub fn mark_seen(&self, pick: fn(&mut Seen) -> &mut bool) {
+        self.seen.update_value(|seen| *pick(seen) = true);
+    }
+
+    /// Whether an event of the kind `pick` names has arrived.
+    pub fn has_seen(&self, pick: fn(&Seen) -> bool) -> bool {
+        self.seen.with_value(pick)
     }
 }

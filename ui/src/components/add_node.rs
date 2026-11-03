@@ -4,13 +4,13 @@
 //! several.
 
 use launcher_types::{
-    DEFAULT_STOP_GRACE_SECS, Network, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram, NodeRole,
-    assign_ports,
+    DEFAULT_STOP_GRACE_SECS, Network, NodeDraft, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram,
+    NodeRole, assign_ports,
 };
 use leptos::{ev, html, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
 
-use crate::{api, app::AppState, node_state::NodeState};
+use crate::{api, app::AppState};
 
 /// Where a node's data goes by default: its own folder under the launcher's data folder.
 const NODES_DIR: &str = "~/.local/share/org.zfnd.zeal/nodes";
@@ -289,22 +289,41 @@ pub fn AddNode(
             });
         }
     });
+    // The backend checks the draft and fills in the id, the ports (out of the way of every
+    // node's and of ports in use on this computer) and the folder; the node comes back as it
+    // was set up.
     let add = move |start: bool| {
         let info = draft.get_untracked();
+        let request = NodeDraft {
+            kind: info.kind,
+            network: info.network,
+            name: info.name,
+            id: None,
+            ports: None,
+            data_dir: None,
+            program: NodeProgram::Bundled,
+            autostart: true,
+        };
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            match api::add_node(info.clone()).await {
-                Ok(()) => {
-                    let node = NodeState::new(info, false);
-                    state.nodes.update(|nodes| nodes.push(node));
-                    crate::app::subscribe_extra(state, node);
-                    state.selected.set(node);
-                    state.tab.set(crate::app::Tab::Dashboard);
+            match api::add_node(request).await {
+                Ok(added) => {
+                    if let Ok(list) = api::list_nodes().await {
+                        state.apply_nodes(list);
+                    }
+                    let node = state.find(&added.id);
+                    if let Some(node) = node {
+                        state.selected.set(node);
+                        state.tab.set(crate::app::Tab::Dashboard);
+                    }
                     busy.set(false);
                     open.set(false);
                     restore_focus();
-                    if start && let Err(failure) = node.start().await {
+                    if start
+                        && let Some(node) = node
+                        && let Err(failure) = node.start().await
+                    {
                         state.backend_error.set(Some(failure.to_string()));
                     }
                 }

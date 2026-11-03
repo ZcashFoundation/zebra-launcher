@@ -1,9 +1,10 @@
 //! `?herd`: five more nodes beside the mock's zebrad, for the overview and the node pages of a
-//! launcher that runs several nodes (docs/MULTI-NODE.md). The real backend runs one node until
-//! the registry lands, so this exists only in the mock.
+//! launcher that runs several nodes (docs/MULTI-NODE.md), and the nodes the add-node dialog
+//! adds. [`super::nodes`] routes the node-scoped API here for every node but the main one.
 //!
 //! The nodes are light simulations, not the zebrad mock: a status, statistics that move
-//! every 5 s while running, and a log line now and then.
+//! every 5 s while running, a log line now and then, and for a zebrad node a `zebrad.toml` of
+//! its own.
 //!
 //! | Node | State |
 //! | --- | --- |
@@ -23,13 +24,14 @@ use std::{
 };
 
 use launcher_types::{
-    DEFAULT_STOP_GRACE_SECS, ExitClass, ExitInfo, LogLevel, LogLine, LogStream, Network, NodeId,
-    NodeInfo, NodeKind, NodePort, NodeProgram, NodeStats, Phase, PortRole, Status,
+    ApplyOutcome, ConfigDocument, DEFAULT_STOP_GRACE_SECS, ExitClass, ExitInfo, LogLevel, LogLine,
+    LogStream, Network, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram, NodeStats, Phase,
+    PortRole, Status,
 };
 use leptos::prelude::*;
 
-use super::{FIRST_TIP, mock};
-use crate::clock;
+use super::{FIRST_TIP, config::minimal_config, mock, nodes};
+use crate::{clock, format};
 
 /// The block interval after NU7, for the nodes at the tip.
 const BLOCK_INTERVAL: Duration = Duration::from_secs(25);
@@ -47,7 +49,9 @@ const ZAKURA_BLOCKS_PER_TICK: u64 = 60;
 /// One extra node: who it is and the signals its events come from.
 #[derive(Clone)]
 struct HerdNode {
-    info: NodeInfo,
+    info: ArcRwSignal<NodeInfo>,
+    /// A zebrad node's `zebrad.toml`, written the first time it is read.
+    config: ArcRwSignal<Option<ConfigDocument>>,
     status: ArcRwSignal<Status>,
     stats: ArcRwSignal<Option<NodeStats>>,
     /// Lines waiting for the next log batch.
@@ -188,7 +192,8 @@ fn herd() -> Vec<HerdNode> {
 impl HerdNode {
     fn new(info: NodeInfo, height: u64, status: Status, pid: u32) -> Self {
         HerdNode {
-            info,
+            info: ArcRwSignal::new(info),
+            config: ArcRwSignal::new(None),
             status: ArcRwSignal::new(status),
             stats: ArcRwSignal::new(None),
             pending: ArcRwSignal::new(Vec::new()),
@@ -229,9 +234,29 @@ impl HerdNode {
         self.status.with_untracked(|status| status.phase.clone())
     }
 
+    fn id(&self) -> NodeId {
+        self.info.with_untracked(|info| info.id.clone())
+    }
+
+    fn kind(&self) -> NodeKind {
+        self.info.with_untracked(|info| info.kind)
+    }
+
+    fn network(&self) -> Network {
+        self.info.with_untracked(|info| info.network)
+    }
+
+    /// Sends every change of the node's status and statistics to the UI's handlers.
+    fn report(&self) {
+        let (node, status) = (self.clone(), self.status.clone());
+        Effect::new(move |_| nodes::emit_status(&node.id(), status.get()));
+        let (node, stats) = (self.clone(), self.stats.clone());
+        Effect::new(move |_| nodes::emit_stats(&node.id(), stats.get()));
+    }
+
     /// The tip this node's network is at: the mock's Mainnet tip moves with the main node.
     fn tip(&self) -> u64 {
-        match self.info.network {
+        match self.network() {
             Network::Testnet => TESTNET_TIP + blocks_since_load(),
             Network::Mainnet => mock()
                 .stats
@@ -242,6 +267,7 @@ impl HerdNode {
 
     /// Statistics every 5 s and a log line now and then, while running.
     fn simulate(self) {
+        self.report();
         let node = self.clone();
         set_interval(
             move || {
@@ -260,7 +286,7 @@ impl HerdNode {
             return;
         }
         let tip = self.tip();
-        let height = match self.info.kind {
+        let height = match self.kind() {
             // Catching up from the snapshot.
             NodeKind::Zakura => {
                 let next = self.height.load(Ordering::Relaxed) + ZAKURA_BLOCKS_PER_TICK;
@@ -274,7 +300,7 @@ impl HerdNode {
             _ => tip.saturating_sub(u64::from(random_below(2))),
         };
         self.height.store(height, Ordering::Relaxed);
-        let indexer = self.info.kind == NodeKind::Zaino;
+        let indexer = self.kind() == NodeKind::Zaino;
         let stats = NodeStats {
             height,
             estimated_height: tip,
@@ -289,11 +315,11 @@ impl HerdNode {
             } else {
                 u64::from(random_below(6))
             },
-            chain: match self.info.network {
+            chain: match self.network() {
                 Network::Mainnet => "main".into(),
                 Network::Testnet => "test".into(),
             },
-            zebrad_version: version(self.info.kind).into(),
+            zebrad_version: version(self.kind()).into(),
             last_error: None,
             eos: None,
             updated_at: clock::now(),
@@ -305,7 +331,7 @@ impl HerdNode {
     }
 
     fn sample_message(&self, height: u64) -> String {
-        match self.info.kind {
+        match self.kind() {
             NodeKind::Zaino => format!(
                 "indexed block height={height} · serving lightwalletd gRPC on 127.0.0.1:8137"
             ),
@@ -327,7 +353,7 @@ impl HerdNode {
             timestamp: Some(clock::now_iso()),
             level: Some(level),
             spans: None,
-            target: Some(target(self.info.kind).into()),
+            target: Some(target(self.kind()).into()),
             message: message.to_owned(),
             dropped: None,
         };
@@ -359,7 +385,7 @@ impl HerdNode {
             status.pid = Some(pid);
             status.started_at = Some(clock::now());
         });
-        self.note(&format!("{} started (pid {pid})", program(self.info.kind)));
+        self.note(&format!("{} started (pid {pid})", program(self.kind())));
         super::sleep(1500).await;
         if self.generation.load(Ordering::Relaxed) == generation {
             self.status.update(|status| status.phase = Phase::Running);
@@ -394,7 +420,7 @@ impl HerdNode {
             self.stats.set(None);
             self.note(&format!(
                 "{} exited (exit code 0, Clean, stop requested)",
-                program(self.info.kind)
+                program(self.kind())
             ));
         }
     }
@@ -440,14 +466,14 @@ fn random_below(n: u32) -> u32 {
 fn find(node: &NodeId) -> Option<HerdNode> {
     HERD.with_borrow(|herd| {
         herd.iter()
-            .find(|candidate| &candidate.info.id == node)
+            .find(|candidate| &candidate.id() == node)
             .cloned()
     })
 }
 
-/// The extra nodes of `?herd`, none without it.
-pub fn extra_nodes() -> Vec<NodeInfo> {
-    HERD.with_borrow(|herd| herd.iter().map(|node| node.info.clone()).collect())
+/// The extra nodes, in the order they were added.
+pub fn infos() -> Vec<NodeInfo> {
+    HERD.with_borrow(|herd| herd.iter().map(|node| node.info.get_untracked()).collect())
 }
 
 /// Adds a node, stopped, as the add-node dialog does. Its simulation starts with it.
@@ -458,20 +484,19 @@ pub fn add_node(info: NodeInfo) {
     HERD.with_borrow_mut(|herd| herd.push(node));
 }
 
-/// Calls `handler` with every status change of `node`, starting with the current one.
-pub fn on_node_status(node: &NodeId, handler: impl Fn(Status) + 'static) {
-    if let Some(node) = find(node) {
-        let status = node.status;
-        Effect::new(move |_| handler(status.get()));
+/// Replaces a node's info, as `update_node` does.
+pub fn set_info(node: &NodeId, info: NodeInfo) {
+    if let Some(found) = find(node) {
+        found.info.set(info);
     }
 }
 
-/// Calls `handler` with every statistics change of `node`, starting with the current value.
-pub fn on_node_stats(node: &NodeId, handler: impl Fn(Option<NodeStats>) + 'static) {
-    if let Some(node) = find(node) {
-        let stats = node.stats;
-        Effect::new(move |_| handler(stats.get()));
-    }
+pub fn status(node: &NodeId) -> Option<Status> {
+    find(node).map(|node| node.status.get_untracked())
+}
+
+pub fn stats(node: &NodeId) -> Option<Option<NodeStats>> {
+    find(node).map(|node| node.stats.get_untracked())
 }
 
 /// Sends `node`'s log lines in batches, as the bridge does.
@@ -489,21 +514,92 @@ pub fn subscribe_node_logs(node: &NodeId, on_batch: impl Fn(Vec<LogLine>) + 'sta
     }
 }
 
-pub async fn start_node(node: &NodeId) {
-    if let Some(node) = find(node) {
-        node.start().await;
+pub async fn start_node(node: &NodeId) -> Option<()> {
+    find(node)?.start().await;
+    Some(())
+}
+
+pub async fn stop_node(node: &NodeId) -> Option<()> {
+    find(node)?.stop().await;
+    Some(())
+}
+
+pub async fn restart_node(node: &NodeId) -> Option<()> {
+    let node = find(node)?;
+    node.clone().stop().await;
+    node.start().await;
+    Some(())
+}
+
+/// A zebrad node's `zebrad.toml`: the minimal managed file for its network, ports and folder
+/// until it is saved.
+pub fn read_config(node: &NodeId) -> Result<ConfigDocument, String> {
+    let found = find(node).ok_or_else(|| format!("there is no node {node}"))?;
+    let info = found.info.get_untracked();
+    if info.kind != NodeKind::Zebrad {
+        return Err(format!("(mock) {} has no zebrad.toml", info.name));
+    }
+    if found.config.with_untracked(Option::is_none) {
+        found.config.set(Some(fresh_config(&info)));
+    }
+    Ok(found
+        .config
+        .get_untracked()
+        .unwrap_or_else(|| fresh_config(&info)))
+}
+
+fn fresh_config(info: &NodeInfo) -> ConfigDocument {
+    ConfigDocument {
+        text: minimal_config(info, &format!("{}/rpc", info.data_dir)),
+        token: format!("mock-{}-{}", info.id, js_sys::Date::now()),
+        path: format!("{}/zebrad.toml", info.data_dir),
     }
 }
 
-pub async fn stop_node(node: &NodeId) {
-    if let Some(node) = find(node) {
-        node.stop().await;
+/// Saves a zebrad node's `zebrad.toml` and restarts the node if it runs. A herd node accepts
+/// any text; only the main node simulates a rollback.
+pub async fn apply_config(
+    node: &NodeId,
+    text: String,
+    token: String,
+) -> Result<ApplyOutcome, String> {
+    let current = read_config(node)?;
+    if token != current.token {
+        return Err(format!(
+            "{} changed on disk since it was read",
+            current.path
+        ));
     }
+    let found = find(node).ok_or_else(|| format!("there is no node {node}"))?;
+    found.config.set(Some(ConfigDocument {
+        text,
+        token: format!("mock-{node}-{}", js_sys::Date::now()),
+        path: current.path,
+    }));
+    if matches!(found.phase(), Phase::Starting | Phase::Running) {
+        found.clone().stop().await;
+        found.start().await;
+    }
+    Ok(ApplyOutcome::Applied)
 }
 
-pub async fn restart_node(node: &NodeId) {
-    if let Some(node) = find(node) {
-        node.clone().stop().await;
-        node.start().await;
+/// Replaces a zebrad node's `zebrad.toml` with the minimal file, while it is stopped.
+pub fn reset_config(node: &NodeId) -> Result<ConfigDocument, String> {
+    let found = find(node).ok_or_else(|| format!("there is no node {node}"))?;
+    if !format::data_change_allowed(&found.phase()) {
+        return Err("stop zebrad first".into());
     }
+    let info = found.info.get_untracked();
+    let fresh = fresh_config(&info);
+    found.config.set(Some(fresh.clone()));
+    Ok(fresh)
+}
+
+/// Deletes a node's chain state, while it is stopped: the bytes freed.
+pub fn delete_data(node: &NodeId) -> Result<u64, String> {
+    let found = find(node).ok_or_else(|| format!("there is no node {node}"))?;
+    if !format::data_change_allowed(&found.phase()) {
+        return Err("stop zebrad first".into());
+    }
+    Ok(found.height.swap(0, Ordering::Relaxed) * 50_000)
 }

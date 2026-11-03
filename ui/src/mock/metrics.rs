@@ -153,12 +153,6 @@ pub(super) fn snapshot(input: &MetricsInput<'_>) -> MetricsSnapshot {
     }
 }
 
-/// Calls `handler` with every metrics snapshot, starting with the current one.
-pub fn on_metrics(handler: impl Fn(Option<MetricsSnapshot>) + 'static) {
-    let metrics = mock().metrics;
-    Effect::new(move |_| handler(metrics.get()));
-}
-
 pub async fn get_metrics() -> Option<MetricsSnapshot> {
     super::sleep(50).await;
     mock().metrics.get_untracked()

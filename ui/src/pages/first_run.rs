@@ -1,6 +1,7 @@
 //! The first-run flow: a modal wizard shown while `settings.first_run_done` is false. It cannot
-//! be dismissed; Finish records completion (`complete_first_run`) and starts zebrad, which the
-//! backend does not start at launch until then.
+//! be dismissed; Finish records completion (`complete_first_run`) and starts the first node,
+//! which the backend does not start at launch until then. The network and the data folder
+//! chosen here are the first node's (`update_node`, `choose_data_dir`).
 //!
 //! Steps: welcome, data location and network, alpha.4 leftovers (only when some were found:
 //! move the old chain state here, delete it, or leave it), update mode, and notes (firewall
@@ -9,7 +10,7 @@
 //! error line and the Back, Next and Finish footer, which saves what a step chose.
 
 use launcher_types::{
-    FirstRunInfo, ImportOutcome, Network, OpenTarget, Phase, Settings, UpdateMode,
+    FirstRunInfo, ImportOutcome, Network, NodeUpdate, OpenTarget, Phase, Settings, UpdateMode,
 };
 use leptos::{prelude::*, task::spawn_local};
 
@@ -51,11 +52,29 @@ fn steps(has_legacy: bool) -> Vec<Step> {
     steps
 }
 
-/// True when the backend reports zebrad starting or running.
-async fn already_running() -> bool {
-    api::get_status()
+/// True when the backend reports the first node starting or running.
+async fn already_running(state: AppState) -> bool {
+    let node = state.nodes.with_untracked(|nodes| nodes[0].id());
+    api::get_status(&node)
         .await
         .is_ok_and(|status| matches!(status.phase, Phase::Starting | Phase::Running))
+}
+
+/// Gives the first node `network`. While the first run is not done, the backend gives the
+/// node the network's id too, so the list is read again.
+async fn save_network(state: AppState, network: Network) -> Result<(), String> {
+    let node = state.nodes.with_untracked(|nodes| nodes[0].id());
+    let update = NodeUpdate {
+        network: Some(network),
+        ..NodeUpdate::default()
+    };
+    api::update_node(&node, update)
+        .await
+        .map_err(|error| format!("Could not save the network: {error}"))?;
+    if let Ok(list) = api::list_nodes().await {
+        state.apply_nodes(list);
+    }
+    Ok(())
 }
 
 /// Saves a change to the current settings and publishes what was stored.
@@ -122,15 +141,25 @@ impl Wizard {
         }
     }
 
-    /// Asks the backend what is on this computer.
+    /// Asks the backend what is on this computer. A data folder the first node has that is not
+    /// the default was chosen in an earlier, unfinished run of the wizard: it is shown as the
+    /// choice, with its free space read again.
     fn load_info(self) {
         self.info.set(None);
         spawn_local(async move {
-            self.info.set(Some(
-                api::get_first_run_info()
-                    .await
-                    .map_err(|error| format!("Could not look at this computer: {error}")),
-            ));
+            let info = api::get_first_run_info()
+                .await
+                .map_err(|error| format!("Could not look at this computer: {error}"));
+            if let Ok(info) = &info {
+                let dir = self.state.nodes.with_untracked(|nodes| {
+                    nodes[0].info.with_untracked(|node| node.data_dir.clone())
+                });
+                if dir != info.default_data_dir && self.chosen.with_untracked(Option::is_none) {
+                    self.chosen.set(Some((dir.clone(), None)));
+                    self.refresh_stored_dir(dir);
+                }
+            }
+            self.info.set(Some(info));
         });
     }
 
@@ -204,16 +233,19 @@ impl Wizard {
                 },
             };
             if let Some(path) = path {
-                match api::choose_data_dir(path).await {
+                let node = self.state.nodes.with_untracked(|nodes| nodes[0]);
+                match api::choose_data_dir(&node.id(), path).await {
                     Ok(choice) => {
+                        let default = self.info.with_untracked(|info| match info {
+                            Some(Ok(info)) => Some(info.default_data_dir.clone()),
+                            _ => None,
+                        });
+                        let dir = choice.node.data_dir.clone();
                         self.chosen.set(
-                            choice
-                                .settings
-                                .data_dir
-                                .clone()
-                                .map(|dir| (dir, choice.free_bytes)),
+                            (default.as_deref() != Some(dir.as_str()))
+                                .then_some((dir, choice.free_bytes)),
                         );
-                        self.state.settings.set(Some(choice.settings));
+                        node.info.set(choice.node);
                     }
                     Err(failure) => {
                         self.error
@@ -261,7 +293,7 @@ impl Wizard {
     /// Opens the launcher's log folder.
     fn open_logs(self) {
         spawn_local(async move {
-            if let Err(failure) = api::open_path(OpenTarget::LogDir).await {
+            if let Err(failure) = api::open_path(OpenTarget::LogDir, None).await {
                 self.error
                     .set(Some(format!("Could not open the log folder: {failure}")));
             }
@@ -284,23 +316,19 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
         ..
     } = wizard;
 
-    // Open once the settings say the flow is due, starting from the stored choices.
+    // Open once the settings say the flow is due and the backend's nodes are known, starting
+    // from the first node's network and folder.
     Effect::new(move |_| {
         let due = state
             .settings
-            .with(|settings| settings.as_ref().filter(|s| !s.first_run_done).cloned());
-        if let Some(settings) = due
-            && !open.get_untracked()
-        {
-            wizard.network.set(settings.network);
-            wizard
-                .chosen
-                .set(settings.data_dir.clone().map(|dir| (dir, None)));
+            .with(|settings| settings.as_ref().is_some_and(|s| !s.first_run_done));
+        if due && state.nodes_loaded.get() && !open.get_untracked() {
+            let network = state
+                .nodes
+                .with_untracked(|nodes| nodes[0].info.with_untracked(|info| info.network));
+            wizard.network.set(network);
             open.set(true);
             wizard.load_info();
-            if let Some(dir) = settings.data_dir {
-                wizard.refresh_stored_dir(dir);
-            }
         }
     });
 
@@ -331,10 +359,7 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
         error.set(None);
         spawn_local(async move {
             let saved = match current {
-                Step::Data => {
-                    let chosen_network = wizard.network.get_untracked();
-                    save_settings(state, |s| s.network = chosen_network).await
-                }
+                Step::Data => save_network(state, wizard.network.get_untracked()).await,
                 Step::Updates => {
                     let mode = wizard.update_mode.get_untracked();
                     save_settings(state, |s| s.update_mode = mode).await
@@ -360,11 +385,12 @@ pub fn FirstRun(open: RwSignal<bool>) -> impl IntoView {
                             settings.first_run_done = true;
                         }
                     });
-                    match api::start_zebrad().await {
+                    let node = state.nodes.with_untracked(|nodes| nodes[0].id());
+                    match api::start_node(&node).await {
                         Ok(()) => open.set(false),
                         // Nothing starts zebrad before the first run is done, but if it runs
                         // anyway, the start failing is not a problem: the node is up.
-                        Err(_) if already_running().await => open.set(false),
+                        Err(_) if already_running(state).await => open.set(false),
                         Err(failure) => start_error.set(Some(failure.to_string())),
                     }
                 }

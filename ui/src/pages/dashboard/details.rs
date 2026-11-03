@@ -302,8 +302,9 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
     let state = dash.state;
     let open_error = Transient::<String>::new();
     let open_data_dir = move |_| {
+        let node = state.node_untracked().id();
         spawn_local(async move {
-            if let Err(error) = api::open_path(OpenTarget::DataDir).await {
+            if let Err(error) = api::open_path(OpenTarget::DataDir, Some(&node)).await {
                 open_error.hold(format!("Could not open the data folder: {error}"));
             }
         });
@@ -394,11 +395,9 @@ pub(super) fn Details(dash: Dash) -> impl IntoView {
                     (move || eos_text(&eos, &date, state.now.get())).into_any(),
                 ));
             }
-            let data_dir = state.settings.with(|settings| {
-                settings
-                    .as_ref()
-                    .map(|settings| data_folder_text(settings.data_dir.as_deref()))
-            });
+            let data_dir = (state.nodes_loaded.get()
+                && state.default_data_dir.with(Option::is_some))
+            .then(|| data_folder_text(state.chosen_data_dir(state.node()).as_deref()));
             if let Some(folder) = data_dir {
                 rows.push((
                     "Data folder",
