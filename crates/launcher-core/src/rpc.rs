@@ -289,15 +289,9 @@ impl RpcClient {
     /// Reads the cookie once and returns a session that reuses it, for a batch
     /// of calls.
     pub async fn session(&self) -> Result<RpcSession<'_>, RpcError> {
-        let cookie = tokio::fs::read_to_string(&self.cookie_file)
-            .await
-            .map_err(|source| RpcError::Cookie {
-                path: self.cookie_file.clone(),
-                source,
-            })?;
         Ok(RpcSession {
             client: self,
-            authorization: format!("Basic {}", STANDARD.encode(cookie.trim())),
+            authorization: read_authorization(&self.cookie_file).await?,
         })
     }
 
@@ -387,22 +381,49 @@ impl RpcSession<'_> {
         method: &str,
         params: Value,
     ) -> Result<T, RpcError> {
-        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-        let response = self
-            .client
-            .http
-            .post(&self.client.url)
-            .header(reqwest::header::AUTHORIZATION, &self.authorization)
-            .json(&body)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(RpcError::Status(status.as_u16()));
-        }
-        let bytes = response.bytes().await?;
-        decode(&bytes)
+        exchange(
+            &self.client.http,
+            &self.client.url,
+            &self.authorization,
+            method,
+            params,
+        )
+        .await
     }
+}
+
+/// zebrad's cookie file as the `Authorization` header value.
+async fn read_authorization(cookie_file: &Path) -> Result<String, RpcError> {
+    let cookie = tokio::fs::read_to_string(cookie_file)
+        .await
+        .map_err(|source| RpcError::Cookie {
+            path: cookie_file.to_path_buf(),
+            source,
+        })?;
+    Ok(format!("Basic {}", STANDARD.encode(cookie.trim())))
+}
+
+/// One request and its decoded result.
+async fn exchange<T: DeserializeOwned>(
+    http: &reqwest::Client,
+    url: &str,
+    authorization: &str,
+    method: &str,
+    params: Value,
+) -> Result<T, RpcError> {
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let response = http
+        .post(url)
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .json(&body)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(RpcError::Status(status.as_u16()));
+    }
+    let bytes = response.bytes().await?;
+    decode(&bytes)
 }
 
 /// Decodes a JSON-RPC response body.
