@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Install smoke test for a Linux bundle, run by bundle.yml in the ubuntu:22.04
-# container: starts the launcher under Xvfb with a fresh home directory, lets
-# it run for a while, then checks that it was still running when stopped, that
-# its log says the bundled zebrad started, and that no zebrad is left over.
+# container: starts the launcher under Xvfb with a fresh home directory whose
+# first run is complete, lets it run for a while, then checks that it was still
+# running when stopped, that its log says the bundled zebrad started, and that
+# no zebrad is left over.
 #
 #   --deb      runs the installed /usr/bin/zeal-app (install the .deb first)
 #   --appimage PATH runs the AppImage (set APPIMAGE_EXTRACT_AND_RUN=1 where
@@ -57,6 +58,13 @@ export XDG_RUNTIME_DIR="${home}/runtime"
 mkdir -p "${XDG_DATA_HOME}" "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}" "${XDG_STATE_HOME}"
 mkdir -p "${XDG_RUNTIME_DIR}"
 chmod 0700 "${XDG_RUNTIME_DIR}"
+
+# The state after the first-run wizard. A fresh install starts no zebrad until
+# the wizard is finished; from then on it starts the bundled zebrad at launch,
+# which is what this test checks. The other settings take their defaults.
+mkdir -p "${XDG_CONFIG_HOME}/${IDENTIFIER}"
+printf '{"schema_version": 2, "first_run_done": true}\n' \
+    > "${XDG_CONFIG_HOME}/${IDENTIFIER}/launcher.json"
 
 # WebKitGTK in a container: no GPU, and its bubblewrap sandbox needs user
 # namespaces the container does not grant. Smoke test only; never set for users.
