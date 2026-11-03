@@ -126,3 +126,70 @@ fn metrics_port_in_use_is_a_deterministic_failure() {
     );
     assert_eq!(classify_exit(None, cause(&events)), ExitClass::PortInUse);
 }
+
+#[test]
+fn the_light_wallet_endpoint_reports_its_address() {
+    let text = include_str!("fixtures/zebrad-7.0.0-lightwalletd-start-shutdown.stdout.log");
+    let lines = parse_all(LogStream::Stdout, text);
+    let opened = lines
+        .iter()
+        .find(|line| line.message.starts_with("Opened lightwalletd"))
+        .expect("the endpoint line");
+    assert_eq!(opened.spans.as_deref(), Some("init"));
+    assert_eq!(
+        opened.target.as_deref(),
+        Some("zebra_rpc::lightwalletd::server")
+    );
+
+    let events = detect_all(&lines);
+    let endpoint: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event, LogEvent::LightwalletdOpened { .. }))
+        .collect();
+    assert_eq!(
+        endpoint,
+        [&LogEvent::LightwalletdOpened {
+            addr: "127.0.0.1:39067".parse().unwrap()
+        }]
+    );
+    // The endpoint opens after the RPC endpoint, and the run ends cleanly.
+    let rpc = events
+        .iter()
+        .position(|event| matches!(event, LogEvent::RpcOpened { .. }))
+        .expect("RPC opened");
+    let lwd = events
+        .iter()
+        .position(|event| matches!(event, LogEvent::LightwalletdOpened { .. }))
+        .expect("endpoint opened");
+    assert!(rpc < lwd, "{events:#?}");
+    assert_eq!(classify_exit(Some(0), cause(&events)), ExitClass::Clean);
+}
+
+#[test]
+fn a_taken_light_wallet_port_is_a_deterministic_failure() {
+    // zebrad returns the bind error from its start command: an ERROR line on stdout and
+    // exit code 1, not a panic.
+    let lines = parse_all(
+        LogStream::Stdout,
+        include_str!("fixtures/zebrad-7.0.0-lightwalletd-port-in-use.stdout.log"),
+    );
+    let events = detect_all(&lines);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, LogEvent::LightwalletdOpened { .. })),
+        "{events:#?}"
+    );
+    let in_use: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            LogEvent::PortInUse { message } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        in_use,
+        ["lightwalletd gRPC endpoint at 127.0.0.1:39067: Address already in use (os error 98)"]
+    );
+    assert_eq!(classify_exit(Some(1), cause(&events)), ExitClass::PortInUse);
+}

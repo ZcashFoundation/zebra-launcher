@@ -491,6 +491,7 @@ impl Actor {
             s.started_at = Some(SystemTime::now());
             s.rpc_addr = None;
             s.metrics_addr = None;
+            s.lightwalletd_addr = None;
         });
         self.note(format!("zebrad started (pid {pid})"));
     }
@@ -736,6 +737,7 @@ impl Actor {
             s.started_at = None;
             s.rpc_addr = None;
             s.metrics_addr = None;
+            s.lightwalletd_addr = None;
             s.last_exit = Some(info);
             if let Some(report) = last_stop {
                 s.last_stop = Some(report);
@@ -878,6 +880,10 @@ impl Actor {
                 RunState::Running | RunState::Exited(_) => {}
             },
             LogEvent::RpcOpened { addr } => self.status.send_modify(|s| s.rpc_addr = Some(addr)),
+            LogEvent::LightwalletdOpened { addr } => {
+                self.status
+                    .send_modify(|s| s.lightwalletd_addr = Some(addr));
+            }
             LogEvent::MetricsOpened { addr } => {
                 self.status.send_modify(|s| s.metrics_addr = Some(addr));
             }

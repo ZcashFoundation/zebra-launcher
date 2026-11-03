@@ -357,3 +357,121 @@ async fn second_instance_on_the_same_state_fails_with_db_locked() {
         .await
         .expect("shutdown first");
 }
+
+/// Adds zebrad's light wallet endpoint at `addr` to the instance's config, as the launcher
+/// writes it while a light client server is on.
+fn add_light_endpoint(node: &Instance, addr: SocketAddr) {
+    let path = &node.config.command.config;
+    let text = std::fs::read_to_string(path).expect("read zebrad.toml");
+    let text = text.replacen(
+        "[rpc]\n",
+        &format!("[rpc]\nlightwalletd_listen_addr = \"{addr}\"\n"),
+        1,
+    );
+    std::fs::write(path, text).expect("write zebrad.toml");
+}
+
+/// What the endpoint answers to an HTTP/1.1 gRPC request, as a browser would send one to a
+/// plaintext port, read until it closes or for 5 s.
+async fn http1_answer(addr: SocketAddr) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = within_limit(CMD_LIMIT, "connect", tokio::net::TcpStream::connect(addr))
+        .await
+        .expect("connect to the endpoint");
+    stream
+        .write_all(
+            b"POST /cash.z.wallet.sdk.rpc.CompactTxStreamer/GetLightdInfo HTTP/1.1\r\n\
+              Host: 127.0.0.1\r\ncontent-type: application/grpc\r\nte: trailers\r\n\
+              content-length: 5\r\n\r\n\0\0\0\0\0",
+        )
+        .await
+        .expect("send");
+    let mut answer = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut answer)).await;
+    answer
+}
+
+#[ignore = "needs ZEBRAD_BIN; run with -- --include-ignored"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_light_wallet_endpoint_opens_on_loopback_and_refuses_http1() {
+    let Some(zebrad) = zebrad_bin() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let node = instance(&zebrad, &dir.path().join("node"), &dir.path().join("state"));
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, free_port()));
+    add_light_endpoint(&node, addr);
+
+    let handle = start_running(node.config.clone()).await;
+    let status = wait_status(&handle, START_LIMIT, "endpoint open", |s| {
+        s.lightwalletd_addr.is_some()
+    })
+    .await;
+    assert_eq!(status.lightwalletd_addr, Some(addr));
+
+    // zebrad's server speaks HTTP/2 with prior knowledge only, so a browser's HTTP/1.1
+    // request reaches no method.
+    let answer = http1_answer(addr).await;
+    let text = String::from_utf8_lossy(&answer);
+    eprintln!("HTTP/1.1 answer: {} bytes", answer.len());
+    assert!(!text.starts_with("HTTP/1"), "{text:?}");
+    assert!(!text.contains("grpc-status"), "{text:?}");
+
+    within_limit(STOP_LIMIT, "stop", handle.stop())
+        .await
+        .expect("stop");
+    assert_eq!(handle.status().lightwalletd_addr, None);
+    assert!(
+        tokio::net::TcpStream::connect(addr).await.is_err(),
+        "the endpoint closes with zebrad"
+    );
+    within_limit(CMD_LIMIT, "shutdown", handle.shutdown())
+        .await
+        .expect("shutdown");
+}
+
+#[ignore = "needs ZEBRAD_BIN; run with -- --include-ignored"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_taken_light_wallet_port_fails_as_port_in_use() {
+    let Some(zebrad) = zebrad_bin() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let node = instance(&zebrad, &dir.path().join("node"), &dir.path().join("state"));
+    let taken = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind");
+    add_light_endpoint(&node, taken.local_addr().expect("addr"));
+
+    let handle = supervisor::spawn(node.config.clone()).expect("spawn supervisor");
+    // zebrad logs `Starting zebrad` before it opens the endpoint, so the start may succeed.
+    match within_limit(START_LIMIT, "start", handle.start()).await {
+        Ok(()) | Err(SupervisorError::ExitedDuringStart(_)) => {}
+        Err(err) => panic!("start: {err}"),
+    }
+    let status = wait_status(&handle, START_LIMIT, "failed", |s| {
+        matches!(s.phase, Phase::Failed { .. })
+    })
+    .await;
+    let history = within_limit(CMD_LIMIT, "history", handle.history_since(0))
+        .await
+        .expect("history");
+    if status.phase
+        != (Phase::Failed {
+            class: ExitClass::PortInUse,
+        })
+    {
+        dump(&history);
+    }
+    assert_eq!(
+        status.phase,
+        Phase::Failed {
+            class: ExitClass::PortInUse
+        }
+    );
+    let exit = status.last_exit.expect("exit recorded");
+    eprintln!("zebrad with a taken endpoint port: {exit:?}");
+    assert_eq!(exit.code, Some(1), "an error, not a panic: {exit:?}");
+    within_limit(CMD_LIMIT, "shutdown", handle.shutdown())
+        .await
+        .expect("shutdown");
+}

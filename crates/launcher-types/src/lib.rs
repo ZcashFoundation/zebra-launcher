@@ -211,6 +211,8 @@ pub enum LogEvent {
     RpcCookieWritten,
     /// The JSON-RPC listener is bound.
     RpcOpened { addr: SocketAddr },
+    /// The light wallet listener (`rpc.lightwalletd_listen_addr`) is bound.
+    LightwalletdOpened { addr: SocketAddr },
     /// `Starting zebrad`: the configuration loaded and the components initialised.
     StartingZebrad,
     /// A shutdown was requested; `reason` is `SIGTERM`, `SIGINT`, `Ctrl-C`, or similar.
@@ -355,6 +357,10 @@ pub struct Status {
     pub rpc_addr: Option<SocketAddr>,
     /// The metrics address zebrad reported as opened in this run.
     pub metrics_addr: Option<SocketAddr>,
+    /// The light wallet endpoint zebrad reported as opened in this run. A
+    /// status from a backend without the field reads as none.
+    #[serde(default)]
+    pub lightwalletd_addr: Option<SocketAddr>,
     /// How the previous run ended.
     pub last_exit: Option<ExitInfo>,
     /// A zebrad from an earlier launcher run that is still alive, if detected.
@@ -407,6 +413,7 @@ impl Default for Status {
             started_at: None,
             rpc_addr: None,
             metrics_addr: None,
+            lightwalletd_addr: None,
             last_exit: None,
             stale: None,
             stop_is_graceful: true,
