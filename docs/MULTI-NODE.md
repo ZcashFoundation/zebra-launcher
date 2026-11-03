@@ -276,7 +276,8 @@ one log subscription per node it shows and folds each node's log analysis separa
 
 - **One node looks like today.** With a single node there is no overview to get through:
   the window opens on that node's dashboard. The way to add another is one click away, not
-  in the way.
+  in the way: an "Add a node…" button in a Nodes section of Settings, and the same item in
+  the tray menu, open the add-node dialog; once a second node exists the sidebar takes over.
 - **Every node is recognisable at a glance.** A node keeps a colour and a kind badge
   everywhere it appears: overview, sidebar, tray, log lines in a combined view.
 - **Problems are explained before they happen.** Port, folder and disk conflicts show in
@@ -369,7 +370,7 @@ A dialog in three steps, each validated as it is filled in:
 ### First run
 
 Unchanged for one zebrad node: the steps end by creating `zebrad-mainnet` (or Testnet).
-The last step mentions that other nodes can be added later from the sidebar.
+The last step mentions that other nodes can be added later from Settings → Nodes.
 
 ## Phases
 
@@ -378,7 +379,9 @@ The last step mentions that other nodes can be added later from the sidebar.
    node until phase 2 lands, so nothing changes for users in between. The mock's `?herd`
    flag adds four nodes. Screenshotted for review.
 2. **Several zebrad nodes.** The registry, per-node runtimes, port assignment, settings v3
-   and its migration, node-scoped commands and events, the tray per node, Node settings.
+   and its migration, node-scoped commands and events, the tray per node, Node settings, and
+   the single-node entry point to the add-node dialog (Settings → Nodes and the tray), which
+   phase 1 leaves out because adding a node needs this backend.
 3. **Zakura**, as a variant of the zebrad adapter: its binary, `zakura.toml`, pruning and
    start from a snapshot.
 4. **The generic adapter** and fake-zebrad's mode that behaves like a zcashd-compatible
