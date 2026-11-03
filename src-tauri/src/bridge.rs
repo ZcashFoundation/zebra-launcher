@@ -1,9 +1,11 @@
 //! Forwards launcher-core's channels to the webview.
 //!
-//! Status, node statistics and metrics change rarely, so every change is
-//! emitted as a Tauri event ([`events::STATUS`], [`events::NODE_STATS`],
-//! [`events::NODE_DETAILS`], [`events::METRICS`]). Logs can arrive by the thousand per second, so they
-//! go through a `tauri::ipc::Channel` in batches.
+//! Status, node statistics, metrics and resources change rarely, so every
+//! change is emitted as a Tauri event ([`events::STATUS`],
+//! [`events::NODE_STATS`], [`events::NODE_DETAILS`], [`events::METRICS`],
+//! [`events::NODE_RESOURCES`], [`events::MACHINE_RESOURCES`]). Logs can arrive
+//! by the thousand per second, so they go through a `tauri::ipc::Channel` in
+//! batches.
 
 use std::{
     sync::{
@@ -14,7 +16,10 @@ use std::{
 };
 
 use launcher_core::supervisor::LogSubscription;
-use launcher_types::{LogLine, MetricsSnapshot, NodeDetails, NodeStats, Status, events};
+use launcher_types::{
+    LogLine, MachineResources, MetricsSnapshot, NodeDetails, NodeResources, NodeStats, Status,
+    events,
+};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, ipc::Channel};
 use tokio::{
@@ -51,6 +56,24 @@ pub fn forward_metrics<R: Runtime>(
     rx: watch::Receiver<Option<MetricsSnapshot>>,
 ) {
     tauri::async_runtime::spawn(forward_watch(app, events::METRICS, rx));
+}
+
+/// Emits [`events::NODE_RESOURCES`] now and on every change (a sample every
+/// 5 s while zebrad has a run), until the sampler ends.
+pub fn forward_node_resources<R: Runtime>(
+    app: AppHandle<R>,
+    rx: watch::Receiver<Option<NodeResources>>,
+) {
+    tauri::async_runtime::spawn(forward_watch(app, events::NODE_RESOURCES, rx));
+}
+
+/// Emits [`events::MACHINE_RESOURCES`] now and on every change (a sample every
+/// 5 s), until the sampler ends.
+pub fn forward_machine_resources<R: Runtime>(
+    app: AppHandle<R>,
+    rx: watch::Receiver<Option<MachineResources>>,
+) {
+    tauri::async_runtime::spawn(forward_watch(app, events::MACHINE_RESOURCES, rx));
 }
 
 async fn forward_watch<R: Runtime, T: Clone + Serialize>(

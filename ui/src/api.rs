@@ -234,8 +234,8 @@ pub async fn on_metrics(
 }
 
 /// Calls `on_resources` with every `node_resources` event: what the node's processes use, read
-/// every 5 s from the spawn until the run ends, `None` while the node has no run. The backend
-/// has no resource sampler yet, so under Tauri nothing arrives.
+/// every 5 s from the spawn until the run ends, `None` while the node has no run and on a
+/// platform the backend does not measure yet.
 pub async fn on_node_resources(
     on_resources: impl Fn(Option<NodeResources>) + 'static,
     on_error: impl Fn(String) + 'static,
@@ -246,12 +246,13 @@ pub async fn on_node_resources(
             on_resources,
             on_error,
         ));
+        return Ok(());
     }
-    Ok(())
+    Ok(tauri::listen(events::NODE_RESOURCES, on_resources, on_error).await?)
 }
 
 /// Calls `on_machine` with every `machine_resources` event: the computer's CPU and memory, read
-/// every 5 s. Nothing arrives under Tauri yet, like [`on_node_resources`].
+/// every 5 s.
 pub async fn on_machine_resources(
     on_machine: impl Fn(Option<MachineResources>) + 'static,
     on_error: impl Fn(String) + 'static,
@@ -262,8 +263,9 @@ pub async fn on_machine_resources(
             on_machine,
             on_error,
         ));
+        return Ok(());
     }
-    Ok(())
+    Ok(tauri::listen(events::MACHINE_RESOURCES, on_machine, on_error).await?)
 }
 
 /// Streams log batches to `on_batch` for the rest of the page's life. When the backend fell
@@ -382,22 +384,20 @@ pub async fn get_metrics() -> ApiResult<Option<MetricsSnapshot>> {
     Ok(tauri::invoke0("get_metrics").await?)
 }
 
-/// The newest sample of the node's processes, `None` while it has no run (and under Tauri until
-/// the backend samples them).
+/// The newest sample of the node's processes, `None` while it has no run.
 pub async fn get_node_resources() -> ApiResult<Option<NodeResources>> {
     if !is_tauri() {
         return Ok(wire(mock::get_node_resources().await)?);
     }
-    Ok(None)
+    Ok(tauri::invoke0("get_node_resources").await?)
 }
 
-/// The newest sample of the computer's CPU and memory (`None` under Tauri until the backend
-/// samples them).
+/// The newest sample of the computer's CPU and memory, `None` before the first one.
 pub async fn get_machine_resources() -> ApiResult<Option<MachineResources>> {
     if !is_tauri() {
         return Ok(wire(mock::get_machine_resources().await)?);
     }
-    Ok(None)
+    Ok(tauri::invoke0("get_machine_resources").await?)
 }
 
 /// What the first-run flow shows: the default data directory, its free space and any alpha.4

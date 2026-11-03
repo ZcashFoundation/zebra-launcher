@@ -3,9 +3,9 @@
 //! Startup (in [`run`]'s setup hook): resolve the per-user directories,
 //! start the launcher log, roll back an interrupted config change, load the
 //! settings, bring the managed `zebrad.toml` keys up to date, start the
-//! supervisor, the RPC monitor and the metrics poller, forward their state to
-//! the UI, and start zebrad if the settings say so. Quitting stops zebrad
-//! first; see [`exit`].
+//! supervisor, the RPC monitor, the metrics poller and the resource samplers,
+//! forward their state to the UI, and start zebrad if the settings say so.
+//! Quitting stops zebrad first; see [`exit`].
 
 pub mod app_state;
 pub mod bridge;
@@ -26,6 +26,7 @@ use launcher_core::{
     monitor::{self, Monitor, MonitorOutput},
     pidfile::StaleProcess,
     process::ZebradCommand,
+    resources::{MachineSampler, ResourceSampler},
     settings::SettingsStore,
     supervisor::{self, SupervisorConfig, SupervisorError},
 };
@@ -33,7 +34,7 @@ use launcher_types::{StaleProcessInfo, events};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
-use crate::app_state::{AppState, managed_keys};
+use crate::app_state::{AppState, ResourceWatches, managed_keys};
 
 /// Set to `1` to run zebrad with `--shutdown-on-stdin-close`, for testing
 /// with a zebrad that has the upstream change.
@@ -80,6 +81,8 @@ pub fn run() {
             commands::get_node_stats,
             commands::get_node_details,
             commands::get_metrics,
+            commands::get_node_resources,
+            commands::get_machine_resources,
             commands::open_path,
             commands::get_first_run_info,
             commands::pick_data_dir,
@@ -140,6 +143,8 @@ fn setup(app: &AppHandle) {
             bridge::forward_node_stats(app.clone(), state.node_stats.clone());
             bridge::forward_node_details(app.clone(), state.node_details.clone());
             bridge::forward_metrics(app.clone(), state.metrics.clone());
+            bridge::forward_node_resources(app.clone(), state.node_resources.clone());
+            bridge::forward_machine_resources(app.clone(), state.machine.clone());
             tray::install(app, &state);
             if plan.start_now {
                 tauri::async_runtime::spawn(start_in_background(app.clone(), state));
@@ -264,8 +269,12 @@ async fn start(app: &AppHandle) -> Result<AppState, StartupError> {
         monitor::DEFAULT_INTERVAL,
     );
     let metrics = MetricsPoller::spawn(supervisor.watch_status());
+    let resources = ResourceWatches {
+        node: ResourceSampler::spawn(supervisor.watch_probe()),
+        machine: MachineSampler::spawn(),
+    };
     Ok(AppState::new(
-        paths, supervisor, settings, stats, details, metrics,
+        paths, supervisor, settings, stats, details, metrics, resources,
     ))
 }
 

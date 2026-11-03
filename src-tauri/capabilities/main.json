@@ -23,6 +23,8 @@
     "allow-get-node-stats",
     "allow-get-node-details",
     "allow-get-metrics",
+    "allow-get-node-resources",
+    "allow-get-machine-resources",
     "allow-open-path",
     "allow-get-first-run-info",
     "allow-pick-data-dir",
