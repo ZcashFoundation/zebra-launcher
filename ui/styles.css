@@ -59,6 +59,16 @@
   --status-critical: #d03b3b;
   --grid: #333333;
   --axis: #4a4a4a;
+  /* The value pools' colours, identities wherever a pool is drawn (the Explorer), in the stack
+     order: public first, Ironwood beside Orchard, the lockbox last. They pass the palette check
+     against --panel in both sets; Sapling and Lockbox are under 3:1 in the light set, so pool
+     marks always carry a label or a legend. */
+  --pool-transparent: #d95926;
+  --pool-sprout: #9085e9;
+  --pool-sapling: #199e70;
+  --pool-orchard: #3987e5;
+  --pool-ironwood: #008300;
+  --pool-lockbox: #d55181;
   /* Sizes that Rust reads back (ui/src/pages/configure.rs, ui/src/components/tooltip.rs), so
      a change here reaches them: the scrolling page's padding, which the Configure page's sticky
      panes are inset by; the gap above the Configure footer; the gap between a help icon and
@@ -106,6 +116,12 @@
   --series-track: #d6e4f7;
   --grid: #e1e0d9;
   --axis: #c3c2b7;
+  --pool-transparent: #eb6834;
+  --pool-sprout: #6250d6;
+  --pool-sapling: #1baf7a;
+  --pool-orchard: #2a78d6;
+  --pool-ironwood: #008300;
+  --pool-lockbox: #e87ba4;
   color-scheme: light;
 }
 
