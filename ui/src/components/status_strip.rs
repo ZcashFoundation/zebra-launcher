@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use launcher_types::{NodeStats, Phase, Status};
+use launcher_types::{NodeKind, NodeStats, Phase, Status};
 use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
@@ -11,6 +11,7 @@ use crate::{
         self, controls, exit_class_text, is_synced, percent, phase_class, phase_label,
         sync_percent, thousands,
     },
+    pages::docs::DocsSection,
 };
 
 /// Extra words for the badge: the restart countdown or the failure reason.
@@ -149,7 +150,34 @@ pub fn StatusStrip() -> impl IntoView {
                                 .with(|info| info.kind.program().unwrap_or("version"))
                         }}
                     </dt>
-                    <dd>{stat(|s| s.zebrad_version.clone())}</dd>
+                    <dd>
+                        {move || {
+                            let node = state.node();
+                            let zebra = node.info.with(|info| info.kind == NodeKind::Zebrad);
+                            let version = node.stats.with(|stats| {
+                                stats.as_ref().map(|stats| stats.zebrad_version.clone())
+                            });
+                            match version {
+                                Some(version) if zebra => {
+                                    let label = format!("Read zebrad {version} release notes");
+                                    view! {
+                                        <button
+                                            type="button"
+                                            class="link docs-version-link"
+                                            aria-label=label
+                                            title="Read this release's notes"
+                                            on:click=move |_| state.open_docs(DocsSection::Changes)
+                                        >
+                                            {version}
+                                        </button>
+                                    }
+                                    .into_any()
+                                }
+                                Some(version) => view! { {version} }.into_any(),
+                                None => view! { "—" }.into_any(),
+                            }
+                        }}
+                    </dd>
                 </div>
             </dl>
             <div class="controls">

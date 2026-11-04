@@ -152,7 +152,7 @@ impl NodeSpec {
             own_folder: (self.layout == NodeLayout::Folder)
                 .then(|| self.paths(launcher).data_dir().display().to_string()),
             ports: self.ports.clone(),
-            program: self.program.clone(),
+            program: self.program,
             autostart: self.autostart,
             stop_grace_secs: self.stop_grace_secs,
         }
@@ -220,6 +220,9 @@ pub enum NodeError {
     /// The kind cannot be added in this release ([`NodeKind::addable`]).
     #[error("{0} nodes come in a later release")]
     KindNotAddable(NodeKind),
+    /// The bundled channel cannot be selected with the current version pins.
+    #[error("the bundled {} channel is not available", .0.channel().as_str())]
+    ProgramUnavailable(NodeProgram),
     /// The node's name is empty.
     #[error("give the node a name")]
     NoName,
@@ -367,8 +370,11 @@ pub fn plan_new_node(
     if nodes.len() >= MAX_NODES {
         return Err(NodeError::TooMany);
     }
-    if !draft.kind.addable() || draft.program != NodeProgram::Bundled {
+    if !draft.kind.addable() {
         return Err(NodeError::KindNotAddable(draft.kind));
+    }
+    if !draft.program.channel().is_available() {
+        return Err(NodeError::ProgramUnavailable(draft.program));
     }
     let name = check_name(&draft.name, nodes)?;
     let has_files = |id: &NodeId| paths.node_folder(id).data_dir().exists();
@@ -446,7 +452,7 @@ pub fn plan_new_node(
         name,
         kind: draft.kind,
         network: draft.network,
-        program: draft.program.clone(),
+        program: draft.program,
         data_dir: draft.data_dir.clone(),
         ports,
         autostart: draft.autostart,
@@ -526,6 +532,8 @@ pub fn plan_update(
 
 #[cfg(test)]
 mod tests {
+    use launcher_types::ZebradChannel;
+
     use super::*;
 
     #[test]
@@ -690,6 +698,51 @@ mod tests {
             plan_new_node(&asked, &nodes, &paths, &nothing_in_use),
             Err(NodeError::IdHasFiles(id, _)) if id == testnet.id
         ));
+    }
+
+    #[test]
+    fn new_nodes_accept_each_available_bundled_channel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::under(dir.path());
+        let mut nodes = vec![NodeSpec::first(Network::Mainnet)];
+        for channel in ZebradChannel::ALL {
+            let program = NodeProgram::from_channel(channel);
+            let requested = NodeDraft {
+                program,
+                ..draft(Network::Testnet, &format!("Zebra {}", channel.as_str()))
+            };
+            let planned = plan_new_node(&requested, &nodes, &paths, &nothing_in_use);
+            if channel.is_available() {
+                let node = planned.expect("an available bundled channel");
+                assert_eq!(node.program, program);
+                nodes.push(node);
+            } else {
+                assert_eq!(planned, Err(NodeError::ProgramUnavailable(program)));
+            }
+        }
+    }
+
+    #[test]
+    fn updates_preserve_the_nodes_bundled_channel() {
+        for channel in ZebradChannel::ALL {
+            let node = NodeSpec {
+                program: NodeProgram::from_channel(channel),
+                ..NodeSpec::first(Network::Mainnet)
+            };
+            let updated = plan_update(
+                &node,
+                &NodeUpdate {
+                    name: Some("Archive".into()),
+                    network: Some(Network::Testnet),
+                    autostart: Some(false),
+                    stop_grace_secs: Some(120),
+                },
+                &[],
+                false,
+            )
+            .expect("update");
+            assert_eq!(updated.program, node.program);
+        }
     }
 
     #[test]

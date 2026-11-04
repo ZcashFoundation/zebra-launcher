@@ -11,6 +11,7 @@
 pub mod app_state;
 pub mod bridge;
 pub mod commands;
+pub mod docs;
 pub mod exit;
 pub mod explorer;
 pub mod logging;
@@ -86,6 +87,7 @@ pub fn run() {
             commands::set_settings,
             commands::get_node_stats,
             commands::get_node_details,
+            commands::get_node_docs,
             commands::get_metrics,
             commands::get_node_resources,
             commands::get_machine_resources,
@@ -284,7 +286,10 @@ async fn start(app: &AppHandle) -> Result<(AppState, bool), StartupError> {
 
     let sizes = Arc::new(SizeCache::default());
     let stdin_close = std::env::var_os(STDIN_CLOSE_ENV).is_some_and(|v| v == "1");
-    let mut config = RegistryConfig::new(paths.clone(), sidecar::resolve(&paths));
+    let sidecar_paths = paths.clone();
+    let mut config = RegistryConfig::with_resolver(paths.clone(), move |channel| {
+        sidecar::resolve(&sidecar_paths, channel)
+    });
     config.customize = Some(Arc::new(move |_node, supervisor| {
         supervisor.command.shutdown_on_stdin_close = stdin_close;
     }));

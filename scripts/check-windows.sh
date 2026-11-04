@@ -9,10 +9,9 @@
 #
 #   1. The target: `rustup target add x86_64-pc-windows-msvc` when it is not
 #      installed (rust-toolchain.toml lists only wasm32).
-#   2. The sidecar file tauri-build requires: an empty
-#      src-tauri/binaries/zeal-zebrad-x86_64-pc-windows-msvc.exe,
-#      created when missing and removed again afterwards (the directory is
-#      git-ignored).
+#   2. The three sidecar files tauri-build requires: empty stable, beta and
+#      nightly binaries under src-tauri/binaries, created when missing and
+#      removed again afterwards (the directory is git-ignored).
 #   3. A C compiler and archiver for the target: the build scripts of `ring`,
 #      `embed-resource` and `vswhom-sys` ask the `cc` crate for one and fail
 #      without MSVC. A type-check never links, so stubs that write empty
@@ -47,21 +46,25 @@ if ! rustup target list --installed | grep -qx "${TARGET}"; then
     rustup target add "${TARGET}"
 fi
 
-sidecar="${repo_root}/src-tauri/binaries/zeal-zebrad-${TARGET}.exe"
-created_sidecar=false
-if [ ! -e "${sidecar}" ]; then
-    mkdir -p "$(dirname "${sidecar}")"
-    : >"${sidecar}"
-    created_sidecar=true
-    echo "Created the placeholder sidecar ${sidecar#"${repo_root}/"}"
-fi
+created_sidecars=()
+for channel in stable beta nightly; do
+    suffix=""
+    [ "${channel}" = stable ] || suffix="-${channel}"
+    sidecar="${repo_root}/src-tauri/binaries/zeal-zebrad${suffix}-${TARGET}.exe"
+    if [ ! -e "${sidecar}" ]; then
+        mkdir -p "$(dirname "${sidecar}")"
+        : >"${sidecar}"
+        created_sidecars+=("${sidecar}")
+        echo "Created the placeholder sidecar ${sidecar#"${repo_root}/"}"
+    fi
+done
 
 stubs="$(mktemp -d)"
 cleanup() {
     rm -rf "${stubs}"
-    if [ "${created_sidecar}" = true ]; then
+    for sidecar in "${created_sidecars[@]}"; do
         rm -f "${sidecar}"
-    fi
+    done
 }
 trap cleanup EXIT
 

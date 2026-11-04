@@ -33,6 +33,7 @@ const COMMANDS: &[&str] = &[
     "set_settings",
     "get_node_stats",
     "get_node_details",
+    "get_node_docs",
     "get_metrics",
     "get_node_resources",
     "get_machine_resources",

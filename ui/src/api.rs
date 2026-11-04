@@ -5,16 +5,16 @@ use std::{cell::Cell, fmt};
 
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, FirstRunInfo, ImportOutcome, LogLine,
-    MachineResources, MetricsSnapshot, NodeDataDirChoice, NodeDetails, NodeDraft, NodeEvent,
-    NodeId, NodeInfo, NodeResources, NodeStats, NodeUpdate, OpenTarget, Settings, StaleProcessInfo,
-    Status, UpdateHealthFailure, UpdateInfo, UpdateState, events,
+    MachineResources, MetricsSnapshot, NodeDataDirChoice, NodeDetails, NodeDocs, NodeDraft,
+    NodeEvent, NodeId, NodeInfo, NodeResources, NodeStats, NodeUpdate, OpenTarget, Settings,
+    StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo, UpdateState, events,
     explorer::{
         ExplorerCall, ExplorerError, ExplorerErrorKind, ExplorerLiveEvent, ExplorerReply,
         ExplorerRequest,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
 
 use crate::{
     mock,
@@ -22,6 +22,13 @@ use crate::{
 };
 
 pub mod public;
+
+#[wasm_bindgen]
+extern "C" {
+    /// `window.__TAURI__.core.convertFileSrc(path)`: an absolute resource path as a webview URL.
+    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = convertFileSrc)]
+    fn convert_file_src(path: &str) -> String;
+}
 
 /// A failed command, with a message for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -330,6 +337,23 @@ pub async fn subscribe_logs(
     js_sys::Reflect::set(&args, &JsValue::from_str("channel"), &channel)?;
     tauri::invoke_js("subscribe_logs", &args).await?;
     Ok(())
+}
+
+/// The offline book, configuration reference and release notes for a node's fixed Zebra channel.
+/// Tauri returns absolute resource paths; the iframe needs webview URLs for those same files.
+pub async fn get_node_docs(node: &NodeId) -> ApiResult<NodeDocs> {
+    if !is_tauri() {
+        return Ok(wire(
+            mock::docs::get_node_docs(node).await.map_err(ApiError)?,
+        )?);
+    }
+    let docs: NodeDocs = tauri::invoke("get_node_docs", &NodeArgs { node }).await?;
+    Ok(NodeDocs {
+        channel: docs.channel,
+        book: convert_file_src(&docs.book),
+        config: convert_file_src(&docs.config),
+        changes: convert_file_src(&docs.changes),
+    })
 }
 
 pub async fn read_config(node: &NodeId) -> ApiResult<ConfigDocument> {

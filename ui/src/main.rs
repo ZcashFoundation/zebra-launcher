@@ -55,11 +55,13 @@ mod components {
     pub mod typed_confirm;
     pub mod update_mode_choice;
     pub mod updates;
+    pub mod zebrad_channel;
 }
 
 mod pages {
     pub mod configure;
     pub mod dashboard;
+    pub mod docs;
     pub mod first_run;
     pub mod grafana;
     pub mod logs;
@@ -67,6 +69,10 @@ mod pages {
     pub mod overview;
     pub mod settings;
 }
+
+// Trunk does not copy files referenced only by CSS @import, so these ship inside the Wasm app.
+const CHANNELS_CSS: &str = include_str!("../styles/channels.css");
+const DOCS_CSS: &str = include_str!("../styles/docs.css");
 
 #[cfg(target_arch = "wasm32")]
 fn main() {

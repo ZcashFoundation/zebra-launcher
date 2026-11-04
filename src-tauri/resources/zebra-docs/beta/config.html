@@ -1,0 +1,27 @@
+<!doctype html>
+<!-- ZEAL DEVELOPMENT FALLBACK: CI replaces this file with output from the pinned beta zebrad. -->
+<html lang="en">
+<head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; connect-src 'self'; font-src 'self' data:; form-action 'none'; frame-src 'none'; img-src 'self' data:; media-src 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; worker-src 'none'">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zebra beta config — development fallback</title>
+  <style>
+    :root { color-scheme: light; --bg: #fff; --fg: #202124; --muted: #5f6368; --code: #f3f4f6; }
+    :root[data-theme="dark"] { color-scheme: dark; --bg: #151719; --fg: #e8eaed; --muted: #aeb4bc; --code: #202428; }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme]) { color-scheme: dark; --bg: #151719; --fg: #e8eaed; --muted: #aeb4bc; --code: #202428; } }
+    body { max-width: 64rem; margin: 0 auto; padding: 2rem; background: var(--bg); color: var(--fg); font: 16px/1.55 system-ui, sans-serif; }
+    .notice { color: var(--muted); } pre { padding: 1rem; background: var(--code); white-space: pre-wrap; }
+  </style>
+  <script>(() => { const t = new URLSearchParams(location.search).get("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; })();</script>
+</head>
+<body>
+  <main>
+    <h1>Zebra beta default configuration</h1>
+    <p class="notice"><strong>Development fallback.</strong> CI generates the commented TOML with the exact bundled beta binary.</p>
+    <pre># Development fallback only.
+# The generated release resource contains the complete output of:
+zebrad generate</pre>
+  </main>
+</body>
+</html>

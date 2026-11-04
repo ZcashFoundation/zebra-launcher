@@ -10,8 +10,12 @@ use crate::{
     api,
     app::{AppState, Tab},
     components::{
-        add_node::ports_line, outcome_note::OutcomeNote, rows::Rows, transient::Transient,
+        add_node::ports_line,
+        outcome_note::OutcomeNote,
+        rows::Rows,
+        transient::Transient,
         typed_confirm::TypedConfirm,
+        zebrad_channel::{ZebradChannelChip, channel_warning},
     },
     format::state_dir,
     pages::settings::DELETE_WORD,
@@ -209,6 +213,28 @@ pub fn NodeSettings() -> impl IntoView {
                         <OutcomeNote outcome=outcome.signal() />
                     </div>
                 </fieldset>
+                {move || {
+                    let info = node().info.get();
+                    (info.kind == NodeKind::Zebrad).then(|| {
+                        let channel = info.program.channel();
+                        view! {
+                            <fieldset>
+                                <legend>"Zebra program"</legend>
+                                <Rows rows=vec![
+                                    ("Channel", view! { <ZebradChannelChip channel /> }.into_any()),
+                                    ("Version", view! { <code>{channel.version()}</code> }.into_any()),
+                                    ("Commit", view! { <code>{channel.short_commit()}</code> }.into_any()),
+                                    ("Build date", channel.date().into_any()),
+                                ] />
+                                <p class="muted">
+                                    "The channel and bundled zebrad version are fixed for this node. Add a separate node to use another channel."
+                                </p>
+                                {channel_warning(channel)
+                                    .map(|warning| view! { <div class="banner banner-warn">{warning}</div> })}
+                            </fieldset>
+                        }
+                    })
+                }}
                 <fieldset>
                     <legend>"Files and ports"</legend>
                     <Rows rows=vec![

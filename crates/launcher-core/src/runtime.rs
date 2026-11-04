@@ -77,7 +77,8 @@ pub fn spawn(
     listeners: watch::Receiver<Vec<Listener>>,
 ) -> io::Result<NodeActors> {
     let node = spec.paths(&config.paths);
-    let command = ZebradCommand::new(&config.zebrad, node.zebrad_config());
+    let zebrad = config.zebrad_for(&spec.program)?;
+    let command = ZebradCommand::new(zebrad, node.zebrad_config());
     let mut supervisor_config = SupervisorConfig::new(command);
     supervisor_config.stop_grace = Duration::from_secs(spec.stop_grace_secs);
     supervisor_config.pidfile = Some(node.pidfile());

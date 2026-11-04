@@ -9,7 +9,7 @@
 //!
 //! | Node | State |
 //! | --- | --- |
-//! | Zebra · Testnet | running for hours, at the tip |
+//! | Zebra · Testnet (Nightly) | running for hours, at the tip |
 //! | Zakura · Testnet | running, pruned, at the tip |
 //! | Zakura · Mainnet | running, catching up from a pruned snapshot |
 //! | Zaino · Mainnet | running, indexing the mock's Zebra · Mainnet |
@@ -116,19 +116,23 @@ fn info(
 fn herd() -> Vec<HerdNode> {
     let now = clock::now();
     let hours = |h: u64| now - Duration::from_secs(h * 3600);
+    let testnet_zebrad = NodeInfo {
+        program: NodeProgram::BundledNightly,
+        ..info(
+            "zebrad-testnet",
+            NodeKind::Zebrad,
+            Network::Testnet,
+            None,
+            &[
+                (PortRole::P2p, 18233),
+                (PortRole::Rpc, 18232),
+                (PortRole::Metrics, 10_000),
+            ],
+        )
+    };
     let nodes = vec![
         HerdNode::running(
-            info(
-                "zebrad-testnet",
-                NodeKind::Zebrad,
-                Network::Testnet,
-                None,
-                &[
-                    (PortRole::P2p, 18233),
-                    (PortRole::Rpc, 18232),
-                    (PortRole::Metrics, 10_000),
-                ],
-            ),
+            testnet_zebrad,
             TESTNET_TIP,
             hours(3) - Duration::from_secs(12 * 60),
             4300,
@@ -346,7 +350,7 @@ impl HerdNode {
                 Network::Mainnet => "main".into(),
                 Network::Testnet => "test".into(),
             },
-            zebrad_version: version(self.kind()).into(),
+            zebrad_version: self.info.with_untracked(version).into(),
             last_error: None,
             eos: None,
             updated_at: clock::now(),
@@ -465,9 +469,9 @@ fn target(kind: NodeKind) -> &'static str {
     }
 }
 
-fn version(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Zebrad => "7.0.0",
+fn version(info: &NodeInfo) -> &'static str {
+    match info.kind {
+        NodeKind::Zebrad => info.program.channel().version(),
         NodeKind::Zakura => "1.8.0",
         NodeKind::Zcashd => "zebra-compat 1.3.0",
         NodeKind::Zaino => "0.10.2",
@@ -660,4 +664,28 @@ pub fn delete_data(node: &NodeId) -> Result<u64, String> {
         return Err("stop zebrad first".into());
     }
     Ok(found.height.swap(0, Ordering::Relaxed) * 50_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simulated_zebrad_versions_follow_the_nodes_channel() {
+        for program in [
+            NodeProgram::Bundled,
+            NodeProgram::BundledBeta,
+            NodeProgram::BundledNightly,
+        ] {
+            let mut node = info(
+                "zebrad-testnet",
+                NodeKind::Zebrad,
+                Network::Testnet,
+                None,
+                &[],
+            );
+            node.program = program;
+            assert_eq!(version(&node), program.channel().version());
+        }
+    }
 }

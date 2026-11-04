@@ -130,8 +130,21 @@ fn tab_for_key(current: Tab, key: &str) -> Option<Tab> {
     })
 }
 
+/// The same keyboard rule for a node header's shorter tab list.
+pub(crate) fn tab_for_key_in(tabs: &[Tab], current: Tab, key: &str) -> Option<Tab> {
+    let index = tabs.iter().position(|tab| *tab == current)?;
+    let next = match key {
+        "ArrowRight" => (index + 1) % tabs.len(),
+        "ArrowLeft" => (index + tabs.len() - 1) % tabs.len(),
+        "Home" => 0,
+        "End" => tabs.len() - 1,
+        _ => return None,
+    };
+    tabs.get(next).copied()
+}
+
 /// Moves keyboard focus to `tab`'s button.
-fn focus_tab(tab: Tab) {
+pub(crate) fn focus_tab(tab: Tab) {
     let button = web_sys::window()
         .and_then(|window| window.document())
         .and_then(|document| document.get_element_by_id(&tab.button_id()))
@@ -176,6 +189,8 @@ mod tests {
         );
         assert_eq!(tab_for_key(Tab::Grafana, "Home"), Some(Tab::Dashboard));
         assert_eq!(tab_for_key(Tab::Grafana, "End"), Some(Tab::Settings));
+        assert_eq!(tab_for_key(Tab::Configure, "ArrowRight"), Some(Tab::Docs));
+        assert_eq!(tab_for_key(Tab::Docs, "ArrowRight"), Some(Tab::Settings));
         // Other keys are left to the browser (Enter and Space activate the button).
         assert_eq!(tab_for_key(Tab::Grafana, "ArrowDown"), None);
         assert_eq!(tab_for_key(Tab::Grafana, "Enter"), None);

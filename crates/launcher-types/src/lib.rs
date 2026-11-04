@@ -19,6 +19,7 @@ pub mod explorer;
 mod nodes;
 pub mod public;
 mod resources;
+mod zebrad;
 
 pub use nodes::{
     MAX_NODES, NodeDraft, NodeEvent, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram, NodeRole,
@@ -27,6 +28,7 @@ pub use nodes::{
 pub use resources::{
     MAX_MEMBERS, MachineResources, MemoryPressure, NodeResources, Platform, ProcessUsage,
 };
+pub use zebrad::{NodeDocs, ZebradChannel};
 
 /// The names of the events the backend emits and the UI listens to. Logs do
 /// not go through an event: they take a `tauri::ipc::Channel` of

@@ -1,24 +1,27 @@
 //! The header row of a launcher that runs several nodes, in place of the tab bar: on a node's
-//! pages, the node (its status, name, kind and network) and its tabs; on the overview and the
-//! launcher's own pages, the page's name.
+//! pages, the node (its status, name, kind, channel and network) and its tabs; on the overview
+//! and the launcher's own pages, the page's name.
 
 use launcher_types::NodeKind;
 use leptos::prelude::*;
 
 use crate::{
     app::{AppState, Tab},
-    components::nav::network_class,
+    components::{
+        nav::{focus_tab, network_class, tab_for_key_in},
+        zebrad_channel::ZebradChannelChip,
+    },
     format::version_tag,
     node_summary::summarize,
 };
 
-/// The tabs a node offers: Configure edits a zebrad node's `zebrad.toml`, so other kinds have
-/// none yet; the Explorer is for the kinds that keep the chain and answer zebrad's RPC
+/// The tabs a node offers: Configure and Docs belong to a zebrad node's own release, so other
+/// kinds have neither; the Explorer is for the kinds that keep the chain and answer zebrad's RPC
 /// ([`NodeKind::has_explorer`]).
 fn node_tabs(kind: NodeKind) -> Vec<Tab> {
     Tab::NODE
         .into_iter()
-        .filter(|tab| kind == NodeKind::Zebrad || *tab != Tab::Configure)
+        .filter(|tab| kind == NodeKind::Zebrad || !matches!(*tab, Tab::Configure | Tab::Docs))
         .filter(|tab| kind.has_explorer() || *tab != Tab::Explorer)
         .collect()
 }
@@ -27,7 +30,7 @@ fn node_tabs(kind: NodeKind) -> Vec<Tab> {
 pub fn HerdHeader() -> impl IntoView {
     let state = AppState::get();
     let node = move || state.node();
-    // A node without a Configure or an Explorer tab shows its dashboard when picked from it.
+    // A node without a Configure, Docs or Explorer tab shows its dashboard when picked from it.
     Effect::new(move |_| {
         let kind = state.node().info.with(|info| info.kind);
         if !node_tabs(kind).contains(&state.tab.get()) && state.tab.get().is_node_tab() {
@@ -60,6 +63,14 @@ pub fn HerdHeader() -> impl IntoView {
                     ></span>
                     <h1>{move || node.info.with(|info| info.name.clone())}</h1>
                     <span class="chip">{move || node.info.with(|info| info.kind.label())}</span>
+                    {move || {
+                        node.info.with(|info| {
+                            (info.kind == NodeKind::Zebrad).then(|| {
+                                let channel = info.program.channel();
+                                view! { <ZebradChannelChip channel /> }
+                            })
+                        })
+                    }}
                     <span class=move || node.info.with(|info| network_class(info.network))>
                         {move || node.info.with(|info| info.network.as_str())}
                     </span>
@@ -68,15 +79,28 @@ pub fn HerdHeader() -> impl IntoView {
                     {node_tabs(node.info.with_untracked(|info| info.kind))
                         .into_iter()
                         .map(|tab| {
+                            let selected = move || state.tab.get() == tab;
+                            let keydown = move |event: web_sys::KeyboardEvent| {
+                                let tabs = node_tabs(node.info.with_untracked(|info| info.kind));
+                                let Some(next) = tab_for_key_in(&tabs, tab, &event.key()) else {
+                                    return;
+                                };
+                                event.prevent_default();
+                                state.tab.set(next);
+                                focus_tab(next);
+                            };
                             view! {
                                 <button
+                                    type="button"
                                     role="tab"
                                     id=tab.button_id()
                                     class="tab"
-                                    class:active=move || state.tab.get() == tab
-                                    aria-selected=move || (state.tab.get() == tab).to_string()
+                                    class:active=selected
+                                    aria-selected=move || selected().to_string()
                                     aria-controls=tab.page_id()
+                                    tabindex=move || if selected() { "0" } else { "-1" }
                                     on:click=move |_| state.tab.set(tab)
+                                    on:keydown=keydown
                                 >
                                     {tab.label()}
                                 </button>
@@ -116,7 +140,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_explorer_is_for_nodes_that_keep_the_chain() {
+    fn only_zebra_nodes_have_config_and_offline_docs_tabs() {
         assert_eq!(
             node_tabs(NodeKind::Zebrad),
             [
@@ -124,6 +148,7 @@ mod tests {
                 Tab::Logs,
                 Tab::Explorer,
                 Tab::Configure,
+                Tab::Docs,
                 Tab::NodeSettings
             ]
         );
@@ -134,6 +159,23 @@ mod tests {
         assert_eq!(
             node_tabs(NodeKind::Zaino),
             [Tab::Dashboard, Tab::Logs, Tab::NodeSettings]
+        );
+    }
+
+    #[test]
+    fn node_tabs_keep_the_arrow_key_order() {
+        let tabs = node_tabs(NodeKind::Zebrad);
+        assert_eq!(
+            tab_for_key_in(&tabs, Tab::Configure, "ArrowRight"),
+            Some(Tab::Docs)
+        );
+        assert_eq!(
+            tab_for_key_in(&tabs, Tab::NodeSettings, "ArrowRight"),
+            Some(Tab::Dashboard)
+        );
+        assert_eq!(
+            tab_for_key_in(&tabs, Tab::Docs, "End"),
+            Some(Tab::NodeSettings)
         );
     }
 }

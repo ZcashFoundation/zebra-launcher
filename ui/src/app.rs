@@ -29,14 +29,21 @@ use crate::{
     },
     node_state::{self, NodeState},
     pages::{
-        configure::Configure, dashboard::Dashboard, first_run::FirstRun, grafana::Grafana,
-        logs::Logs, node_settings::NodeSettings, overview::Overview, settings::SettingsPage,
+        configure::Configure,
+        dashboard::Dashboard,
+        docs::{Docs, DocsSection},
+        first_run::FirstRun,
+        grafana::Grafana,
+        logs::Logs,
+        node_settings::NodeSettings,
+        overview::Overview,
+        settings::SettingsPage,
     },
     theme,
     update_text::update_needs_attention,
 };
 
-/// The pages: the six of the tab bar, and the overview and a node's settings of a launcher
+/// The pages: the seven of the tab bar, and the overview and a node's settings of a launcher
 /// that runs several nodes, which the sidebar and the node header show instead of the tab bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -46,6 +53,7 @@ pub enum Tab {
     Explorer,
     Grafana,
     Configure,
+    Docs,
     NodeSettings,
     Settings,
 }
@@ -79,23 +87,25 @@ impl Badge {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [
+    pub const ALL: [Tab; 7] = [
         Tab::Dashboard,
         Tab::Logs,
         Tab::Explorer,
         Tab::Grafana,
         Tab::Configure,
+        Tab::Docs,
         Tab::Settings,
     ];
 
     /// The pages about the selected node, as opposed to the overview and the launcher's own.
     /// Node settings has a tab in the node header of several nodes only: with one node,
     /// Settings holds what it would.
-    pub const NODE: [Tab; 5] = [
+    pub const NODE: [Tab; 6] = [
         Tab::Dashboard,
         Tab::Logs,
         Tab::Explorer,
         Tab::Configure,
+        Tab::Docs,
         Tab::NodeSettings,
     ];
 
@@ -111,12 +121,13 @@ impl Tab {
             Tab::Explorer => "Explorer",
             Tab::Grafana => "Grafana",
             Tab::Configure => "Configure",
+            Tab::Docs => "Docs",
             Tab::NodeSettings => "Node settings",
             Tab::Settings => "Settings",
         }
     }
 
-    /// The tab's position, 1 to 6: its keyboard shortcut is Ctrl (or Cmd) plus this digit.
+    /// The tab's position, 1 to 7: its keyboard shortcut is Ctrl (or Cmd) plus this digit.
     pub fn number(self) -> usize {
         Tab::ALL.iter().position(|tab| *tab == self).unwrap_or(0) + 1
     }
@@ -138,6 +149,7 @@ impl Tab {
             Tab::Explorer => "explorer",
             Tab::Grafana => "grafana",
             Tab::Configure => "configure",
+            Tab::Docs => "docs",
             Tab::NodeSettings => "node-settings",
             Tab::Settings => "settings",
         }
@@ -153,8 +165,8 @@ impl Tab {
         format!("page-{}", self.slug())
     }
 
-    /// The tab for a keyboard shortcut, from a keydown's `key` and `code`: `1` to `6`, or the
-    /// layout-independent `Digit1` to `Digit6`. The caller checks the modifier.
+    /// The tab for a keyboard shortcut, from a keydown's `key` and `code`: `1` to `7`, or the
+    /// layout-independent `Digit1` to `Digit7`. The caller checks the modifier.
     pub fn from_shortcut(key: &str, code: &str) -> Option<Tab> {
         let digit = if key.len() == 1 && key.bytes().all(|b| b.is_ascii_digit()) {
             key
@@ -188,6 +200,7 @@ impl Tab {
             | Tab::Explorer
             | Tab::Grafana
             | Tab::Configure
+            | Tab::Docs
             | Tab::NodeSettings => None,
         }
     }
@@ -197,6 +210,8 @@ impl Tab {
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub tab: RwSignal<Tab>,
+    /// The document section shown by the Docs tab and selected by its toolbar or a docs link.
+    pub docs_section: RwSignal<DocsSection>,
     /// The nodes the backend runs, in its order: until its list arrives, a placeholder for the
     /// first ([`node_state::placeholder`]).
     pub nodes: RwSignal<Vec<NodeState>>,
@@ -205,8 +220,8 @@ pub struct AppState {
     /// The launcher's own data folder (`FirstRunInfo::default_data_dir`), where the first
     /// node keeps its chain unless another folder was chosen; `None` until read.
     pub default_data_dir: RwSignal<Option<String>>,
-    /// The node the node pages (Dashboard, Logs, Configure, Node settings) show and the node
-    /// commands act on; read it with [`AppState::node`].
+    /// The node the node pages (Dashboard, Logs, Configure, Docs, Node settings) show and the
+    /// node commands act on; read it with [`AppState::node`].
     pub selected: RwSignal<NodeState>,
     /// The network the shell shows when it runs several nodes: the sidebar, the overview and
     /// the node pages list only that network's nodes, and Testnet is marked everywhere.
@@ -241,6 +256,12 @@ pub struct AppState {
 impl AppState {
     pub fn get() -> Self {
         expect_context()
+    }
+
+    /// Opens the selected node's offline documentation at `section`.
+    pub fn open_docs(&self, section: DocsSection) {
+        self.docs_section.set(section);
+        self.tab.set(Tab::Docs);
     }
 
     fn report(&self, what: &str, result: api::ApiResult<()>) {
@@ -605,6 +626,7 @@ pub fn App() -> impl IntoView {
     });
     let state = AppState {
         tab: RwSignal::new(Tab::Dashboard),
+        docs_section: RwSignal::new(DocsSection::Book),
         nodes: RwSignal::new(vec![node]),
         nodes_loaded: RwSignal::new(false),
         default_data_dir: RwSignal::new(None),
@@ -777,7 +799,7 @@ pub fn App() -> impl IntoView {
         }
     });
 
-    // Ctrl (or Cmd) + 1..6 switch tabs. The modifier keeps the shortcut out of the way of typing,
+    // Ctrl (or Cmd) + 1..7 switch tabs. The modifier keeps the shortcut out of the way of typing,
     // so it works while an input has focus too; a handler that already claimed the key wins.
     let shortcuts = window_event_listener(ev::keydown, move |event| {
         if event.default_prevented() || !(event.ctrl_key() || event.meta_key()) || event.alt_key() {
@@ -871,6 +893,8 @@ pub fn App() -> impl IntoView {
     let labelled = move |tab: Tab| move || herd.get().then(|| tab.label());
 
     view! {
+        <style>{crate::CHANNELS_CSS}</style>
+        <style>{crate::DOCS_CSS}</style>
         <div
             class="app"
             class:app-herd=herd
@@ -962,6 +986,15 @@ pub fn App() -> impl IntoView {
                     hidden=hidden(Tab::Configure)
                 >
                     <Configure />
+                </section>
+                <section
+                    class="page page-docs"
+                    role="tabpanel"
+                    id=Tab::Docs.page_id()
+                    aria-labelledby=Tab::Docs.button_id()
+                    hidden=hidden(Tab::Docs)
+                >
+                    <Docs />
                 </section>
                 <section
                     class="page"
@@ -1094,19 +1127,21 @@ mod tests {
     fn tabs_are_numbered_in_order() {
         assert_eq!(Tab::Dashboard.number(), 1);
         assert_eq!(Tab::Explorer.number(), 3);
-        assert_eq!(Tab::Settings.number(), 6);
+        assert_eq!(Tab::Docs.number(), 6);
+        assert_eq!(Tab::Settings.number(), 7);
     }
 
     #[test]
     fn steps_wrap_around_the_tab_bar() {
         assert_eq!(Tab::Dashboard.step(1), Tab::Logs);
         assert_eq!(Tab::Grafana.step(-1), Tab::Explorer);
+        assert_eq!(Tab::Docs.step(1), Tab::Settings);
         // Past either end, the bar wraps.
         assert_eq!(Tab::Settings.step(1), Tab::Dashboard);
         assert_eq!(Tab::Dashboard.step(-1), Tab::Settings);
         assert_eq!(Tab::Logs.step(0), Tab::Logs);
-        assert_eq!(Tab::Logs.step(6), Tab::Logs);
-        assert_eq!(Tab::Logs.step(-8), Tab::Settings);
+        assert_eq!(Tab::Logs.step(7), Tab::Logs);
+        assert_eq!(Tab::Logs.step(-8), Tab::Dashboard);
     }
 
     #[test]
@@ -1118,17 +1153,20 @@ mod tests {
         }
         assert_eq!(Tab::Grafana.button_id(), "tab-grafana");
         assert_eq!(Tab::Grafana.page_id(), "page-grafana");
+        assert_eq!(Tab::Docs.button_id(), "tab-docs");
+        assert_eq!(Tab::Docs.page_id(), "page-docs");
     }
 
     #[test]
     fn shortcuts_map_digits_to_tabs() {
         assert_eq!(Tab::from_shortcut("1", "Digit1"), Some(Tab::Dashboard));
         assert_eq!(Tab::from_shortcut("3", "Digit3"), Some(Tab::Explorer));
-        assert_eq!(Tab::from_shortcut("6", "Digit6"), Some(Tab::Settings));
+        assert_eq!(Tab::from_shortcut("6", "Digit6"), Some(Tab::Docs));
+        assert_eq!(Tab::from_shortcut("7", "Digit7"), Some(Tab::Settings));
         // Layouts where Ctrl changes the key: the code still names the digit.
         assert_eq!(Tab::from_shortcut("&", "Digit1"), Some(Tab::Dashboard));
         assert_eq!(Tab::from_shortcut("0", "Digit0"), None);
-        assert_eq!(Tab::from_shortcut("7", "Digit7"), None);
+        assert_eq!(Tab::from_shortcut("8", "Digit8"), None);
         assert_eq!(Tab::from_shortcut("a", "KeyA"), None);
         assert_eq!(Tab::from_shortcut("Enter", "Enter"), None);
         assert_eq!(Tab::from_shortcut("1", "Numpad1"), Some(Tab::Dashboard));
