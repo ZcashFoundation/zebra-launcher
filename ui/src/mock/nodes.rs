@@ -16,7 +16,7 @@ use launcher_types::{
 use leptos::prelude::*;
 
 use super::{DEFAULT_DATA_DIR, herd, mock, sleep};
-use crate::format;
+use crate::{components::zebrad_channel::channel_available, format};
 
 type Handlers<T> = RefCell<Vec<Rc<dyn Fn(T)>>>;
 
@@ -332,6 +332,19 @@ fn check_name(name: &str, others: &[NodeInfo]) -> Result<String, String> {
     Ok(name.to_owned())
 }
 
+/// The backend's bundled-program guard, plus the browser mock's explicit unavailable-Beta state.
+fn check_program(program: NodeProgram, beta_unavailable: bool) -> Result<(), String> {
+    let channel = program.channel();
+    if channel_available(channel, beta_unavailable) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the bundled {} channel is not available",
+            channel.as_str()
+        ))
+    }
+}
+
 fn taken_ports(nodes: &[NodeInfo]) -> Vec<u16> {
     nodes
         .iter()
@@ -348,6 +361,7 @@ pub async fn add_node(draft: NodeDraft) -> Result<NodeInfo, String> {
     if !draft.kind.addable() {
         return Err(format!("{} nodes come in a later release", draft.kind));
     }
+    check_program(draft.program, mock().flags.beta_unavailable)?;
     let name = check_name(&draft.name, &nodes)?;
     let mut taken: Vec<NodeId> = nodes.iter().map(|node| node.id.clone()).collect();
     taken.extend(KEPT.with_borrow(Clone::clone));
@@ -380,7 +394,7 @@ pub async fn add_node(draft: NodeDraft) -> Result<NodeInfo, String> {
         network: draft.network,
         depends_on: None,
         ports,
-        program: NodeProgram::Bundled,
+        program: draft.program,
         autostart: draft.autostart,
         stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
     };
@@ -541,5 +555,23 @@ mod tests {
             check_name("  Archive ", std::slice::from_ref(&first)),
             Ok("Archive".to_owned())
         );
+    }
+
+    #[test]
+    fn add_node_checks_pins_and_the_mock_beta_override() {
+        for channel in launcher_types::ZebradChannel::ALL {
+            let program = NodeProgram::from_channel(channel);
+            assert_eq!(
+                check_program(program, false).is_ok(),
+                channel.is_available(),
+                "the normal mock must follow the {channel:?} pin"
+            );
+        }
+        assert_eq!(
+            check_program(NodeProgram::BundledBeta, true),
+            Err("the bundled beta channel is not available".to_owned())
+        );
+        assert_eq!(check_program(NodeProgram::Bundled, true), Ok(()));
+        assert_eq!(check_program(NodeProgram::BundledNightly, true), Ok(()));
     }
 }

@@ -16,11 +16,17 @@ What the launcher protects:
   authentication. The launcher refuses to save a config that changes this.
 - **The webview.** Strict CSP (with `'wasm-unsafe-eval'` for the Leptos UI); capabilities
   list only the launcher's own commands; the Grafana iframe is limited to loopback URLs,
-  sandboxed, and has no IPC access.
-- **What runs on the user's machine.** Installers, the app and the bundled zebrad are
-  signed on macOS and Windows; every release asset has a keyless cosign signature and a
-  build provenance attestation; updates are verified with minisign before zebrad is
-  stopped.
+  sandboxed, and has no IPC access. Offline node documentation is shown in a separate
+  sandboxed iframe over Tauri's local asset protocol, also without IPC access or a
+  runtime network dependency. Every generated and fallback HTML document has its own CSP:
+  only mdBook's local/inline assets, `self`/`data:` images and local search connections are
+  allowed; remote origins, frames, objects, media, workers, forms and base URIs are denied.
+- **What runs on the user's machine.** Installers, the app and all three bundled zebrad
+  sidecars (Stable, Beta and Nightly) are signed on macOS and Windows; every release asset
+  has a keyless cosign signature and a build provenance attestation; updates are verified
+  with minisign before zebrad is stopped. CI checks every packaged sidecar's version and
+  commit, and the post-update health gate checks each running node's base version and any
+  reported commit hash against its own channel pin.
 - **The release pipeline.** Untrusted dependency code compiles in unprivileged jobs
   without secrets; bundling and signing run in the `release` environment (required
   reviewer, no restored caches); actions are pinned by SHA.
@@ -43,7 +49,8 @@ checked:
 | Rust toolchain | static.rust-lang.org | rustup's signed channel manifest |
 | tauri-cli (and trunk, in `build` only) | their GitHub releases | sha256 per platform in [`.github/tool-versions.env`](../.github/tool-versions.env) |
 | Artifact Signing client (Windows) | nuget.org | sha256 in `release.yml` |
-| zebrad sidecars | `zebrad-sidecars.yml` artifacts | cosign and attestations on Linux, built from the pinned commit elsewhere ([SIDECARS.md](SIDECARS.md)) |
+| Stable, Beta and Nightly zebrad sidecars | `zebrad-<channel>-<target>` artifacts from `zebrad-sidecars.yml` | Stable and Beta Linux use Zebra's cosign signatures and provenance attestations; their other targets use the pinned release tags. Nightly is built from its exact pinned commit on every target. Every binary is version/commit checked, every Linux binary is glibc checked, and provenance is attested ([SIDECARS.md](SIDECARS.md)) |
+| Offline Book, Config and Changes HTML | `zebra-docs` artifact from `zebrad-docs.yml` | generated from the exact three channel commits after all sidecar jobs pass; packaged as local resources, not fetched at runtime |
 | AppRun, linuxdeploy (Linux AppImage) | tauri-apps/binary-releases, fetched by tauri-bundler | **nothing**; they never see the updater key (below) |
 | linuxdeploy-plugin-appimage (Linux AppImage) | the moving `continuous` release of linuxdeploy/linuxdeploy-plugin-appimage, fetched by tauri-bundler | **nothing**; if the download fails, linuxdeploy uses its built-in copy; never sees the updater key |
 | NSIS 3.13 and nsis_tauri_utils.dll (Windows) | tauri-apps/binary-releases, tauri-apps/nsis-tauri-utils, fetched by tauri-bundler | SHA-1 hard-coded in tauri-bundler |
@@ -95,10 +102,10 @@ requires, so the build fails rather than fetch a different one.
 
 ## Code signing
 
-- macOS: Apple Developer ID, hardened runtime, notarization; sidecars are signed by the
-  Tauri bundler. TODO: team ID and certificate holder.
-- Windows: Azure Artifact Signing through GitHub OIDC, for installer, app and sidecar.
-  TODO: identity and subscription owner.
+- macOS: Apple Developer ID, hardened runtime, notarization; all three channel sidecars
+  are signed by the Tauri bundler. TODO: team ID and certificate holder.
+- Windows: Azure Artifact Signing through GitHub OIDC, for installer, app and all three
+  channel sidecars. TODO: identity and subscription owner.
 - Linux: no platform signing; cosign and attestations only.
 
 ## Updater key custody and rotation
@@ -180,6 +187,14 @@ release ([RELEASING.md](RELEASING.md#bad-release-runbook)). A user who wants to 
 back reinstalls a previous installer from the releases page by hand, which the
 post-update recovery screen links to.
 
+Launcher rollback does not make a Zebra database downgrade safe. Stable, Beta and Nightly
+are immutable per node because newer Zebra state cannot safely be reopened by Stable; do
+not rename sidecars or reuse a prerelease node's state to bypass that rule. The
+post-update health gate also rejects a running sidecar whose RPC-reported base version
+does not match its node's channel pin. Build metadata does not relax the base-version
+check: when it reports a commit hash, the hash must also match the pinned commit. A
+base-version or reported-commit mismatch fails promptly.
+
 ## Exception to Zebra ADR 0008
 
 Zebra's ADR 0008 prefers keyless signing. The minisign updater key is a documented
@@ -200,6 +215,9 @@ TODO: exact commands and identities, tested against a real release.
   Developer ID.
 - **Windows:** `Get-AuthenticodeSignature <installer>` reports `Valid`.
 
-The bundled Linux zebrad is verified at build time against Zebra's own signatures
-(`cosign verify-blob` and `gh attestation verify`); macOS and Windows zebrad are built
-from the Zebra tag in this repo's CI and attested.
+The bundled Stable and Beta Linux zebrads are verified at build time against Zebra's own
+signatures (`cosign verify-blob` and `gh attestation verify`). Stable and Beta macOS and
+Windows binaries are built from their pinned tags; Nightly is built from its exact pinned
+commit on every target. This repository's CI checks and attests all of them. The offline
+HTML documentation is generated from the same exact commits and packaged with the app,
+so reading it introduces no runtime download or remote-content trust decision.

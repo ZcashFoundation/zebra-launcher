@@ -27,7 +27,7 @@ use launcher_core::{
 };
 use launcher_types::{
     ExitClass, LogLevel, MAX_NODES, Network, NodeDraft, NodeId, NodeKind, NodePort, NodeProgram,
-    NodeUpdate, Phase, PortRole, Settings,
+    NodeUpdate, Phase, PortRole, Settings, ZebradChannel,
 };
 
 #[path = "support/helpers.rs"]
@@ -102,7 +102,18 @@ fn config_with_modes(
     in_use: fn(PortRole, u16) -> bool,
     mode: fn(&NodeSpec) -> &'static str,
 ) -> RegistryConfig {
-    let mut config = RegistryConfig::new(paths.clone(), fake_zebrad());
+    configure_fake(
+        RegistryConfig::new(paths.clone(), fake_zebrad()),
+        in_use,
+        mode,
+    )
+}
+
+fn configure_fake(
+    mut config: RegistryConfig,
+    in_use: fn(PortRole, u16) -> bool,
+    mode: fn(&NodeSpec) -> &'static str,
+) -> RegistryConfig {
     config.customize = Some(Arc::new(move |spec, supervisor| {
         supervisor.command.env = vec![
             ("FAKE_ZEBRAD_MODE".into(), mode(spec).into()),
@@ -197,6 +208,90 @@ async fn wait_for(
 ) -> launcher_types::Status {
     let handle = registry.node(node).expect("the node exists");
     support::wait_status(&handle.supervisor, LIMIT, what, predicate).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_bundled_channel_resolves_and_starts_its_own_zebrad() {
+    let fx = fixture_from(true, |paths| {
+        let source = fake_zebrad();
+        let file_name = source
+            .file_name()
+            .expect("fake-zebrad file name")
+            .to_owned();
+        let binaries: Vec<_> = ZebradChannel::ALL
+            .into_iter()
+            .map(|channel| {
+                let dir = paths.config_dir().join("bundled").join(channel.as_str());
+                fs::create_dir_all(&dir).expect("channel directory");
+                let binary = dir.join(&file_name);
+                fs::copy(&source, &binary).expect("copy fake-zebrad");
+                (channel, binary)
+            })
+            .collect();
+        let resolved = binaries.clone();
+        let config = RegistryConfig::with_resolver(paths.clone(), move |channel| {
+            resolved
+                .iter()
+                .find(|(candidate, _)| *candidate == channel)
+                .map(|(_, binary)| binary.clone())
+                .expect("every channel has a fake-zebrad")
+        });
+        let mut config = configure_fake(config, nothing_in_use, |_| "ok");
+        let fast = config.customize.take().expect("fake-zebrad customization");
+        config.customize = Some(Arc::new(move |spec, supervisor| {
+            fast(spec, supervisor);
+            let (channel, _) = binaries
+                .iter()
+                .find(|(_, binary)| binary == &supervisor.command.binary)
+                .expect("the supervisor uses a resolved channel binary");
+            let version = format!("{}+{}", channel.version(), channel.as_str());
+            supervisor
+                .command
+                .env
+                .push(("FAKE_ZEBRAD_VERSION".into(), version.into()));
+        }));
+        config
+    })
+    .await;
+
+    let first = fx.registry.first().expect("the stable node");
+    let mut nodes = vec![(ZebradChannel::Stable, first)];
+    for (channel, network, name) in [
+        (ZebradChannel::Beta, Network::Testnet, "Zebra Beta"),
+        (ZebradChannel::Nightly, Network::Mainnet, "Zebra Nightly"),
+    ] {
+        assert!(
+            channel.is_available(),
+            "{} must be testable",
+            channel.as_str()
+        );
+        let requested = NodeDraft {
+            program: NodeProgram::from_channel(channel),
+            ..draft(network, name)
+        };
+        let info = within(fx.registry.add(requested))
+            .await
+            .expect("add channel node");
+        let node = fx.registry.node(&info.id).expect("channel node handle");
+        nodes.push((channel, node));
+    }
+
+    for (channel, node) in nodes {
+        within(node.start(&done(), StartOptions::default()))
+            .await
+            .expect("start channel node");
+        let mut stats = node.stats.clone();
+        let stats = within(stats.wait_for(Option::is_some))
+            .await
+            .expect("channel stats")
+            .clone()
+            .expect("channel stats");
+        let reported = format!("{}+{}", channel.version(), channel.as_str());
+        assert_eq!(stats.zebrad_version, reported);
+        assert!(channel.version_matches(&stats.zebrad_version));
+        assert_eq!(node.spec().program, NodeProgram::from_channel(channel));
+    }
+    within(fx.registry.shutdown()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

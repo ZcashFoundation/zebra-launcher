@@ -26,6 +26,7 @@
     "allow-set-settings",
     "allow-get-node-stats",
     "allow-get-node-details",
+    "allow-get-node-docs",
     "allow-get-metrics",
     "allow-get-node-resources",
     "allow-get-machine-resources",

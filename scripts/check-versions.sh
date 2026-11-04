@@ -3,16 +3,20 @@
 #
 #   1. ZEBRAD_VERSION is MAJOR.MINOR.PATCH, with no leading "v".
 #   2. ZEBRAD_COMMIT is a full 40-character lowercase hex commit SHA.
-#   3. The tauri-cli pin, `TAURI_CLI_VERSION=` in .github/tool-versions.env,
+#   3. ZEBRAD_DATE and all beta/nightly pins use their channel grammars;
+#      commits are full lowercase SHAs and dates are real ISO calendar dates.
+#   4. ZEBRAD_BETA_VERSION newer than ZEBRAD_VERSION makes Beta available;
+#      an equal-or-older beta is unavailable, not invalid.
+#   5. The tauri-cli pin, `TAURI_CLI_VERSION=` in .github/tool-versions.env,
 #      has the MAJOR.MINOR of the `tauri` crate in Cargo.lock: the CLI that
 #      bundles the app must match the runtime it was built against. Skipped if
 #      nothing pins tauri-cli.
-#   4. src-tauri/tauri.conf.json sets plugins.updater.requireSignedVersion
+#   6. src-tauri/tauri.conf.json sets plugins.updater.requireSignedVersion
 #      to true, always. Its updater pubkey must also not be the placeholder,
 #      unless the environment variable UPDATER_ENABLED is "false"; only this
 #      pubkey part is skipped while UPDATER_ENABLED is unset (CI on pull
 #      requests). release.yml sets it.
-#   5. The wasm-bindgen CLI pin, `WASM_BINDGEN_VERSION=` in
+#   7. The wasm-bindgen CLI pin, `WASM_BINDGEN_VERSION=` in
 #      .github/tool-versions.env, equals the `wasm-bindgen` crate in Cargo.lock
 #      (read by scripts/cargo-lock-version.sh): trunk runs the CLI only at
 #      exactly that version. Skipped if nothing pins it.
@@ -71,7 +75,68 @@ else
     fail "ZEBRAD_COMMIT is '${commit}', expected a full 40-character lowercase hex SHA"
 fi
 
-# 3. tauri-cli pin vs. the tauri crate
+# 3. Stable release date
+stable_date="$(read_pin "${root}/ZEBRAD_DATE")"
+if [ ! -f "${root}/ZEBRAD_DATE" ]; then
+    fail "ZEBRAD_DATE is missing"
+elif is_iso_date "${stable_date}"; then
+    ok "ZEBRAD_DATE is ${stable_date}"
+else
+    fail "ZEBRAD_DATE is '${stable_date}', expected a real ISO calendar date (YYYY-MM-DD)"
+fi
+
+# 4. Beta and nightly channel pins
+for channel in beta nightly; do
+    prefix="ZEBRAD_$(printf '%s' "${channel}" | tr '[:lower:]' '[:upper:]')"
+    channel_version="$(read_pin "${root}/${prefix}_VERSION")"
+    channel_commit="$(read_pin "${root}/${prefix}_COMMIT")"
+    channel_date="$(read_pin "${root}/${prefix}_DATE")"
+
+    if [ ! -f "${root}/${prefix}_VERSION" ]; then
+        fail "${prefix}_VERSION is missing"
+    elif [ "${channel}" = beta ] && ! is_prerelease_version "${channel_version}"; then
+        fail "${prefix}_VERSION is '${channel_version}', expected X.Y.Z-PRERELEASE without a leading v"
+    elif [ "${channel}" = nightly ] && ! is_zebrad_version "${channel_version}"; then
+        fail "${prefix}_VERSION is '${channel_version}', expected X.Y.Z with an optional pre-release suffix"
+    else
+        ok "${prefix}_VERSION is ${channel_version}"
+    fi
+
+    if [ ! -f "${root}/${prefix}_COMMIT" ]; then
+        fail "${prefix}_COMMIT is missing"
+    elif is_full_sha "${channel_commit}"; then
+        ok "${prefix}_COMMIT is ${channel_commit}"
+    else
+        fail "${prefix}_COMMIT is '${channel_commit}', expected a full 40-character lowercase hex SHA"
+    fi
+
+    if [ ! -f "${root}/${prefix}_DATE" ]; then
+        fail "${prefix}_DATE is missing"
+    elif is_iso_date "${channel_date}"; then
+        ok "${prefix}_DATE is ${channel_date}"
+    else
+        fail "${prefix}_DATE is '${channel_date}', expected a real ISO calendar date (YYYY-MM-DD)"
+    fi
+
+    if [ "${channel}" = beta ]; then
+        beta_version="${channel_version}"
+    fi
+done
+
+# A beta from the same release as stable is older, not newer: a stable version
+# takes precedence over every pre-release with the same MAJOR.MINOR.PATCH.
+# Equal-or-older beta pins are valid but make Beta unavailable.
+if is_stable_version "${version}" && is_prerelease_version "${beta_version}"; then
+    if semver_newer "${beta_version}" "${version}"; then
+        ok "ZEBRAD_BETA_VERSION ${beta_version} is semver-newer than stable ${version}"
+    else
+        ok "Beta is unavailable: ZEBRAD_BETA_VERSION ${beta_version} is equal to or older than ZEBRAD_VERSION ${version}"
+    fi
+else
+    skip "beta/stable ordering (a version pin is invalid)"
+fi
+
+# 5. tauri-cli pin vs. the tauri crate
 cli_pin_line="$(grep -nE '^TAURI_CLI_VERSION=' "${root}/.github/tool-versions.env" 2>/dev/null || true)"
 if [ -z "${cli_pin_line}" ]; then
     skip "nothing sets TAURI_CLI_VERSION, so the tauri-cli/tauri check does not apply"
@@ -95,7 +160,7 @@ else
     fi
 fi
 
-# 4. updater signature settings
+# 6. updater signature settings
 # requireSignedVersion is always checked. The app is built with the minisign
 # public key in tauri.conf.json; a release with the updater enabled must not
 # ship the placeholder, or every update would fail to verify. The placeholder
@@ -117,7 +182,7 @@ else
     fail "${conf} has the placeholder updater public key, but UPDATER_ENABLED is '${UPDATER_ENABLED}': replace it (docs/SECURITY.md) or set the repository variable UPDATER_ENABLED=false"
 fi
 
-# 5. wasm-bindgen CLI pin vs. the wasm-bindgen crate
+# 7. wasm-bindgen CLI pin vs. the wasm-bindgen crate
 wb_pin_line="$(grep -nE '^WASM_BINDGEN_VERSION=' "${root}/.github/tool-versions.env" 2>/dev/null || true)"
 if [ -z "${wb_pin_line}" ]; then
     skip "nothing sets WASM_BINDGEN_VERSION, so the wasm-bindgen check does not apply"

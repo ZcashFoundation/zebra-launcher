@@ -5,7 +5,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DEFAULT_STOP_GRACE_SECS, Network};
+use crate::{DEFAULT_STOP_GRACE_SECS, Network, ZebradChannel};
 
 /// The most nodes Zeal runs: adding another is refused at this many.
 pub const MAX_NODES: usize = 8;
@@ -336,13 +336,37 @@ pub struct NodePort {
 }
 
 /// Where a node's program comes from. On the wire it is tagged by `from`:
-/// `{"from": "bundled"}`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `{"from": "bundled"}`, `{"from": "bundled_beta"}` or `{"from": "bundled_nightly"}`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "from", rename_all = "snake_case")]
 pub enum NodeProgram {
-    /// The zebrad bundled with Zeal.
+    /// The stable zebrad bundled with Zeal.
     #[default]
     Bundled,
+    /// The beta zebrad bundled with Zeal.
+    BundledBeta,
+    /// The nightly zebrad bundled with Zeal.
+    BundledNightly,
+}
+
+impl NodeProgram {
+    /// The Zebra channel this program runs.
+    pub fn channel(self) -> ZebradChannel {
+        match self {
+            NodeProgram::Bundled => ZebradChannel::Stable,
+            NodeProgram::BundledBeta => ZebradChannel::Beta,
+            NodeProgram::BundledNightly => ZebradChannel::Nightly,
+        }
+    }
+
+    /// The bundled program for `channel`.
+    pub fn from_channel(channel: ZebradChannel) -> Self {
+        match channel {
+            ZebradChannel::Stable => NodeProgram::Bundled,
+            ZebradChannel::Beta => NodeProgram::BundledBeta,
+            ZebradChannel::Nightly => NodeProgram::BundledNightly,
+        }
+    }
 }
 
 /// What everyone lists about a node: who it is and where it lives, not how it is doing.

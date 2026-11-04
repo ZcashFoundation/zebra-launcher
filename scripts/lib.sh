@@ -8,14 +8,14 @@
 # `set -e`: when they call die inside the command substitution, the assignment
 # fails and the caller exits too.
 #
-# Two version grammars, decided once here:
+# Version grammars, decided once here:
 #   - the ZEBRAD_VERSION pin is a stable release, MAJOR.MINOR.PATCH and nothing
 #     else (is_stable_version): zebrad-watch.yml only ever bumps to one, and
 #     check-versions.sh and bump-zebrad.sh enforce it;
-#   - a one-off `--version` given to the build and fetch scripts, or the
-#     `version` input of zebrad-sidecars.yml, may carry a pre-release suffix
-#     such as 7.0.0-rc.0 (is_zebrad_version), to build or verify a release
-#     candidate without pinning it.
+#   - a one-off `--version` given to the build and fetch scripts, the `version`
+#     input of zebrad-sidecars.yml, or a beta/nightly pin may carry a
+#     pre-release suffix such as 7.0.0-rc.0 (is_zebrad_version). Beta pins must
+#     have that suffix (is_prerelease_version).
 
 # read_pin FILE: prints FILE with all whitespace removed, or nothing if it is
 # missing.
@@ -39,17 +39,100 @@ read_zebrad_commit() {
     fi
 }
 
-# is_zebrad_version STRING: succeeds when STRING is X.Y.Z, optionally with a
-# pre-release suffix (7.0.0-rc.0), and no leading "v", so it is safe in URLs
-# and patterns.
+# is_zebrad_version STRING: succeeds for semantic X.Y.Z or X.Y.Z-PRERELEASE,
+# without a leading "v" or build metadata. Numeric identifiers have no leading
+# zeros; pre-release identifiers may contain letters and additional hyphens.
 is_zebrad_version() {
-    printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+    printf '%s\n' "$1" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))(\.((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)))*)?$'
 }
 
 # is_stable_version STRING: succeeds when STRING is exactly MAJOR.MINOR.PATCH,
 # with no leading zeros, suffix or leading "v": the grammar of ZEBRAD_VERSION.
 is_stable_version() {
     printf '%s\n' "$1" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+}
+
+# is_prerelease_version STRING: succeeds for the beta pin grammar, X.Y.Z with
+# a pre-release suffix and no leading "v".
+is_prerelease_version() {
+    is_zebrad_version "$1" && [[ "$1" == *-* ]]
+}
+
+# is_iso_date STRING: succeeds for a real YYYY-MM-DD calendar date, including
+# leap-year rules, without relying on GNU date.
+is_iso_date() {
+    [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return 1
+    local year=$((10#${1:0:4}))
+    local month=$((10#${1:5:2}))
+    local day=$((10#${1:8:2}))
+    ((year >= 1 && month >= 1 && month <= 12 && day >= 1)) || return 1
+    local days=(31 28 31 30 31 30 31 31 30 31 30 31)
+    if ((year % 4 == 0 && (year % 100 != 0 || year % 400 == 0))); then
+        days[1]=29
+    fi
+    ((day <= days[month - 1]))
+}
+
+# semver_newer LEFT RIGHT: succeeds only when LEFT is semver-newer than RIGHT.
+# Both arguments must already use is_zebrad_version's grammar. Returns 2 for an
+# invalid argument, 1 for an equal or older version, and 0 for a newer one.
+semver_newer() {
+    is_zebrad_version "$1" && is_zebrad_version "$2" || return 2
+    local LC_ALL=C
+    local left_core="${1%%-*}" right_core="${2%%-*}"
+    local left_pre="" right_pre=""
+    [ "${1}" = "${left_core}" ] || left_pre="${1#*-}"
+    [ "${2}" = "${right_core}" ] || right_pre="${2#*-}"
+
+    local left_parts=() right_parts=()
+    IFS=. read -r -a left_parts <<<"${left_core}"
+    IFS=. read -r -a right_parts <<<"${right_core}"
+    local i
+    for i in 0 1 2; do
+        if ((10#${left_parts[i]} > 10#${right_parts[i]})); then
+            return 0
+        elif ((10#${left_parts[i]} < 10#${right_parts[i]})); then
+            return 1
+        fi
+    done
+
+    # A release is newer than a pre-release of the same MAJOR.MINOR.PATCH.
+    if [ -z "${left_pre}" ]; then
+        [ -n "${right_pre}" ] && return 0
+        return 1
+    fi
+    [ -n "${right_pre}" ] || return 1
+
+    local left_ids=() right_ids=()
+    IFS=. read -r -a left_ids <<<"${left_pre}"
+    IFS=. read -r -a right_ids <<<"${right_pre}"
+    local count="${#left_ids[@]}"
+    [ "${#right_ids[@]}" -le "${count}" ] || count="${#right_ids[@]}"
+    local left_id right_id
+    for ((i = 0; i < count; i++)); do
+        if [ "${i}" -ge "${#left_ids[@]}" ]; then
+            return 1
+        elif [ "${i}" -ge "${#right_ids[@]}" ]; then
+            return 0
+        fi
+        left_id="${left_ids[i]}"
+        right_id="${right_ids[i]}"
+        if [[ "${left_id}" =~ ^[0-9]+$ ]] && [[ "${right_id}" =~ ^[0-9]+$ ]]; then
+            if ((10#${left_id} > 10#${right_id})); then
+                return 0
+            elif ((10#${left_id} < 10#${right_id})); then
+                return 1
+            fi
+        elif [[ "${left_id}" =~ ^[0-9]+$ ]]; then
+            return 1
+        elif [[ "${right_id}" =~ ^[0-9]+$ ]]; then
+            return 0
+        elif [[ "${left_id}" != "${right_id}" ]]; then
+            [[ "${left_id}" > "${right_id}" ]] && return 0
+            return 1
+        fi
+    done
+    return 1
 }
 
 # check_zebrad_version VERSION [HINT]: dies unless is_zebrad_version VERSION.

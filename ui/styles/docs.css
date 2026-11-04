@@ -1,0 +1,122 @@
+/* Offline Zebra documentation, and the links that open it. */
+
+.page-docs {
+  overflow: hidden;
+  padding: 0;
+}
+
+.docs {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.docs-toolbar {
+  flex: none;
+  justify-content: space-between;
+  padding: 0 12px;
+}
+
+.docs-section-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+}
+
+.docs-section-tab {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  padding: 12px 12px 8px;
+  white-space: nowrap;
+}
+
+.docs-section-tab:hover:not(:disabled) {
+  color: var(--text);
+  border-color: transparent;
+}
+
+.docs-section-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--text);
+}
+
+.docs-section-tab:focus-visible {
+  outline-offset: -2px;
+}
+
+.docs-channel {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.docs-channel-beta,
+.docs-channel-nightly {
+  color: var(--warn);
+}
+
+.docs-warning {
+  flex: none;
+  margin: 8px 12px 0;
+}
+
+.docs-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--embed-bg);
+}
+
+.docs-frame {
+  display: block;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: var(--embed-bg);
+}
+
+.docs-status {
+  margin: auto;
+  padding: 24px;
+  text-align: center;
+}
+
+.docs-load-error {
+  color: var(--error);
+}
+
+.docs-load-error p {
+  margin: 0 0 12px;
+}
+
+/* The version remains compact and aligned with the surrounding readouts. */
+button.docs-version-link {
+  color: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.cfg-docs-link {
+  margin: 6px 0 0;
+}
+
+@container page (max-width: 640px) {
+  .docs-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0;
+    padding-bottom: 8px;
+  }
+
+  .docs-channel {
+    padding: 4px 12px 0;
+    text-align: left;
+  }
+}

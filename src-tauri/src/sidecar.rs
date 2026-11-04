@@ -1,11 +1,11 @@
-//! Finds the bundled zebrad.
+//! Finds the bundled zebrad for a channel.
 //!
-//! The bundler installs the sidecar next to the launcher executable as
-//! `zeal-zebrad` (`.exe` on Windows); `cargo tauri dev` copies it
-//! there too. Inside an AppImage the executable lives on a FUSE mount that
-//! disappears when the launcher exits or is replaced by an update, so the
-//! sidecar is copied into the data directory first and zebrad runs from the
-//! copy.
+//! The bundler installs the sidecars next to the launcher executable as
+//! `zeal-zebrad`, `zeal-zebrad-beta` and `zeal-zebrad-nightly` (`.exe` on
+//! Windows); `cargo tauri dev` copies them there too. Inside an AppImage the
+//! executable lives on a FUSE mount that disappears when the launcher exits
+//! or is replaced by an update, so the selected sidecar is copied into the
+//! data directory first and zebrad runs from the copy.
 
 use std::{
     fs::{self, File},
@@ -14,33 +14,35 @@ use std::{
 };
 
 use launcher_core::paths::Paths;
+use launcher_types::ZebradChannel;
 
-/// The sidecar's file name without the platform suffix, as installed.
+/// The stable sidecar's file name without the platform suffix, as installed.
 pub const SIDECAR_NAME: &str = "zeal-zebrad";
 
-/// The zebrad binary to run. Never fails: when something is wrong the
-/// supervisor reports the spawn failure to the user.
-pub fn resolve(paths: &Paths) -> PathBuf {
-    let bundled = match bundled_path() {
+/// The zebrad binary to run for `channel`. Never fails: when something is
+/// wrong the supervisor reports the spawn failure to the user.
+pub fn resolve(paths: &Paths, channel: ZebradChannel) -> PathBuf {
+    let bundled = match bundled_path(&channel) {
         Ok(path) => path,
         Err(err) => {
-            tracing::error!(%err, "could not locate the launcher executable");
-            PathBuf::from(sidecar_file_name())
+            tracing::error!(%err, channel = channel.as_str(), "could not locate the launcher executable");
+            PathBuf::from(sidecar_file_name(&channel))
         }
     };
     if !bundled.is_file() {
-        tracing::error!(path = %bundled.display(), "the bundled zebrad is missing");
+        tracing::error!(path = %bundled.display(), channel = channel.as_str(), "the bundled zebrad is missing");
         return bundled;
     }
     if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some() {
-        let dir = paths.sidecar_dir().join(env!("CARGO_PKG_VERSION"));
+        let dir = appimage_dir(paths, &channel);
         match copy_out(&bundled, &dir) {
             Ok(copy) => {
-                remove_other_versions(&paths.sidecar_dir(), &dir);
+                remove_other_versions(&paths.sidecar_dir().join(channel.as_str()), &dir);
                 return copy;
             }
             Err(err) => tracing::error!(
                 %err,
+                channel = channel.as_str(),
                 dir = %dir.display(),
                 "could not copy zebrad out of the AppImage; running it from the mount"
             ),
@@ -49,17 +51,24 @@ pub fn resolve(paths: &Paths) -> PathBuf {
     bundled
 }
 
-fn sidecar_file_name() -> String {
-    format!("{SIDECAR_NAME}{}", std::env::consts::EXE_SUFFIX)
+fn sidecar_file_name(channel: &ZebradChannel) -> String {
+    format!("{}{}", channel.sidecar_name(), std::env::consts::EXE_SUFFIX)
 }
 
-/// `zeal-zebrad[.exe]` next to the running executable.
-fn bundled_path() -> io::Result<PathBuf> {
+/// The selected channel's `zeal-zebrad*[.exe]` next to the running executable.
+fn bundled_path(channel: &ZebradChannel) -> io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let dir = exe
         .parent()
         .ok_or_else(|| io::Error::other("the launcher executable has no parent directory"))?;
-    Ok(dir.join(sidecar_file_name()))
+    Ok(dir.join(sidecar_file_name(channel)))
+}
+
+fn appimage_dir(paths: &Paths, channel: &ZebradChannel) -> PathBuf {
+    paths
+        .sidecar_dir()
+        .join(channel.as_str())
+        .join(env!("CARGO_PKG_VERSION"))
 }
 
 /// Copies `source` into `dir` unless an identical copy is already there, and
@@ -168,5 +177,41 @@ mod tests {
         remove_other_versions(root.path(), &keep);
         assert!(keep.is_dir());
         assert!(!old.exists());
+    }
+
+    #[test]
+    fn file_names_come_from_the_channel() {
+        for channel in ZebradChannel::ALL {
+            assert_eq!(
+                sidecar_file_name(&channel),
+                format!("{}{}", channel.sidecar_name(), std::env::consts::EXE_SUFFIX)
+            );
+        }
+        assert_eq!(
+            sidecar_file_name(&ZebradChannel::Stable),
+            format!("{SIDECAR_NAME}{}", std::env::consts::EXE_SUFFIX)
+        );
+    }
+
+    #[test]
+    fn appimage_cleanup_preserves_other_channels() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::under(root.path());
+        let stable = appimage_dir(&paths, &ZebradChannel::Stable);
+        let beta = appimage_dir(&paths, &ZebradChannel::Beta);
+        let old_stable = stable.parent().expect("version parent").join("0.0.9");
+        fs::create_dir_all(&stable).expect("stable copy");
+        fs::create_dir_all(&beta).expect("beta copy");
+        fs::create_dir_all(&old_stable).expect("old stable copy");
+
+        remove_other_versions(&paths.sidecar_dir().join("stable"), &stable);
+
+        assert!(stable.is_dir());
+        assert!(beta.is_dir());
+        assert!(!old_stable.exists());
+        assert_eq!(
+            beta.parent().expect("channel parent"),
+            paths.sidecar_dir().join("beta")
+        );
     }
 }

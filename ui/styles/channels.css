@@ -1,0 +1,137 @@
+/* Zebra's Stable, Beta and Nightly choices and the channel labels beside node names. */
+
+.channel-picker {
+  min-width: 0;
+}
+
+.channel-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.channel-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.channel-option:hover:not(.unavailable) {
+  border-color: var(--muted);
+}
+
+.channel-option.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.channel-option:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.channel-option.unavailable {
+  cursor: not-allowed;
+}
+
+.channel-option input {
+  flex: none;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+
+.channel-option-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  font-weight: 400;
+}
+
+.channel-option-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.channel-option-version {
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.channel-option-guidance,
+.channel-option-unavailable {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.channel-option-guidance {
+  color: var(--text-secondary);
+}
+
+.channel-option-unavailable {
+  color: var(--warn);
+}
+
+.channel-chip {
+  flex: none;
+  font-weight: 500;
+}
+
+.channel-beta,
+.channel-nightly {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.side-node .side-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.side-node-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-node .channel-chip {
+  padding: 0 5px;
+  font-size: 10px;
+}
+
+.node-card-title {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.node-card-title h3 {
+  flex: 0 1 auto;
+}
+
+.review-channel {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .channel-options {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Installs fake-zebrad as the sidecar for the host, so `cargo tauri dev` and
-# `cargo tauri build` work without downloading or building the real zebrad.
-# Never ship a bundle built this way. Windows: scripts/dev-sidecar.ps1.
+# Installs fake-zebrad as all three channel sidecars for the host, so
+# `cargo tauri dev` and `cargo tauri build` work without downloading or building
+# the real zebrad. Never ship a bundle built this way. Windows:
+# scripts/dev-sidecar.ps1.
 set -euo pipefail
 
 die() {
@@ -14,7 +15,6 @@ die() {
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 host="$(host_triple)"
-out="${root}/src-tauri/binaries/zeal-zebrad-${host}"
 
 # Take the binary's path from cargo, which knows about build.target-dir,
 # CARGO_TARGET_DIR and CARGO_BUILD_TARGET. Diagnostics still go to stderr.
@@ -27,5 +27,10 @@ built="$(
 built="${built#\"executable\":\"}"
 built="${built%\"}"
 [ -n "${built}" ] || die "cargo did not report where it built fake-zebrad"
-install_atomic "${built}" "${out}"
-echo "installed fake-zebrad ($("${out}" --version)) at ${out}"
+for channel in stable beta nightly; do
+    suffix=""
+    [ "${channel}" = stable ] || suffix="-${channel}"
+    out="${root}/src-tauri/binaries/zeal-zebrad${suffix}-${host}"
+    install_atomic "${built}" "${out}"
+    echo "installed ${channel} fake-zebrad ($("${out}" --version)) at ${out}"
+done

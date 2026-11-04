@@ -17,6 +17,7 @@ use leptos::{html, prelude::*};
 use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::{
+    app::AppState,
     components::{config_form_view::ZebradConfigForm, reset_config::ResetConfigButton},
     config_editor::{
         ConfigEditor, Load, Notice, changed_list, changes_text, fix_text, save_label,
@@ -25,6 +26,7 @@ use crate::{
     config_view::{
         LineChange, change_summary, highlight_toml, key_line, line_changes, scroll_to_reveal,
     },
+    pages::docs::DocsSection,
 };
 
 /// How long the line last edited in the form stays highlighted.
@@ -54,6 +56,7 @@ fn parse_px(value: &str) -> Option<i32> {
 
 #[component]
 pub fn Configure() -> impl IntoView {
+    let state = AppState::get();
     let editor = ConfigEditor::new();
     let has_document = move || editor.document.with(Option::is_some);
     // Ctrl (or Cmd) + S saves, from anywhere on the page.
@@ -212,6 +215,17 @@ pub fn Configure() -> impl IntoView {
                     </p>
                     <p class="muted cfg-lead">
                         "Change a setting in the form and zebrad.toml follows, with the changed lines marked. The file can also be edited as text."
+                    </p>
+                    <p class="muted cfg-docs-link">
+                        "Need the details of a setting? "
+                        <button
+                            type="button"
+                            class="link"
+                            on:click=move |_| state.open_docs(DocsSection::Config)
+                        >
+                            "Open the configuration reference"
+                        </button>
+                        " for this node's Zebra release."
                     </p>
                 </div>
                 // The first control on the page, so the text editor is a Tab away and not

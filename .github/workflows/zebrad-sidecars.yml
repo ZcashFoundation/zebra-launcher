@@ -1,51 +1,62 @@
 # Produces the zebrad sidecar binaries that the launcher bundles, one workflow
-# artifact per target, named `zebrad-<target triple>`, each holding
-# `zeal-zebrad-<target triple>[.exe]` (the name Tauri expects in
-# src-tauri/binaries/).
+# artifact per channel and target, named `zebrad-<channel>-<target triple>`.
+# Each holds `zeal-zebrad[-beta|-nightly]-<target triple>[.exe]`, the name Tauri
+# expects in src-tauri/binaries/.
 #
-# - Linux (x86_64, aarch64): Zebra's own release tarballs, verified with cosign
-#   and GitHub attestations by scripts/fetch-zebrad-linux.sh.
-# - macOS (aarch64, x86_64) and Windows (x86_64): built from the Zebra release
-#   tag by scripts/build-zebrad.sh / build-zebrad.ps1, because Zebra publishes
-#   only Linux binaries.
+# - Stable and beta Linux (x86_64, aarch64): Zebra's own release tarballs,
+#   verified with cosign and GitHub attestations by fetch-zebrad-linux.sh.
+# - Stable and beta macOS (aarch64, x86_64) and Windows (x86_64): built from the
+#   pinned Zebra release tag by build-zebrad.sh / build-zebrad.ps1.
+# - Nightly: built from the pinned next-branch commit on every target.
 #
-# Every binary gets a build-provenance attestation from this workflow. The
-# binaries are unsigned: code signing happens later, in the release
+# Stable uses ZEBRAD_VERSION/ZEBRAD_COMMIT. Beta and nightly use
+# ZEBRAD_BETA_VERSION/ZEBRAD_BETA_COMMIT and
+# ZEBRAD_NIGHTLY_VERSION/ZEBRAD_NIGHTLY_COMMIT respectively; their pins cannot
+# be overridden through workflow inputs. Every binary gets a build-provenance
+# attestation, a smoke `generate` check and, on Linux, the glibc floor check.
+# The binaries are unsigned: code signing happens later, in the release
 # environment, through the Tauri bundler. See docs/SIDECARS.md.
 #
 # Development builds: with a non-empty `zebrad_ref` input (a Zebra branch, tag
 # or full commit SHA), the first job resolves the ref to one commit and EVERY
 # selected target, Linux included, builds zebrad from source at that commit
-# (build-zebrad.sh --ref / build-zebrad.ps1 -Ref). Nothing is downloaded from a
-# Zebra release and nothing is checked against ZEBRAD_VERSION/ZEBRAD_COMMIT, so
-# these binaries are unverified; each artifact also holds
-# zebrad-build-info.txt saying so. The release path (empty `zebrad_ref`) is
-# unchanged. The `targets` input (comma-separated triples, empty for all five)
-# selects targets in both modes, through scripts/select-targets.sh.
+# (build-zebrad.sh --ref / build-zebrad.ps1 -Ref). Development builds retain the
+# stable sidecar name and are not combinable with channel, version or commit
+# overrides. Nothing is downloaded from a Zebra release or checked against the
+# stable pins, so these binaries are unverified; each artifact also holds
+# zebrad-build-info.txt saying so. Nightly and development Linux builds run in
+# Ubuntu 22.04, so their binaries meet the bundle smoke test's glibc floor.
+# The `targets` input (comma-separated triples, empty for all five) selects
+# targets in every mode through scripts/select-targets.sh.
 #
 # Callers must grant `contents: read`, `id-token: write` and
 # `attestations: write`. The `version` and `commit` outputs are the resolved,
-# validated zebrad version and Zebra commit; callers use them instead of
-# reading ZEBRAD_VERSION themselves. Both are empty for a development build,
-# which sets `zebrad_ref` and `zebrad_commit` instead (what the binary prints
-# for --version is in each artifact's zebrad-build-info.txt).
+# validated zebrad version and Zebra commit for the selected channel; callers
+# use them instead of reading root pins themselves. Both are empty for a
+# development build, which sets `zebrad_ref` and `zebrad_commit` instead (what
+# the binary prints for --version is in each artifact's zebrad-build-info.txt).
 name: zebrad sidecars
 
 on:
   workflow_call:
     inputs:
+      channel:
+        description: zebrad channel to build (development zebrad_ref builds require stable)
+        required: false
+        type: string
+        default: stable
       version:
-        description: zebrad version without a leading "v" (empty uses ZEBRAD_VERSION)
+        description: stable zebrad version without a leading "v" (empty uses ZEBRAD_VERSION; stable only)
         required: false
         type: string
         default: ""
       commit:
-        description: full Zebra commit SHA of tag v<version> (empty uses ZEBRAD_COMMIT; required when version is not ZEBRAD_VERSION)
+        description: full Zebra commit SHA of tag v<version> (empty uses ZEBRAD_COMMIT; required when stable version is not ZEBRAD_VERSION)
         required: false
         type: string
         default: ""
       zebrad_ref:
-        description: DEVELOPMENT BUILD, never released. Zebra branch, tag or full commit SHA to build zebrad from on every target (empty builds the verified release). Not combinable with version or commit.
+        description: DEVELOPMENT BUILD, never released. Zebra branch, tag or full commit SHA to build on every target with the stable sidecar name. Not combinable with a non-stable channel, version or commit.
         required: false
         type: string
         default: ""
@@ -55,11 +66,14 @@ on:
         type: string
         default: ""
     outputs:
+      channel:
+        description: the zebrad channel the sidecars were built from
+        value: ${{ jobs.version.outputs.channel }}
       version:
-        description: the zebrad version the sidecars were built from (X.Y.Z, no leading v); empty for a development build
+        description: the zebrad version the sidecars were built from (no leading v); empty for a development build
         value: ${{ jobs.version.outputs.version }}
       commit:
-        description: the full Zebra commit SHA of tag v<version>; empty for a development build
+        description: the full pinned Zebra commit; empty for a development build
         value: ${{ jobs.version.outputs.commit }}
       zebrad_ref:
         description: the zebrad_ref input of a development build (empty otherwise)
@@ -69,18 +83,24 @@ on:
         value: ${{ jobs.version.outputs.zebrad_commit }}
   workflow_dispatch:
     inputs:
+      channel:
+        description: zebrad channel to build (development zebrad_ref builds require stable)
+        required: true
+        type: choice
+        options: [stable, beta, nightly]
+        default: stable
       version:
-        description: zebrad version without a leading "v" (empty uses ZEBRAD_VERSION)
+        description: stable zebrad version without a leading "v" (empty uses ZEBRAD_VERSION; stable only)
         required: false
         type: string
         default: ""
       commit:
-        description: full Zebra commit SHA of tag v<version> (empty uses ZEBRAD_COMMIT; required when version is not ZEBRAD_VERSION)
+        description: full Zebra commit SHA of tag v<version> (empty uses ZEBRAD_COMMIT; required when stable version is not ZEBRAD_VERSION)
         required: false
         type: string
         default: ""
       zebrad_ref:
-        description: DEVELOPMENT BUILD, never released. Zebra branch, tag or full commit SHA to build zebrad from on every target (empty builds the verified release). Not combinable with version or commit.
+        description: DEVELOPMENT BUILD, never released. Zebra branch, tag or full commit SHA to build on every target with the stable sidecar name. Not combinable with a non-stable channel, version or commit.
         required: false
         type: string
         default: ""
@@ -96,19 +116,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Resolves the version and its pinned Zebra commit once: the inputs when
-  # given, otherwise ZEBRAD_VERSION and ZEBRAD_COMMIT from the checked-out
-  # commit. ZEBRAD_COMMIT only applies to ZEBRAD_VERSION, so any other version
-  # needs the commit input. For a development build, resolves zebrad_ref to a
-  # commit instead, so every target builds the same commit even if the branch
-  # moves meanwhile. Also selects the targets.
+  # Validates the input combination, then resolves the selected channel's
+  # version and pinned commit once. Stable retains its one-off version/commit
+  # overrides; beta and nightly always come from their root pin files. For a
+  # development build, resolves zebrad_ref instead, so every target builds the
+  # same commit even if the branch moves meanwhile. Also selects the targets.
   version:
-    name: Resolve the zebrad version
+    name: Resolve the ${{ inputs.channel }} zebrad version
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
     outputs:
+      channel: ${{ steps.mode.outputs.channel }}
+      sidecar_suffix: ${{ steps.mode.outputs.sidecar_suffix }}
+      source: ${{ steps.mode.outputs.source }}
       version: ${{ steps.resolve.outputs.version }}
       commit: ${{ steps.resolve.outputs.commit }}
       zebrad_ref: ${{ steps.ref.outputs.ref }}
@@ -123,9 +145,33 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - id: validate
+        name: Validate the channel and input combination
+        env:
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_REF: ${{ inputs.zebrad_ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          case "${INPUT_CHANNEL}" in
+            stable | beta | nightly) ;;
+            *) echo "::error::channel must be stable, beta or nightly, not '${INPUT_CHANNEL}'"; exit 1 ;;
+          esac
+          if [ "${INPUT_CHANNEL}" != stable ] && { [ -n "${INPUT_REF}" ] || [ -n "${INPUT_VERSION}" ] || [ -n "${INPUT_COMMIT}" ]; }; then
+            echo "::error::beta and nightly use their exact root pins; zebrad_ref, version and commit are stable-only inputs"
+            exit 1
+          fi
+          if [ -n "${INPUT_REF}" ] && { [ -n "${INPUT_VERSION}" ] || [ -n "${INPUT_COMMIT}" ]; }; then
+            echo "::error::zebrad_ref cannot be combined with the version or commit inputs"
+            exit 1
+          fi
+
       - id: resolve
         if: inputs.zebrad_ref == ''
         env:
+          CHANNEL: ${{ inputs.channel }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_COMMIT: ${{ inputs.commit }}
         run: |
@@ -133,21 +179,30 @@ jobs:
           die() { echo "::error::$*"; exit 1; }
           # shellcheck disable=SC1091 # the version grammars live in scripts/lib.sh
           . scripts/lib.sh
-          pinned_version="$(read_zebrad_version .)"
-          version="${INPUT_VERSION:-${pinned_version}}"
-          # A one-off version input may be a release candidate; the pin itself
-          # is held to the stable grammar by check-versions.sh in ci.yml.
-          check_zebrad_version "${version}"
-          # ZEBRAD_COMMIT pins ZEBRAD_VERSION only.
-          commit="${INPUT_COMMIT:-$(read_zebrad_commit . "${version}")}"
-          [ -n "${commit}" ] \
-            || die "version ${version} is not ZEBRAD_VERSION (${pinned_version}); give the commit input too"
+          if [ "${CHANNEL}" = stable ]; then
+            pinned_version="$(read_zebrad_version .)"
+            version="${INPUT_VERSION:-${pinned_version}}"
+            # A one-off stable version input may be a release candidate; the pin
+            # itself is held to the stable grammar by check-versions.sh in ci.yml.
+            check_zebrad_version "${version}"
+            # ZEBRAD_COMMIT pins ZEBRAD_VERSION only.
+            commit="${INPUT_COMMIT:-$(read_zebrad_commit . "${version}")}"
+            [ -n "${commit}" ] \
+              || die "version ${version} is not ZEBRAD_VERSION (${pinned_version}); give the commit input too"
+          else
+            prefix="ZEBRAD_$(tr '[:lower:]' '[:upper:]' <<< "${CHANNEL}")"
+            version="$(read_pin "${prefix}_VERSION")"
+            commit="$(read_pin "${prefix}_COMMIT")"
+            [ -n "${version}" ] || die "${prefix}_VERSION is missing or empty"
+            [ -n "${commit}" ] || die "${prefix}_COMMIT is missing or empty"
+            check_zebrad_version "${version}"
+          fi
           check_commit "${commit}"
           {
             echo "version=${version}"
             echo "commit=${commit}"
           } >> "${GITHUB_OUTPUT}"
-          echo "zebrad ${version} (Zebra commit ${commit})" >> "${GITHUB_STEP_SUMMARY}"
+          echo "${CHANNEL} zebrad ${version} (Zebra commit ${commit})" >> "${GITHUB_STEP_SUMMARY}"
 
       # Development build: a shallow fetch of exactly the ref (build-zebrad.sh
       # validates it), whose HEAD is the commit every target builds.
@@ -156,14 +211,8 @@ jobs:
         if: inputs.zebrad_ref != ''
         env:
           INPUT_REF: ${{ inputs.zebrad_ref }}
-          INPUT_VERSION: ${{ inputs.version }}
-          INPUT_COMMIT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
-          if [ -n "${INPUT_VERSION}" ] || [ -n "${INPUT_COMMIT}" ]; then
-            echo "::error::zebrad_ref cannot be combined with the version or commit inputs"
-            exit 1
-          fi
           src="${RUNNER_TEMP}/zebra-ref"
           scripts/build-zebrad.sh --ref "${INPUT_REF}" --src-dir "${src}" --fetch-only
           commit="$(git -C "${src}" rev-parse HEAD)"
@@ -177,6 +226,25 @@ jobs:
             echo
             echo "Not a verified release: built from a Zebra git ref, not checked against ZEBRAD_VERSION/ZEBRAD_COMMIT, unsigned."
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - id: mode
+        name: Select the channel build mode
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          INPUT_REF: ${{ inputs.zebrad_ref }}
+        run: |
+          set -euo pipefail
+          suffix=""
+          [ "${CHANNEL}" = stable ] || suffix="-${CHANNEL}"
+          source=false
+          if [ "${CHANNEL}" = nightly ] || [ -n "${INPUT_REF}" ]; then
+            source=true
+          fi
+          {
+            echo "channel=${CHANNEL}"
+            echo "sidecar_suffix=${suffix}"
+            echo "source=${source}"
+          } >> "${GITHUB_OUTPUT}"
 
       # One matrix per job below, each possibly empty (the job is then
       # skipped through its has_* output).
@@ -196,100 +264,156 @@ jobs:
             } >> "${GITHUB_OUTPUT}"
           done
 
-  # The job names carry the target: with an explicit `name:` GitHub does not
-  # append the matrix values, so a static name would be the same for both
-  # Linux (and both macOS) targets. A skipped job shows the expression
+  # The job names carry the channel and target: with an explicit `name:` GitHub
+  # does not append the matrix values, so a static name would be the same for
+  # both Linux (and both macOS) targets. A skipped job shows the expression
   # unrendered, which is the lesser problem.
   linux:
-    name: zebrad (${{ matrix.target }})
+    name: ${{ inputs.channel }} zebrad (${{ matrix.target }})
     needs: version
     if: needs.version.outputs.has_linux == 'true'
     runs-on: ${{ matrix.runner }}
-    # A development build compiles zebrad.
-    timeout-minutes: ${{ needs.version.outputs.zebrad_ref == '' && 15 || 90 }}
+    # Release downloads stay on the runner. Source builds use Ubuntu 22.04 so
+    # the resulting binary also runs in the bundle workflow's smoke container.
+    container: ${{ needs.version.outputs.source == 'true' && matrix.container || '' }}
+    timeout-minutes: ${{ needs.version.outputs.source == 'true' && 90 || 15 }}
     strategy:
       fail-fast: false
-      # The Linux entries of .github/targets.json: ubuntu-24.04 for x86_64 and
-      # the native arm64 runner for aarch64, so the --version smoke test runs
-      # the binary. (Their `container` is for bundle.yml; not used here.)
+      # Native x86_64 and aarch64 runners execute the version/generate checks.
       matrix: ${{ fromJSON(needs.version.outputs.linux) }}
     permissions:
       contents: read
       id-token: write # sign the build provenance
       attestations: write # store the build provenance
+    defaults:
+      run:
+        shell: bash
     env:
       VERSION: ${{ needs.version.outputs.version }}
       COMMIT: ${{ needs.version.outputs.commit }}
       ZEBRAD_REF: ${{ needs.version.outputs.zebrad_ref }}
       ZEBRAD_COMMIT: ${{ needs.version.outputs.zebrad_commit }}
+      SOURCE_COMMIT: ${{ needs.version.outputs.zebrad_commit || needs.version.outputs.commit }}
       TARGET: ${{ matrix.target }}
-      SIDECAR: dist/zeal-zebrad-${{ matrix.target }}
+      SIDECAR: dist/zeal-zebrad${{ needs.version.outputs.sidecar_suffix }}-${{ matrix.target }}
     steps:
-      - name: ${{ needs.version.outputs.zebrad_ref == '' && 'Fetch' || 'Build' }} zebrad for ${{ matrix.target }}
+      - name: ${{ needs.version.outputs.source == 'true' && 'Build' || 'Fetch' }} ${{ inputs.channel }} zebrad for ${{ matrix.target }}
         run: |
-          if [ -z "${ZEBRAD_REF}" ]; then
-            echo "${TARGET}: fetch and verify the released zebrad ${VERSION}"
+          if [ -z "${ZEBRAD_REF}" ] && [ -z "${VERSION}" ]; then
+            echo "::error::neither a pinned release nor a development ref was resolved"
+            exit 1
+          elif [ -n "${ZEBRAD_REF}" ]; then
+            echo "${TARGET}: build development zebrad ${ZEBRAD_REF} (${SOURCE_COMMIT}) from source"
+          elif [ "${SOURCE_COMMIT}" != "${COMMIT}" ] || [ -z "${VERSION}" ]; then
+            echo "::error::inconsistent source and release pins"
+            exit 1
+          elif [ "${{ inputs.channel }}" = nightly ]; then
+            echo "${TARGET}: build nightly zebrad ${VERSION} from pinned commit ${COMMIT}"
           else
-            echo "${TARGET}: build zebrad ${ZEBRAD_REF} (${ZEBRAD_COMMIT}) from source"
+            echo "${TARGET}: fetch and verify the released zebrad ${VERSION}"
           fi
+
+      # A minimal Ubuntu container has neither the build tools nor git needed
+      # by checkout. It runs as root; no host sudo or runner packages are used.
+      - name: Install the source-build prerequisites (Ubuntu 22.04)
+        if: needs.version.outputs.source == 'true'
+        run: |
+          set -euo pipefail
+          [ "$(id -u)" -eq 0 ] || { echo "::error::the source-build container must run as root"; exit 1; }
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config libssl-dev \
+            clang libclang-dev cmake binutils unzip
+
+      # Keep this pinned, checksummed bootstrap in sync with setup-tauri. Do
+      # not replace it with a mutable install script piped into a shell.
+      - name: Install rustup (Ubuntu 22.04 container)
+        if: needs.version.outputs.source == 'true'
+        env:
+          RUSTUP_VERSION: 1.29.2
+          RUSTUP_INIT_SHA256_X86_64: 5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+          RUSTUP_INIT_SHA256_AARCH64: a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697
+        run: |
+          set -euo pipefail
+          if command -v rustup > /dev/null 2>&1; then
+            echo "rustup is already installed: $(rustup --version 2> /dev/null)"
+            exit 0
+          fi
+          case "$(uname -m)" in
+            x86_64) triple=x86_64-unknown-linux-gnu; sha256="${RUSTUP_INIT_SHA256_X86_64}" ;;
+            aarch64) triple=aarch64-unknown-linux-gnu; sha256="${RUSTUP_INIT_SHA256_AARCH64}" ;;
+            *) echo "::error::no pinned rustup-init for $(uname -m)"; exit 1 ;;
+          esac
+          init="${RUNNER_TEMP}/rustup-init"
+          curl --proto '=https' --tlsv1.2 -sSf -o "${init}" \
+            "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${triple}/rustup-init"
+          echo "${sha256}  ${init}" | sha256sum -c -
+          chmod +x "${init}"
+          "${init}" -y --no-modify-path --profile minimal --default-toolchain none
+          rm -f "${init}"
+          echo "${CARGO_HOME:-${HOME}/.cargo}/bin" >> "${GITHUB_PATH}"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: needs.version.outputs.zebrad_ref == ''
+        if: needs.version.outputs.source == 'false'
 
       # Verifies the cosign signature on SHA256SUMS, the tarball checksum and
       # Zebra's attestation (the script fails if the runner's gh is older than
-      # 2.68.0), with
-      # the signature and attestation pinned to the Zebra commit, then checks
-      # `zebrad --version`.
+      # 2.68.0), with the signature and attestation pinned to the Zebra commit,
+      # then checks `zebrad --version`. Beta uses the same verified release path.
       - name: Download and verify zebrad
-        if: needs.version.outputs.zebrad_ref == ''
+        if: needs.version.outputs.source == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           # CI must never skip the attestation check.
           REQUIRE_ATTESTATION: "1"
         run: scripts/fetch-zebrad-linux.sh --version "${VERSION}" --commit "${COMMIT}" --target "${TARGET}" --out "${SIDECAR}"
 
-      # Development build only: the dependencies build-zebrad.sh lists for
-      # Linux (clang and libclang for bindgen, cmake for RocksDB), and protoc
-      # from the same action as the macOS and Windows jobs. Built on the
-      # runner, so the binary needs the runner's glibc, not the 2.35 floor of
-      # the release bundles (bundle.yml exempts it from that check).
-      - name: Install the zebrad build dependencies (development build)
-        if: needs.version.outputs.zebrad_ref != ''
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang libclang-dev cmake
-
       - uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        if: needs.version.outputs.zebrad_ref != ''
+        if: needs.version.outputs.source == 'true'
         with:
           repo-token: ${{ github.token }}
 
-      # Fetched before rust-cache so the cache sees Zebra's Cargo.lock; the
-      # build step then checks that the checkout is exactly ZEBRAD_COMMIT.
-      - name: Fetch Zebra ${{ needs.version.outputs.zebrad_commit }} (development build)
-        if: needs.version.outputs.zebrad_ref != ''
-        run: scripts/build-zebrad.sh --ref "${ZEBRAD_COMMIT}" --src-dir zebra-src --fetch-only
+      # Fetched before rust-cache so the cache sees Zebra's Cargo.lock. A full
+      # commit SHA makes build-zebrad.sh verify the checkout for both nightly
+      # and development source builds.
+      - name: Fetch Zebra ${{ needs.version.outputs.zebrad_commit || needs.version.outputs.commit }} (source build)
+        if: needs.version.outputs.source == 'true'
+        run: |
+          set -euo pipefail
+          scripts/build-zebrad.sh --ref "${SOURCE_COMMIT}" --src-dir zebra-src --fetch-only
+          test "$(git -C zebra-src rev-parse HEAD)" = "${SOURCE_COMMIT}"
 
-      - name: Install Zebra's Rust toolchain (development build)
-        if: needs.version.outputs.zebrad_ref != ''
+      - name: Install Zebra's Rust toolchain (source build)
+        if: needs.version.outputs.source == 'true'
         working-directory: zebra-src
-        run: rustup toolchain install --profile minimal
+        run: rustup toolchain install --profile minimal --no-self-update
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        if: needs.version.outputs.zebrad_ref != ''
+        if: needs.version.outputs.source == 'true'
         with:
           workspaces: zebra-src -> target
-          key: zebrad-ref-${{ matrix.target }}
+          key: zebrad-${{ inputs.channel }}-${{ needs.version.outputs.zebrad_commit || needs.version.outputs.commit }}-${{ matrix.target }}
 
-      - name: Build zebrad (development build)
-        if: needs.version.outputs.zebrad_ref != ''
-        run: scripts/build-zebrad.sh --ref "${ZEBRAD_COMMIT}" --target "${TARGET}" --src-dir zebra-src --out "${SIDECAR}"
+      - name: Build zebrad (source build)
+        if: needs.version.outputs.source == 'true'
+        run: scripts/build-zebrad.sh --ref "${SOURCE_COMMIT}" --target "${TARGET}" --src-dir zebra-src --out "${SIDECAR}"
+
+      # Release scripts already check this too. In particular, this gives the
+      # pinned-commit nightly build the same strict base-version check while
+      # accepting Zebra's build metadata.
+      - name: Verify the packaged zebrad version
+        if: needs.version.outputs.zebrad_ref == ''
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+          # shellcheck disable=SC1091 # check_reported_version lives in scripts/lib.sh
+          . scripts/lib.sh
+          check_reported_version "${SIDECAR}" "${VERSION}"
 
       - name: Smoke test
         run: |
@@ -297,30 +421,36 @@ jobs:
           "${SIDECAR}" generate -o "${RUNNER_TEMP}/zebrad.toml"
           test -s "${RUNNER_TEMP}/zebrad.toml"
 
-      - name: Write zebrad-build-info.txt (development build)
-        if: needs.version.outputs.zebrad_ref != ''
+      - name: Check the glibc floor
+        run: scripts/check-glibc.sh "${SIDECAR}"
+
+      - name: Write zebrad-build-info.txt (development or pinned nightly build)
+        if: needs.version.outputs.zebrad_ref != '' || inputs.channel == 'nightly'
         run: |
           set -euo pipefail
-          scripts/dev-build-info.sh --ref "${ZEBRAD_REF}" --commit "${ZEBRAD_COMMIT}" \
-            --target "${TARGET}" --binary "${SIDECAR}" > dist/zebrad-build-info.txt
+          mode=development
+          if [ -z "${ZEBRAD_REF}" ]; then mode=pinned-nightly; fi
+          scripts/dev-build-info.sh --mode "${mode}" --ref "${ZEBRAD_REF:-next}" \
+            --commit "${SOURCE_COMMIT}" --target "${TARGET}" --binary "${SIDECAR}" \
+            > dist/zebrad-build-info.txt
           cat dist/zebrad-build-info.txt
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ env.SIDECAR }}
 
-      # zebrad-build-info.txt exists for a development build only; the
-      # artifact's root is dist/ either way.
+      # Development and pinned nightly artifacts include zebrad-build-info.txt;
+      # stable and beta release artifacts contain only the sidecar.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: zebrad-${{ matrix.target }}
+          name: zebrad-${{ inputs.channel }}-${{ matrix.target }}
           path: |
             ${{ env.SIDECAR }}
             dist/zebrad-build-info.txt
           if-no-files-found: error
 
   macos:
-    name: zebrad (${{ matrix.target }})
+    name: ${{ inputs.channel }} zebrad (${{ matrix.target }})
     needs: version
     if: needs.version.outputs.has_macos == 'true'
     runs-on: ${{ matrix.runner }}
@@ -340,15 +470,16 @@ jobs:
       COMMIT: ${{ needs.version.outputs.commit }}
       ZEBRAD_REF: ${{ needs.version.outputs.zebrad_ref }}
       ZEBRAD_COMMIT: ${{ needs.version.outputs.zebrad_commit }}
+      SOURCE_COMMIT: ${{ needs.version.outputs.zebrad_commit || needs.version.outputs.commit }}
       TARGET: ${{ matrix.target }}
-      SIDECAR: dist/zeal-zebrad-${{ matrix.target }}
+      SIDECAR: dist/zeal-zebrad${{ needs.version.outputs.sidecar_suffix }}-${{ matrix.target }}
     steps:
-      - name: Build zebrad for ${{ matrix.target }}
+      - name: Build ${{ inputs.channel }} zebrad for ${{ matrix.target }}
         run: |
-          if [ -z "${ZEBRAD_REF}" ]; then
-            echo "${TARGET}: build zebrad ${VERSION} from source"
+          if [ -n "${ZEBRAD_REF}" ]; then
+            echo "${TARGET}: build development zebrad ${ZEBRAD_REF} (${SOURCE_COMMIT}) from source"
           else
-            echo "${TARGET}: build zebrad ${ZEBRAD_REF} (${ZEBRAD_COMMIT}) from source"
+            echo "${TARGET}: build ${{ inputs.channel }} zebrad ${VERSION} from ${COMMIT}"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -356,18 +487,21 @@ jobs:
           persist-credentials: false
 
       # Cloned before rust-cache so the cache sees Zebra's Cargo.lock. The
-      # build script checks that the checkout is exactly the release tag and
-      # that the tag is the pinned commit.
+      # build script checks that the checkout is exactly the stable or beta
+      # release tag and that the tag is the pinned commit.
       - name: Clone Zebra ${{ needs.version.outputs.version }}
-        if: needs.version.outputs.zebrad_ref == ''
+        if: needs.version.outputs.source == 'false'
         run: |
           git -c advice.detachedHead=false clone --depth 1 --branch "v${VERSION}" \
             https://github.com/ZcashFoundation/zebra zebra-src
 
-      # Development build: the same, at the resolved commit of zebrad_ref.
-      - name: Fetch Zebra ${{ needs.version.outputs.zebrad_commit }} (development build)
-        if: needs.version.outputs.zebrad_ref != ''
-        run: scripts/build-zebrad.sh --ref "${ZEBRAD_COMMIT}" --src-dir zebra-src --fetch-only
+      # Nightly and development builds fetch a resolved full commit instead.
+      - name: Fetch Zebra ${{ needs.version.outputs.zebrad_commit || needs.version.outputs.commit }} (pinned source)
+        if: needs.version.outputs.source == 'true'
+        run: |
+          set -euo pipefail
+          scripts/build-zebrad.sh --ref "${SOURCE_COMMIT}" --src-dir zebra-src --fetch-only
+          test "$(git -C zebra-src rev-parse HEAD)" = "${SOURCE_COMMIT}"
 
       # Only for rust-cache: its key includes the rustc version of every
       # installed toolchain, and it runs `cargo metadata` in zebra-src, so
@@ -386,15 +520,24 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: zebra-src -> target
-          key: zebrad-${{ needs.version.outputs.version || 'ref' }}-${{ matrix.target }}
+          key: zebrad-${{ inputs.channel }}-${{ needs.version.outputs.zebrad_commit || needs.version.outputs.commit }}-${{ matrix.target }}
 
-      - name: Build zebrad
-        if: needs.version.outputs.zebrad_ref == ''
+      - name: Build zebrad (release tag)
+        if: needs.version.outputs.source == 'false'
         run: scripts/build-zebrad.sh --version "${VERSION}" --commit "${COMMIT}" --target "${TARGET}" --src-dir zebra-src --out "${SIDECAR}"
 
-      - name: Build zebrad (development build)
-        if: needs.version.outputs.zebrad_ref != ''
-        run: scripts/build-zebrad.sh --ref "${ZEBRAD_COMMIT}" --target "${TARGET}" --src-dir zebra-src --out "${SIDECAR}"
+      - name: Build zebrad (pinned source)
+        if: needs.version.outputs.source == 'true'
+        run: scripts/build-zebrad.sh --ref "${SOURCE_COMMIT}" --target "${TARGET}" --src-dir zebra-src --out "${SIDECAR}"
+
+      - name: Verify the packaged zebrad version
+        if: needs.version.outputs.zebrad_ref == ''
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+          # shellcheck disable=SC1091 # check_reported_version lives in scripts/lib.sh
+          . scripts/lib.sh
+          check_reported_version "${SIDECAR}" "${VERSION}"
 
       - name: Smoke test
         run: |
@@ -402,30 +545,33 @@ jobs:
           "${SIDECAR}" generate -o "${RUNNER_TEMP}/zebrad.toml"
           test -s "${RUNNER_TEMP}/zebrad.toml"
 
-      - name: Write zebrad-build-info.txt (development build)
-        if: needs.version.outputs.zebrad_ref != ''
+      - name: Write zebrad-build-info.txt (development or pinned nightly build)
+        if: needs.version.outputs.zebrad_ref != '' || inputs.channel == 'nightly'
         run: |
           set -euo pipefail
-          scripts/dev-build-info.sh --ref "${ZEBRAD_REF}" --commit "${ZEBRAD_COMMIT}" \
-            --target "${TARGET}" --binary "${SIDECAR}" > dist/zebrad-build-info.txt
+          mode=development
+          if [ -z "${ZEBRAD_REF}" ]; then mode=pinned-nightly; fi
+          scripts/dev-build-info.sh --mode "${mode}" --ref "${ZEBRAD_REF:-next}" \
+            --commit "${SOURCE_COMMIT}" --target "${TARGET}" --binary "${SIDECAR}" \
+            > dist/zebrad-build-info.txt
           cat dist/zebrad-build-info.txt
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ env.SIDECAR }}
 
-      # zebrad-build-info.txt exists for a development build only; the
-      # artifact's root is dist/ either way.
+      # Development and pinned nightly artifacts include zebrad-build-info.txt;
+      # stable and beta release artifacts contain only the sidecar.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: zebrad-${{ matrix.target }}
+          name: zebrad-${{ inputs.channel }}-${{ matrix.target }}
           path: |
             ${{ env.SIDECAR }}
             dist/zebrad-build-info.txt
           if-no-files-found: error
 
   windows:
-    name: zebrad (${{ matrix.target }})
+    name: ${{ inputs.channel }} zebrad (${{ matrix.target }})
     needs: version
     if: needs.version.outputs.has_windows == 'true'
     runs-on: ${{ matrix.runner }}
@@ -444,21 +590,22 @@ jobs:
       COMMIT: ${{ needs.version.outputs.commit }}
       ZEBRAD_REF: ${{ needs.version.outputs.zebrad_ref }}
       ZEBRAD_COMMIT: ${{ needs.version.outputs.zebrad_commit }}
+      SOURCE_COMMIT: ${{ needs.version.outputs.zebrad_commit || needs.version.outputs.commit }}
       TARGET: ${{ matrix.target }}
-      SIDECAR: dist/zeal-zebrad-${{ matrix.target }}${{ matrix.exe_suffix }}
+      SIDECAR: dist/zeal-zebrad${{ needs.version.outputs.sidecar_suffix }}-${{ matrix.target }}${{ matrix.exe_suffix }}
       # bindgen's libclang: build-zebrad.ps1 finds the LLVM that the runner
       # image preinstalls in C:\Program Files\LLVM, and fails if it is missing.
     defaults:
       run:
         shell: pwsh
     steps:
-      - name: Build zebrad for ${{ matrix.target }}
+      - name: Build ${{ inputs.channel }} zebrad for ${{ matrix.target }}
         shell: bash
         run: |
-          if [ -z "${ZEBRAD_REF}" ]; then
-            echo "${TARGET}: build zebrad ${VERSION} from source"
+          if [ -n "${ZEBRAD_REF}" ]; then
+            echo "${TARGET}: build development zebrad ${ZEBRAD_REF} (${SOURCE_COMMIT}) from source"
           else
-            echo "${TARGET}: build zebrad ${ZEBRAD_REF} (${ZEBRAD_COMMIT}) from source"
+            echo "${TARGET}: build ${{ inputs.channel }} zebrad ${VERSION} from ${COMMIT}"
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -469,17 +616,22 @@ jobs:
       # changed to `git describe --dirty`, and zebrad then reports
       # "7.0.0-modified+git.<commit>", which fails build-zebrad.ps1's version check.
       - name: Clone Zebra ${{ needs.version.outputs.version }}
-        if: needs.version.outputs.zebrad_ref == ''
+        if: needs.version.outputs.source == 'false'
         run: |
           git -c advice.detachedHead=false clone --config core.autocrlf=false --depth 1 --branch "v$env:VERSION" `
             https://github.com/ZcashFoundation/zebra zebra-src
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      # Development build: fetched at the resolved commit of zebrad_ref, before
+      # Nightly and development builds: fetched at a resolved full commit before
       # rust-cache, as in the macOS job.
-      - name: Fetch Zebra ${{ needs.version.outputs.zebrad_commit }} (development build)
-        if: needs.version.outputs.zebrad_ref != ''
-        run: ./scripts/build-zebrad.ps1 -Ref $env:ZEBRAD_COMMIT -SrcDir zebra-src -FetchOnly
+      - name: Fetch Zebra ${{ needs.version.outputs.zebrad_commit || needs.version.outputs.commit }} (pinned source)
+        if: needs.version.outputs.source == 'true'
+        run: |
+          ./scripts/build-zebrad.ps1 -Ref $env:SOURCE_COMMIT -SrcDir zebra-src -FetchOnly
+          $head = (git -C zebra-src rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -cne $env:SOURCE_COMMIT) {
+            throw "Zebra checkout is $head, not $env:SOURCE_COMMIT"
+          }
 
       # Only for rust-cache, as in the macOS job; build-zebrad.ps1 would install
       # the toolchain itself, but only after the cache is restored.
@@ -494,15 +646,25 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: zebra-src -> target
-          key: zebrad-${{ needs.version.outputs.version || 'ref' }}-${{ matrix.target }}
+          key: zebrad-${{ inputs.channel }}-${{ needs.version.outputs.zebrad_commit || needs.version.outputs.commit }}-${{ matrix.target }}
 
-      - name: Build zebrad
-        if: needs.version.outputs.zebrad_ref == ''
+      - name: Build zebrad (release tag)
+        if: needs.version.outputs.source == 'false'
         run: ./scripts/build-zebrad.ps1 -Version $env:VERSION -Commit $env:COMMIT -Target $env:TARGET -SrcDir zebra-src -Out $env:SIDECAR
 
-      - name: Build zebrad (development build)
-        if: needs.version.outputs.zebrad_ref != ''
-        run: ./scripts/build-zebrad.ps1 -Ref $env:ZEBRAD_COMMIT -Target $env:TARGET -SrcDir zebra-src -Out $env:SIDECAR
+      - name: Build zebrad (pinned source)
+        if: needs.version.outputs.source == 'true'
+        run: ./scripts/build-zebrad.ps1 -Ref $env:SOURCE_COMMIT -Target $env:TARGET -SrcDir zebra-src -Out $env:SIDECAR
+
+      - name: Verify the packaged zebrad version
+        if: needs.version.outputs.zebrad_ref == ''
+        run: |
+          $reported = (& $env:SIDECAR --version | Select-Object -First 1)
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($reported -cnotmatch ('^zebrad ' + [regex]::Escape($env:VERSION) + '($|[ +])')) {
+            Remove-Item -Force $env:SIDECAR
+            throw "binary reports '$reported', expected 'zebrad $env:VERSION'"
+          }
 
       - name: Smoke test
         run: |
@@ -511,24 +673,27 @@ jobs:
           if ((Get-Item "$env:RUNNER_TEMP/zebrad.toml").Length -eq 0) { exit 1 }
 
       # Git Bash, as for the other targets.
-      - name: Write zebrad-build-info.txt (development build)
-        if: needs.version.outputs.zebrad_ref != ''
+      - name: Write zebrad-build-info.txt (development or pinned nightly build)
+        if: needs.version.outputs.zebrad_ref != '' || inputs.channel == 'nightly'
         shell: bash
         run: |
           set -euo pipefail
-          scripts/dev-build-info.sh --ref "${ZEBRAD_REF}" --commit "${ZEBRAD_COMMIT}" \
-            --target "${TARGET}" --binary "${SIDECAR}" > dist/zebrad-build-info.txt
+          mode=development
+          if [ -z "${ZEBRAD_REF}" ]; then mode=pinned-nightly; fi
+          scripts/dev-build-info.sh --mode "${mode}" --ref "${ZEBRAD_REF:-next}" \
+            --commit "${SOURCE_COMMIT}" --target "${TARGET}" --binary "${SIDECAR}" \
+            > dist/zebrad-build-info.txt
           cat dist/zebrad-build-info.txt
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ env.SIDECAR }}
 
-      # zebrad-build-info.txt exists for a development build only; the
-      # artifact's root is dist/ either way.
+      # Development and pinned nightly artifacts include zebrad-build-info.txt;
+      # stable and beta release artifacts contain only the sidecar.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: zebrad-${{ matrix.target }}
+          name: zebrad-${{ inputs.channel }}-${{ matrix.target }}
           path: |
             ${{ env.SIDECAR }}
             dist/zebrad-build-info.txt

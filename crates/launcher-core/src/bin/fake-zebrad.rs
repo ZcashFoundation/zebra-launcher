@@ -5,9 +5,10 @@
 //!
 //! It accepts the subset of zebrad's command line the launcher uses
 //! (`--version`, `-c FILE start`), prints the same log lines the launcher's
-//! detectors key on, and shuts down on the same signals. It reports the
-//! pinned `ZEBRAD_VERSION` as its version. `FAKE_ZEBRAD_MODE` selects a
-//! scenario:
+//! detectors key on, and shuts down on the same signals. `FAKE_ZEBRAD_VERSION`
+//! overrides its reported version; otherwise a beta or nightly sidecar file
+//! name selects that channel's pin, and any other name selects stable.
+//! `FAKE_ZEBRAD_MODE` selects a scenario:
 //!
 //! | mode | behaviour |
 //! |---|---|
@@ -88,6 +89,7 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use launcher_core::clock::rfc3339;
+use launcher_types::ZebradChannel;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -95,12 +97,36 @@ use tokio::{
     sync::oneshot,
 };
 
-/// The bundled zebrad's version, from the repository's `ZEBRAD_VERSION` pin.
-const VERSION: &str = include_str!("../../../../ZEBRAD_VERSION").trim_ascii();
 const RPC_ADDR: &str = "127.0.0.1:8232";
 const METRICS_ADDR: &str = "127.0.0.1:9999";
 /// The page the metrics endpoint serves: a real zebrad's, see the fixtures README.
 const METRICS_PAGE: &str = include_str!("../../tests/fixtures/zebrad-7.0.0-metrics.txt");
+
+fn version_for_file_name(file_name: &str) -> &'static str {
+    let channel = if file_name.starts_with("zeal-zebrad-beta-") {
+        ZebradChannel::Beta
+    } else if file_name.starts_with("zeal-zebrad-nightly-") {
+        ZebradChannel::Nightly
+    } else {
+        ZebradChannel::Stable
+    };
+    channel.version()
+}
+
+fn pinned_version() -> &'static str {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(version_for_file_name)
+        })
+        .unwrap_or_else(|| ZebradChannel::Stable.version())
+}
+
+fn reported_version() -> String {
+    std::env::var("FAKE_ZEBRAD_VERSION").unwrap_or_else(|_| pinned_version().to_owned())
+}
 
 /// Why the fake is shutting down, worded like zebrad's `zebrad::signal` lines.
 enum Shutdown {
@@ -116,7 +142,7 @@ fn main() -> ExitCode {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--version" | "-V" => {
-                println!("zebrad {VERSION}");
+                println!("zebrad {}", reported_version());
                 return ExitCode::SUCCESS;
             }
             "-c" | "--config" => config = iter.next().map(PathBuf::from),
@@ -223,7 +249,7 @@ async fn run(
         "started tracing component filter=\"info\" TRACING_STATIC_MAX_LEVEL=LevelFilter::INFO LOG_STATIC_MAX_LEVEL=Info",
     );
     log("INFO", None, "zebrad::application", "Diagnostic metadata:");
-    println!("version: {VERSION}+fake");
+    println!("version: {}+fake", reported_version());
     println!("Zcash network: Regtest");
     println!("features: fake");
     match &config {
@@ -385,7 +411,8 @@ async fn run(
         "eos-halt" => panic_and_abort(
             "zebrad/src/components/sync/end_of_support.rs:91:9",
             &format!(
-                "Zebra refuses to run if the release date is older than 56 days. \nRelease name: {VERSION}, Estimated release height: 3526000 \nHint: Download and install the latest Zebra release from: https://github.com/ZcashFoundation/zebra/releases/latest"
+                "Zebra refuses to run if the release date is older than 56 days. \nRelease name: {}, Estimated release height: 3526000 \nHint: Download and install the latest Zebra release from: https://github.com/ZcashFoundation/zebra/releases/latest",
+                reported_version()
             ),
         ),
         "non-utf8" => {
@@ -917,8 +944,8 @@ fn canned(method: &str) -> Value {
         }),
         "getinfo" => json!({
             "version": 7_000_050,
-            "build": format!("v{VERSION}"),
-            "subversion": format!("/Zebra:{VERSION}/"),
+            "build": format!("v{}", reported_version()),
+            "subversion": format!("/Zebra:{}/", reported_version()),
             "protocolversion": 170_140,
             "blocks": 2_500_000,
             "connections": 8,
@@ -1057,4 +1084,27 @@ fn env_u64(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_name_selects_the_channel_pin() {
+        for (file_name, channel) in [
+            (
+                "zeal-zebrad-beta-x86_64-unknown-linux-gnu",
+                ZebradChannel::Beta,
+            ),
+            (
+                "zeal-zebrad-nightly-x86_64-pc-windows-msvc.exe",
+                ZebradChannel::Nightly,
+            ),
+            ("zeal-zebrad-aarch64-apple-darwin", ZebradChannel::Stable),
+            ("fake-zebrad", ZebradChannel::Stable),
+        ] {
+            assert_eq!(version_for_file_name(file_name), channel.version());
+        }
+    }
 }

@@ -8,6 +8,7 @@ use leptos::{prelude::*, task::spawn_local};
 
 use crate::{
     app::{AppState, Tab},
+    components::zebrad_channel::ZebradChannelChip,
     format::{controls, thousands},
     node_state::NodeState,
     node_summary::{Tone, summarize},
@@ -214,7 +215,16 @@ fn NodeCard(node: NodeState) -> impl IntoView {
                     class=move || format!("status-dot {}", summary.with(|s| s.tone.class()))
                     aria-hidden="true"
                 ></span>
-                <h3>{label}</h3>
+                <div class="node-card-title">
+                    <h3>{label}</h3>
+                    {move || {
+                        node.info
+                            .with(|info| {
+                                (info.kind == NodeKind::Zebrad).then(|| info.program.channel())
+                            })
+                            .map(|channel| view! { <ZebradChannelChip channel /> })
+                    }}
+                </div>
                 <span class="chip">{move || node.info.with(|info| info.kind.label())}</span>
             </header>
             <p class="node-card-state">{move || summary.with(|s| s.text.clone())}</p>

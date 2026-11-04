@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Install smoke test for a Linux bundle, run by bundle.yml in the ubuntu:22.04
-# container: starts the launcher under Xvfb with a fresh home directory whose
-# first run is complete, lets it run for a while, then checks that it was still
-# running when stopped, that its log says the bundled zebrad started, and that
-# no zebrad is left over.
+# container: checks all three channel sidecars and offline documentation, then
+# starts the launcher under Xvfb with a fresh home directory whose first run is
+# complete. After letting it run, checks that it was still running when stopped,
+# that its log says the bundled zebrad started, and that no zebrad is left over.
 #
-#   --deb      runs the installed /usr/bin/zeal-app (install the .deb first)
-#   --appimage PATH runs the AppImage (set APPIMAGE_EXTRACT_AND_RUN=1 where
-#              there is no FUSE, as in containers)
+#   --deb      checks the installed package, then runs /usr/bin/zeal-app
+#   --appimage PATH extracts a scratch copy to check its contents, then runs it
+#              (set APPIMAGE_EXTRACT_AND_RUN=1 where there is no FUSE)
 #
 # The launcher's log is expected in Tauri's app_log_dir, which on Linux is
 # $XDG_DATA_HOME/org.zfnd.zeal/logs (~/.local/share/... by default).
@@ -23,20 +23,57 @@ set -euo pipefail
 readonly IDENTIFIER="org.zfnd.zeal"
 readonly EXPECTED="zebrad started"
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 die() {
     echo "::error::smoke-linux: $*"
     exit 1
+}
+
+check_sidecars() {
+    local bin_dir="$1" channel suffix sidecar
+    for channel in stable beta nightly; do
+        suffix=""
+        [ "${channel}" = stable ] || suffix="-${channel}"
+        sidecar="${bin_dir}/zeal-zebrad${suffix}"
+        [ -x "${sidecar}" ] || die "the bundle does not contain executable ${sidecar}"
+        echo "Installed sidecar: ${sidecar} ($("${sidecar}" --version | head -n 1))"
+    done
+}
+
+check_docs() {
+    local root="$1"
+    [ -d "${root}" ] || die "the bundle does not contain offline documentation at ${root}"
+    "${script_dir}/validate-zebra-docs.sh" --root "${root}"
 }
 
 cmd=()
 seconds=15
 while [ $# -gt 0 ]; do
     case "$1" in
-        --deb) cmd=(/usr/bin/zeal-app); shift ;;
+        --deb)
+            cmd=(/usr/bin/zeal-app)
+            check_sidecars /usr/bin
+            docs_index="$(dpkg -L zeal-app | grep -E '/zebra-docs/stable/book/index\.html$' | head -n 1 || true)"
+            [ -n "${docs_index}" ] || die "the .deb did not install the offline documentation"
+            check_docs "${docs_index%/stable/book/index.html}"
+            shift
+            ;;
         --appimage)
             [ $# -ge 2 ] || die "--appimage needs a path"
             chmod +x "$2"
-            cmd=("$(cd "$(dirname "$2")" && pwd)/$(basename "$2")")
+            appimage="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+            extract="$(mktemp -d)"
+            trap 'rm -rf "${extract}"' EXIT
+            if ! (cd "${extract}" && "${appimage}" --appimage-extract > /dev/null); then
+                die "could not extract ${appimage} to check its sidecars and documentation"
+            fi
+            app_root="${extract}/squashfs-root"
+            check_sidecars "${app_root}/usr/bin"
+            docs_index="$(find "${app_root}" -type f -path '*/zebra-docs/stable/book/index.html' -print -quit)"
+            [ -n "${docs_index}" ] || die "the AppImage does not contain the offline documentation"
+            check_docs "${docs_index%/stable/book/index.html}"
+            cmd=("${appimage}")
             shift 2
             ;;
         --seconds) [ $# -ge 2 ] || die "--seconds needs a value"; seconds="$2"; shift 2 ;;

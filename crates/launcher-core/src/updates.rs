@@ -28,8 +28,8 @@ use std::{
 
 pub use launcher_types::EOS_WARNING_WINDOW;
 use launcher_types::{
-    EosInfo, ExitClass, NodeId, Phase, RecoveryAction, StaleProcessInfo, Status,
-    UpdateHealthFailure, UpdateMode,
+    EosInfo, ExitClass, NodeId, NodeProgram, NodeStats, Phase, RecoveryAction, StaleProcessInfo,
+    Status, UpdateHealthFailure, UpdateMode, ZebradChannel,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{sync::watch, time::Instant};
@@ -336,6 +336,11 @@ pub trait UpdateBackend: Send + Sync + 'static {
 pub trait NodeControl: Clone + Send + Sync + 'static {
     /// The supervisor's status.
     fn watch_status(&self) -> watch::Receiver<Status>;
+    /// RPC stats for the post-update zebrad version check. Supervisor-only
+    /// controls retain the status-only health gate.
+    fn watch_stats(&self) -> Option<watch::Receiver<Option<NodeStats>>> {
+        None
+    }
     /// How long [`Self::stop`] may take before the updater gives up on it:
     /// the supervisor's [`SupervisorHandle::shutdown_cap`], which outlasts
     /// its escalation to a kill.
@@ -416,10 +421,33 @@ fn unhealthy_recovery() -> Vec<RecoveryAction> {
 /// A launcher still on the old version means the install did not complete
 /// (the marker is written right before it): that is reported with the logs
 /// and the releases page only, since zebrad's configuration is not the cause.
+///
+/// This compatibility entry point does not check zebrad's version. The gates
+/// created by [`run_health_gate`] also check RPC stats when the node provides
+/// them.
 pub async fn health_gate(
     pending: &PendingUpdate,
     current_version: &str,
+    status: watch::Receiver<Status>,
+    timeout: Duration,
+    releases_url: &str,
+) -> Result<(), UpdateHealthFailure> {
+    health_gate_inner(
+        pending,
+        current_version,
+        status,
+        None,
+        timeout,
+        releases_url,
+    )
+    .await
+}
+
+async fn health_gate_inner(
+    pending: &PendingUpdate,
+    current_version: &str,
     mut status: watch::Receiver<Status>,
+    mut zebrad: Option<(ZebradChannel, watch::Receiver<Option<NodeStats>>)>,
     timeout: Duration,
     releases_url: &str,
 ) -> Result<(), UpdateHealthFailure> {
@@ -449,11 +477,13 @@ pub async fn health_gate(
     }
     let mut deadline = Instant::now() + timeout;
     let mut stale: Option<StaleProcessInfo> = None;
+    let mut stats_open = zebrad.is_some();
     loop {
+        let running_with_rpc;
         {
             let status = status.borrow_and_update();
             match &status.phase {
-                Phase::Running if status.rpc_addr.is_some() => return Ok(()),
+                Phase::Running if status.rpc_addr.is_some() => running_with_rpc = true,
                 // Not a configuration problem: only a newer release helps.
                 Phase::Failed {
                     class: ExitClass::EosHalt,
@@ -469,7 +499,7 @@ pub async fn health_gate(
                 Phase::Failed { class } => {
                     return Err(fail(failed_message(*class, status.last_exit.as_ref())));
                 }
-                _ => {}
+                _ => running_with_rpc = false,
             }
             // A zebrad from an earlier launcher run blocks the start. That is
             // not the update's fault: the user was told (`stale_process`) and
@@ -479,11 +509,59 @@ pub async fn health_gate(
             }
             stale = status.stale.clone();
         }
+        let waiting_for_version = running_with_rpc && zebrad.is_some();
+        if running_with_rpc {
+            let Some((channel, stats)) = zebrad.as_mut() else {
+                return Ok(());
+            };
+            if let Some(reported) = stats.borrow_and_update().clone() {
+                let actual = reported.zebrad_version;
+                return if channel.version_matches(&actual) {
+                    Ok(())
+                } else {
+                    Err(health_failure(
+                        pending,
+                        current_version,
+                        releases_url,
+                        format!(
+                            "zebrad version mismatch on the {} channel: expected {}, actual {} \
+                             (reported by RPC).",
+                            channel.as_str(),
+                            channel.version(),
+                            actual
+                        ),
+                        vec![RecoveryAction::OpenLogs, RecoveryAction::OpenReleasesPage],
+                    ))
+                };
+            }
+            if !stats_open {
+                return Err(health_failure(
+                    pending,
+                    current_version,
+                    releases_url,
+                    format!(
+                        "zebrad RPC stats stopped before the running version could be checked \
+                         against the {} channel (expected {}).",
+                        channel.as_str(),
+                        channel.version()
+                    ),
+                    vec![RecoveryAction::OpenLogs],
+                ));
+            }
+        }
         tokio::select! {
             changed = status.changed() => if changed.is_err() {
                 return Err(fail(
                     "The zebrad supervisor stopped before zebrad was running.".to_string(),
                 ));
+            },
+            changed = async {
+                match zebrad.as_mut() {
+                    Some((_, stats)) => stats.changed().await,
+                    None => std::future::pending().await,
+                }
+            }, if stats_open => {
+                stats_open = changed.is_ok();
             },
             () = tokio::time::sleep_until(deadline) => {
                 return Err(match &stale {
@@ -499,6 +577,11 @@ pub async fn health_gate(
                         ),
                         vec![RecoveryAction::OpenLogs],
                     ),
+                    None if waiting_for_version => fail(format!(
+                        "zebrad reached Running with RPC but did not report its version within {} \
+                         minutes after the update.",
+                        timeout.as_secs() / 60
+                    )),
                     None => fail(format!(
                         "zebrad did not reach Running with RPC within {} minutes after the update.",
                         timeout.as_secs() / 60
@@ -525,6 +608,8 @@ fn failed_message(class: ExitClass, exit: Option<&launcher_types::ExitInfo>) -> 
 pub struct GateNode<N> {
     /// The node.
     pub node: N,
+    /// The program whose version the running node must report.
+    pub program: NodeProgram,
     /// Start it first when it was running before the update: the launcher
     /// will not start it by itself.
     pub start: bool,
@@ -537,10 +622,11 @@ pub struct GateNode<N> {
 /// `nodes` picks from the marker the nodes to check: every node that was
 /// running before the update. Each one whose [`GateNode::start`] is set is
 /// started first when zebrad was running, also when the update did not
-/// complete, since the update stopped it. The nodes are checked side by side
-/// by [`health_gate`], and the first failure is the result, its message led
-/// by the node's name when there is one. Without a node to check, only the
-/// version is. Returns `None` when there was no marker.
+/// complete, since the update stopped it. The nodes are checked side by side,
+/// including each program channel's expected zebrad version when RPC stats are
+/// available. The first failure is the result, its message led by the node's
+/// name when there is one. Without a node to check, only the version is.
+/// Returns `None` when there was no marker.
 pub async fn run_health_gate<N: NodeControl>(
     marker: &Path,
     current_version: &str,
@@ -573,7 +659,13 @@ pub async fn run_health_gate<N: NodeControl>(
         health_gate(&idle, current_version, status, timeout, releases_url).await
     } else {
         let mut gates = tokio::task::JoinSet::new();
-        for GateNode { node, start, name } in nodes {
+        for GateNode {
+            node,
+            program,
+            start,
+            name,
+        } in nodes
+        {
             if start && pending.zebrad_was_running {
                 // The gate below reports a failure to reach Running.
                 let node = node.clone();
@@ -583,20 +675,28 @@ pub async fn run_health_gate<N: NodeControl>(
                     }
                 });
             }
+            let zebrad = node.watch_stats().map(|stats| (program.channel(), stats));
             let (pending, version, url) = (
                 pending.clone(),
                 current_version.to_string(),
                 releases_url.to_string(),
             );
             gates.spawn(async move {
-                health_gate(&pending, &version, node.watch_status(), timeout, &url)
-                    .await
-                    .map_err(|mut failure| {
-                        if let Some(name) = name {
-                            failure.message = format!("{name}: {}", failure.message);
-                        }
-                        failure
-                    })
+                health_gate_inner(
+                    &pending,
+                    &version,
+                    node.watch_status(),
+                    zebrad,
+                    timeout,
+                    &url,
+                )
+                .await
+                .map_err(|mut failure| {
+                    if let Some(name) = name {
+                        failure.message = format!("{name}: {}", failure.message);
+                    }
+                    failure
+                })
             });
         }
         let mut result = Ok(());
@@ -604,9 +704,9 @@ pub async fn run_health_gate<N: NodeControl>(
             match gate {
                 Ok(Ok(())) => {}
                 Ok(Err(failure)) => {
-                    if result.is_ok() {
-                        result = Err(failure);
-                    }
+                    result = Err(failure);
+                    gates.abort_all();
+                    break;
                 }
                 Err(err) => tracing::warn!(%err, "a health gate task failed"),
             }
@@ -791,6 +891,91 @@ mod tests {
             rpc_addr: Some(SocketAddr::from(([127, 0, 0, 1], 8232))),
             ..Status::default()
         }
+    }
+
+    fn rpc_stats(version: &str) -> NodeStats {
+        NodeStats {
+            height: 1,
+            estimated_height: 1,
+            verification_progress: 1.0,
+            peers: 8,
+            mempool_transactions: 0,
+            chain: "main".into(),
+            zebrad_version: version.into(),
+            last_error: None,
+            eos: None,
+            updated_at: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    async fn version_gate_result(
+        channel: ZebradChannel,
+        reported: &str,
+    ) -> Result<(), UpdateHealthFailure> {
+        let (_status_tx, status) = watch::channel(running());
+        let (_stats_tx, stats) = watch::channel(Some(rpc_stats(reported)));
+        tokio::time::timeout(
+            T,
+            health_gate_inner(
+                &pending("0.2.0", true),
+                "0.2.0",
+                status,
+                Some((channel, stats)),
+                HEALTH_GATE_TIMEOUT,
+                "u",
+            ),
+        )
+        .await
+        .expect("in time")
+    }
+
+    async fn check_channel_version_gate(channel: ZebradChannel) {
+        let expected = channel.version();
+        assert!(channel.version_matches(&format!("v{expected}")));
+        let with_metadata = format!("{expected}+build.7");
+        assert!(channel.version_matches(&with_metadata));
+        assert_eq!(version_gate_result(channel, &with_metadata).await, Ok(()));
+
+        let with_commit = format!("{expected}+git.{}", channel.short_commit());
+        assert!(channel.version_matches(&with_commit));
+        assert_eq!(version_gate_result(channel, &with_commit).await, Ok(()));
+
+        let other = ZebradChannel::ALL
+            .into_iter()
+            .find(|other| *other != channel)
+            .expect("another channel");
+        let wrong_commit = format!("{expected}+git.{}", other.short_commit());
+        assert!(!channel.version_matches(&wrong_commit));
+        let failure = version_gate_result(channel, &wrong_commit)
+            .await
+            .expect_err("same zebrad base version but another channel's commit");
+        assert!(failure.message.contains(channel.as_str()));
+        assert!(failure.message.contains(expected));
+        assert!(failure.message.contains(&wrong_commit));
+
+        let actual = "0.0.1";
+        assert!(!channel.version_matches(actual));
+        let failure = version_gate_result(channel, actual)
+            .await
+            .expect_err("wrong zebrad base version");
+        assert!(failure.message.contains(channel.as_str()));
+        assert!(failure.message.contains(expected));
+        assert!(failure.message.contains(actual));
+    }
+
+    #[tokio::test]
+    async fn stable_gate_checks_its_own_zebrad_version() {
+        check_channel_version_gate(ZebradChannel::Stable).await;
+    }
+
+    #[tokio::test]
+    async fn beta_gate_checks_its_own_zebrad_version() {
+        check_channel_version_gate(ZebradChannel::Beta).await;
+    }
+
+    #[tokio::test]
+    async fn nightly_gate_checks_its_own_zebrad_version() {
+        check_channel_version_gate(ZebradChannel::Nightly).await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -1031,6 +1216,7 @@ mod tests {
     #[derive(Clone)]
     struct InstantNode {
         status: Arc<watch::Sender<Status>>,
+        stats: Arc<watch::Sender<Option<NodeStats>>>,
         starts: Arc<std::sync::atomic::AtomicUsize>,
     }
 
@@ -1038,16 +1224,22 @@ mod tests {
         fn watch_status(&self) -> watch::Receiver<Status> {
             self.status.subscribe()
         }
+        fn watch_stats(&self) -> Option<watch::Receiver<Option<NodeStats>>> {
+            Some(self.stats.subscribe())
+        }
         fn shutdown_cap(&self) -> Duration {
             crate::supervisor::shutdown_cap(Duration::from_secs(60))
         }
         async fn stop(&self) -> Result<(), String> {
+            self.stats.send_replace(None);
             self.status.send_replace(Status::default());
             Ok(())
         }
         async fn start(&self) -> Result<(), String> {
             self.starts
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.stats
+                .send_replace(Some(rpc_stats(ZebradChannel::Stable.version())));
             self.status.send_replace(running());
             Ok(())
         }
@@ -1059,6 +1251,7 @@ mod tests {
         move |_| {
             vec![GateNode {
                 node,
+                program: NodeProgram::Bundled,
                 start: true,
                 name: None,
             }]
@@ -1071,6 +1264,7 @@ mod tests {
         let marker = dir.path().join(PENDING_UPDATE_MARKER);
         let node = InstantNode {
             status: Arc::new(watch::channel(Status::default()).0),
+            stats: Arc::new(watch::channel(None).0),
             starts: Arc::default(),
         };
 
@@ -1162,6 +1356,7 @@ mod tests {
         write_marker(&marker, &marked).expect("write");
         let node = InstantNode {
             status: Arc::new(watch::channel(Status::default()).0),
+            stats: Arc::new(watch::channel(None).0),
             starts: Arc::default(),
         };
         let main = NodeId::new("zebrad-mainnet").unwrap();
@@ -1172,6 +1367,7 @@ mod tests {
                 assert_eq!(ids, vec![testnet], "only the node that ran");
                 vec![GateNode {
                     node,
+                    program: NodeProgram::Bundled,
                     start: true,
                     name: None,
                 }]
@@ -1193,11 +1389,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_health_gate_fails_promptly_on_one_nodes_version_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join(PENDING_UPDATE_MARKER);
+        write_marker(&marker, &pending("0.2.0", true)).expect("write");
+        let node = |status, reported: Option<&str>| InstantNode {
+            status: Arc::new(watch::channel(status).0),
+            stats: Arc::new(watch::channel(reported.map(rpc_stats)).0),
+            starts: Arc::default(),
+        };
+        let waiting = node(Status::default(), None);
+        let wrong = node(running(), Some("0.0.1"));
+        let nodes = move |_: &PendingUpdate| {
+            vec![
+                GateNode {
+                    node: waiting,
+                    program: NodeProgram::BundledNightly,
+                    start: false,
+                    name: Some("Nightly node".into()),
+                },
+                GateNode {
+                    node: wrong,
+                    program: NodeProgram::BundledBeta,
+                    start: false,
+                    name: Some("Beta node".into()),
+                },
+            ]
+        };
+        let failure = tokio::time::timeout(
+            T,
+            run_health_gate(&marker, "0.2.0", nodes, HEALTH_GATE_TIMEOUT, "u"),
+        )
+        .await
+        .expect("the mismatch does not wait for the other node")
+        .expect("a marker")
+        .expect_err("wrong beta version");
+        assert!(failure.message.starts_with("Beta node: "));
+        assert!(
+            failure.message.contains(ZebradChannel::Beta.version()),
+            "{}",
+            failure.message
+        );
+        assert!(failure.message.contains("0.0.1"));
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
     async fn run_health_gate_checks_every_node_that_was_running_and_names_a_failure() {
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join(PENDING_UPDATE_MARKER);
         let fresh = || InstantNode {
             status: Arc::new(watch::channel(Status::default()).0),
+            stats: Arc::new(watch::channel(None).0),
             starts: Arc::default(),
         };
         let (main, test) = (fresh(), fresh());
@@ -1215,12 +1458,14 @@ mod tests {
                 vec![
                     GateNode {
                         node: main,
+                        program: NodeProgram::Bundled,
                         start: true,
                         name: Some("Zebra · Mainnet".into()),
                     },
                     // It starts at launch by itself: the gate does not start it.
                     GateNode {
                         node: test,
+                        program: NodeProgram::Bundled,
                         start: false,
                         name: Some("Zebra · Testnet".into()),
                     },

@@ -18,8 +18,11 @@
 #
 # Every bundle type expected for the target must be present exactly once.
 #
+# With --raw, also copies the compiled launcher and all three sidecars into
+# DIR/raw under their runtime names for development bundles.
+#
 # Usage: scripts/collect-bundles.sh --target TRIPLE --out DIR [--version X.Y.Z]
-#                                   [--require-updater-sigs]
+#                                   [--require-updater-sigs] [--raw]
 
 set -euo pipefail
 
@@ -34,6 +37,7 @@ target=""
 out=""
 version=""
 require_sigs=false
+raw=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -41,6 +45,7 @@ while [ $# -gt 0 ]; do
         --out) [ $# -ge 2 ] || die "--out needs a value"; out="$2"; shift 2 ;;
         --version) [ $# -ge 2 ] || die "--version needs a value"; version="$2"; shift 2 ;;
         --require-updater-sigs) require_sigs=true; shift ;;
+        --raw) raw=true; shift ;;
         *) die "unknown argument: $1" ;;
     esac
 done
@@ -100,3 +105,23 @@ case "${target}" in
         die "unsupported target ${target}"
         ;;
 esac
+
+if [ "${raw}" = true ]; then
+    exe=""
+    case "${target}" in *-windows-*) exe=".exe" ;; esac
+    raw_dir="${out}/raw"
+    mkdir -p "${raw_dir}"
+    app_bin="${APP_BIN:-zeal-app}"
+    app="${repo_root}/target/${target}/release/${app_bin}${exe}"
+    [ -f "${app}" ] || die "${app} does not exist"
+    cp "${app}" "${raw_dir}/${app_bin}${exe}"
+    echo "${app#"${repo_root}/"} -> ${raw_dir}/${app_bin}${exe}"
+    for channel in stable beta nightly; do
+        suffix=""
+        [ "${channel}" = stable ] || suffix="-${channel}"
+        sidecar="${repo_root}/src-tauri/binaries/zeal-zebrad${suffix}-${target}${exe}"
+        [ -f "${sidecar}" ] || die "${sidecar} does not exist"
+        cp "${sidecar}" "${raw_dir}/zeal-zebrad${suffix}${exe}"
+        echo "${sidecar#"${repo_root}/"} -> ${raw_dir}/zeal-zebrad${suffix}${exe}"
+    done
+fi

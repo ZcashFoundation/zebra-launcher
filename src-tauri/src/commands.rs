@@ -26,8 +26,9 @@ use launcher_core::{
 use launcher_public::PublicServices;
 use launcher_types::{
     ApplyError, ApplyErrorKind, ApplyOutcome, ConfigDocument, FirstRunInfo, ImportOutcome, LogLine,
-    MachineResources, MetricsSnapshot, Network, NodeDataDirChoice, NodeDetails, NodeDraft, NodeId,
-    NodeInfo, NodeResources, NodeStats, NodeUpdate, OpenTarget, Settings, Status,
+    MachineResources, MetricsSnapshot, Network, NodeDataDirChoice, NodeDetails, NodeDocs,
+    NodeDraft, NodeId, NodeInfo, NodeResources, NodeStats, NodeUpdate, OpenTarget, Settings,
+    Status, ZebradChannel,
     public::{
         ConnectionReport, DnsProvider, OpenError, PublicService, PublicStatus, StepAnswer, StepId,
         StillPublic,
@@ -41,7 +42,7 @@ use tracing::Instrument;
 
 use crate::{
     app_state::{AppState, legacy_cache_dir},
-    bridge, sidecar,
+    bridge, docs, sidecar,
 };
 
 /// How long `apply_config` waits for zebrad to accept a configuration.
@@ -347,6 +348,18 @@ pub fn get_node_details(
     Ok(state.node(&node)?.details.borrow().clone())
 }
 
+/// The offline book, configuration and changes pages for the node's fixed
+/// zebrad channel, as absolute paths for the sandboxed docs iframe.
+#[tauri::command]
+pub async fn get_node_docs<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+    node: NodeId,
+) -> Result<NodeDocs, String> {
+    let channel = state.node(&node)?.spec().program.channel();
+    on_node(&node, blocking(move || docs::load(&app, channel))).await?
+}
+
 /// The latest read of the node's Prometheus metrics page, `None` while it is
 /// not running, has not answered yet, or stopped answering. Every change is
 /// also sent as the `metrics` event.
@@ -565,8 +578,8 @@ pub async fn delete_node_data(state: State<'_, AppState>, node: NodeId) -> Resul
 }
 
 /// The diagnostics text for a bug report ([`diagnostics::bundle`]): versions,
-/// OS, the zebrad binary, the settings, the updater's records and the
-/// launcher log, then for each node its spec, stop grace, status,
+/// OS, the stable zebrad binary, the settings, the updater's records and the
+/// launcher log, then for each node its spec, resolved channel binary, stop grace, status,
 /// statistics, newest process tree sample, `zebrad.toml` and the last lines
 /// of its log, and last the computer's newest sample
 /// ([`diagnostics::machine_section`]). The UI copies it to the clipboard.
@@ -591,13 +604,14 @@ pub async fn copy_diagnostics(state: State<'_, AppState>) -> Result<String, Stri
         .collect();
     let machine = state.machine.borrow().clone();
     blocking(move || {
-        let sidecar = sidecar::resolve(&paths);
+        let sidecar = sidecar::resolve(&paths, ZebradChannel::Stable);
         let reports: Vec<diagnostics::NodeReport<'_>> = nodes
             .iter()
             .map(
                 |(info, files, status, stats, resources, stop_grace)| diagnostics::NodeReport {
                     info,
                     paths: files,
+                    sidecar: Some(sidecar::resolve(&paths, info.program.channel())),
                     status,
                     stats: stats.as_ref(),
                     resources: resources.as_ref(),

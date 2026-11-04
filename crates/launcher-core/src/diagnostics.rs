@@ -17,7 +17,9 @@ use std::{
     time::Duration,
 };
 
-use launcher_types::{MachineResources, NodeInfo, NodeResources, NodeStats, Settings, Status};
+use launcher_types::{
+    MachineResources, NodeInfo, NodeResources, NodeStats, Settings, Status, ZebradChannel,
+};
 
 use crate::{
     clock,
@@ -72,18 +74,15 @@ pub fn redact_public(public: &launcher_types::public::PublicConfig) -> serde_jso
     value
 }
 
-/// The `ZEBRAD_VERSION` file at the repository root, read at build time.
-const ZEBRAD_VERSION_FILE: &str = include_str!("../../../ZEBRAD_VERSION");
-
 /// How many lines of each log the bundle includes.
 pub const TAIL_LINES: usize = 200;
 
 /// At most this many bytes are read from the end of a log for its tail.
 const TAIL_MAX_BYTES: u64 = 1024 * 1024;
 
-/// The zebrad version the launcher bundles.
+/// The stable zebrad version the launcher bundles.
 pub fn bundled_zebrad_version() -> &'static str {
-    ZEBRAD_VERSION_FILE.trim()
+    ZebradChannel::Stable.version()
 }
 
 /// The last `n` lines of `path`, reading at most the last 1 MiB. Invalid
@@ -167,6 +166,8 @@ pub struct NodeReport<'a> {
     pub info: &'a NodeInfo,
     /// Its files: its `zebrad.toml` and log are read from them.
     pub paths: &'a NodePaths,
+    /// The resolved zebrad binary for this node's channel, if known.
+    pub sidecar: Option<PathBuf>,
     /// Its supervisor's status.
     pub status: &'a Status,
     /// Its last statistics, if zebrad has answered.
@@ -185,7 +186,8 @@ pub struct NodeReport<'a> {
 /// `zebrad.toml` and the tail of its log, see [`log_tail`]). The computer's
 /// part is [`machine_section`].
 ///
-/// `sidecar` is the zebrad binary the launcher resolved, if known.
+/// `sidecar` is the stable zebrad binary the launcher resolved, if known. Each
+/// node report also carries the binary resolved for its own channel.
 pub fn bundle(
     paths: &Paths,
     settings: &Settings,
@@ -200,9 +202,17 @@ pub fn bundle(
     let _ = writeln!(out, "Zeal diagnostics");
     let _ = writeln!(
         out,
-        "Zeal {LAUNCHER_VERSION} (zebrad {})",
+        "Zeal {LAUNCHER_VERSION} (stable zebrad {})",
         bundled_zebrad_version()
     );
+    for channel in ZebradChannel::ALL {
+        let _ = writeln!(
+            out,
+            "Bundled zebrad {}: {}",
+            channel.as_str(),
+            channel.version()
+        );
+    }
     let _ = writeln!(
         out,
         "OS: {} {} ({})",
@@ -262,6 +272,22 @@ pub fn bundle(
         let name = format!("{} ({})", node.info.name, node.info.id);
         section(&mut out, &name);
         out.push_str(&to_json(node.info));
+        let channel = node.info.program.channel();
+        let _ = writeln!(
+            out,
+            "Zebra channel: {}; expected zebrad version: {}",
+            channel.as_str(),
+            channel.version()
+        );
+        let _ = writeln!(
+            out,
+            "Resolved zebrad binary: {}",
+            match node.sidecar.as_deref() {
+                Some(path) if path.is_file() => path.display().to_string(),
+                Some(path) => format!("{} (missing)", path.display()),
+                None => "(unknown)".to_string(),
+            }
+        );
         // The supervisor's grace is fixed at launch; a changed setting applies
         // to the next one.
         let _ = writeln!(
@@ -461,7 +487,9 @@ fn push_block(out: &mut String, text: &str) {
 mod tests {
     use std::time::SystemTime;
 
-    use launcher_types::{EosInfo, Network, NodeId, Platform, ProcessUsage, StaleProcessInfo};
+    use launcher_types::{
+        EosInfo, Network, NodeId, NodeProgram, Platform, ProcessUsage, StaleProcessInfo,
+    };
 
     use super::*;
     use crate::nodes::{NodeLayout, NodeSpec};
@@ -635,6 +663,7 @@ mod tests {
         let second = NodeSpec {
             id: NodeId::new("zebrad-testnet").unwrap(),
             layout: NodeLayout::Folder,
+            program: NodeProgram::BundledBeta,
             ..NodeSpec::first(Network::Testnet)
         };
         let (main, test) = (first.paths(&paths), second.paths(&paths));
@@ -672,7 +701,9 @@ mod tests {
         )
         .expect("marker");
         let sidecar = dir.path().join("zeal-zebrad");
+        let beta_sidecar = dir.path().join("zeal-zebrad-beta");
         fs::write(&sidecar, b"zebrad").expect("sidecar");
+        fs::write(&beta_sidecar, b"zebrad beta").expect("beta sidecar");
 
         let settings = Settings {
             grafana_url: Some("http://user:pw@127.0.0.1:3000/d/zebra".into()),
@@ -696,6 +727,7 @@ mod tests {
                 NodeReport {
                     info: &info_a,
                     paths: &main,
+                    sidecar: Some(sidecar.clone()),
                     status: &status,
                     stats: Some(&stats),
                     resources: Some(&resources),
@@ -704,6 +736,7 @@ mod tests {
                 NodeReport {
                     info: &info_b,
                     paths: &test,
+                    sidecar: Some(beta_sidecar.clone()),
                     status: &idle,
                     stats: None,
                     resources: None,
@@ -714,11 +747,13 @@ mod tests {
         );
         for needle in [
             &format!(
-                "Zeal {LAUNCHER_VERSION} (zebrad {})",
+                "Zeal {LAUNCHER_VERSION} (stable zebrad {})",
                 bundled_zebrad_version()
             ),
             std::env::consts::OS,
             &format!("zebrad binary: {}", sidecar.display()),
+            &format!("Resolved zebrad binary: {}", sidecar.display()),
+            &format!("Resolved zebrad binary: {}", beta_sidecar.display()),
             "Nodes: 2",
             "== Zebra · Mainnet (zebrad-mainnet) ==",
             "Stop grace: 60 s in effect, 90 s in the node's settings",
@@ -740,6 +775,18 @@ mod tests {
             "== Zebra · Testnet (zebrad-testnet): resources ==\n(none: zebrad is not running",
         ] {
             assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
+        for channel in ZebradChannel::ALL {
+            let bundled = format!("Bundled zebrad {}: {}", channel.as_str(), channel.version());
+            assert!(text.contains(&bundled), "missing {bundled:?} in:\n{text}");
+        }
+        for channel in [ZebradChannel::Stable, ZebradChannel::Beta] {
+            let expected = format!(
+                "Zebra channel: {}; expected zebrad version: {}",
+                channel.as_str(),
+                channel.version()
+            );
+            assert!(text.contains(&expected), "missing {expected:?} in:\n{text}");
         }
         assert!(!text.contains("plain launcher line"), "{text}");
         assert!(!text.contains("Public services"), "nothing set up: {text}");
@@ -799,9 +846,10 @@ mod tests {
         let info = first.info(&paths);
         let node = first.paths(&paths);
         let status = Status::default();
-        let report = || NodeReport {
+        let report = |sidecar: Option<PathBuf>| NodeReport {
             info: &info,
             paths: &node,
+            sidecar,
             status: &status,
             stats: None,
             resources: None,
@@ -810,11 +858,15 @@ mod tests {
         let text = bundle(
             &paths,
             &Settings::default(),
-            &[report()],
+            &[report(Some(missing_sidecar.clone()))],
             Some(&missing_sidecar),
         );
         for needle in [
-            &format!("zebrad binary: {} (missing)", missing_sidecar.display()),
+            &format!("\nzebrad binary: {} (missing)", missing_sidecar.display()),
+            &format!(
+                "Resolved zebrad binary: {} (missing)",
+                missing_sidecar.display()
+            ),
             "== Zebra · Mainnet (zebrad-mainnet): stale zebrad from an earlier launcher run ==\n(none)",
             "== Zebra · Mainnet (zebrad-mainnet): node stats ==\n(none: zebrad is not running or has not answered yet)",
             "== Zebra · Mainnet (zebrad-mainnet): resources ==\n(none: zebrad is not running, or this platform is not measured yet)",
@@ -844,8 +896,9 @@ mod tests {
         );
         assert!(text.contains("(could not read it: "), "{text}");
 
-        let text = bundle(&paths, &Settings::default(), &[report()], None);
-        assert!(text.contains("zebrad binary: (unknown)"), "{text}");
+        let text = bundle(&paths, &Settings::default(), &[report(None)], None);
+        assert!(text.contains("\nzebrad binary: (unknown)"), "{text}");
+        assert!(text.contains("Resolved zebrad binary: (unknown)"), "{text}");
     }
 
     #[test]

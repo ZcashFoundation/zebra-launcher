@@ -31,8 +31,8 @@ use std::{
 };
 
 use launcher_types::{
-    MetricsSnapshot, NodeDetails, NodeDraft, NodeId, NodeInfo, NodeResources, NodeStats,
-    NodeUpdate, Phase, PortRole, Settings,
+    MetricsSnapshot, NodeDetails, NodeDraft, NodeId, NodeInfo, NodeProgram, NodeResources,
+    NodeStats, NodeUpdate, Phase, PortRole, Settings, ZebradChannel,
 };
 use tokio::{
     sync::{OwnedSemaphorePermit, mpsc, oneshot, watch},
@@ -57,6 +57,9 @@ use crate::{
 /// Whether another program holds a node's port: `(role, port)`.
 pub type PortProbe = Arc<dyn Fn(PortRole, u16) -> bool + Send + Sync>;
 
+/// The bundled zebrad to run for a channel.
+pub type ZebradResolver = Arc<dyn Fn(ZebradChannel) -> PathBuf + Send + Sync>;
+
 /// A last word on each node's supervisor configuration before it starts: the
 /// app sets the stdin-close mode, tests a fake zebrad's mode and fast timings.
 pub type Customize = Arc<dyn Fn(&NodeSpec, &mut SupervisorConfig) + Send + Sync>;
@@ -66,8 +69,10 @@ pub type Customize = Arc<dyn Fn(&NodeSpec, &mut SupervisorConfig) + Send + Sync>
 pub struct RegistryConfig {
     /// The launcher's directories.
     pub paths: Paths,
-    /// The bundled zebrad, which every zebrad node runs.
+    /// The stable bundled zebrad, for callers using [`RegistryConfig::new`].
     pub zebrad: PathBuf,
+    /// The bundled zebrad for each channel, when the caller resolves them all.
+    resolver: Option<ZebradResolver>,
     /// Applied to every node's supervisor configuration.
     pub customize: Option<Customize>,
     /// How often each node's RPC is polled.
@@ -83,13 +88,15 @@ pub struct RegistryConfig {
 }
 
 impl RegistryConfig {
-    /// The defaults: zebrad's polling intervals, the resource samplers'
-    /// [`resources::INTERVAL`], and a port counts as in use when binding it
-    /// fails ([`port_in_use`]).
+    /// The single-stable-path configuration: zebrad's polling intervals, the
+    /// resource samplers' [`resources::INTERVAL`], and a port counts as in use
+    /// when binding it fails ([`port_in_use`]). Use [`Self::with_resolver`] to
+    /// run beta or nightly nodes.
     pub fn new(paths: Paths, zebrad: impl Into<PathBuf>) -> Self {
         Self {
             paths,
             zebrad: zebrad.into(),
+            resolver: None,
             customize: None,
             monitor_interval: monitor::DEFAULT_INTERVAL,
             metrics_interval: poller::DEFAULT_INTERVAL,
@@ -97,6 +104,36 @@ impl RegistryConfig {
             port_in_use: Arc::new(port_in_use),
             sizes: Arc::new(SizeCache::default()),
         }
+    }
+
+    /// The defaults of [`Self::new`], with the bundled zebrad for each channel
+    /// selected by `resolver` when a node's supervisor is configured.
+    pub fn with_resolver(
+        paths: Paths,
+        resolver: impl Fn(ZebradChannel) -> PathBuf + Send + Sync + 'static,
+    ) -> Self {
+        let mut config = Self::new(paths, PathBuf::new());
+        config.resolver = Some(Arc::new(resolver));
+        config
+    }
+
+    /// The zebrad binary for `program`. The legacy constructor has only a
+    /// stable binary and refuses to substitute it for another channel.
+    pub fn zebrad_for(&self, program: &NodeProgram) -> io::Result<PathBuf> {
+        let channel = program.channel();
+        if let Some(resolver) = &self.resolver {
+            return Ok(resolver(channel));
+        }
+        if channel == ZebradChannel::Stable {
+            return Ok(self.zebrad.clone());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "no bundled zebrad path was configured for the {} channel",
+                channel.as_str()
+            ),
+        ))
     }
 }
 
@@ -588,9 +625,8 @@ impl RegistryHandle {
     }
 
     /// The statistics the updater reads the end of support from: those of
-    /// the first zebrad node on Mainnet, the only network with one (every
-    /// node runs the same zebrad, so one is enough), and `None` while there
-    /// is no such node or its runtime has ended. Kept up to date by a task,
+    /// the first zebrad node on Mainnet, the only network with one, and `None`
+    /// while there is no such node or its runtime has ended. Kept up to date by a task,
     /// which follows the node list too, until the receiver or the registry
     /// is gone; the receiver hears of a change of the value only.
     pub fn eos_stats(&self) -> watch::Receiver<Option<NodeStats>> {

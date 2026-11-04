@@ -1,12 +1,12 @@
 //! The add-node dialog (docs/MULTI-NODE.md): pick a kind, fill in its details (network, name,
 //! program, the node a service uses, the data folder with its free space), and review what
-//! Zeal will set up, with the ports moved out of the way of the nodes that exist. This release
-//! adds zebrad nodes, which run the bundled zebrad; the other kinds show what they will need
-//! and cannot be picked yet.
+//! Zeal will set up, with the ports moved out of the way of the nodes that exist. Zebra nodes
+//! also pick a bundled Stable, Beta or Nightly channel; the other kinds show what they will
+//! need and cannot be picked yet.
 
 use launcher_types::{
     DEFAULT_STOP_GRACE_SECS, MAX_NODES, Network, NodeDraft, NodeId, NodeInfo, NodeKind, NodePort,
-    NodeProgram, NodeRole, node_ports,
+    NodeRole, ZebradChannel, node_ports,
 };
 use leptos::{ev, html, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
@@ -14,6 +14,10 @@ use wasm_bindgen::JsCast;
 use crate::{
     api,
     app::AppState,
+    components::zebrad_channel::{
+        ZebradChannelChip, ZebradChannelPicker, availability_note, channel_build, channel_warning,
+        draft_program,
+    },
     pages::settings::{free_space_text, free_space_view},
 };
 
@@ -132,12 +136,15 @@ pub fn AddNode(
     return_focus: StoredValue<Option<web_sys::HtmlElement>, LocalStorage>,
 ) -> impl IntoView {
     let state = AppState::get();
+    // Only the browser mock honors this URL scenario; Tauri always uses the version pins.
+    let beta_unavailable = !crate::tauri::is_tauri() && crate::mock::force_beta_unavailable();
     let step = RwSignal::new(Step::Kind);
     let kind = RwSignal::new(NodeKind::Zebrad);
     let network = RwSignal::new(Network::Testnet);
     let name = RwSignal::new(String::new());
     let name_edited = RwSignal::new(false);
     let program = RwSignal::new(String::new());
+    let zebrad_channel = RwSignal::new(ZebradChannel::Stable);
     let uses = RwSignal::new(None::<NodeId>);
     // The data folder picked with Change…; `None`: a folder of its own in Zeal's data folder.
     let chosen_dir = RwSignal::new(None::<String>);
@@ -153,6 +160,7 @@ pub fn AddNode(
             network.set(state.network.get_untracked());
             name_edited.set(false);
             program.set(String::new());
+            zebrad_channel.set(ZebradChannel::Stable);
             uses.set(None);
             chosen_dir.set(None);
             error.set(None);
@@ -237,7 +245,7 @@ pub fn AddNode(
                 uses.get()
             },
             ports,
-            program: NodeProgram::Bundled,
+            program: draft_program(zebrad_channel.get()),
             autostart: true,
             stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
         }
@@ -327,6 +335,11 @@ pub fn AddNode(
                 info.kind.label()
             ));
         }
+        if info.kind == NodeKind::Zebrad
+            && let Some(note) = availability_note(info.program.channel(), beta_unavailable)
+        {
+            return Some(note);
+        }
         if info.name.is_empty() {
             return Some("Give the node a name.".into());
         }
@@ -410,7 +423,7 @@ pub fn AddNode(
             id: None,
             ports: None,
             data_dir: chosen_dir.get_untracked(),
-            program: NodeProgram::Bundled,
+            program: info.program,
             autostart: true,
         };
         busy.set(true);
@@ -543,8 +556,11 @@ pub fn AddNode(
                     })
                     .unwrap_or_else(|| {
                         view! {
-                            <span class="form-label">"Program"</span>
-                            <span>"The bundled zebrad 7.0.0"</span>
+                            <span class="form-label" id="add-node-channel">"Zebra channel"</span>
+                            <ZebradChannelPicker
+                                selected=zebrad_channel
+                                beta_unavailable=beta_unavailable
+                            />
                         }
                         .into_any()
                     })}
@@ -647,11 +663,7 @@ pub fn AddNode(
                 .find(|node| &node.id == used)
                 .map(|node| node.name)
         });
-        let program_text = if info.kind == NodeKind::Zebrad {
-            "the bundled zebrad 7.0.0".to_owned()
-        } else {
-            program.get().trim().to_owned()
-        };
+        let channel = (info.kind == NodeKind::Zebrad).then(|| info.program.channel());
         view! {
             <p>"Zeal will set this node up, stopped. You can start it now or later."</p>
             <dl class="rows">
@@ -662,7 +674,18 @@ pub fn AddNode(
                 <dt>"Network"</dt>
                 <dd>{info.network.as_str()}</dd>
                 <dt>"Program"</dt>
-                <dd><code>{program_text}</code></dd>
+                <dd>
+                    {match channel {
+                        Some(channel) => view! {
+                            <div class="review-channel">
+                                <ZebradChannelChip channel />
+                                <code>{channel_build(channel)}</code>
+                            </div>
+                        }
+                        .into_any(),
+                        None => view! { <code>{program.get().trim().to_owned()}</code> }.into_any(),
+                    }}
+                </dd>
                 {uses_name.map(|used| view! { <dt>"Uses"</dt><dd>{used}</dd> })}
                 <dt>"Data folder"</dt>
                 <dd>
@@ -675,6 +698,9 @@ pub fn AddNode(
                 <dt>"Id"</dt>
                 <dd><code>{info.id.to_string()}</code></dd>
             </dl>
+            {channel
+                .and_then(channel_warning)
+                .map(|warning| view! { <div class="banner banner-warn">{warning}</div> })}
         }
     };
 
@@ -779,7 +805,7 @@ fn role_text(role: NodeRole) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use launcher_types::PortRole;
+    use launcher_types::{NodeProgram, PortRole};
 
     use super::*;
 

@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # ZEBRAD_VERSION, ZEBRAD_COMMIT and fake-zebrad's VERSION agree.
+      # Validate every channel pin before compiling fake-zebrad and the app.
       - run: scripts/check-versions.sh
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
@@ -39,8 +39,8 @@ jobs:
           # shellcheck disable=SC2086 # LINUX_PACKAGES is a word list
           sudo apt-get install -y --no-install-recommends ${packages}
       - run: cargo fmt --all --check
-      # tauri-build requires the sidecar file named in bundle.externalBin.
-      - name: Install fake-zebrad as the sidecar
+      # tauri-build requires every sidecar named in bundle.externalBin.
+      - name: Install fake-zebrad as all channel sidecars
         run: scripts/dev-sidecar.sh
       - run: cargo clippy --workspace --all-targets --locked
       - run: cargo test --workspace --locked
@@ -216,12 +216,12 @@ jobs:
         with:
           cache: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # tauri-build requires the sidecar file named in bundle.externalBin.
-      - name: Install fake-zebrad as the sidecar (Windows)
+      # tauri-build requires every sidecar named in bundle.externalBin.
+      - name: Install fake-zebrad as all channel sidecars (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: scripts/dev-sidecar.ps1
-      - name: Install fake-zebrad as the sidecar (macOS)
+      - name: Install fake-zebrad as all channel sidecars (macOS)
         if: runner.os == 'macOS'
         run: scripts/dev-sidecar.sh
       - run: cargo clippy --workspace --all-targets --locked

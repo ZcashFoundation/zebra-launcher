@@ -29,7 +29,7 @@ use launcher_core::{
         UpdaterConfig, UpdaterHandle,
     },
 };
-use launcher_types::{NodeId, Status, UpdateInfo, UpdateState, events};
+use launcher_types::{NodeId, NodeStats, Status, UpdateInfo, UpdateState, events};
 use tauri::{
     AppHandle, Emitter, Runtime,
     utils::{config::BundleType, platform::bundle_type},
@@ -199,6 +199,10 @@ impl<R: Runtime> NodeControl for GatedNode<R> {
         self.node.supervisor.watch_status()
     }
 
+    fn watch_stats(&self) -> Option<watch::Receiver<Option<NodeStats>>> {
+        Some(self.node.stats.clone())
+    }
+
     async fn stop(&self) -> Result<(), String> {
         NodeControl::stop(&self.node.supervisor).await
     }
@@ -292,14 +296,18 @@ fn gate_nodes<R: Runtime>(
         .registry
         .nodes_of(&ids)
         .into_iter()
-        .map(|node| GateNode {
-            start: plan.gate_may_start(&node.id),
-            name: several.then(|| node.info().name),
-            node: GatedNode {
-                app: app.clone(),
-                state: state.clone(),
-                node,
-            },
+        .map(|node| {
+            let program = node.spec().program;
+            GateNode {
+                start: plan.gate_may_start(&node.id),
+                name: several.then(|| node.info().name),
+                program,
+                node: GatedNode {
+                    app: app.clone(),
+                    state: state.clone(),
+                    node,
+                },
+            }
         })
         .collect()
 }

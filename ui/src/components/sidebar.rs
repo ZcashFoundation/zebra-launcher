@@ -9,6 +9,7 @@ use leptos::prelude::*;
 use crate::{
     app::{AppState, Tab},
     charts::widgets::focus_sibling,
+    components::zebrad_channel::ZebradChannelChip,
     node_state::NodeState,
     node_summary::summarize,
 };
@@ -204,11 +205,14 @@ fn NodeItem(node: NodeState) -> impl IntoView {
     // The name with the state and any new problems: what the folded rail, which shows only
     // the dot, offers as the item's name and tooltip.
     let described = move || {
-        let mut text = format!(
-            "{} · {}",
-            node.info.with(|info| info.name.clone()),
-            summary.with(|s| s.text.clone())
-        );
+        let name = node.info.with(|info| {
+            let mut name = info.name.clone();
+            if info.kind == launcher_types::NodeKind::Zebrad {
+                name.push_str(&format!(" · {}", info.program.channel().label()));
+            }
+            name
+        });
+        let mut text = format!("{} · {}", name, summary.with(|s| s.text.clone()));
         match unseen() {
             0 => {}
             1 => text.push_str(" · 1 new problem in the log"),
@@ -230,7 +234,17 @@ fn NodeItem(node: NodeState) -> impl IntoView {
                 class=move || format!("status-dot {}", summary.with(|s| s.tone.class()))
                 aria-hidden="true"
             ></span>
-            <span class="side-label">{move || node.info.with(short_name)}</span>
+            <span class="side-label">
+                <span class="side-node-name">{move || node.info.with(short_name)}</span>
+                {move || {
+                    node.info
+                        .with(|info| {
+                            (info.kind == launcher_types::NodeKind::Zebrad)
+                                .then(|| info.program.channel())
+                        })
+                        .map(|channel| view! { <ZebradChannelChip channel /> })
+                }}
+            </span>
             <span class="side-fact">
                 {move || summary.with(|s| s.short.clone())}
             </span>

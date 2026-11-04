@@ -34,6 +34,7 @@
 //! | `?readerpanic` | The resource reader panics 30 s into the first run: the samples stop while zebrad keeps running, so the Resources card says it is not measured until zebrad's next run, which Restart starts ([`resources::reader_panicked`]). |
 //! | `?leftover` | Removing a node with its chain state deleted takes it off the list but leaves its folder behind, as when the backend cannot delete a file: the error banner names the folder. |
 //! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). Each node's process tree has samples of its own, and the computer has 16 CPUs and 32 GiB ([`resources`]). |
+//! | `?beta=unavailable` | Beta is disabled in the add-node picker and mock `add_node` rejects a Beta draft, even when its pin is newer than Stable. Without this mock-only override, channel availability follows the actual pins. |
 //! | `?attip` | zebrad is at the tip near 3,551,000 (past NU7) and mines a block every 25 s, so the Explorer shows Ironwood, the burn and the shielded budget. The end of support keeps its distance above the tip. |
 //! | `?tip=<h>` | Like `?attip`, at height `h`, a block per the era's target spacing. |
 //! | `?explorer=slow` | Every Explorer answer takes 300 to 800 ms ([`explorer`]). |
@@ -52,6 +53,7 @@ mod metrics;
 mod resources;
 mod updates;
 
+pub mod docs;
 pub mod explorer;
 pub mod herd;
 pub mod nodes;
@@ -198,6 +200,8 @@ struct Flags {
     leftover: bool,
     /// `?herd`.
     herd: bool,
+    /// `?beta=unavailable`.
+    beta_unavailable: bool,
 }
 
 impl Flags {
@@ -238,6 +242,7 @@ impl Flags {
             reader_panic: flag("readerpanic"),
             leftover: flag("leftover"),
             herd: flag("herd"),
+            beta_unavailable: value("beta") == Some("unavailable"),
             tip: value("tip")
                 .and_then(|tip| tip.parse().ok())
                 .or_else(|| flag("attip").then_some(AT_TIP_HEIGHT)),
@@ -390,6 +395,11 @@ thread_local! {
 
 fn mock() -> Mock {
     MOCK.with(Mock::clone)
+}
+
+/// Whether `?beta=unavailable` overrides Beta's pin in the browser mock.
+pub fn force_beta_unavailable() -> bool {
+    mock().flags.beta_unavailable
 }
 
 impl Mock {
@@ -1126,7 +1136,7 @@ mod tests {
         // Every flag in the module doc's table, combined.
         assert_eq!(
             Flags::parse(
-                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&os=windows&children&unreadable&readerpanic&leftover&herd"
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&os=windows&children&unreadable&readerpanic&leftover&herd&beta=unavailable"
             ),
             Flags {
                 first_run: true,
@@ -1150,6 +1160,7 @@ mod tests {
                 reader_panic: true,
                 leftover: true,
                 herd: true,
+                beta_unavailable: true,
             }
         );
         assert_eq!(Flags::parse("?tip=3100000").at_tip(), Some(3_100_000));
@@ -1169,7 +1180,7 @@ mod tests {
         assert_eq!(Flags::parse("?os=macos").os, OsFlag::Macos);
         // Unknown values and flags are ignored.
         assert_eq!(
-            Flags::parse("?eos=never&update=bogus&os=plan9&other"),
+            Flags::parse("?eos=never&update=bogus&os=plan9&beta=available&other"),
             Flags::default()
         );
         for (value, flag) in [
