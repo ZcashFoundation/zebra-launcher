@@ -285,6 +285,9 @@ jobs:
       contents: read
       id-token: write # sign the build provenance
       attestations: write # store the build provenance
+    defaults:
+      run:
+        shell: bash
     env:
       VERSION: ${{ needs.version.outputs.version }}
       COMMIT: ${{ needs.version.outputs.commit }}
