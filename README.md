@@ -80,8 +80,12 @@ http://localhost:1420.
 
 ## Release
 
-The bundled `zebrad` version is pinned in [`ZEBRAD_VERSION`](ZEBRAD_VERSION). Binaries
-are never committed: CI fetches the Linux `zebrad` from Zebra's signed releases and
-builds the macOS and Windows ones from the same tag ([SIDECARS.md](docs/SIDECARS.md)).
+Stable uses [`ZEBRAD_VERSION`](ZEBRAD_VERSION), [`ZEBRAD_COMMIT`](ZEBRAD_COMMIT) and
+[`ZEBRAD_DATE`](ZEBRAD_DATE); Beta and Nightly use the corresponding
+[`ZEBRAD_BETA_*`](ZEBRAD_BETA_VERSION) and [`ZEBRAD_NIGHTLY_*`](ZEBRAD_NIGHTLY_VERSION)
+pins. Stable and Beta use Zebra's verified release binaries on Linux and source builds
+from the pinned release tag on macOS and Windows. Nightly builds from the pinned Zebra
+`next` commit on every platform. Binaries are never committed; see
+[SIDECARS.md](docs/SIDECARS.md) for the sources and verification.
 Releases are built, signed and published by the workflow described in
 [RELEASING.md](docs/RELEASING.md).
