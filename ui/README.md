@@ -95,14 +95,19 @@ every node command and event carries a node's id, and the mock's zebrad below is
   panic 30 s into the first run, as the backend's can: the samples stop while zebrad keeps
   running, and the card says it is not measured until zebrad's next run, which Restart
   starts;
-- several nodes: `?herd` adds five nodes beside the mock's zebrad: on Mainnet, Zakura catching
-  up from a snapshot, Zaino reading the Mainnet Zebra, and the zcashd compatibility build,
-  stopped; on Testnet, a Zebra and a pruned Zakura at the tip. The window shows the sidebar
-  with its Mainnet and Testnet tabs, the overview with a card per node of the chosen network,
-  each node's pages and the add-node dialog. The dialog offers Zebra on either network (the
-  other kinds show as coming later), and its Add creates one more simulated zebrad node, with
-  its own folder, ports and `zebrad.toml`, under the backend's rules: at most eight nodes, and
-  a name, ports and data folder no other node has. Its data folder shows the free space there
+- several nodes: `?herd` adds five nodes beside the mock's Stable zebrad: on Mainnet, Zakura
+  catching up from a snapshot, Zaino reading the Mainnet Zebra, and the zcashd compatibility
+  build, stopped; on Testnet, a **Nightly Zebra** and a pruned Zakura at the tip. This makes
+  the Testnet warning tone and the nightly channel warning visible together. The window shows
+  the sidebar with its Mainnet and Testnet tabs, the overview with a card per node of the
+  chosen network, each node's pages and the add-node dialog. The dialog offers Zebra on either
+  network and a Stable, Beta or Nightly channel where available (the other kinds show as coming
+  later). Stable is recommended; Beta and Nightly show their version, short commit, pin date and
+  warning. When Beta is not semver-newer than Stable, it remains visible but disabled as
+  unavailable without blocking the other channels. Add creates one more
+  simulated zebrad node with an immutable channel, its own folder, ports and `zebrad.toml`,
+  under the backend's rules: at most eight nodes, and a name, ports and data folder no other
+  node has. Its data folder shows the free space there
   (212.4 GB in the launcher's data folder, with the low-space warning on Mainnet), and its
   Change… picks `/mnt/storage/zebra` (1,834.5 GB free). A node's Node settings tab renames it,
   turns its start at launch on or off and removes it, keeping or deleting its data (the last
@@ -149,6 +154,36 @@ every node command and event carries a node's id, and the mock's zebrad below is
 The flags are read from the query string once, when the page loads; the table at the top of
 [`src/mock.rs`](src/mock.rs) lists every one.
 
+## Node channels and offline documentation
+
+Zebra nodes choose Stable, Beta or Nightly when they are created. Stable is the
+default and recommended channel. Beta is selectable only when its semantic
+version is newer than Stable; otherwise it stays visible as unavailable and
+disabled, a non-fatal state that leaves Stable and Nightly selectable. Beta and
+Nightly display their version, short commit, pin date and a development-software
+warning. A channel cannot be changed after creation because newer Zebra database
+formats cannot safely be reopened by Stable. Create a separate node and data
+folder to try another channel.
+
+The Docs tab exposes Book, Config and Changes through
+`AppState::open_docs(DocsSection)`. Its typed API wrapper calls the backend's
+`get_node_docs(node)` command and receives `NodeDocs`. In Tauri those paths
+identify absolute local HTML resources generated from the node's exact pinned
+Zebra commit, and the view embeds the selected page through the local asset
+protocol. The browser mock returns illustrative paths and renders self-contained
+inline documents instead, exercising the same sandboxed iframe without file
+resources. Both follow the UI's light/dark theme. Released documentation
+requires no remote network and the iframe has no Tauri IPC access. Every
+generated book, Config and Changes page and every fallback has a per-document
+CSP allowing mdBook's local/inline styles and scripts, `self`/`data:` images and
+local search fetches to `self`, while denying remote origins, frames, objects,
+media, workers, forms and base URIs. External hyperlinks remain available.
+
+The mock covers channel selection and unavailable-Beta state, immutable channel
+details, all three documentation sections and their loading/error states. In
+particular, `?herd` includes a Nightly Zebra node on Testnet so the channel and
+network warnings can be reviewed together.
+
 ## Build
 
 ```sh
@@ -175,10 +210,12 @@ The Tauri app (`src-tauri`) points at this crate:
 
 `withGlobalTauri` is required: `src/tauri.rs` binds by hand (no `tauri-sys`) to
 `window.__TAURI__.core.invoke`, `window.__TAURI__.event.listen` and `window.__TAURI__.core.Channel`.
-The CSP must allow `'wasm-unsafe-eval'` in `script-src`, and `frame-src` must list the loopback
+The CSP must allow `'wasm-unsafe-eval'` in `script-src`. `frame-src` lists the loopback
 origins the shared Grafana URL rule accepts (`http://127.0.0.1:* http://localhost:*`, see
-`launcher_types::is_loopback_http_url` and `docs/GRAFANA.md`). trunk puts a
-small inline module script in `index.html` to load the wasm; Tauri adds hashes for inline scripts
+`launcher_types::is_loopback_http_url` and `docs/GRAFANA.md`) and the local asset origins
+used by offline node documentation. The docs iframe is sandboxed and receives no Tauri IPC
+capability; only the `get_node_docs` command resolves resource paths. trunk puts a small
+inline module script in `index.html` to load the wasm; Tauri adds hashes for inline scripts
 to the CSP when it serves the bundled assets.
 
 ## Layout
@@ -190,7 +227,7 @@ to the CSP when it serves the bundled assets.
 | `src/api.rs` | One typed function per backend command or event, Tauri or mock; the node commands and events carry the node's id |
 | `src/mock.rs`, `src/mock/` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads. `nodes.rs` is the node-scoped API and the node list's rules, `herd.rs` the light simulation of every node but the first, and `resources.rs` the resource samples, pure and tested natively |
 | `src/mock/explorer.rs` | The mock's block explorers: one synthetic chain per zebrad or Zakura node, answered with explorer-model's views, and the chain facts the mock's dashboard details read |
-| `src/app.rs` | Shared state (`AppState`: the node list from `list_nodes` and the `nodes` event, matched by id, and the selected node), backend subscriptions, the shell: header, the tab bar for one node or the sidebar for several, and the first-run wizard |
+| `src/app.rs` | Shared state (`AppState`: the node list from `list_nodes` and the `nodes` event, matched by id, the selected node and `open_docs(DocsSection)`), backend subscriptions, the shell with `Tab::Docs`: header, the tab bar for one node or the sidebar for several, and the first-run wizard |
 | `src/node_state.rs` | One node's state: what the backend reports about it and the histories and log analysis the UI keeps for it |
 | `src/node_summary.rs` | A node's state in a few words, for the sidebar and the overview. Pure, tested natively |
 | `src/theme.rs` | Light and dark appearance: resolves the setting against the system preference and applies it to the document |
@@ -210,7 +247,7 @@ to the CSP when it serves the bundled assets.
 | `src/config_form.rs`, `src/config_form/schema.rs` | zebrad's configuration as a form: the schema of every key the bundled zebrad accepts, values read from `zebrad.toml` with `toml_edit`, validation, and edits written back into the same document. Pure, tested natively; a test pins the schema to the `zebrad generate` fixture |
 | `src/config_view.rs` | Helpers for the Configure page's file pane: changed lines, where a key is written, how far to scroll. Pure, tested natively |
 | `src/components/` | `nav.rs` (header and tabs), `sidebar.rs` and `herd_header.rs` (the shell for several nodes), `add_node.rs` (the add-node dialog), `status_strip.rs` (phase, progress, Start/Stop/Restart), `stale_banner.rs`, `updates.rs` (update banner, buttons, "Check for updates", recovery panel), `update_mode_choice.rs` (radio buttons shared by the wizard and Settings), `config_form.rs` (the two-view configuration editor), `log_insights.rs` (analysis cards), `reset_config.rs`, `tooltip.rs` |
-| `src/pages/` | The pages (`overview.rs` with several nodes, `dashboard.rs`, `logs.rs`, `grafana.rs`, `configure.rs`, `node_settings.rs` with several nodes, `settings.rs`) and the first-run wizard (`first_run.rs`) |
+| `src/pages/` | The pages (`overview.rs` with several nodes, `dashboard.rs`, `logs.rs`, `docs.rs` with the Book/Config/Changes sections and sandboxed themed iframe, `grafana.rs`, `configure.rs`, `node_settings.rs` with several nodes, `settings.rs`) and the first-run wizard (`first_run.rs`) |
 | `src/explorer.rs`, `src/explorer/` | The Explorer tab: the shell (back and forward, the search box, the source line, the banner) and the Chain, Block, Transaction and Search pages, with their shared parts, text (pure, tested natively), navigation history and per-node state |
 | `styles/explorer.css` | The Explorer's styles, with the `--pool-*` colour tokens from `styles.css` |
 

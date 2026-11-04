@@ -10,7 +10,17 @@ custody are in [SECURITY.md](SECURITY.md).
 
 - Launcher version: `[workspace.package] version` in [`Cargo.toml`](../Cargo.toml), the
   only place it lives. The launcher has its own semver, independent of zebrad.
-- Bundled zebrad: [`ZEBRAD_VERSION`](../ZEBRAD_VERSION).
+- Bundled Stable zebrad: [`ZEBRAD_VERSION`](../ZEBRAD_VERSION),
+  [`ZEBRAD_COMMIT`](../ZEBRAD_COMMIT) and [`ZEBRAD_DATE`](../ZEBRAD_DATE).
+- Bundled Beta and Nightly zebrads: the `ZEBRAD_BETA_VERSION`,
+  `ZEBRAD_BETA_COMMIT`, `ZEBRAD_BETA_DATE` and corresponding `ZEBRAD_NIGHTLY_*`
+  root pins. Each channel's version, full commit and date are released together;
+  the complete current values are in [SIDECARS.md](SIDECARS.md).
+- Offline node documentation: generated from those exact same Zebra commits and
+  packaged with the app. Opening the Book, default configuration or Changes in
+  a released app requires no remote network. Every generated HTML page carries
+  a per-document CSP that permits local mdBook assets and search but denies
+  remote origins, frames, objects, media, workers, forms and base URIs.
 - Tags are `vX.Y.Z`, or `vX.Y.Z-rc.N` for release candidates. `release.yml` refuses a tag
   that differs from the workspace version. Release candidates are created as
   prereleases, so `latest.json` (the updater endpoint) does not move.
@@ -18,7 +28,9 @@ custody are in [SECURITY.md](SECURITY.md).
 ## Before the tag
 
 1. Check that [`bundle.yml`](../.github/workflows/bundle.yml) passed on `main` in the last
-   week on all five targets. To run it now: `gh workflow run bundle.yml --ref main`.
+   week for Stable, Beta and Nightly on all five targets, including every sidecar's
+   version/commit and Linux glibc checks and the `zebra-docs` resource build. To run it
+   now: `gh workflow run bundle.yml --ref main`.
 2. Open the release PR:
    - set `[workspace.package] version` in `Cargo.toml`, then run
      `cargo update --workspace` so `Cargo.lock` matches;
@@ -32,8 +44,9 @@ custody are in [SECURITY.md](SECURITY.md).
 
 ## Release-day runbook
 
-Expect 40–60 minutes from tag to draft with warm zebrad caches, longer if the macOS or
-Windows zebrad builds are cold.
+Allow longer than the old single-sidecar release: three channel matrices and offline docs
+precede packaging. Warm caches and parallel channel jobs reduce wall time; cold macOS or
+Windows Zebra builds can dominate it. Record timings from the first three-channel run.
 
 1. **Tag** the merged commit:
 
@@ -44,7 +57,11 @@ Windows zebrad builds are cold.
    ```
 
 2. **Wait for the unprivileged jobs.** `verify`, `draft` (creates the draft release),
-   `sidecars` and `build` run without secrets.
+   `sidecars`, `sidecars-beta`, `sidecars-nightly`, `build` and the offline documentation
+   job run without secrets. Each sidecar matrix must pass its version/commit checks on all
+   five targets, every Linux sidecar must pass the glibc check, and documentation
+   generation must finish for all three exact pinned commits. The docs job needs all three
+   sidecar jobs, so missing or mismatched channel binaries block the release.
 3. **Approve the `release` environment.** In the workflow run, use *Review deployments*,
    then select `release`. The approver must not be the person who pushed the tag;
    self-review is blocked. The five `bundle_sign` jobs then package, sign, notarize and
@@ -107,23 +124,30 @@ Windows zebrad builds are cold.
 - [ ] `for s in *.sig; do base64 -d < "$s" | sed -n 3p; done` prints, for every
       signature, a trusted comment ending in `version:X.Y.Z` (this version).
 - [ ] **Linux x86_64** (Ubuntu 22.04 and 24.04): the AppImage starts after `chmod +x`,
-      the node reaches Running, and About shows "Zeal X.Y.Z (zebrad A.B.C)".
+      a Stable node reaches Running, and About shows "Zeal X.Y.Z (zebrad A.B.C)".
 - [ ] **Linux deb** (Debian 12): `sudo apt install ./zeal_X.Y.Z_amd64.deb`
       installs, the app starts, and the update setting is Notify-only.
-- [ ] **Linux aarch64**: the AppImage starts and the node reaches Running.
+- [ ] **Linux aarch64**: the AppImage starts and a Stable node reaches Running.
 - [ ] **macOS Apple Silicon and Intel**: the dmg opens; after copying to Applications,
       `spctl -a -vv "/Applications/Zeal.app"` reports
-      `source=Notarized Developer ID`, and
-      `codesign -dv --verbose=4 "/Applications/Zeal.app/Contents/MacOS/zeal-zebrad"`
-      shows the Developer ID authority and `flags=0x10000(runtime)`. The app opens
-      without an "unidentified developer" block and the node reaches Running.
+      `source=Notarized Developer ID`. `codesign -dv --verbose=4` on
+      `Contents/MacOS/zeal-zebrad`, `zeal-zebrad-beta` and `zeal-zebrad-nightly`
+      shows the Developer ID authority and `flags=0x10000(runtime)` for each. The app
+      opens without an "unidentified developer" block and a Stable node reaches Running.
 - [ ] **Windows 11**: `Get-AuthenticodeSignature .\zeal_X.Y.Z_x86_64-setup.exe`
       is `Valid`; the installer runs per-user without a UAC prompt;
-      `Get-AuthenticodeSignature` is `Valid` for `zeal-app.exe` and
-      `zeal-zebrad.exe` in `%LOCALAPPDATA%\Zeal`; the node reaches
-      Running.
+      `Get-AuthenticodeSignature` is `Valid` for `zeal-app.exe`, `zeal-zebrad.exe`,
+      `zeal-zebrad-beta.exe` and `zeal-zebrad-nightly.exe` in `%LOCALAPPDATA%\Zeal`;
+      a Stable node reaches Running.
+- [ ] **Every OS**: create and start a node on each available channel. Beta is selectable
+      only when semver-newer than Stable; otherwise it remains visible as unavailable and
+      disabled without blocking the other channels. Beta and Nightly show their full
+      channel metadata and warnings, and an existing node's channel cannot be changed. With
+      networking disabled, open Book, Config and Changes for each channel and confirm that
+      their content matches the release's pinned Zebra commits. Every page must retain its
+      per-document CSP, and no document should fetch an online replacement.
 - [ ] **Every OS**: with close-to-tray on, closing the window keeps the node running;
-      tray Quit leaves no `zeal-zebrad` process.
+      tray Quit leaves no Stable, Beta or Nightly `zeal-zebrad` process.
 - [ ] **Updater** (releases that ship it): every `.sig` names this version (see below), and
       the [update rehearsal](#update-rehearsal) from the previous rc to this release
       works on every target; the `.deb` shows the release link instead of installing.
@@ -202,7 +226,8 @@ For a rehearsal from `v0.2.0-rc.2` to `v0.2.0-rc.3`, save as `rehearsal.json`:
 `endpoints` replaces the configured list (arrays are not merged); everything else,
 including the public key, comes from the tag's `tauri.conf.json`. The "from" build
 needs no updater artifacts of its own, hence `createUpdaterArtifacts: false` (and no
-signing key). On each target, with the sidecar in place as for any local build
+signing key). On each target, with all three channel sidecars and the offline docs
+resources in place as for any local build
 ([DEVELOPMENT.md](DEVELOPMENT.md#release-build)), check out `v0.2.0-rc.2` and run:
 
 ```sh
@@ -212,11 +237,14 @@ cargo tauri build --config rehearsal.json
 
 Then, with `v0.2.0-rc.3` published as a prerelease:
 
-1. Install the rehearsal build, start it, let the node reach Running, and set updates
-   to Notify. Within a minute (or with *Check for updates*) it offers `0.2.0-rc.3`.
-2. Install it. The zebrad log shows the graceful shutdown (`stopping zebrad`), the
-   launcher relaunches as `0.2.0-rc.3` (About), and the node reaches Running within
-   5 minutes with no recovery screen.
+1. Install the rehearsal build, start a node on each available channel, let every node
+   reach Running, and set updates to Notify. Within a minute (or with *Check for updates*)
+   it offers `0.2.0-rc.3`.
+2. Install it. The zebrad logs show the graceful shutdown (`stopping zebrad`), the
+   launcher relaunches as `0.2.0-rc.3` (About), and every previously running node reaches
+   Running within 5 minutes with no recovery screen. Each node's RPC-reported base zebrad
+   version must match its own channel, and any commit hash reported in build metadata must
+   match the channel pin. The existing launcher-version health check must pass as well.
 3. On Debian, the `.deb` build shows the release link instead of an Install button.
 
 The refusals are checked with a debug bundle (`cargo tauri build --debug --config
@@ -243,11 +271,14 @@ it cache-free.
 
 To switch:
 
-1. Delete the `build` job and change `bundle_sign`'s `needs` to
-   `[verify, draft, sidecars]`.
+1. Delete the `build` job and make `bundle_sign` need `verify`, `draft`, all three
+   sidecar jobs (`sidecars`, `sidecars-beta` and `sidecars-nightly`) and the offline
+   documentation job. The fallback must not drop a channel or bypass the docs job's
+   all-sidecars prerequisite.
 2. In `bundle_sign`, delete the `build-<target>` download-artifact step and the "Place
-   the compiled app" step (keep the zebrad download and add its `chmod +x`), and drop
-   `compile: "false"` from `./.github/actions/setup-tauri`.
+   the compiled app" step. Keep all three channel sidecar downloads, the `zebra-docs`
+   resource download and their `chmod +x`/placement steps, and drop `compile: "false"`
+   from `./.github/actions/setup-tauri`.
 3. In the three "Bundle and sign" steps, replace `cargo tauri bundle` with
    `cargo tauri build`, keeping the same flags, env and throwaway key, for example:
 
@@ -295,13 +326,13 @@ of the [release-day runbook](#release-day-runbook)).
 
 ## zebrad bump SLA
 
-A launcher release with the new zebrad ships **within 14 days of each zebrad release**.
-On Mainnet, zebrad halts 56 days after its estimated release height, so a slipped bump
-eventually stops every user's node.
+A launcher release with the new Stable zebrad ships **within 14 days of each Stable zebrad
+release**. On Mainnet, zebrad halts 56 days after its estimated release height, so a
+slipped Stable bump eventually stops every user's Stable node.
 
 Triggers:
 
-1. Primary: the Zebra release checklist includes bumping the launcher.
+1. Primary: the Zebra release checklist includes bumping the launcher's Stable channel.
 2. Backstop: [`zebrad-watch.yml`](../.github/workflows/zebrad-watch.yml) (daily at
    05:17 UTC and on dispatch) compares Zebra's latest `vX.Y.Z` release that has signed
    binaries with `ZEBRAD_VERSION` and opens a bump PR (`bump/zebrad-<ver>`) with a
@@ -314,17 +345,29 @@ GitHub pauses scheduled workflows after 60 days without repository activity, whi
 is why the watcher is only the backstop. If the Actions tab shows **zebrad watch** as
 disabled, re-enable it and run it once by hand.
 
-Bump PR checklist (the steps are in [SIDECARS.md](SIDECARS.md#bumping-zebrad_version)):
+Stable bump PR checklist (the steps are in
+[SIDECARS.md](SIDECARS.md#bumping-zebrad_version)):
 
-- [ ] `ZEBRAD_VERSION` and fake-zebrad's `VERSION` updated.
-- [ ] `bundle.yml` green on all five targets (Tier-3 macOS and Windows zebrad builds
-      included); it checks that each bundled zebrad reports `ZEBRAD_VERSION`.
-- [ ] The previous release's generated config validates against the new zebrad.
-- [ ] Log fixtures re-captured if zebrad's wording changed (see
+- [ ] `ZEBRAD_VERSION`, `ZEBRAD_COMMIT`, `ZEBRAD_DATE` and fake-zebrad's version agree
+      with the intended Stable release.
+- [ ] `bundle.yml` is green for all three channels on all five targets (Tier-3 macOS and
+      Windows zebrad builds included); every sidecar passes its own version/commit check
+      and every Linux sidecar passes the glibc check.
+- [ ] The previous release's generated config validates against the new Stable zebrad.
+- [ ] Log fixtures are re-captured if Stable zebrad's wording changed (see
       [DEVELOPMENT.md](DEVELOPMENT.md#log-fixtures)).
-- [ ] Grafana dashboards re-vendored with `docs/observability/sync-dashboards.sh`.
+- [ ] Grafana dashboards are re-vendored with `docs/observability/sync-dashboards.sh`.
+- [ ] `zebra-docs` contains Book, Config and Changes generated from all three exact
+      channel commits, and the packaged Docs tabs work with networking disabled.
 
-After the bump merges, cut a patch release with this runbook within the 14 days.
+After the Stable bump merges, cut a patch release with this runbook within the 14 days.
+
+Beta and Nightly pins are maintained separately with `scripts/bump-zebrad-beta.sh` and
+`scripts/bump-zebrad-nightly.sh`. These manual scripts discover the next prerelease or
+development commit, write its version/full commit/date files and run the pin checks; they
+do not commit or push. Beta is offered only while semver-newer than Stable. There is no
+new Beta/Nightly watcher or automatic bumping bot. Any channel bump still requires the
+full three-channel bundle and offline-docs checks above before release.
 
 ## Secrets inventory
 
@@ -367,5 +410,8 @@ The minisign updater key is generated, escrowed and rotated as described in
 
 ## Cost and timing
 
-Estimated with warm sidecar caches: 120–180 runner minutes, 40–60 min wall clock. Replace
-with the times measured on the first real runs.
+The old single-sidecar estimate was 120–180 runner minutes and 40–60 min wall clock with
+warm caches. Three channel matrices and documentation generation increase runner time and
+installer size, although the channel matrices run in parallel. Replace these figures with
+measurements from the first real three-channel runs; use a longer timeout for cold macOS
+or Windows Zebra builds.

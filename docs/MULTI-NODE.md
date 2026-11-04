@@ -1,16 +1,16 @@
 # Running several nodes
 
-> **Status: phase 1 and phase 2a built, 2026-11-03; the rest is a proposal.** Zeal runs
-> up to eight zebrad nodes; the other kinds are still a design.
-> [ARCHITECTURE.md](ARCHITECTURE.md#nodes) describes what is built, and
-> [Built differently](#built-differently) lists where the code went another way than this
-> document.
+> **Status: phase 1, phase 2a, three-channel sidecars and offline node docs built,
+> 2026-11-03; the rest is a proposal.** Zeal runs up to eight zebrad nodes; the other
+> kinds are still a design. [ARCHITECTURE.md](ARCHITECTURE.md#nodes) describes what is
+> built, and [Built differently](#built-differently) lists where the code went another
+> way than this document.
 
-Zeal runs one bundled `zebrad` today. The maintainer asked for "great UX and support for
-running multiple node implementations at once": several zebrad nodes (Mainnet and Testnet,
-or the release next to a development build), zcashd, Zakura, Zebend, the Z3 services Zaino
-and Zallet wired to a node, and any other binary through a generic adapter. This document
-proposes how.
+Zeal runs several bundled `zebrad` nodes on Stable, Beta or Nightly. The maintainer asked
+for "great UX and support for running multiple node implementations at once": several
+zebrad nodes (Mainnet and Testnet, or different pinned channels), zcashd, Zakura, Zebend,
+the Z3 services Zaino and Zallet wired to a node, and any other binary through a generic
+adapter. This document proposes how.
 
 ## Goals
 
@@ -44,7 +44,7 @@ A node is one supervised process and everything Zeal keeps for it:
 | `name` | What the UI shows ("Zebra · Mainnet"), editable. |
 | `kind` | The implementation: `zebrad`, `zakura`, `zcashd`, `zebend`, `zaino`, `zallet` or `generic`. Decides the adapter (below). |
 | `network` | `Mainnet`, `Testnet` or, later, `Regtest`. |
-| `program` | Where the binary comes from: `Bundled` (zebrad only), `File(path)` (a binary the user picked; its version is read with `--version` where the kind supports it), or `Command { program, args, working_dir }` for kinds run through a wrapper (Zebend's Python supervisor, the generic adapter). |
+| `program` | Where the binary comes from: `Bundled` (Stable zebrad, retaining the old `{"from":"bundled"}` wire shape), `BundledBeta` (`bundled_beta`) or `BundledNightly` (`bundled_nightly`), all through `NodeProgram::channel()` / `from_channel()`; later, `File(path)` (a binary the user picked, inspected with `--version` where supported), or `Command { program, args, working_dir }` for wrappers such as Zebend's Python supervisor and the generic adapter. A bundled node's channel is immutable after creation. |
 | `data_dir` | The node's chain state. Defaults to `<app data>/nodes/<id>`; a node may use a folder of its own, but no two nodes may share one. |
 | `ports` | The ports the node listens on (P2P, RPC, metrics, gRPC), assigned when the node is added and kept until the user changes them (see [Ports](#ports)). |
 | `depends_on` | For a service or a sidecar: the node it talks to (Zaino and Zallet read a zebrad node; the zcashd compatibility build follows a zebrad or Zakura node). |
@@ -90,12 +90,27 @@ explains why a kind cannot run on this computer instead of hiding it.
 
 ### zebrad
 
-The Zcash Foundation's node, bundled and pinned (`ZEBRAD_VERSION`, 7.0.0, which follows
-NU7 on Mainnet). Everything Zeal does today. A second zebrad node uses the same bundled
-binary with its own config, data folder and ports; a development build from a Zebra git ref
-is a `File` program picked by the user (CI already produces such builds, see
-[SIDECARS.md](SIDECARS.md)). zebrad halts about 56 days after its release, so every node's
-end of support is shown on its card, not only the bundled one's.
+The Zcash Foundation's node is bundled in three pinned channels: **Stable**
+(the existing `ZEBRAD_VERSION`/`ZEBRAD_COMMIT` release, 7.0.0 at this pin),
+**Beta** (7.1.0-alpha.0 at commit `9889683`, dated 2026-10-30), and **Nightly**
+(7.1.0-alpha.0 at commit `7ae1a82`, dated 2026-11-02). Stable is the default and
+recommended choice. Beta is offered only when its semantic version is newer
+than stable's; otherwise it is visible as unavailable and disabled, a non-fatal
+state that leaves Stable and Nightly selectable. Beta and Nightly both show
+their version, short commit, pin date and an explicit development-software
+warning. See
+[SIDECARS.md](SIDECARS.md) for the full pins and build provenance.
+
+Every zebrad node uses its selected channel's binary with its own config, data
+folder and ports. The channel is fixed when the node is created and cannot be
+changed afterwards: a newer Zebra can upgrade the database to a format that
+stable cannot safely reopen. The UI explains this downgrade risk at creation
+and in Node settings. To use another channel, create a separate node with a
+separate data folder rather than pointing stable at beta or nightly state. A
+development build from an arbitrary Zebra git ref remains a `File` program
+picked by the user in the later phase that adds user-selected programs.
+zebrad halts about 56 days after its release, so every node's end of support is
+shown on its card.
 
 ### Zakura
 
@@ -267,12 +282,14 @@ delete its data; deleting uses today's `delete_node_data` rules for that node's 
 ## Commands and events
 
 Every node-scoped command takes a `node` id: `start_node`, `stop_node`, `restart_node`,
-`read_config`, `apply_config`, `reset_config`, the snapshot commands and the log
-subscription. New commands manage the list: `list_nodes`, `add_node` (validates a draft
-spec: ports, folder, binary, dependency), `update_node`, `remove_node`, `inspect_binary`
-(runs `--version` and guesses the kind) and `suggest_ports`. Events carry the node id
-(`status { node, status }`, and so on), and `nodes` publishes the summaries. The UI keeps
-one log subscription per node it shows and folds each node's log analysis separately.
+`read_config`, `apply_config`, `reset_config`, `get_node_docs`, the snapshot commands and
+the log subscription. `get_node_docs` returns `NodeDocs { channel, book, config, changes }`,
+with absolute local HTML paths in Tauri and illustrative paths in the browser mock. New
+commands manage the list: `list_nodes`, `add_node` (validates a draft spec: ports, folder,
+binary, dependency), `update_node`, `remove_node`, `inspect_binary` (runs `--version` and
+guesses the kind) and `suggest_ports`. Events carry the node id (`status { node, status }`,
+and so on), and `nodes` publishes the summaries. The UI keeps one log subscription per node
+it shows and folds each node's log analysis separately.
 
 ## User interface
 
@@ -323,9 +340,12 @@ A sidebar replaces the top tab bar once there is more than one node:
   the window there.
 - The sidebar lists the network's nodes with a status dot and one fact (sync percentage,
   "at tip", "serving", "stopped"). Under 900 px it folds to a rail of dots.
-- A node's page has today's tabs scoped to it (Dashboard, Logs, Configure) plus Node
-  settings (name, autostart, stop grace, data folder, ports, binary, remove). The status
-  strip becomes the page header.
+- A node's page has tabs scoped to it (Dashboard, Logs, Docs, Configure) plus Node
+  settings (name, autostart, stop grace, data folder, ports, binary, remove). Docs offers
+  Book, Config and Changes for that node's fixed channel in a sandboxed, light/dark local
+  asset iframe; released pages come from the exact pinned Zebra commit and need no
+  network. The status strip becomes the page header, and prerelease version, short commit,
+  date and warning stay visible with the node's identity.
 - Grafana and Settings stay global.
 - The pages' breakpoints follow the page's width, not the window's (CSS container queries
   on the page area), so the sidebar narrows them as it narrows the page: a window of
@@ -370,37 +390,44 @@ A dialog in three steps, each validated as it is filled in:
 1. **Kind**: a card per kind with what it is, what it needs (bundled, or a program you
    provide) and where it runs. A kind that cannot run on this computer stays visible, with
    the reason, and cannot be picked.
-2. **Details**: the network (Zebend: Mainnet only), the name, the program (the bundled
-   zebrad, a binary picked from disk that Zeal runs with `--version` and shows what it
-   found, or a checkout or command line), the node it uses (services and the zcashd
-   sidecar), the data folder with its free space, and the ports, assigned around the
-   existing nodes' with each move explained ("P2P 18233 instead of 8233, which Zebra ·
-   Mainnet uses"). The kind's caveats show here: Zebend unaudited, Zallet beta, Zaino
+2. **Details**: the network (Zebend: Mainnet only), the name, the program, the node it
+   uses (services and the zcashd sidecar), the data folder with its free space, and the
+   ports, assigned around the existing nodes' with each move explained ("P2P 18233 instead
+   of 8233, which Zebra · Mainnet uses"). For Zebra, the program is a bundled channel:
+   Stable by default, Beta only when semver-newer than Stable, or Nightly. Prerelease
+   choices show version, short commit, pin date and warnings, and the review states that
+   the channel cannot be changed after creation because of database downgrade risk. Later
+   phases add a binary picked from disk and inspected with `--version`, or a checkout or
+   command line. Other kind caveats show here too: Zebend unaudited, Zallet beta, Zaino
    before NU7, Zakura's CPU requirement.
-3. **Review**: everything Zeal will set up, including the config it will write, then
-   "Add" or "Add and start".
+3. **Review**: everything Zeal will set up, including the immutable channel and the config
+   it will write, then "Add" or "Add and start".
 
 ### First run
 
-Unchanged for one zebrad node: the steps end by creating `zebrad-mainnet` (or Testnet).
-The last step mentions that other nodes can be added later from Settings → Nodes.
+Unchanged for one Stable zebrad node: the steps end by creating `zebrad-mainnet` (or
+Testnet). The last step mentions that other nodes and channels can be added later from
+Settings → Nodes.
 
 ## Phases
 
 1. **Overview and node pages in the UI, against the mock.** The sidebar, overview, node
    header and add-node dialog, built on a node list that the real backend reports as one
    node until phase 2 lands, so nothing changes for users in between. The mock's `?herd`
-   flag adds five nodes. Screenshotted for review. Mainnet and Testnet tabs at the top of the
-   sidebar scope the whole window to one network, with Testnet marked in the warning tone.
+   flag adds five nodes, including a Nightly Zebra on Testnet, and covers channel and docs
+   states. Screenshotted for review. Mainnet and Testnet tabs at the top of the sidebar
+   scope the whole window to one network, with Testnet marked in the warning tone.
 2. **Several zebrad nodes**, in two parts.
    - **2a, built**: the registry, per-node runtimes, port assignment and the port check at
      every start, settings v3 and its migration, node-scoped commands and events, the
-     add-node dialog on the real backend (zebrad on Mainnet or Testnet, running the bundled
-     zebrad; the other kinds visible as coming later; the data folder with its free space;
-     the warning for a second node on one network), Node settings with the name, the start
-     at launch and Remove, Settings → Nodes as the single-node entry point to the dialog, an
-     update that stops and starts every node, Quit that stops every node, and the tray's
-     node counts with Start all and Stop all.
+     add-node dialog on the real backend (zebrad on Mainnet or Testnet, with an immutable
+     Stable, available Beta or Nightly bundled channel; the other kinds visible as coming
+     later; the data folder with its free space; the warning for a second node on one
+     network), offline Book/Config/Changes docs for the selected channel, Node settings
+     with the name, the start at launch and Remove, Settings → Nodes as the single-node
+     entry point to the dialog, an update that stops and starts every node and checks each
+     running node's channel version, Quit that stops every node, and the tray's node counts
+     with Start all and Stop all.
    - **2b**: a tray submenu per node and "Add a node…" in the tray, the stop grace, data
      folder and ports in Node settings, and the first run's pointer to Settings → Nodes.
 3. **Zakura**, as a variant of the zebrad adapter: its binary, `zakura.toml`, pruning and
@@ -422,8 +449,11 @@ Decided on 2026-11-03, for phase 2:
 2. Zallet's zebrad with the `indexer` feature: decided with Zaino, Zallet and the zcashd
    sidecar, which come later (phase 5).
 3. zcashd as its own node or zebrad's `[zcashd_compat]` supervision: also phase 5.
-4. Every zebrad node in phase 2 runs the bundled zebrad; a zebrad the user picks comes with
-   the programs of the other kinds.
+4. **Decided:** every zebrad node in phase 2 uses one of the three bundled channels,
+   Stable (default), Beta (only when semver-newer than Stable) or Nightly. The choice is
+   made at creation and is immutable so Stable never reopens a newer Zebra database;
+   trying another channel requires another node and data folder. A zebrad binary the user
+   picks comes with the programs of the other kinds.
 5. No Regtest yet.
 6. At most eight nodes (`MAX_NODES`).
 
@@ -472,4 +502,7 @@ Where phase 2a's code differs from the design above:
 - **Node settings** is a tab only with several nodes; with one node, Settings holds the same
   choices.
 - **The updater treats the nodes as one**: an update stops every node that runs, the marker
-  lists them, and the health gate checks each of them after the update.
+  lists them, and the health gate retains its launcher-version check and checks each of
+  them after the update. A running node's RPC stats must match its own channel's expected
+  base zebrad version, and any commit hash reported in build metadata must match the
+  channel pin. A base-version or reported-commit mismatch fails promptly.

@@ -2,8 +2,8 @@
 
 Start with **Settings → Copy diagnostics**: it copies the launcher and bundled zebrad
 versions, the OS, the settings, the last 200 lines of the launcher log and, for every node,
-its status, managed `zebrad.toml` and the last 200 lines of its zebrad log to the
-clipboard, ready to paste into an issue.
+its channel, resolved sidecar, status, managed `zebrad.toml` and the last 200 lines of its
+zebrad log to the clipboard, ready to paste into an issue.
 It never includes the RPC cookie, and credentials in the Grafana URL are redacted. If the
 clipboard cannot be written, the text is shown below the button to copy by hand.
 
@@ -76,6 +76,37 @@ again once the node is stopped, so the removal never leaves it running unseen.
 The launcher never reuses a terminal zebrad's state directory, so otherwise this means two
 launchers or a manual zebrad pointed at the launcher's data dir.
 
+## Channel or database version is incompatible
+
+A node's Stable, Beta or Nightly channel is fixed when it is created. This is
+intentional: a newer Zebra can upgrade the database, after which Stable cannot
+safely reopen it. Node settings shows the channel but does not offer a switch.
+Do not work around this by renaming sidecars or pointing a Stable node at a
+Beta or Nightly node's data folder.
+
+To try another channel, add a separate Zebra node with its own empty data
+folder and ports. Keep the original node on its original channel to reopen its
+existing state. Stable is the recommended channel. Beta is selectable only when
+its semantic version is newer than Stable; otherwise it appears unavailable and
+disabled without blocking the other channels. Both prerelease channels carry a
+warning with their version, short commit and pin date.
+
+After a launcher update, each previously running node must also report its own
+channel's expected zebrad base version through RPC. When the build metadata
+reports a commit hash, that hash must also match the channel pin. A base-version
+or reported-commit mismatch fails the health check promptly instead of waiting
+for the timeout. Reinstall the intended release, do not replace individual
+sidecars, and use **Copy diagnostics** if the mismatch persists.
+
+The Docs tab is offline in released builds: its Book, Config and Changes pages
+come from the same pinned commit as the node's channel and need no remote
+network. Every generated and fallback page has a per-document CSP that blocks
+remote origins and permits only the local assets and search connections mdBook
+needs. If one of these local pages is missing or blank, capture diagnostics and
+report the channel and launcher version rather than looking for a proxy or
+connectivity fix. Development builds use small fallback resources until the
+`zebra-docs` artifact is generated.
+
 ## Blank window on Linux
 
 Some GPU drivers (often NVIDIA, or VMs) leave the WebKitGTK window blank. Start the
@@ -106,11 +137,12 @@ Choose More info → Run anyway after checking the signature
 
 ## Firewall prompt for port 8233
 
-zebrad listens for peers on `[::]:8233` (P2P; `18233` on Testnet). The first time the
-node starts, macOS and Windows ask whether to allow incoming connections for
-`zeal-zebrad`; the first-run screen warns about this prompt. Allowing it helps
-the network; denying it still lets your node sync through outbound connections. RPC and
-metrics are loopback-only and never need a firewall rule. To change your answer later:
+zebrad listens for peers on `[::]:8233` (P2P; `18233` on Testnet). The first time a
+node starts, macOS and Windows ask whether to allow incoming connections for its
+`zeal-zebrad`, `zeal-zebrad-beta` or `zeal-zebrad-nightly` sidecar; the first-run screen
+warns about this prompt. Allowing it helps the network; denying it still lets your node
+sync through outbound connections. RPC and metrics are loopback-only and never need a
+firewall rule. To change your answer later:
 Windows Security → Firewall & network protection → Allow an app through firewall; macOS
 System Settings → Network → Firewall → Options.
 

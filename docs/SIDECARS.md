@@ -1,44 +1,65 @@
-# The bundled zebrad
+# The bundled zebrad channels
 
-Zeal ships zebrad as a Tauri sidecar. Tauri looks for it at
-`src-tauri/binaries/zeal-zebrad-<target triple>` (with `.exe` on
-Windows), the name `bundle.externalBin` in `src-tauri/tauri.conf.json` gives.
-That directory is git-ignored, so the binary always comes from one of the
-scripts below and is never committed. The `zeal-` prefix keeps the
-Linux `.deb` from shadowing a system `/usr/bin/zebrad`.
+Zeal ships three zebrads as Tauri sidecars, so a node on any supported channel
+works without a runtime download:
 
-The zebrad version is pinned in [`ZEBRAD_VERSION`](../ZEBRAD_VERSION), written
-without a leading `v` (for example `7.0.0`). The Zebra commit that tag
-`v<ver>` points to is pinned next to it in [`ZEBRAD_COMMIT`](../ZEBRAD_COMMIT),
-as the full 40-character lowercase SHA. A Git tag can be moved, but a commit SHA
-cannot, so every script checks the release against the commit and not just the
-tag. The two files describe one release and change together (see
-[Bumping ZEBRAD_VERSION](#bumping-zebrad_version)).
+| Channel | Sidecar in `src-tauri/binaries/` | Version | Pinned Zebra commit | Release/snapshot date |
+| --- | --- | --- | --- | --- |
+| Stable | `zeal-zebrad-<target triple>[.exe]` | [`ZEBRAD_VERSION`](../ZEBRAD_VERSION) | [`ZEBRAD_COMMIT`](../ZEBRAD_COMMIT) | [`ZEBRAD_DATE`](../ZEBRAD_DATE): 2026-10-22 |
+| Beta | `zeal-zebrad-beta-<target triple>[.exe]` | `7.1.0-alpha.0` | `9889683b9abecd5d28f2de1a49d1a359be11b8eb` | `ZEBRAD_BETA_DATE`: 2026-10-30 |
+| Nightly | `zeal-zebrad-nightly-<target triple>[.exe]` | `7.1.0-alpha.0` | `7ae1a827471235e8d14204e2aaa77dc9b61ca25c` | `ZEBRAD_NIGHTLY_DATE`: 2026-11-02 |
+
+The beta values live in `ZEBRAD_BETA_VERSION`, `ZEBRAD_BETA_COMMIT` and
+`ZEBRAD_BETA_DATE`; the nightly values use the corresponding
+`ZEBRAD_NIGHTLY_*` files. Versions have no leading `v`, commits are full
+40-character lowercase SHAs, and dates are ISO `YYYY-MM-DD`. Beta and nightly
+can have the same base version while identifying different commits, so the
+commit, not the version alone, identifies the binary. Stable remains the
+default and recommended channel. Beta is selectable only while its semantic
+version is newer than stable's; otherwise it stays visible as unavailable and
+disabled without blocking Stable or Nightly. Nightly is the next pinned
+development commit. The UI shows the beta and nightly version, short commit,
+pin date and a clear warning before either is chosen.
+
+Bundling all three binaries on all five targets makes installers larger. That
+is deliberate: channel selection and the accompanying documentation work
+offline, with no dependence on a release server or a network connection when a
+node is created. The sidecar directory is git-ignored, so binaries always come
+from the scripts or CI artifacts below and are never committed. The `zeal-`
+prefix keeps the Linux `.deb` from shadowing a system `/usr/bin/zebrad`.
+
+A Git tag can be moved, but a commit SHA cannot, so builds check the source
+against the commit and not just the tag. A channel's pin files change together
+(see [Bumping the channel pins](#bumping-the-channel-pins)).
 [`scripts/check-versions.sh`](../scripts/check-versions.sh), which CI runs,
-checks that both files are well formed and that `fake-zebrad` reports the same
+checks that the pins are well formed and that `fake-zebrad` reports the stable
 version. It also checks that the tauri-cli pin (`TAURI_CLI_VERSION` in
 [`.github/tool-versions.env`](../.github/tool-versions.env)) has the same minor
 version as the `tauri` crate in `Cargo.lock`.
 
-The scripts read both files by default. `ZEBRAD_COMMIT` applies only to the
-version in `ZEBRAD_VERSION`. To build any other version, pass its commit as well
-(`--commit` or `-Commit`). The build scripts refuse to run without one, and
-`fetch-zebrad-linux.sh` still checks the tag but does not pin the commit.
+The stable build scripts read `ZEBRAD_VERSION` and `ZEBRAD_COMMIT` by default.
+To build another stable version, pass its commit as well (`--commit` or
+`-Commit`). The build scripts refuse to run without one, and
+`fetch-zebrad-linux.sh` still checks the tag but does not pin an overridden
+commit. Beta and nightly always use their exact root pins; workflow inputs
+cannot override them.
 
 ## Where each platform's zebrad comes from
 
-| Target | Source | Script |
-| --- | --- | --- |
-| `x86_64-unknown-linux-gnu` | Zebra's release tarball | `scripts/fetch-zebrad-linux.sh` |
-| `aarch64-unknown-linux-gnu` | Zebra's release tarball | `scripts/fetch-zebrad-linux.sh` |
-| `aarch64-apple-darwin` | built from the Zebra tag | `scripts/build-zebrad.sh` |
-| `x86_64-apple-darwin` | built from the Zebra tag | `scripts/build-zebrad.sh` |
-| `x86_64-pc-windows-msvc` | built from the Zebra tag | `scripts/build-zebrad.ps1` |
+| Target | Stable and Beta source | Nightly source | Script |
+| --- | --- | --- | --- |
+| `x86_64-unknown-linux-gnu` | Zebra's verified release tarball | the exact pinned commit | `scripts/fetch-zebrad-linux.sh` (Stable/Beta), `scripts/build-zebrad.sh` (Nightly) |
+| `aarch64-unknown-linux-gnu` | Zebra's verified release tarball | the exact pinned commit | `scripts/fetch-zebrad-linux.sh` (Stable/Beta), `scripts/build-zebrad.sh` (Nightly) |
+| `aarch64-apple-darwin` | the pinned release tag | the exact pinned commit | `scripts/build-zebrad.sh` |
+| `x86_64-apple-darwin` | the pinned release tag | the exact pinned commit | `scripts/build-zebrad.sh` |
+| `x86_64-pc-windows-msvc` | the pinned release tag | the exact pinned commit | `scripts/build-zebrad.ps1` |
 
-Zebra publishes binaries for Linux only (Zebra's ADR 0008), so macOS and
-Windows binaries are built from source.
+Zebra publishes release binaries for Linux only (Zebra's ADR 0008), so Stable
+and Beta macOS and Windows binaries, and Nightly on every target, are built
+from source.
 
-**Linux.** `fetch-zebrad-linux.sh` downloads `zebrad-<ver>-<target>.tar.gz`,
+**Linux (Stable and Beta).** `fetch-zebrad-linux.sh` downloads
+`zebrad-<ver>-<target>.tar.gz`,
 `SHA256SUMS` and `SHA256SUMS.sigstore.json` from the Zebra release and refuses
 to install anything unless all of these checks pass:
 
@@ -56,15 +77,16 @@ to install anything unless all of these checks pass:
    attestation check into an error before anything is downloaded.
 4. The extracted binary prints `zebrad <ver>` for `--version`.
 
-**macOS and Windows.** `build-zebrad.sh` and `build-zebrad.ps1` clone Zebra at
-tag `v<ver>`, or reuse an existing checkout with `--src-dir`. They refuse to
-build unless HEAD is the tag and the tag resolves to exactly the pinned commit.
-Then they build zebrad the way Zebra's release workflow builds its Linux
-binaries:
+**Source builds.** `build-zebrad.sh` and `build-zebrad.ps1` build Stable and
+Beta on macOS and Windows, and Nightly on every target. They clone Zebra or
+reuse an existing checkout with `--src-dir`. Stable and Beta check out the
+release tag `v<ver>` and require it to resolve to the channel's pinned commit;
+Nightly uses the full commit with `--ref` (`-Ref` in PowerShell). Then they
+build zebrad the way Zebra's release workflow builds its Linux binaries:
 
 - the toolchain pinned in Zebra's `rust-toolchain.toml`, through `RUSTUP_TOOLCHAIN`
 - `cargo build --locked --release -p zebrad --features default-release-binaries`
-- `SOURCE_DATE_EPOCH` set from the tag's commit time
+- `SOURCE_DATE_EPOCH` set from the selected commit's time
 - build paths remapped out of the binary
 - symbols stripped
 
@@ -77,18 +99,49 @@ rustup and PowerShell 7 (`pwsh`; Windows PowerShell 5.1 is not supported).
 it exits, so running it in an open `pwsh` session leaves that session as it
 was.
 
-**CI.** [`zebrad-sidecars.yml`](../.github/workflows/zebrad-sidecars.yml) runs
-the scripts on native runners for all five targets. Its first job reads
-`ZEBRAD_VERSION` and `ZEBRAD_COMMIT`, or the `version` and `commit` inputs, and
-passes both to every script. It smoke-tests each binary
-(`--version` and `generate`), attests its provenance with
-`actions/attest-build-provenance`, and uploads it as the workflow artifact
-`zebrad-<target triple>`. You can run it by hand (Actions → zebrad sidecars →
-Run workflow), and the bundle and release workflows call it. Workflow
-artifacts do not keep the executable bit, so run `chmod +x` after downloading
-one. The CI binaries are **unsigned**. macOS and Windows code signing happens
-only in the release environment, when the Tauri bundler signs the app and its
-sidecars.
+**CI.** The reusable
+[`zebrad-sidecars.yml`](../.github/workflows/zebrad-sidecars.yml) workflow has a
+`channel` input (`stable`, `beta` or `nightly`, default `stable`) and runs the
+scripts on native runners for all five targets. It reads that channel's root
+pins, or the `version` and `commit` inputs when they override a stable build,
+and passes both values to every script. Every packaged binary is smoke-tested
+with `--version` and `generate`, and checked against its channel's expected
+version and commit. Every Linux sidecar also passes the glibc-floor check.
+Nightly Linux builds run in an Ubuntu 22.04 environment, rather than on a newer
+host, so the binary runs in the bundle's Ubuntu 22.04 install smoke container.
+
+The workflow attests provenance with `actions/attest-build-provenance` and
+uploads `zebrad-<channel>-<target triple>`. The artifact contains
+`zeal-zebrad[-beta|-nightly]-<target triple>[.exe]`, plus build information
+where appropriate. The bundle and release workflows invoke the reusable
+workflow three times, as `sidecars`, `sidecars-beta` and `sidecars-nightly`
+(the stable job keeps its original name). They then invoke the reusable
+[`zebrad-docs.yml`](../.github/workflows/zebrad-docs.yml) documentation job
+with all three sidecar jobs as prerequisites. You can also run the sidecar
+workflow by hand (Actions → zebrad sidecars → Run workflow). Workflow artifacts
+do not keep the executable bit, so run `chmod +x` after downloading one. The CI
+binaries are **unsigned**. macOS and Windows code signing happens only in the
+release environment, when the Tauri bundler signs the app and all its sidecars.
+
+The documentation job generates the Zebra mdBook, default configuration and
+changes from each channel's exact pinned commit and uploads an artifact named
+`zebra-docs`, containing a `zebra-docs/` directory. Bundle and release jobs
+download that artifact into `src-tauri/resources/`, producing:
+
+```text
+src-tauri/resources/zebra-docs/<stable|beta|nightly>/
+  book/index.html
+  config.html
+  changes.html
+```
+
+These HTML files become Tauri resources. Released documentation therefore
+matches the sidecar's source commit and needs no remote network to read. Every
+generated book page, Config and Changes page has a per-document CSP permitting
+local mdBook assets and search while denying remote origins, frames, objects,
+media, workers, forms and base URIs. Small local fallback resources carry the
+same policy for development; they are not a substitute for generating and
+checking the pinned release resources.
 
 To check that a sidecar artifact came from this workflow:
 
@@ -129,59 +182,63 @@ The first job resolves `zebrad_ref` to one commit, so every target builds the
 same code even if the branch moves during the run. Every selected target then
 builds zebrad from source at that commit, Linux included, with
 `build-zebrad.sh --ref` or `build-zebrad.ps1 -Ref` and the same flags as a
-release build. A Linux build runs on the ubuntu-24.04 runners with clang,
-libclang, cmake and protoc installed for it. No Zebra release is downloaded,
-and no cosign, attestation, `ZEBRAD_VERSION` or `ZEBRAD_COMMIT` check
-applies: the `--version` smoke test only checks that the binary reports
-`zebrad <something>`.
+release build. Custom-ref builds always use the Stable sidecar name and cannot
+be combined with a non-Stable channel or version/commit override. Linux
+custom-ref and Nightly builds run in an Ubuntu 22.04 environment with clang,
+libclang, cmake and protoc installed, so they meet the bundle smoke container's
+glibc floor. No Zebra release is downloaded for the custom ref, and no cosign
+or Stable-pin source check applies: its `--version` smoke test only checks that
+the binary reports `zebrad <something>`, while the build info records the exact
+resolved commit.
 
-The run uploads these artifacts:
+The run uploads sidecar artifacts named `zebrad-<channel>-<triple>`, containing
+the matching `zeal-zebrad[-beta|-nightly]-<triple>[.exe]` and, for a custom
+ref, `zebrad-build-info.txt`. Development bundle artifacts are named
+`bundles-<triple>-dev-<short commit>` and contain the installers that
+`collect-bundles.sh` collects (Windows: `zeal_<ver>_x86_64-setup.exe`), the raw
+app and its required channel sidecars, and build information.
 
-| Artifact | Contents |
-| --- | --- |
-| `zebrad-<triple>` | `zeal-zebrad-<triple>[.exe]` and `zebrad-build-info.txt` |
-| `bundles-<triple>-dev-<short commit>` | the installers that `collect-bundles.sh` collects (Windows: `zeal_<ver>_x86_64-setup.exe`), `raw/zeal-app[.exe]` with `raw/zeal-zebrad[.exe]` beside it, and `zebrad-build-info.txt` |
+`zebrad-build-info.txt` names the channel, ref, resolved commit,
+`zebrad --version` output, target and workflow run, under an "UNVERIFIED
+DEVELOPMENT BUILD" warning. Each bundle job's summary shows the same, with a
+warning that the build is unsigned and unverified. Download an artifact with
+`gh run download <run id> -n <artifact>`. On Windows, either run the NSIS
+installer, which SmartScreen flags because it is unsigned, or run
+`raw/zeal-app.exe` directly, keeping every supplied `zeal-zebrad*.exe` beside
+it, because the launcher looks for its sidecars next to itself.
 
-`zebrad-build-info.txt` names the ref, the resolved commit, the
-`zebrad --version` output, the target and the workflow run, under an
-"UNVERIFIED DEVELOPMENT BUILD" warning. Each bundle job's summary shows the
-same, with a warning that the build is unsigned and unverified. Download an
-artifact with `gh run download <run id> -n <artifact>`. On Windows, either run
-the NSIS installer, which SmartScreen flags because it is unsigned, or run
-`raw/zeal-app.exe` directly, keeping `zeal-zebrad.exe` in the
-same directory, because the launcher looks for zebrad next to itself.
-
-On Linux, the development zebrad needs the glibc of the ubuntu-24.04 runner
-it was built on, not the 2.35 floor of the release bundles. The bundle job
-checks the floor for the launcher binary only. If the sidecar does not run
-in the ubuntu:22.04 container, the job skips the install smoke tests with a
-warning, and the bundles only work on systems with that newer glibc.
+Every packaged Linux sidecar, including a custom-ref or Nightly build, receives
+the glibc-floor check. This is what keeps the Nightly and development binaries
+compatible with the Ubuntu 22.04 bundle smoke environment rather than assuming
+the host runner's newer glibc is acceptable.
 
 **Development builds are never released or signed.** `release.yml` has no
-`zebrad_ref` input and always ships the verified `ZEBRAD_VERSION`.
-`bundle.yml` uses no secrets and signs nothing. macOS bundles are ad-hoc
-signed and Windows binaries are unsigned. The sidecars still get a
-build-provenance attestation from `zebrad-sidecars.yml`. Its recorded
-workflow inputs include `zebrad_ref`, so it shows where the binary was built,
-not that Zebra released it.
+`zebrad_ref` input and always ships the verified Stable, Beta and Nightly pins.
+`bundle.yml` uses no secrets and signs nothing. macOS bundles are ad-hoc signed
+and Windows binaries are unsigned. The sidecars still get a build-provenance
+attestation from `zebrad-sidecars.yml`. Its recorded workflow inputs include
+`zebrad_ref`, so it shows where the binary was built, not that Zebra released
+it.
 
-You can also run `zebrad-sidecars.yml` alone with the same two inputs, or
-build locally with `scripts/build-zebrad.sh --ref main` (or
-`scripts/build-zebrad.ps1 -Ref main`). Add `--dry-run` (`-DryRun`) to print
-the commands without running them.
+You can also run `zebrad-sidecars.yml` alone with `channel` and the ref inputs,
+or build locally with `scripts/build-zebrad.sh --ref main` (or
+`scripts/build-zebrad.ps1 -Ref main`). Add `--dry-run` (`-DryRun`) to print the
+commands without running them.
 
 ## Local development without zebrad
 
 `scripts/dev-sidecar.sh` (or `scripts/dev-sidecar.ps1` on Windows) builds the
-workspace's `fake-zebrad` test binary and installs it as the host's sidecar.
-After that, `cargo tauri dev` and `cargo tauri build` work without the real
-node. Never ship a bundle built this way. Replace the fake with the real
-zebrad first:
+workspace's `fake-zebrad` test binary and installs it as each of the host's
+three channel sidecars. After that, `cargo tauri dev` and `cargo tauri build`
+work without real nodes. Never ship a bundle built this way. Replace the fakes
+with all three real channel sidecars first; the stable host build starts with:
 
 ```sh
-scripts/fetch-zebrad-linux.sh             # Linux host
-scripts/build-zebrad.sh                   # macOS host (takes a while)
+scripts/fetch-zebrad-linux.sh             # Linux host, Stable
+scripts/build-zebrad.sh                   # macOS host, Stable (takes a while)
 ```
+
+Build Beta and Nightly from their exact channel pins as described above.
 
 ## Verifying a Zebra tarball by hand
 
@@ -228,20 +285,67 @@ them: `scripts/fetch-zebrad-linux.sh --from-dir <dir> --target <triple>`.
 Changing any byte of `SHA256SUMS` makes step 1 fail. Changing any byte of the
 tarball makes step 2 fail.
 
+## Bumping the channel pins
+
+Keep each channel's files atomic: a version, the full commit that identifies
+it, and its release or snapshot date. The bump scripts run the version checks
+after writing pins:
+
+```sh
+scripts/bump-zebrad.sh <ver> <commit>     # Stable: explicit release and full commit
+scripts/bump-zebrad-beta.sh               # Beta: discover the newest published prerelease
+scripts/bump-zebrad-nightly.sh            # Nightly: discover the current development tip
+```
+
+For Stable, update `ZEBRAD_DATE` to the release date in the same change; the
+Stable script writes `ZEBRAD_VERSION` and `ZEBRAD_COMMIT`. The Beta and Nightly
+scripts need `gh`, take no version arguments, resolve a full commit and its
+committer date, and write all three channel files. Beta selects the newest
+published prerelease and refuses to replace the pin unless it is semver-newer
+than Stable. Nightly reads zebrad's package version at the exact resolved
+development commit. None of these scripts commits or pushes.
+
+A Stable bump can make the existing Beta equal to or older than Stable; Beta
+then remains visible as unavailable and disabled until a newer prerelease is
+available. This is not a fatal state, and Stable and Nightly remain selectable.
+Nightly remains a separate, explicitly warned development pin even when its
+base version equals Beta's.
+
+After any channel bump:
+
+1. Run `scripts/check-versions.sh` and inspect the complete pin diff, including
+   the date. Confirm that Beta's availability rule has the expected result.
+2. Run that channel's **zebrad sidecars** workflow on all five targets. Every
+   binary must pass the version/commit check, and every Linux binary must pass
+   the glibc check.
+3. Run **Bundle** so all three channels and the generated `zebra-docs` resources
+   are tested together. Review the mdBook, default config and changes from the
+   new exact commit; no released page should require an online source.
+4. Recheck configuration, CLI and log compatibility. For Stable, also follow
+   the fixture and release checklist below. For Beta or Nightly, verify the
+   picker metadata and warning, the immutable channel on existing nodes, and
+   the browser mock's available and unavailable states.
+
+The existing `zebrad-watch.yml` automation below watches Stable only. The new
+Beta and Nightly bump scripts are manual maintenance tools; this design does
+not add a bot to move those pins.
+
 ## Bumping ZEBRAD_VERSION
 
-[`zebrad-watch.yml`](../.github/workflows/zebrad-watch.yml) does steps 1–3
-for you. Every day at 05:17 UTC, and when run by hand, it finds Zebra's
-highest `vX.Y.Z` release that has `SHA256SUMS.sigstore.json` (release
-candidates and releases without signed binaries are skipped; the
-`releases/latest` endpoint and the prerelease flag are not used, because
-Zebra published `v7.0.0-rc.0` as a non-prerelease). If that release is newer
-than `ZEBRAD_VERSION`, it resolves the tag to its commit, runs
-[`scripts/bump-zebrad.sh`](../scripts/bump-zebrad.sh) `<ver> <commit>` and
+[`zebrad-watch.yml`](../.github/workflows/zebrad-watch.yml) automates the
+Stable version and commit update. Every day at 05:17 UTC, and when run by
+hand, it finds Zebra's highest `vX.Y.Z` release that has
+`SHA256SUMS.sigstore.json` (release candidates and releases without signed
+binaries are skipped; the `releases/latest` endpoint and the prerelease flag
+are not used, because Zebra published `v7.0.0-rc.0` as a non-prerelease). If
+that release is newer than `ZEBRAD_VERSION`, it resolves the tag to its commit,
+runs [`scripts/bump-zebrad.sh`](../scripts/bump-zebrad.sh) `<ver> <commit>` and
 opens a pull request titled `build: bump zebrad to <ver>` from branch
 `bump/zebrad-<ver>`, with this checklist in its body. Later runs update the
 pull request's body but never rewrite the branch, so you can push fixes to
 it. If the pull request was closed without merging, the watcher only warns.
+The existing Stable script does not infer `ZEBRAD_DATE`: set that file to the
+release date in the watcher's pull request before merging it.
 
 The pull request is pushed with a GitHub App token, because pull requests
 opened with `GITHUB_TOKEN` do not trigger CI. It needs two repository
@@ -263,8 +367,9 @@ To bump by hand, or to finish the watcher's pull request:
 
 1. Wait for the Zebra release to be published with its Linux assets: the two
    tarballs, `SHA256SUMS` and `SHA256SUMS.sigstore.json`.
-2. Update `ZEBRAD_VERSION` and `ZEBRAD_COMMIT` together, in the same commit.
-   Never change one without the other.
+2. Update `ZEBRAD_VERSION`, `ZEBRAD_COMMIT` and `ZEBRAD_DATE` together, in the
+   same commit. Never change the version without its commit, and keep the
+   release date in ISO `YYYY-MM-DD` form.
    - Write the new version, without `v`, to `ZEBRAD_VERSION`.
    - Write the commit that the new tag points to, as the full 40-character
      lowercase SHA, to `ZEBRAD_COMMIT`. Zebra's tags are annotated, so the

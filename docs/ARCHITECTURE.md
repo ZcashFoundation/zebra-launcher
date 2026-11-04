@@ -1,10 +1,11 @@
 # Architecture
 
 Zeal is a Tauri 2 desktop app that supervises one or more Zcash nodes (for now up to
-eight zebrad nodes, each running the bundled `zebrad`), streams their logs, edits their
-config, and shows their status. A small Rust team must be able to maintain it for years,
-so the rules are: Rust only (no Node toolchain), a thin Tauri layer over testable
-crates, and no mutexes.
+eight zebrad nodes, each running one of three bundled `zebrad` channels), streams their
+logs, edits their config, shows their status, and provides the selected channel's
+documentation offline. A small Rust team must be able to maintain it for years, so the
+rules are: Rust only (no Node toolchain), a thin Tauri layer over testable crates, and
+no mutexes.
 
 This document describes the launcher as built. The plan it grew from is [PLAN.md](PLAN.md),
 kept as the historical design record; where the two differ, this file describes the code.
@@ -15,9 +16,9 @@ kept as the historical design record; where the two differ, this file describes 
 +-------------------------------- Zeal (one process) --------------------------------+
 |                                                                                    |
 |  ui/  Leptos CSR (wasm) --- invoke / Channel<Vec<LogLine>> ---> src-tauri/         |
-|   |   Dashboard, Logs, Explorer, Grafana, Configure, Settings    commands, tray,   |
-|   |                                                              updater, exit     |
-|   +-- <iframe> Grafana (no IPC)                                      |             |
+|   |   Dashboard, Logs, Docs, Explorer, Grafana, Configure, Settings  commands,     |
+|   |                                                              tray, updater,    |
+|   +-- <iframe> Grafana or local Docs assets (sandboxed, no IPC)      exit          |
 |                                                                      v             |
 |  crates/launcher-core  (no Tauri)                                                  |
 |    node registry: the node list, settings actor, one runtime per node:             |
@@ -29,7 +30,8 @@ kept as the historical design record; where the two differ, this file describes 
 +--------|---------------------------------------------------------------------------+
          | stdin pipe (closed = stop), stdout/stderr drained
          v
-   zebrad (sidecar "zeal-zebrad"), one process per node; the first node's ports:
+   zebrad (sidecar "zeal-zebrad[-beta|-nightly]"), one process per node;
+   the first node's ports:
        RPC      127.0.0.1:8232  <-- cookie-auth JSON-RPC poll every 5 s (status strip)
                                 <-- the explorer's reads, while its pages ask
        metrics  127.0.0.1:9999  <-- Prometheus <-- Grafana 127.0.0.1:3000 (optional)
@@ -40,19 +42,20 @@ kept as the historical design record; where the two differ, this file describes 
 
 | Path | Role |
 | --- | --- |
-| `crates/launcher-types` | serde types shared by backend and UI (`Status`, `LogLine`, `Settings`, `NodeStats`, errors). Builds natively and to wasm; no tokio, no Tauri. |
+| `crates/launcher-types` | serde types shared by backend and UI (`Status`, `LogLine`, `Settings`, `NodeStats`, `NodeProgram`, `ZebradChannel`, `NodeDocs`, errors). Builds natively and to wasm; no tokio, no Tauri. |
 | `crates/explorer-model` | The block explorer's pure model: zebrad's response shapes, the block ledger and shielded budget, network upgrade heights, the search classifier, the pages' views and a synthetic chain for the mock and tests. serde only; builds natively and to wasm. |
-| `crates/launcher-core` | Logic that does not need Tauri: the node registry and node specs, supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind. |
+| `crates/launcher-core` | Logic that does not need Tauri: the node registry and node specs, per-channel sidecar resolution, supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind. |
 | `crates/launcher-core/src/bin/fake-zebrad.rs` | Scripted stand-in for zebrad, used by tests and PR bundle builds. |
 | `crates/launcher-herd` | Pure rules for the nodes Zeal runs together, so far the public services': the setup's plan, pauses, the front door's mode, evidence ages, the wallet check. Native and wasm, no I/O; the UI's mock runs it too. |
 | `crates/launcher-gateway` | The front door: the TLS server a public service faces the internet through. tokio, rustls with ring, socket2 and h2 only. |
 | `crates/launcher-public` | The public services without Tauri: the service actor, ACME, dynamic DNS, the network checks, the keychain, the self-tests. |
-| `src-tauri` | Thin Tauri 2.12 app: commands, the `Channel` bridge, tray, updater, exit flow, capabilities. |
+| `src-tauri` | Thin Tauri 2.12 app: commands, the `Channel` bridge, per-channel sidecar and offline documentation resources, tray, updater, exit flow, capabilities. |
 | `ui` | Leptos CSR crate built by trunk into `ui/dist`. Talks to Tauri through about 100 lines of hand-written `wasm_bindgen` externs to `window.__TAURI__`. |
 
 Single sources of truth: `[workspace.package] version` in [`Cargo.toml`](../Cargo.toml)
-for the launcher version, [`ZEBRAD_VERSION`](../ZEBRAD_VERSION) for the bundled zebrad,
-and [`rust-toolchain.toml`](../rust-toolchain.toml) for the toolchain.
+for the launcher version; `ZEBRAD_VERSION`/`ZEBRAD_COMMIT`/`ZEBRAD_DATE` for Stable and
+the `ZEBRAD_BETA_*` and `ZEBRAD_NIGHTLY_*` root pins for the other channels; and
+[`rust-toolchain.toml`](../rust-toolchain.toml) for the toolchain.
 
 ## Nodes
 
@@ -143,6 +146,55 @@ files are brought up to date and its actors started in
   for the update also when another node halted, which the folded phase shows: a Testnet
   node beside a halted Mainnet one is brought back after a failed install and checked
   after the update.
+
+## Channels and offline documentation
+
+`ZebradChannel` in `launcher-types` defines `Stable`, `Beta` and `Nightly`,
+with `ALL`, string and display labels, the version/commit/date metadata,
+`short_commit()`, `sidecar_name()`, `is_available()` and
+`version_matches(reported)`. Stable uses the existing root version and commit
+pins. Beta uses `ZEBRAD_BETA_VERSION`, `ZEBRAD_BETA_COMMIT` and
+`ZEBRAD_BETA_DATE`; Nightly uses `ZEBRAD_NIGHTLY_VERSION`,
+`ZEBRAD_NIGHTLY_COMMIT` and `ZEBRAD_NIGHTLY_DATE`. Stable is the default and
+recommended channel. `Beta::is_available()` is true only when beta is
+semver-newer than stable, which prevents a stale beta pin from being offered
+as an upgrade. Otherwise Beta remains visible but unavailable and disabled;
+this non-fatal state does not prevent Stable or Nightly selection. Beta and
+Nightly expose their version, short commit, pin date and development warning
+in the add-node flow and node details.
+
+`NodeProgram::Bundled` retains Stable's existing `{"from":"bundled"}` wire
+shape; `BundledBeta` and `BundledNightly` serialize as `bundled_beta` and
+`bundled_nightly`. `channel()` and `from_channel()` map between program and
+channel. The choice is persisted in `NodeSpec` and fixed after creation: a
+newer Zebra database format cannot safely be reopened by Stable. Changing
+channels means creating another node with a separate data folder, never
+rewriting an existing node's program.
+
+`RegistryConfig::new(paths, stable_path)` preserves the old stable-only
+constructor. `RegistryConfig::with_resolver` additionally accepts a
+`Fn(ZebradChannel) -> PathBuf + Send + Sync + 'static`, stores it in an `Arc`,
+and resolves each runtime from its `NodeSpec.program`; no mutex is involved.
+Tauri installs this resolver with `sidecar::resolve(&paths, channel)`, selecting
+`zeal-zebrad`, `zeal-zebrad-beta` or `zeal-zebrad-nightly` for the host target.
+All three are bundled for offline use despite the installer-size cost.
+
+The Docs tab's Book, Config and Changes sections call
+`get_node_docs(node) -> Result<NodeDocs, String>`. `NodeDocs` carries the
+node's channel and the `book`, `config` and `changes` HTML paths. Tauri resolves
+absolute paths under
+`resources/zebra-docs/<stable|beta|nightly>/` (`book/index.html`, `config.html`
+and `changes.html`) and the UI loads the selected path in a sandboxed local
+asset iframe without IPC access. The frame follows the app's light/dark theme.
+Release resources are generated from the exact channel commits by
+`zebrad-docs.yml`, downloaded as the `zebra-docs` artifact only after all three
+sidecar jobs succeed, and require no remote network when read. Every book HTML
+page, Config and Changes page, and development fallback has a per-document CSP
+allowing mdBook's local/inline assets, `self`/`data:` images and local search
+fetches, while denying remote origins, frames, objects, media, workers, forms
+and base URIs. Development uses small fallback resources; the browser mock
+returns illustrative paths and covers all channel, documentation and loading
+states.
 
 ## Supervisor
 
@@ -317,9 +369,10 @@ zebrad; see
   EOF while the job stays for escalation. `CREATE_NO_WINDOW` is kept.
 - **Stale process:** an orphan cannot be adopted, because its pipes are gone. On startup
   the user chooses "wait for it to exit" or "kill".
-- **AppImage:** the sidecar is copied out of the FUSE mount into the app data dir
-  (hash-checked, per launcher version) and run from there, so zebrad survives the mount
-  going away.
+- **AppImage:** a node's selected channel sidecar is copied out of the FUSE mount into a
+  channel- and launcher-version-specific app data directory and run from there, so zebrad
+  survives the mount going away. An identical existing copy is reused after a content
+  comparison, and cleanup for one channel leaves the other channels' copies intact.
 
 ### Measured shutdown times
 
@@ -807,19 +860,27 @@ The launcher verifies the package once, right before stopping zebrad; the plugin
 verifies inside `download` and `install`. The marker is written only after zebrad
 stopped, so a crash or failed stop before the install leaves no marker behind.
 
-At the next launch, if `pending_update_check` exists, the health gate checks that the
-new version is running and that every node the marker lists as running
-(`PendingUpdate::nodes_to_check`: a marker from a single-node launcher means the first
-node, and a node removed since is left out) reaches `Running` with an RPC address within 5
-minutes, each checked side by side and started first unless it starts at launch by
-itself. A node that had halted at its end of support is not in the list. Then the marker
-is removed. On failure the `update_health_failed` event (and
-`UpdateInfo.health_failure`) carries a message, led by the node's name when several were
-checked, and recovery hints:
+At the next launch, if `pending_update_check` exists, the health gate retains its launcher
+version check: the newly installed launcher version must be running. Every node the marker
+lists as running (`PendingUpdate::nodes_to_check`: a marker from a single-node launcher
+means the first node, and a node removed since is left out) must also reach `Running` with
+an RPC address within 5 minutes, each checked side by side and started first unless it
+starts at launch by itself. A node that had halted at its end of support is not in the
+list.
+
+Once a node's RPC stats answer, the gate checks the reported zebrad version with that
+node's own `ZebradChannel::version_matches`. The base version must equal the channel pin.
+Build metadata does not relax that check: when it reports a commit hash, such as
+`7.1.0-alpha.0+git.<commit>`, the hash must also match the pinned commit. A base-version
+or reported-commit mismatch fails the gate promptly instead of waiting for the 5-minute
+timeout. The marker is removed only after the launcher and every required node pass. On
+failure the `update_health_failed` event (and `UpdateInfo.health_failure`) carries a
+message, led by the node's name when several were checked, and recovery hints:
 
 | Outcome | Recovery |
 |---|---|
-| still the old version: the update did not complete | open logs, releases page |
+| still the old launcher version: the update did not complete | open logs, releases page |
+| a running node's RPC stats report another base version than its channel pin | reinstall the intended bundle, open logs, releases page |
 | zebrad `Failed { EosHalt }`: past its end of support, update required | releases page |
 | zebrad failed otherwise, or not `Running` with RPC in 5 minutes | open logs, reset config, releases page |
 | a stale zebrad (`Status.stale`) still blocks the start at the limit; names its pid and binary | open logs |
@@ -847,21 +908,26 @@ is kept in `<config>/updater.json`.
 ## Release pipeline
 
 ```text
-ZEBRAD_VERSION
-  |- Linux x86_64/aarch64: download the Zebra release tarball,
-  |    cosign verify-blob SHA256SUMS, gh attestation verify
-  '- macOS aarch64/x86_64, Windows x86_64: zebrad-sidecars.yml builds the Zebra tag,
-       smoke-runs it, attests it, caches it unsigned
+Stable ZEBRAD_VERSION/ZEBRAD_COMMIT     Beta ZEBRAD_BETA_*     Nightly ZEBRAD_NIGHTLY_*
+  | Stable and beta Linux: verified Zebra release tarballs; their other targets:
+  | build the pinned tag. Nightly: build the exact pinned commit on every target.
+  |- zebrad-sidecars.yml channel=stable  -> sidecars
+  |- zebrad-sidecars.yml channel=beta    -> sidecars-beta
+  '- zebrad-sidecars.yml channel=nightly -> sidecars-nightly (Linux: Ubuntu 22.04)
+       every target: version/commit and generate checks, provenance attestation
+       every Linux sidecar: glibc-floor check
+all three -> zebrad-docs.yml -> zebra-docs artifact (Book, Config, Changes at exact pins)
 
 tag v* -> release.yml
   1. create one draft release; pass its id to the matrix
-  2. unprivileged jobs, no secrets: cargo tauri build --no-bundle
+  2. unprivileged jobs, no secrets: three sidecar matrices, docs, cargo tauri build --no-bundle
   3. environment "release" (required reviewer, no caches): cargo tauri bundle,
-     codesign + notarization (macOS), Azure Artifact Signing (Windows app and sidecar),
+     codesign + notarization (macOS), Azure Artifact Signing (Windows app and sidecars),
      updater .sig files
   4. final job: latest.json with all five platform keys, SHA256SUMS,
      keyless cosign bundle, attestations
-  5. a human smoke-tests and publishes; publishing makes latest.json live
+  5. a human smoke-tests all channels and offline docs, then publishes;
+     publishing makes latest.json live
 ```
 
 Targets: macOS Apple Silicon, macOS Intel, Windows x64, Linux x64 and arm64. Linux ships
@@ -873,8 +939,9 @@ CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs, on Linux,
 clippy for `wasm32-unknown-unknown` and `trunk build --release`, `cargo deny`, and
 shellcheck and actionlint over the scripts and workflows; clippy and tests on
 `windows-2025` and `macos-15`; and, on pushes to `main` and on pull requests that change
-the zebrad pin, the real-zebrad contract tests against the verified release binary.
-`bundle.yml` builds unsigned bundles with the real zebrad for all five targets.
+the stable zebrad pin, the real-zebrad contract tests against the verified release binary.
+`bundle.yml` builds unsigned bundles with all three real zebrad sidecars and their offline
+documentation for all five targets.
 
 ## Decisions
 
@@ -896,8 +963,17 @@ Recorded by the maintainer on 2026-10-23:
 - No mutexes in Rust code, enforced by [`clippy.toml`](../clippy.toml).
 - No history rewrite; the browser demo is deleted.
 
+For the three-channel work on 2026-11-03: bundle Stable, Beta and Nightly on every target
+despite the installer growth, so channel selection and documentation are fully offline;
+keep Stable as the default, offer Beta only while semver-newer, and warn with the pin
+metadata on prereleases. A node's channel is immutable because newer Zebra databases
+cannot safely be reopened by Stable. Package each exact commit's mdBook, default config
+and changes as local resources in a sandboxed, themed asset iframe. Keep the existing
+launcher-version update gate and add per-channel RPC zebrad-version checks. Beta and
+Nightly have manual bump scripts, not a new automatic bumping bot.
+
 Routine choices: minimal managed `zebrad.toml`; an app-owned state dir chosen at first
 run, never reusing a CLI zebrad's state; `zcashd_compat` unsupported; a GitHub App token
-for bot PRs.
+for the existing Stable watcher PRs.
 
 The full plan these decisions come from is [PLAN.md](PLAN.md).
