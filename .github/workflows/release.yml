@@ -2,10 +2,11 @@
 # smoke-tests the assets and publishes it by hand (docs/RELEASING.md).
 # Publishing is what makes latest.json, and so the in-app updater, live.
 #
-#   verify       tag == [workspace.package] version, tool version checks, and
+#   verify       tag == [workspace.package] version, all channel pin checks, and
 #                whether updater artifacts are required (require_updater)
-#   sidecars     zebrad-sidecars.yml: verified/attested zebrad per target; also
-#                resolves and validates ZEBRAD_VERSION (its `version` output)
+#   sidecars     three zebrad-sidecars.yml calls: verified/attested stable, beta
+#                and nightly binaries per target at their resolved pins
+#   docs         zebrad-docs.yml renders all offline documentation after sidecars
 #   draft        creates the draft release once; the matrix jobs upload to it
 #   build        UNPRIVILEGED, no secrets: compiles the app (`--no-bundle`)
 #   bundle_sign  environment `release` (required reviewer), NO caches:
@@ -182,7 +183,7 @@ jobs:
   # ---------------------------------------------------------------------------
   draft:
     name: Create the draft release
-    needs: [verify, sidecars]
+    needs: [verify, sidecars, sidecars-beta, sidecars-nightly]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -195,6 +196,10 @@ jobs:
       VERSION: ${{ needs.verify.outputs.version }}
       ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
       ZEBRAD_COMMIT: ${{ needs.sidecars.outputs.commit }}
+      BETA_ZEBRAD_VERSION: ${{ needs.sidecars-beta.outputs.version }}
+      BETA_ZEBRAD_COMMIT: ${{ needs.sidecars-beta.outputs.commit }}
+      NIGHTLY_ZEBRAD_VERSION: ${{ needs.sidecars-nightly.outputs.version }}
+      NIGHTLY_ZEBRAD_COMMIT: ${{ needs.sidecars-nightly.outputs.commit }}
       PRERELEASE: ${{ needs.verify.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -220,7 +225,11 @@ jobs:
             *) exit "${status}" ;;
           esac
           {
-            echo "Zeal ${VERSION}, bundling zebrad ${ZEBRAD_VERSION} (Zebra commit ${ZEBRAD_COMMIT})."
+            echo "Zeal ${VERSION} bundles these offline zebrad channels:"
+            echo
+            echo "- Stable: ${ZEBRAD_VERSION} (Zebra commit ${ZEBRAD_COMMIT})."
+            echo "- Beta: ${BETA_ZEBRAD_VERSION} (Zebra commit ${BETA_ZEBRAD_COMMIT})."
+            echo "- Nightly: ${NIGHTLY_ZEBRAD_VERSION} (Zebra commit ${NIGHTLY_ZEBRAD_COMMIT})."
             echo
             printf '%s\n' "${changes}"
             echo
@@ -279,25 +288,64 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
   # ---------------------------------------------------------------------------
-  # sidecars: zebrad for each target (unsigned; signed later by the bundler),
-  # at ZEBRAD_VERSION/ZEBRAD_COMMIT, which it validates. After verify, so a
-  # bad tag fails before the long zebrad builds.
+  # sidecars: all three channels for each target (unsigned; signed later by the
+  # bundler), at their exact root pins. After verify, so a bad tag fails before
+  # the long zebrad builds. Documentation is generated only after all three.
   # ---------------------------------------------------------------------------
   sidecars:
-    name: zebrad sidecars
+    name: Stable zebrad sidecars
     needs: verify
     permissions:
       contents: read
       id-token: write # sidecar build provenance
       attestations: write # sidecar build provenance
     uses: ./.github/workflows/zebrad-sidecars.yml
+    with:
+      channel: stable
+
+  sidecars-beta:
+    name: Beta zebrad sidecars
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write # sidecar build provenance
+      attestations: write # sidecar build provenance
+    uses: ./.github/workflows/zebrad-sidecars.yml
+    with:
+      channel: beta
+
+  sidecars-nightly:
+    name: Nightly zebrad sidecars
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write # sidecar build provenance
+      attestations: write # sidecar build provenance
+    uses: ./.github/workflows/zebrad-sidecars.yml
+    with:
+      channel: nightly
+
+  docs:
+    name: Offline Zebra documentation
+    needs: [sidecars, sidecars-beta, sidecars-nightly]
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/zebrad-docs.yml
+    with:
+      stable_version: ${{ needs.sidecars.outputs.version }}
+      stable_commit: ${{ needs.sidecars.outputs.commit }}
+      beta_version: ${{ needs.sidecars-beta.outputs.version }}
+      beta_commit: ${{ needs.sidecars-beta.outputs.commit }}
+      nightly_version: ${{ needs.sidecars-nightly.outputs.version }}
+      nightly_commit: ${{ needs.sidecars-nightly.outputs.commit }}
 
   # ---------------------------------------------------------------------------
   # build: UNPRIVILEGED compile. No secrets, read-only token, no caches.
   # ---------------------------------------------------------------------------
   build:
     name: Build (${{ matrix.target }})
-    needs: [verify, sidecars]
+    needs: [verify, sidecars, sidecars-beta, sidecars-nightly, docs]
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     timeout-minutes: 90
@@ -312,6 +360,12 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       EXE_SUFFIX: ${{ matrix.exe_suffix }}
+      STABLE_ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
+      STABLE_ZEBRAD_COMMIT: ${{ needs.sidecars.outputs.commit }}
+      BETA_ZEBRAD_VERSION: ${{ needs.sidecars-beta.outputs.version }}
+      BETA_ZEBRAD_COMMIT: ${{ needs.sidecars-beta.outputs.commit }}
+      NIGHTLY_ZEBRAD_VERSION: ${{ needs.sidecars-nightly.outputs.version }}
+      NIGHTLY_ZEBRAD_COMMIT: ${{ needs.sidecars-nightly.outputs.commit }}
     steps:
       # git must exist before checkout, or checkout falls back to a tarball.
       # The rest of LINUX_PACKAGES comes from setup-tauri, which needs the
@@ -330,12 +384,60 @@ jobs:
 
       - uses: ./.github/actions/setup-tauri
 
-      # tauri-build needs the sidecar file to exist at compile time.
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      # tauri-build needs every externalBin and resource at compile time.
+      - name: Download the stable zebrad sidecar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: zebrad-${{ matrix.target }}
-          path: src-tauri/binaries
-      - run: chmod +x "src-tauri/binaries/zeal-zebrad-${TARGET}${EXE_SUFFIX}"
+          name: zebrad-stable-${{ matrix.target }}
+          path: ${{ runner.temp }}/sidecars/stable
+      - name: Download the beta zebrad sidecar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zebrad-beta-${{ matrix.target }}
+          path: ${{ runner.temp }}/sidecars/beta
+      - name: Download the nightly zebrad sidecar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zebrad-nightly-${{ matrix.target }}
+          path: ${{ runner.temp }}/sidecars/nightly
+      - name: Download the offline Zebra documentation
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zebra-docs
+          path: src-tauri/resources
+
+      - name: Install and check all zebrad sidecars and resources
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+          # shellcheck disable=SC1091 # version checks live in scripts/lib.sh
+          . scripts/lib.sh
+          for channel in stable beta nightly; do
+            suffix=""
+            [ "${channel}" = stable ] || suffix="-${channel}"
+            prefix="$(tr '[:lower:]' '[:upper:]' <<< "${channel}")"
+            version_var="${prefix}_ZEBRAD_VERSION"
+            commit_var="${prefix}_ZEBRAD_COMMIT"
+            artifact="${RUNNER_TEMP}/sidecars/${channel}/zeal-zebrad${suffix}-${TARGET}${EXE_SUFFIX}"
+            sidecar="src-tauri/binaries/zeal-zebrad${suffix}-${TARGET}${EXE_SUFFIX}"
+            info="${RUNNER_TEMP}/sidecars/${channel}/zebrad-build-info.txt"
+            mkdir -p "$(dirname "${sidecar}")"
+            cp "${artifact}" "${sidecar}"
+            chmod +x "${sidecar}"
+            if [ "${channel}" = nightly ]; then
+              test -s "${info}" || die "the zebrad-nightly-${TARGET} artifact has no zebrad-build-info.txt"
+            fi
+            if [ -f "${info}" ]; then
+              grep -qx "zebrad_commit=${!commit_var}" "${info}" \
+                || die "${channel} zebrad-build-info.txt is not for Zebra commit ${!commit_var}"
+            fi
+            check_reported_version "${sidecar}" "${!version_var}"
+            "${sidecar}" --version | head -n 1
+            for page in book/index.html config.html changes.html; do
+              resource="src-tauri/resources/zebra-docs/${channel}/${page}"
+              test -s "${resource}" || die "missing offline documentation ${resource}"
+            done
+          done
 
       - name: Check Cargo.lock is up to date
         run: cargo fetch --locked
@@ -348,7 +450,9 @@ jobs:
         run: |
           scripts/check-glibc.sh --floor "${GLIBC_FLOOR}" \
             "target/${TARGET}/release/${APP_BIN}" \
-            "src-tauri/binaries/zeal-zebrad-${TARGET}"
+            "src-tauri/binaries/zeal-zebrad-${TARGET}" \
+            "src-tauri/binaries/zeal-zebrad-beta-${TARGET}" \
+            "src-tauri/binaries/zeal-zebrad-nightly-${TARGET}"
 
       - name: Stage the compiled app
         run: |
@@ -369,8 +473,8 @@ jobs:
   # bundle_sign: PRIVILEGED. Environment `release` (required reviewer, self-
   # review blocked). No caches. Packages the compiled app with
   # `cargo tauri bundle`, which also does the platform signing: Windows
-  # signCommand (Azure Artifact Signing) for the app, the sidecar and the
-  # installer; macOS codesign of the app and sidecar plus notarization. The
+  # signCommand (Azure Artifact Signing) for the app, all sidecars and the
+  # installer; macOS codesign of the app and sidecars plus notarization. The
   # updater .sig files are made afterwards by "Sign the updater artifacts",
   # the only step with the minisign key (see the header). If `cargo tauri
   # bundle` cannot consume the `build` job's binaries for a target, see
@@ -378,7 +482,7 @@ jobs:
   # ---------------------------------------------------------------------------
   bundle_sign:
     name: Bundle and sign (${{ matrix.target }})
-    needs: [verify, draft, build]
+    needs: [verify, sidecars, sidecars-beta, sidecars-nightly, docs, draft, build]
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     environment: release
@@ -398,6 +502,12 @@ jobs:
       EXE_SUFFIX: ${{ matrix.exe_suffix }}
       APPIMAGE_EXTRACT_AND_RUN: 1
       REQUIRE_UPDATER: ${{ needs.verify.outputs.require_updater }}
+      STABLE_ZEBRAD_VERSION: ${{ needs.sidecars.outputs.version }}
+      STABLE_ZEBRAD_COMMIT: ${{ needs.sidecars.outputs.commit }}
+      BETA_ZEBRAD_VERSION: ${{ needs.sidecars-beta.outputs.version }}
+      BETA_ZEBRAD_COMMIT: ${{ needs.sidecars-beta.outputs.commit }}
+      NIGHTLY_ZEBRAD_VERSION: ${{ needs.sidecars-nightly.outputs.version }}
+      NIGHTLY_ZEBRAD_COMMIT: ${{ needs.sidecars-nightly.outputs.commit }}
     steps:
       # git must exist before checkout, or checkout falls back to a tarball.
       # The rest of LINUX_PACKAGES comes from setup-tauri, which needs the
@@ -419,27 +529,83 @@ jobs:
         with:
           compile: "false"
 
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - name: Download the stable zebrad sidecar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: zebrad-${{ matrix.target }}
-          path: src-tauri/binaries
-
+          name: zebrad-stable-${{ matrix.target }}
+          path: ${{ runner.temp }}/sidecars/stable
+      - name: Download the beta zebrad sidecar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zebrad-beta-${{ matrix.target }}
+          path: ${{ runner.temp }}/sidecars/beta
+      - name: Download the nightly zebrad sidecar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zebrad-nightly-${{ matrix.target }}
+          path: ${{ runner.temp }}/sidecars/nightly
+      - name: Download the offline Zebra documentation
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zebra-docs
+          path: src-tauri/resources
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: build-${{ matrix.target }}
           path: ${{ runner.temp }}/build
 
-      # Puts the compiled binary where `cargo tauri bundle --target` looks for
-      # it, and restores the executable bits that artifacts drop.
+      - name: Install and check all zebrad sidecars and resources
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+          # shellcheck disable=SC1091 # version checks live in scripts/lib.sh
+          . scripts/lib.sh
+          for channel in stable beta nightly; do
+            suffix=""
+            [ "${channel}" = stable ] || suffix="-${channel}"
+            prefix="$(tr '[:lower:]' '[:upper:]' <<< "${channel}")"
+            version_var="${prefix}_ZEBRAD_VERSION"
+            commit_var="${prefix}_ZEBRAD_COMMIT"
+            artifact="${RUNNER_TEMP}/sidecars/${channel}/zeal-zebrad${suffix}-${TARGET}${EXE_SUFFIX}"
+            sidecar="src-tauri/binaries/zeal-zebrad${suffix}-${TARGET}${EXE_SUFFIX}"
+            info="${RUNNER_TEMP}/sidecars/${channel}/zebrad-build-info.txt"
+            mkdir -p "$(dirname "${sidecar}")"
+            cp "${artifact}" "${sidecar}"
+            chmod +x "${sidecar}"
+            if [ "${channel}" = nightly ]; then
+              test -s "${info}" || die "the zebrad-nightly-${TARGET} artifact has no zebrad-build-info.txt"
+            fi
+            if [ -f "${info}" ]; then
+              grep -qx "zebrad_commit=${!commit_var}" "${info}" \
+                || die "${channel} zebrad-build-info.txt is not for Zebra commit ${!commit_var}"
+            fi
+            check_reported_version "${sidecar}" "${!version_var}"
+            "${sidecar}" --version | head -n 1
+            for page in book/index.html config.html changes.html; do
+              resource="src-tauri/resources/zebra-docs/${channel}/${page}"
+              test -s "${resource}" || die "missing offline documentation ${resource}"
+            done
+          done
+
+      # Put the compiled binary where `cargo tauri bundle --target` looks for
+      # it, and restore the executable bit that artifacts drop.
       - name: Place the compiled app
         run: |
           set -euo pipefail
-          chmod +x "src-tauri/binaries/zeal-zebrad-${TARGET}${EXE_SUFFIX}"
           out="target/${TARGET}/release"
           mkdir -p "${out}" ui/dist
           cp "${RUNNER_TEMP}/build/bin/${APP_BIN}${EXE_SUFFIX}" "${out}/"
           chmod +x "${out}/${APP_BIN}${EXE_SUFFIX}"
           cp -R "${RUNNER_TEMP}/build/ui-dist/." ui/dist/
+
+      - name: Check the glibc floor
+        if: runner.os == 'Linux'
+        run: |
+          scripts/check-glibc.sh --floor "${GLIBC_FLOOR}" \
+            "target/${TARGET}/release/${APP_BIN}" \
+            "src-tauri/binaries/zeal-zebrad-${TARGET}" \
+            "src-tauri/binaries/zeal-zebrad-beta-${TARGET}" \
+            "src-tauri/binaries/zeal-zebrad-nightly-${TARGET}"
 
       # --- macOS: App Store Connect API key for notarization ------------------
       - name: Write the App Store Connect API key

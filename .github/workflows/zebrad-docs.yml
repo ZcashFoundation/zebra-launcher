@@ -1,0 +1,150 @@
+# Renders offline books, generated default configs and channel-specific changes
+# for stable, beta and nightly Zebra. Call this after all three channel sidecar
+# jobs in the SAME workflow run. Each input comes from that channel's resolved
+# sidecar output; every downloaded binary is checked against both values before
+# it runs. The sidecar artifacts must be named zebrad-<channel>-x86_64-unknown-
+# linux-gnu and contain zeal-zebrad[-beta|-nightly]-x86_64-unknown-linux-gnu.
+#
+# The zebra-docs artifact contains zebra-docs/<channel>/{book/index.html,
+# config.html,changes.html}. Bundle jobs download it into src-tauri/resources/,
+# replacing the small development fallback files with the generated resources.
+#
+# Callers must grant contents: read and actions: read (same-run artifacts).
+name: zebrad docs
+
+on:
+  workflow_call:
+    inputs:
+      stable_version:
+        description: resolved stable zebrad version, without a leading v
+        required: true
+        type: string
+      stable_commit:
+        description: full stable Zebra commit SHA
+        required: true
+        type: string
+      stable_ref:
+        description: development Zebra ref for custom stable docs (empty for a pinned release)
+        required: false
+        type: string
+        default: ""
+      beta_version:
+        description: resolved beta zebrad version, without a leading v
+        required: true
+        type: string
+      beta_commit:
+        description: full beta Zebra commit SHA
+        required: true
+        type: string
+      nightly_version:
+        description: expected nightly zebrad base version, without a leading v
+        required: true
+        type: string
+      nightly_commit:
+        description: full nightly Zebra commit SHA
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  docs:
+    name: Render offline Zebra documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    env:
+      STABLE_VERSION: ${{ inputs.stable_version }}
+      STABLE_COMMIT: ${{ inputs.stable_commit }}
+      STABLE_REF: ${{ inputs.stable_ref }}
+      BETA_VERSION: ${{ inputs.beta_version }}
+      BETA_COMMIT: ${{ inputs.beta_commit }}
+      NIGHTLY_VERSION: ${{ inputs.nightly_version }}
+      NIGHTLY_COMMIT: ${{ inputs.nightly_commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Exact, checksum-pinned Linux binaries; no Node or Cargo installation.
+      - name: Install mdBook and its Mermaid preprocessor
+        run: |
+          set -euo pipefail
+          scripts/install-zebra-docs-tools.sh
+          echo "${RUNNER_TEMP}/zebra-docs-tools" >> "${GITHUB_PATH}"
+
+      - name: Download the stable Linux sidecar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          name: zebrad-stable-x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/zebra-docs-sidecars/stable
+
+      - name: Download the beta Linux sidecar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          name: zebrad-beta-x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/zebra-docs-sidecars/beta
+
+      - name: Download the nightly Linux sidecar
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          name: zebrad-nightly-x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/zebra-docs-sidecars/nightly
+
+      - name: Generate all three documentation channels
+        env:
+          # Used only if a beta tag has no CHANGELOG section for its version.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          target=x86_64-unknown-linux-gnu
+          for channel in stable beta nightly; do
+            version_var="${channel^^}_VERSION"
+            commit_var="${channel^^}_COMMIT"
+            case "${channel}" in
+              stable) sidecar="zeal-zebrad-${target}" ;;
+              *) sidecar="zeal-zebrad-${channel}-${target}" ;;
+            esac
+            development_ref=""
+            if [ "${channel}" = stable ]; then development_ref="${STABLE_REF}"; fi
+            scripts/generate-zebra-docs.sh \
+              --channel "${channel}" \
+              --version "${!version_var}" \
+              --commit "${!commit_var}" \
+              --binary "${RUNNER_TEMP}/zebra-docs-sidecars/${channel}/${sidecar}" \
+              --out dist/zebra-docs \
+              --development-ref "${development_ref}"
+          done
+
+      - name: Validate the complete artifact and development fallback replacement
+        run: |
+          set -euo pipefail
+          scripts/validate-zebra-docs.sh --root dist/zebra-docs
+
+          # Mirror download-artifact into src-tauri/resources/: every fallback
+          # entry point must be overwritten, and no fallback marker may remain.
+          stage="${RUNNER_TEMP}/zebra-docs-packaged"
+          mkdir -p "${stage}"
+          cp -R src-tauri/resources/zebra-docs "${stage}/zebra-docs"
+          cp -R dist/zebra-docs/. "${stage}/zebra-docs/"
+          scripts/validate-zebra-docs.sh --root "${stage}/zebra-docs"
+
+      # Upload dist/, not just its child directory, so the archive has the
+      # required zebra-docs/ top-level directory when downloaded by bundle jobs.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zebra-docs
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
