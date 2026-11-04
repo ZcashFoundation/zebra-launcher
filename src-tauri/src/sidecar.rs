@@ -199,7 +199,7 @@ mod tests {
         let paths = Paths::under(root.path());
         let stable = appimage_dir(&paths, &ZebradChannel::Stable);
         let beta = appimage_dir(&paths, &ZebradChannel::Beta);
-        let old_stable = stable.parent().expect("version parent").join("0.1.0");
+        let old_stable = stable.parent().expect("version parent").join("0.0.9");
         fs::create_dir_all(&stable).expect("stable copy");
         fs::create_dir_all(&beta).expect("beta copy");
         fs::create_dir_all(&old_stable).expect("old stable copy");
