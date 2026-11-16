@@ -3,7 +3,7 @@
 //! the node's height, and answered with the backend's own builders (explorer-model's
 //! `views`), so kinds, fees, ledgers and sentences follow its rules. Nothing is fixture data:
 //! every block is computed when asked for. Other nodes, `?herd`'s too, get the backend's
-//! answer that the Explorer reads the first node only, until P6.
+//! answer that the Explorer reads only the node that was first when Zeal started, until P6.
 //!
 //! `?explorer=slow` makes each answer take 300 to 800 ms instead of 20 to 80, `?explorer=nobi`
 //! takes zebrad's value-pool row from every seventh block (so the next one shows the zero-diff
@@ -140,8 +140,8 @@ fn view_of(node: &NodeId) -> Result<NodeView, ExplorerError> {
     } else {
         Err(ExplorerError::new(
             ExplorerErrorKind::UnknownNode,
-            "The Explorer reads the first node only for now; a later version gives every node \
-             its own.",
+            "The Explorer reads only the node that was first when Zeal started; a later \
+             version gives every node its own.",
         ))
     }
 }

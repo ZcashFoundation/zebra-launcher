@@ -797,10 +797,12 @@ No full-chain scan by default. The store is small, public and rebuildable.
 
 ### Several nodes
 
-One explorer per node runtime. Until P6 one explorer serves the registry's first node, under
-the node's own id (`NodeSpec.id`; the first run gives it its network's id, and afterwards it
-keeps it when its network changes); other ids get `UnknownNode`, worded "the Explorer reads the
-first node only for now". The chain it reads is `NodeStats.chain` ("main" is Mainnet, "test"
+One explorer per node runtime. Until P6 one explorer serves the node that is first in the
+registry when Zeal starts, under the node's own id (`NodeSpec.id`; the first run gives it its
+network's id, and afterwards it keeps it when its network changes). The explorer stays bound to
+that node: if it is removed while Zeal runs, no node has an Explorer until the next launch.
+Other ids get `UnknownNode`, worded "the Explorer reads only the node that was first when Zeal
+started". The chain it reads is `NodeStats.chain` ("main" is Mainnet, "test"
 Testnet); before a run's first report, and once zebrad has stopped and the monitor has cleared
 its statistics, it is the node's network. The node's network changes at once (the first-run
 wizard, Settings, Node settings), but zebrad changes network only at its next start. In between
@@ -1247,8 +1249,10 @@ code differs from the design above:
   for the hint and answered "a later version".
 - **Tauri.** The explorer's handle is Tauri state of its own, as the updater's is, not an
   `AppState` field, and the node-id rule is the actor's, behind `ExplorerHandle::call(node,
-  call)`: it answers the first node's own id, and while zebrad still runs on the network the
-  node had before, `LiveState::OtherNetwork` until zebrad's next start. Hiding the window to
+  call)`: it answers the own id of the node that was first when Zeal started (removed, it
+  leaves no node an Explorer until the next launch; P6 gives each node its own), and while
+  zebrad still runs on the network the node had before, `LiveState::OtherNetwork` until
+  zebrad's next start. Hiding the window to
   the tray does not send `Interest` yet: the tab and the document's visibility do.
 - **The actor.** Two lanes, interactive and prefetch (the follower and the Chain page's
   coinbases); every P1 read weighs one, since P1 makes no heavy call, and the background lane

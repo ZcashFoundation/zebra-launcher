@@ -137,7 +137,8 @@ every node command and event carries a node's id, and the mock's zebrad below is
   value-pool row from every seventh block, so that block and the next show their fees as
   unknown. `?reorg` replaces the main node's top two blocks about every 90 s at the tip (with
   `?attip`), and the Explorer shows the banner. With `?herd` the other nodes' Explorer tabs
-  say that the Explorer reads the first node only for now: each node gets its own in P6.
+  say that the Explorer reads only the node that was first when Zeal started: each node gets
+  its own in P6.
 
 - the light client server (docs/PUBLIC-SERVICES.md), in Settings → Public services, with a card
   on the dashboard and a banner on the node's pages. The mock runs launcher-herd's real rules

@@ -771,9 +771,11 @@ design; phases P0 and P1 are built, and its "Built so far" section lists where t
 differs.
 
 - **Backend.** `launcher-core/src/explorer.rs` spawns one actor (`ExplorerHandle`, Tauri
-  state of its own, started in `src-tauri/src/explorer.rs`) for the registry's first node,
-  and answers that node's own id only; other nodes get explorers in EXPLORER.md's P6, and
-  until then their ids are answered "the Explorer reads the first node only". When the node's
+  state of its own, started in `src-tauri/src/explorer.rs`) for the node that is first in the
+  registry when Zeal starts, and answers that node's own id only. If that node is removed, no
+  node has an Explorer until the next launch. Other nodes get explorers in EXPLORER.md's P6,
+  and until then their ids are answered "the Explorer reads only the node that was first when
+  Zeal started". When the node's
   network changes while zebrad runs, zebrad keeps the old one until its next start: the
   actor then publishes `LiveState::OtherNetwork` and reads nothing. Whenever the chain the
   actor holds is not the node's network, running or stopped, it publishes no tip, tip time

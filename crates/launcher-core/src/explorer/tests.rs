@@ -605,7 +605,11 @@ async fn the_first_node_answers_by_its_own_id_on_its_own_network() {
     for other in ["zebrad-testnet", "zebrad-mainnet-2", "zakura-mainnet"] {
         let err = call(other).await.expect_err("another node");
         assert_eq!(err.kind, ExplorerErrorKind::UnknownNode, "{other}");
-        assert!(err.message.contains("first node"), "{}", err.message);
+        assert!(
+            err.message.contains("first when Zeal started"),
+            "{}",
+            err.message
+        );
     }
 
     harness.status.send_replace(Status::default());

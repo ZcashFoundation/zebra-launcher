@@ -18,8 +18,9 @@
 //! is on screen and the node is at the network's tip. Logs name a read's method and how long
 //! it took, never what was asked for.
 //!
-//! One explorer serves the first node, under the node's own id; the other nodes get theirs in
-//! a later phase (docs/EXPLORER.md, P6). When the node's network changes while zebrad runs,
+//! One explorer serves the node it was started for, under the node's own id: the app starts
+//! it once, for the node that is first at launch. The other nodes get theirs in a later phase
+//! (docs/EXPLORER.md, P6). When the node's network changes while zebrad runs,
 //! zebrad keeps the old one until its next start, and the explorer reads nothing meanwhile.
 
 mod actor;

@@ -442,7 +442,8 @@ where
         })
     }
 
-    /// The node this explorer serves: the first node, under its own id.
+    /// The node this explorer serves, under its own id: the one it was started for, which the
+    /// app takes as the first node at launch.
     fn served(&self) -> NodeId {
         self.inputs.spec.borrow().id.clone()
     }
@@ -621,16 +622,16 @@ where
         });
     }
 
-    /// The node this explorer answers: the first node, by its own id. Other nodes get their
-    /// explorers in a later phase (docs/EXPLORER.md, P6).
+    /// The node this explorer answers: the one it was started for, by its own id. Other nodes
+    /// get their explorers in a later phase (docs/EXPLORER.md, P6).
     fn check_node(&self, node: &NodeId) -> Result<(), ExplorerError> {
         if *node == self.served() {
             Ok(())
         } else {
             Err(ExplorerError::new(
                 ExplorerErrorKind::UnknownNode,
-                "The Explorer reads the first node only for now; a later version gives every \
-                 node its own.",
+                "The Explorer reads only the node that was first when Zeal started; a later \
+                 version gives every node its own.",
             ))
         }
     }
