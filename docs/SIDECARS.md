@@ -558,15 +558,26 @@ workflow takes a `targets` input:
   `SOURCE_DATE_EPOCH`, the binary's and the licence files' sha256, and the
   run), and `zingod-src-<ver>`.
 
-`bundle.yml` and `release.yml` call it once each, as `sidecars-zingod`. Only
-the Linux bundle jobs need it. They download it, run `chmod +x` (artifacts lose
-the executable bit), check `--version` against `ZINGOD_VERSION`, add it to the
-glibc check and install it as `src-tauri/binaries/zeal-zingod-<target triple>`.
-They also install the artifact's two licence files into
-`src-tauri/resources/licenses/zingod/` and check them against the sha256 in
-`zingod-build-info.txt`.
-The macOS and Windows jobs don't download it. `release.yml` attaches the source
-archive and its sha256 to the draft release.
+`bundle.yml` and `release.yml` call it once each, as `sidecars-zingod`. Every
+Linux job that compiles the `zeal` crate needs it, since tauri-build copies
+every `externalBin` at compile time and fails on a missing one: `bundle.yml`'s
+Linux `bundle` legs, and both of `release.yml`'s Linux jobs, the unprivileged
+`build` (`cargo tauri build --no-bundle`, `.github/workflows/release.yml:346`)
+and `bundle_sign` (`:483`). Each adds `sidecars-zingod` to its `needs`,
+downloads the artifact, runs `chmod +x` (artifacts lose the executable bit),
+checks `--version` against `ZINGOD_VERSION`, adds it to its glibc check (both
+release jobs have one) and installs it as
+`src-tauri/binaries/zeal-zingod-<target triple>`. Each also installs the
+artifact's two licence files into `src-tauri/resources/licenses/zingod/` and
+checks them against the sha256 in `zingod-build-info.txt`. The macOS and
+Windows jobs don't download it.
+
+`bundle.yml` compiles and bundles in one job, so its runs on `main` never
+exercise `release.yml`'s split; the first release candidate that carries
+zingod (`vX.Y.Z-rc.N`, RELEASING.md) does. `release.yml`'s `draft` job also
+needs `sidecars-zingod`, and uploads `zingod-src-<ver>.tar.zst` and its sha256
+to the draft release. `manifest` already needs `draft` and hashes every draft
+asset, so `SHA256SUMS` and the release's attestations cover the archive.
 
 - `ci.yml` runs the workflow on pull requests that change the `ZINGOD_*` pins,
   `build-zingod.sh` or the workflow.
