@@ -67,6 +67,8 @@ pub(super) enum Internal {
     Done {
         call: ReadCall,
         lane: Lane,
+        /// The actor's `network_changes` when the read went out.
+        network_changes: u64,
         result: Result<ReadResult, SourceError>,
     },
     /// The follower checked the tip.
@@ -268,6 +270,7 @@ struct DoneGuard {
     tx: mpsc::UnboundedSender<Internal>,
     call: ReadCall,
     lane: Lane,
+    network_changes: u64,
     sent: bool,
 }
 
@@ -277,6 +280,7 @@ impl DoneGuard {
         let _ = self.tx.send(Internal::Done {
             call: self.call,
             lane: self.lane,
+            network_changes: self.network_changes,
             result,
         });
     }
@@ -288,6 +292,7 @@ impl Drop for DoneGuard {
             let _ = self.tx.send(Internal::Done {
                 call: self.call,
                 lane: self.lane,
+                network_changes: self.network_changes,
                 result: Err(SourceError::Unavailable("the read stopped".into())),
             });
         }
@@ -316,6 +321,9 @@ struct Actor<S, F> {
     /// The network of the chain the cache and the index hold: the one zebrad reports, else
     /// the node's.
     network: Network,
+    /// Bumped when the network changes. Each read carries it, so the answer of a read sent on
+    /// the old network is dropped: none of it applies to the new one.
+    network_changes: u64,
     reorg: Option<ReorgNotice>,
     live: watch::Sender<ExplorerLiveEvent>,
     internal: mpsc::UnboundedSender<Internal>,
@@ -354,6 +362,7 @@ pub(super) fn start<S: ChainSource>(
         visible: false,
         hidden_since: None,
         network,
+        network_changes: 0,
         reorg: None,
         live,
         internal,
@@ -539,6 +548,7 @@ where
         if network != self.network {
             // Another chain: nothing known about this one applies.
             self.network = network;
+            self.forget_reads();
             self.cache.clear();
             self.index.clear();
             self.reorg = None;
@@ -557,6 +567,19 @@ where
         match self.cache.get(&CacheKey::Block(hash))? {
             ReadResult::Block(block) => block.time.and_then(|time| u64::try_from(time).ok()),
             _ => None,
+        }
+    }
+
+    /// The network changed: every read asked for on the old one fails, queued or under way, and
+    /// the answer of one under way is dropped when it comes, so a read asked for since on the
+    /// new network goes out on its own.
+    fn forget_reads(&mut self) {
+        self.network_changes += 1;
+        self.sched.clear_queue();
+        for (_, inflight) in self.inflight.drain() {
+            for waiter in inflight.waiters {
+                let _ = waiter.send(Err(not_running()));
+            }
         }
     }
 
@@ -789,8 +812,18 @@ where
                     .and_then(|key| self.cache.get(&key).cloned());
                 let _ = reply.send(found);
             }
-            Internal::Done { call, lane, result } => {
+            Internal::Done {
+                call,
+                lane,
+                network_changes,
+                result,
+            } => {
                 self.sched.done(lane);
+                if network_changes != self.network_changes {
+                    // Sent on the old network: its waiters were answered when it changed.
+                    self.pump();
+                    return;
+                }
                 let inflight = self.inflight.remove(&call);
                 let result = match result {
                     Ok(value) => {
@@ -882,6 +915,7 @@ where
                 tx: self.internal.clone(),
                 call,
                 lane,
+                network_changes: self.network_changes,
                 sent: false,
             };
             tokio::spawn(async move {

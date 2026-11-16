@@ -779,7 +779,8 @@ differs.
   network changes while zebrad runs, zebrad keeps the old one until its next start: the
   actor then publishes `LiveState::OtherNetwork` and reads nothing. Whenever the chain the
   actor holds is not the node's network, running or stopped, it publishes no tip, tip time
-  or reorganisation, so no page shows the other network's chain under the node.
+  or reorganisation, so no page shows the other network's chain under the node. When that
+  chain changes, a read still under way fails, and its answer is dropped when it comes.
   The actor owns, without locks, the source (`RpcSource` over an `OwnedSession`, rebuilt
   when `rpc_addr` or `started_at` changes), the `ChainIndex`, a byte-weighted LRU (64 MiB;
   8 MiB after 10 minutes hidden), the reads in flight and the scheduler. Reads run as

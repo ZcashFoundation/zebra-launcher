@@ -1258,7 +1258,8 @@ code differs from the design above:
   coinbases); every P1 read weighs one, since P1 makes no heavy call, and the background lane
   comes with the store (P5). Six permits, four while the node syncs; no HTTP 429 back-off yet,
   since six reads never come near zebrad's 100. A new network clears everything, where the
-  design says a new genesis hash. Hashes above the final 1,000 are trusted for 10 s after a tip
+  design says a new genesis hash: reads under way on the old one fail, and their answers are
+  dropped when they come. Hashes above the final 1,000 are trusted for 10 s after a tip
   check, else a block asked for by height is read again; headers above them are cached per
   epoch. Its time limits read Tokio's clock, so the tests run them at their own values on a
   paused clock.

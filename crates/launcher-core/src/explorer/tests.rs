@@ -12,7 +12,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use explorer_model::synth::SynthChain;
+use explorer_model::{synth::SynthChain, zec_to_zat};
 use launcher_types::{
     EosInfo, Network, NodeDetails, NodeId, NodeStats, Phase, Status,
     explorer::{
@@ -59,6 +59,8 @@ struct Synth {
     gate: watch::Receiver<bool>,
     /// Holds transaction reads only.
     tx_gate: watch::Receiver<bool>,
+    /// Holds subsidy reads only.
+    subsidy_gate: watch::Receiver<bool>,
     counts: Counts,
 }
 
@@ -72,9 +74,13 @@ impl ChainSource for Synth {
         self.counts[slot(call)].fetch_add(1, Ordering::SeqCst);
         let mut gate = self.gate.clone();
         let _ = gate.wait_for(|open| *open).await;
-        if let ReadCall::Tx(_) = call {
-            let mut gate = self.tx_gate.clone();
-            let _ = gate.wait_for(|open| *open).await;
+        let held = match call {
+            ReadCall::Tx(_) => Some(&self.tx_gate),
+            ReadCall::Subsidy(_) => Some(&self.subsidy_gate),
+            _ => None,
+        };
+        if let Some(gate) = held {
+            let _ = gate.clone().wait_for(|open| *open).await;
         }
         let chain = self.chain.borrow().clone();
         let found = match call {
@@ -102,6 +108,7 @@ struct Harness {
     chain: watch::Sender<SynthChain>,
     gate: watch::Sender<bool>,
     tx_gate: watch::Sender<bool>,
+    subsidy_gate: watch::Sender<bool>,
     counts: Counts,
     status: watch::Sender<Status>,
     stats: watch::Sender<Option<NodeStats>>,
@@ -158,6 +165,7 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
     let (chain_tx, chain_rx) = watch::channel(chain);
     let (gate_tx, gate_rx) = watch::channel(true);
     let (tx_gate_tx, tx_gate_rx) = watch::channel(true);
+    let (subsidy_gate_tx, subsidy_gate_rx) = watch::channel(true);
     let counts: Counts = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
     let (status_tx, status) = watch::channel(running());
     let (stats_tx, stats) = watch::channel(Some(stats));
@@ -167,6 +175,7 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
         chain: chain_rx,
         gate: gate_rx,
         tx_gate: tx_gate_rx,
+        subsidy_gate: subsidy_gate_rx,
         counts: counts.clone(),
     };
     let mut explorer_config = ExplorerConfig::new(PathBuf::from("/nonexistent/.cookie"));
@@ -186,6 +195,7 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
         chain: chain_tx,
         gate: gate_tx,
         tx_gate: tx_gate_tx,
+        subsidy_gate: subsidy_gate_tx,
         counts,
         status: status_tx,
         stats: stats_tx,
@@ -790,6 +800,85 @@ async fn zebrad_stopped_on_the_old_network_leaves_nothing_of_it() {
     harness.status.send_replace(running_since(100));
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(harness.live().await, ExplorerLive::default());
+}
+
+#[tokio::test]
+async fn an_answer_from_the_old_network_is_dropped() {
+    let height = 600_000;
+    let testnet = SynthChain::new(Network::Testnet, 3_400_000, NOW);
+    let testnet_subsidy = zec_to_zat(testnet.subsidy(height).total);
+    let harness = harness();
+    assert_ne!(
+        zec_to_zat(harness.chain.borrow().subsidy(height).total),
+        testnet_subsidy,
+        "the networks' subsidies differ at {height}"
+    );
+    // A Mainnet Block page whose subsidy read zebrad holds.
+    harness.subsidy_gate.send_replace(false);
+    let explorer = harness.explorer.clone();
+    let old_page = tokio::spawn(async move {
+        explorer
+            .call(
+                &mainnet(),
+                ExplorerCall {
+                    request: ExplorerRequest::Block {
+                        id: BlockId::Height(height),
+                    },
+                },
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(harness.counts()[5], 1, "the subsidy read is under way");
+    // The node moves to Testnet while zebrad runs on Mainnet; zebrad stops, and the monitor
+    // clears its statistics.
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Testnet);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    harness.stop().await;
+    // zebrad answers the old read late, with Mainnet's subsidy.
+    harness.subsidy_gate.send_replace(true);
+    let old_page = tokio::time::timeout(LIMIT, old_page)
+        .await
+        .expect("the old page is answered")
+        .expect("no panic");
+    // zebrad starts on Testnet, and the monitor reads it.
+    harness.chain.send_replace(testnet.clone());
+    harness.stats.send_replace(Some(NodeStats {
+        chain: "test".into(),
+        ..stats_for(&testnet)
+    }));
+    harness.status.send_replace(running_since(100));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let before = harness.counts();
+    let ExplorerResponse::Block(page) = harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Height(height),
+        })
+        .await
+    else {
+        panic!("a block page");
+    };
+    assert_eq!(
+        delta(harness.counts(), before)[5],
+        1,
+        "Testnet's subsidy is read from zebrad"
+    );
+    assert_eq!(
+        page.reward
+            .and_then(|reward| i64::try_from(reward.subsidy).ok()),
+        Some(testnet_subsidy),
+        "Testnet's subsidy, not Mainnet's"
+    );
+    // The old page went without the subsidy: its read failed when the network changed.
+    assert!(
+        old_page.is_ok_and(|reply| matches!(
+            reply.response,
+            ExplorerResponse::Block(page) if page.reward.is_none()
+        )),
+        "the old page went without its subsidy"
+    );
 }
 
 #[tokio::test]
