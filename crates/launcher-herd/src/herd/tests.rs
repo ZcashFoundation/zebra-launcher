@@ -794,6 +794,35 @@ fn a_deep_fork_names_its_height_as_a_bound() {
 }
 
 #[test]
+fn a_deep_fork_above_a_lower_exact_one_still_reads_as_a_bound() {
+    // The third node's chain splits 1,500 blocks back: found only as block 3,550,204 or
+    // earlier. The fourth, 600 blocks below the top, splits 1,400 back: found exactly, at
+    // block 3,549,804. The lowest height named is the exact one, yet the deep fork may start
+    // below it.
+    let mut herd = Harness::new(Network::Mainnet, 4, H);
+    herd.run(10);
+    let deep = herd.chain.branch(H - 1_500);
+    herd.chain.put(&id(2), deep, H);
+    let shallow = herd.chain.branch(H - 1_400);
+    herd.chain.put(&id(3), shallow, H - 600);
+    let view = herd.run(20);
+    assert_eq!(view.state, HerdState::Split);
+    assert_eq!(view.branches.len(), 3);
+    assert_eq!(view.branches[1].fork_at, Some(H - 1_000));
+    assert!(view.branches[1].deep);
+    assert_eq!(view.branches[2].fork_at, Some(H - 1_400));
+    assert!(!view.branches[2].deep);
+    assert_eq!(
+        view.node(&id(3)).unwrap().word,
+        "disagrees since block 3,549,804"
+    );
+    assert_eq!(
+        view.headline,
+        "Your Mainnet nodes disagree since block 3,549,804 or earlier, and Zeal can't tell which is right"
+    );
+}
+
+#[test]
 fn a_top_that_reorganizes_and_climbs_between_rounds_is_asked_again() {
     // The second node sits 250 blocks below the first, which is asked for its hash there.
     let mut herd = Harness::new(Network::Mainnet, 2, H);

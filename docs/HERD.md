@@ -63,12 +63,14 @@ take from the herd.
   height (`Relation::Forked.at`, `Branch.fork_at`) is the first block that differs, the one
   the sentences name ("since block H"). For a deep fork it can be only a bound, since the
   search stops 1,000 blocks below the lower top, so every sentence and word for one reads
-  "since block H or earlier". That bound stays while the pair still differs there and one
-  block below, so it does not rise with every block; an engine started again finds a new
-  one. `Family` has a variant per zebrad channel, so a split between channels reads as
-  implementations that disagree. `ExcludedWhy` adds `Starting`, `Stopping` and `NoStats`.
-  `HerdView` carries the sentence (`headline`) and the branches; no checks, diversity,
-  census, validator line, alerts or events yet.
+  "since block H or earlier". The herd's sentence names the lowest fork, and reads "or
+  earlier" when any fork in the split is deep, since a deep one may start below it. A deep
+  fork's bound stays while the pair still differs there and one block below, so it does not
+  rise with every block; an engine started again finds a new one. `Family` has a variant per
+  zebrad channel, so a split between channels reads as implementations that disagree.
+  `ExcludedWhy` adds `Starting`, `Stopping` and `NoStats`. `HerdView` carries the sentence
+  (`headline`) and the branches; no checks, diversity, census, validator line, alerts or
+  events yet.
 - The engine is the module `launcher_herd::herd` beside the public services' rules (`roles`,
   `spacing`, `search`, `engine`, `verdict`, and `sim`, a simulated chain behind the feature of
   that name for other crates' tests), not the `agreement/` folder the layout above shows. Its

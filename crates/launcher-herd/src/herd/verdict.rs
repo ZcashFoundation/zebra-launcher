@@ -279,7 +279,7 @@ fn split_headline(herd: &Herd<'_>, witnesses: &[&NodeInHerd], top: &str) -> Stri
         .copied()
         .filter(|node| matches!(node.relation, Relation::Forked { .. }))
         .collect();
-    // The lowest fork, named as a bound if any fork there is deep.
+    // The lowest fork, named as a bound if any fork is deep: a deep one may start below it.
     let forks: Vec<(u32, bool)> = forked
         .iter()
         .filter_map(|node| match node.relation {
@@ -288,7 +288,7 @@ fn split_headline(herd: &Herd<'_>, witnesses: &[&NodeInHerd], top: &str) -> Stri
         })
         .collect();
     let at = forks.iter().map(|(at, _)| *at).min().unwrap_or(0);
-    let since = since(at, forks.contains(&(at, true)));
+    let since = since(at, forks.iter().any(|(_, deep)| *deep));
     let side_of = |node: &NodeInHerd| match node.relation {
         Relation::Forked { side, .. } => Some(side),
         _ => None,
