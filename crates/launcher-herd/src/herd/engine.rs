@@ -375,7 +375,9 @@ impl Engine {
         let branches = &analysis.placement.branches;
         let main = branches.first();
 
-        // The main top, and the spacing the time rules use.
+        // The main top, and the spacing the time rules use. With no node placed (every one
+        // stopped, starting or not answering) nobody watches the top: its quiet time starts
+        // again when a node is back, so the time away never reads as a herd stall.
         if let Some(main) = main {
             match &mut self.top {
                 Some((top, since)) if main.top.height > top.height => {
@@ -389,6 +391,8 @@ impl Engine {
                 Some((top, _)) => *top = main.top.clone(),
                 None => self.top = Some((main.top.clone(), now.mono)),
             }
+        } else {
+            self.top = None;
         }
         let reference = self.top.as_ref().map(|(top, _)| top.height).or_else(|| {
             self.round

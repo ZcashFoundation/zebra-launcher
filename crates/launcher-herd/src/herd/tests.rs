@@ -646,6 +646,35 @@ fn the_herd_stalls_after_twelve_spacings_without_a_block_but_not_after_a_wake() 
 }
 
 #[test]
+fn the_time_every_node_was_stopped_is_not_a_herd_stall() {
+    let mut herd = Harness::new(Network::Mainnet, 2, H);
+    let view = herd.run_with(400, |herd, elapsed| {
+        if elapsed % 25 == 0 {
+            herd.grow(&[0, 1]);
+        }
+    });
+    assert_eq!(view.state, HerdState::Agreed);
+    // Stop all for 20 min, then Start all: the nodes come back on the tips they had.
+    for node in &mut herd.nodes {
+        node.phase = Phase::Stopped;
+    }
+    herd.run(1_200);
+    for node in &mut herd.nodes {
+        node.phase = Phase::Running;
+    }
+    let view = herd.run(120);
+    assert_eq!(view.state, HerdState::Agreed, "{}", view.headline);
+    // The quiet time counts from their return.
+    let view = herd.run(200);
+    assert_eq!(view.state, HerdState::Stalled);
+    assert_eq!(view.level, Level::Attention);
+    assert_eq!(
+        view.headline,
+        "No new block on your Mainnet nodes for 5 min"
+    );
+}
+
+#[test]
 fn the_nodes_order_does_not_matter() {
     let build = |reverse: bool| {
         let mut herd = Harness::new(Network::Mainnet, 4, H);
