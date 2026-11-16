@@ -315,12 +315,12 @@ struct Actor {
     net: Option<NetFacts>,
     net_due: Option<tokio::time::Instant>,
     net_running: bool,
-    /// Counts the times the service stopped running, so a network check from before is told
-    /// apart.
+    /// Counts the times the service stopped watching its surroundings
+    /// ([`rules::watches_surroundings`]), so a network check from before is told apart.
     net_epoch: u64,
-    /// A network check made since the service last started running has come back.
+    /// A network check made since the service last started watching has come back.
     net_fresh: bool,
-    was_running: bool,
+    was_watching: bool,
     firewall: Option<FirewallInfo>,
     port_free: Option<bool>,
     local_test: Option<Checked<Result<LightdInfo, LocalTestProblem>>>,
@@ -445,7 +445,7 @@ impl Actor {
             net_running: false,
             net_epoch: 0,
             net_fresh: false,
-            was_running: false,
+            was_watching: false,
             firewall: None,
             port_free: None,
             local_test: None,
@@ -818,20 +818,18 @@ impl Actor {
     ) {
         let current = rules::current_step(steps);
         let reached = |step: StepId| spec.opened || current.is_none_or(|current| current >= step);
-        let running = !matches!(
-            state,
-            PublicState::Paused { .. } | PublicState::NotAvailable { .. } | PublicState::Off
-        );
-        // A network check from before the service stopped says nothing about where this
-        // computer is now.
-        if !running {
-            if self.was_running {
+        // The network checks and the name go on through a pause that ends by itself, so it can.
+        let watching = rules::watches_surroundings(state);
+        // A network check from before they stopped says nothing about where this computer is
+        // now.
+        if !watching {
+            if self.was_watching {
                 self.net_epoch += 1;
                 self.net_due = None;
             }
             self.net_fresh = false;
         }
-        self.was_running = running;
+        self.was_watching = watching;
 
         // The light monitor follows zebrad's endpoint.
         if self
@@ -853,7 +851,7 @@ impl Actor {
         }
 
         // The read-only network checks, from the network step on.
-        if running
+        if watching
             && reached(StepId::Network)
             && !self.net_running
             && self
@@ -886,7 +884,7 @@ impl Actor {
             changed
         });
         match &spec.name {
-            Some(name) if running => {
+            Some(name) if watching => {
                 let key = format!("{name} {:?}", spec.provider);
                 if self.ddns.as_ref().is_none_or(|ddns| ddns.key != key) {
                     let handle = DdnsHandle::spawn(DdnsConfig {

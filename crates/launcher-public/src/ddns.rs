@@ -135,8 +135,9 @@ pub fn parse_duckdns(body: &str) -> Result<Updated, DdnsProblem> {
 /// What the name should point at, as the service decides.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Wanted {
-    /// Updates may go out: a network check made since the service last started running found
-    /// this network fit to expose (no VPN, the LAN address the forward targets).
+    /// Updates may go out: a network check made since the service last started watching its
+    /// surroundings (at launch, or after a pause only the user ends) found this network fit to
+    /// expose (no VPN, the LAN address the forward targets).
     pub update: bool,
     /// The router's public address, when known; DuckDNS takes the address it sees without.
     pub address: Option<IpAddr>,

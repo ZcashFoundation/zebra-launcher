@@ -949,10 +949,11 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   stops on "too many updates". Without the router's address (no NAT-PMP answer, carrier-grade
   NAT, a second router), DuckDNS takes the address it sees, which may change unseen, so that
   update goes again every 5 minutes (DuckDNS answers `NOCHANGE`). No update goes out until a
-  network check made since the service last started running finds no VPN on the default route
-  and, once open, the LAN address the forward targets: a laptop that starts Zeal or resumes on
-  a café's network never points the name there. A mismatch for 15 minutes, against the
-  router's address or else the one DuckDNS saw, pauses the service. After a change:
+  network check made since the service started, or resumed from a pause only the user ends,
+  finds no VPN on the default route and, once open, the LAN address the forward targets: a
+  laptop that starts Zeal or resumes on a café's network never points the name there. A
+  mismatch for 15 minutes, against the router's address or else the one DuckDNS saw, pauses
+  the service. After a change:
   "Address changed at 14:02. DNS updated; resolvers may use the old one for up to 5 minutes."
 - **Tokens** go to the OS keychain (`keyring` 4.2.0, service `org.zfnd.zeal`, account
   `dns:<provider>:<zone>`: a DuckDNS token covers every name on the user's DuckDNS account,
@@ -1162,7 +1163,10 @@ Zeal shows each step before the system asks, and never elevates without a click.
 Problems that clear themselves keep the front door up in `Unavailable`, so wallets get a clear
 error and TLS-ALPN-01 renewals still work: a long stall of the backend, such as Zaino's at an
 upgrade, must not let the certificate expire. Problems with the exposure itself (the LAN
-address, the name, a VPN, the cap, the user, a too-old build) close it. **Pause**, the switch
+address, the name, a VPN, the cap, the user, a too-old build) close it. The network checks and
+the name's resolution keep running through a pause that ends by itself, so it sees its cause
+clear: a VPN going down, the name pointing here again (until a resolution says so the pause
+for the name holds). A pause only the user ends stops them. **Pause**, the switch
 off, stops the front door or zeeder and deletes the mappings, and removes zebrad's endpoint
 with a restart of zebrad ([How Zeal runs it](#how-zeal-runs-it)); **Resume** re-runs what the
 pause may have changed. **Turn off and forget** also offers to delete Zeal's DNS records, the

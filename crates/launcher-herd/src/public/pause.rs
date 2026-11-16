@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use launcher_types::{
     Phase,
-    public::{DegradedReason, PauseReason, PublicServiceSpec, Resume},
+    public::{DegradedReason, PauseReason, PublicServiceSpec, PublicState, Resume},
 };
 
 use super::{Facts, light};
@@ -81,21 +81,36 @@ pub fn may_point_name_here(
 }
 
 /// Since when an open service's name has resolved away from this network without a break,
-/// from the last value in `facts.name_elsewhere_since` and the facts at `facts.now`.
+/// from the last value in `facts.name_elsewhere_since` and the facts at `facts.now`. Without a
+/// resolution to compare, the last answer holds: a pause for the name must not end because
+/// nothing looked.
 pub fn name_elsewhere_since(spec: &PublicServiceSpec, facts: &Facts) -> Option<SystemTime> {
+    if !spec.opened {
+        return None;
+    }
     // Without NAT-PMP's answer, the address DuckDNS saw, as the name step checks.
     let expected = super::expected_address(facts);
-    let elsewhere = match (&facts.dns, expected) {
-        (Some(dns), Some(expected)) if dns.checked_at.is_some() => {
-            !dns.resolved.contains(&expected)
+    match (&facts.dns, expected) {
+        (Some(dns), Some(expected)) if dns.checked_at.is_some() => light::track_since(
+            facts.name_elsewhere_since,
+            !dns.resolved.contains(&expected),
+            facts.now,
+        ),
+        _ => facts.name_elsewhere_since,
+    }
+}
+
+/// Whether the network checks and the name's resolution run in `state`: while the service
+/// runs, and through a pause that ends by itself, so they see its cause clear. A pause only
+/// the user ends stops them.
+pub fn watches_surroundings(state: &PublicState) -> bool {
+    match state {
+        PublicState::Paused { resumes, .. } => {
+            matches!(resumes, Resume::Automatic | Resume::NextMonth)
         }
-        _ => false,
-    };
-    light::track_since(
-        facts.name_elsewhere_since,
-        elsewhere && spec.opened,
-        facts.now,
-    )
+        PublicState::NotAvailable { .. } | PublicState::Off => false,
+        PublicState::SettingUp { .. } | PublicState::Serving | PublicState::Degraded { .. } => true,
+    }
 }
 
 /// Why an open service tells wallets to try again, if it must.
@@ -367,6 +382,69 @@ mod tests {
         };
         assert!(may_point_name_here(&setting_up, &cafe));
         assert!(!may_point_name_here(&setting_up, &vpn));
+    }
+
+    #[test]
+    fn a_name_pointing_elsewhere_holds_until_a_resolution_says_otherwise() {
+        let spec = open_spec();
+        let mut facts = serving_facts();
+        let dns = |resolved: &str, checked: bool| DnsStatus {
+            name: PublicHostname::parse("zec.example.com").unwrap(),
+            provider: DnsProvider::Manual,
+            has_token: false,
+            resolved: vec![resolved.parse().unwrap()],
+            provider_saw: None,
+            updated_at: None,
+            problem: None,
+            checked_at: checked.then(|| at(NOW)),
+        };
+        facts.dns = Some(dns("198.51.100.7", true));
+        assert_eq!(name_elsewhere_since(&spec, &facts), Some(at(NOW)));
+        facts.name_elsewhere_since = Some(at(NOW - 20 * 60));
+        // Paused: no resolution, or none yet from a new resolver. It still points away.
+        facts.dns = None;
+        assert_eq!(name_elsewhere_since(&spec, &facts), Some(at(NOW - 20 * 60)));
+        facts.dns = Some(dns("198.51.100.7", false));
+        assert_eq!(name_elsewhere_since(&spec, &facts), Some(at(NOW - 20 * 60)));
+        facts.dns = Some(dns("203.0.113.10", true));
+        assert_eq!(
+            name_elsewhere_since(&spec, &facts),
+            None,
+            "points here again"
+        );
+        let setting_up = PublicServiceSpec {
+            opened: false,
+            ..spec
+        };
+        facts.name_elsewhere_since = Some(at(NOW - 20 * 60));
+        assert_eq!(name_elsewhere_since(&setting_up, &facts), None);
+    }
+
+    #[test]
+    fn pauses_that_end_by_themselves_keep_watching() {
+        let paused = |why, resumes| PublicState::Paused {
+            why,
+            since: at(0),
+            resumes,
+        };
+        let vpn = PauseReason::VpnRoute {
+            interface: "wg0".into(),
+        };
+        assert!(watches_surroundings(&paused(vpn, Resume::Automatic)));
+        assert!(watches_surroundings(&paused(
+            PauseReason::DataCap,
+            Resume::NextMonth
+        )));
+        assert!(!watches_surroundings(&paused(
+            PauseReason::ByYou,
+            Resume::NeedsYou
+        )));
+        assert!(!watches_surroundings(&paused(
+            PauseReason::NotResumed,
+            Resume::NeedsYou
+        )));
+        assert!(watches_surroundings(&PublicState::Serving));
+        assert!(!watches_surroundings(&PublicState::Off));
     }
 
     #[test]

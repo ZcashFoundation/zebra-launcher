@@ -25,7 +25,7 @@ use launcher_types::{
     },
 };
 
-pub use pause::{degraded, may_point_name_here, name_elsewhere_since, pause};
+pub use pause::{degraded, may_point_name_here, name_elsewhere_since, pause, watches_surroundings};
 pub use plan::{current_step, expected_address, open_gates, plan};
 
 /// The zebrad versions Zeal has tested as a light client server.
