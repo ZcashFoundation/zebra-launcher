@@ -61,7 +61,9 @@ take from the herd.
 - The types are in `launcher_types::herd`. `NodeStats.best` is a `BlockRef` from
   `getblockchaininfo`, as planned; no extra call. Heights are `u32`; a fork's or a race's
   height (`Relation::Forked.at`, `Branch.fork_at`) is the first block that differs, the one
-  the sentences name ("since block H"). `Family` has a variant per zebrad channel, so a split
+  the sentences name ("since block H"). For a deep fork it can be only a bound, since the
+  search stops 1,000 blocks below the lower top, so every sentence and word for one reads
+  "since block H or earlier". `Family` has a variant per zebrad channel, so a split
   between channels reads as implementations that disagree. `ExcludedWhy` adds `Starting`,
   `Stopping` and `NoStats`. `HerdView` carries the sentence (`headline`) and the branches;
   no checks, diversity, census, validator line, alerts or events yet.
@@ -561,7 +563,7 @@ current numbers. Excluded applies at once.
 | Racing | off the main branch, where the longer side is 1 block past the fork point at any age, or 2 blocks for less than 3 S | "agrees"; the event log says "competing block at H (normal)" | ok |
 | Lagging | past probation, on the main branch, more than 2 blocks behind for 4 S, and still advancing | "15 blocks behind" | attention; a problem at more than 12 behind for 12 S |
 | Stalled | tip unchanged for 5 S while the main branch gained 3 or more blocks. This includes a node still holding one block the others replaced: it is placed at the fork point and judged like a node behind, its unchanged time runs from when it took that block, and until 5 S have passed it keeps its last state | "stuck at block H", "stuck on block H, which your other nodes replaced" | attention; a problem at 24 S |
-| Forked | off the main branch with a branch of its own at least 2 blocks long, beyond the race tolerance (the longer side 3 or more blocks past the fork point, or 2 for 3 S) | "on a different chain since block H" | a problem, shown first if the fork is deep, or if a witness reports the other branch `invalid` |
+| Forked | off the main branch with a branch of its own at least 2 blocks long, beyond the race tolerance (the longer side 3 or more blocks past the fork point, or 2 for 3 S) | "on a different chain since block H"; for a deep fork "since block H or earlier" | a problem, shown first if the fork is deep, or if a witness reports the other branch `invalid` |
 | Rejected (validators) | stuck at H while its parent is 3 or more blocks past H for 3 S | "zcashd rejects block H+1" | a problem, shown first once its `getchaintips` shows H+1 `invalid` (unconfirmed for the compatibility build) or the parent is 12 blocks past |
 | Unknown | probes failed for 2 rounds, or a sudden genesis tip | "not answering" | attention after 30 s |
 

@@ -40,6 +40,16 @@ fn block(height: u32) -> String {
     format!("block {}", thousands(height))
 }
 
+/// "since block 3,551,204". A deep fork's height can be only a bound, since the search stops
+/// 1,000 blocks below the lower top: "since block 3,550,204 or earlier".
+fn since(at: u32, deep: bool) -> String {
+    if deep {
+        format!("since {} or earlier", block(at))
+    } else {
+        format!("since {}", block(at))
+    }
+}
+
 fn blocks_behind(blocks: u32) -> String {
     match blocks {
         1 => "1 block behind".to_owned(),
@@ -122,7 +132,7 @@ pub fn describe(name: &str, relation: &Relation) -> (String, String) {
             deep: false,
             ..
         } => {
-            let words = format!("on a different chain since {}", block(*at));
+            let words = format!("on a different chain {}", since(*at, false));
             both(words.clone(), &format!("is {words}"))
         }
         Relation::Forked {
@@ -130,15 +140,13 @@ pub fn describe(name: &str, relation: &Relation) -> (String, String) {
             side: Side::Minority,
             deep: true,
             ..
-        } => (
-            format!("on a different chain since before {}", block(*at)),
-            format!(
-                "{name} is on a different chain since before {} and can't rejoin it by itself",
-                block(*at)
-            ),
-        ),
-        Relation::Forked { at, .. } => {
-            let words = format!("disagrees since {}", block(*at));
+        } => {
+            let words = format!("on a different chain {}", since(*at, true));
+            let sentence = format!("{name} is {words}, and can't rejoin it by itself");
+            (words, sentence)
+        }
+        Relation::Forked { at, deep, .. } => {
+            let words = format!("disagrees {}", since(*at, *deep));
             both(words.clone(), &words)
         }
         Relation::Unknown => both("not answering".to_owned(), "is not answering"),
@@ -271,24 +279,22 @@ fn split_headline(herd: &Herd<'_>, witnesses: &[&NodeInHerd], top: &str) -> Stri
         .copied()
         .filter(|node| matches!(node.relation, Relation::Forked { .. }))
         .collect();
-    let at = forked
+    // The lowest fork, named as a bound if any fork there is deep.
+    let forks: Vec<(u32, bool)> = forked
         .iter()
         .filter_map(|node| match node.relation {
-            Relation::Forked { at, .. } => Some(at),
+            Relation::Forked { at, deep, .. } => Some((at, deep)),
             _ => None,
         })
-        .min()
-        .unwrap_or(0);
+        .collect();
+    let at = forks.iter().map(|(at, _)| *at).min().unwrap_or(0);
+    let since = since(at, forks.contains(&(at, true)));
     let side_of = |node: &NodeInHerd| match node.relation {
         Relation::Forked { side, .. } => Some(side),
         _ => None,
     };
-    let no_majority = || {
-        format!(
-            "Your {net} nodes disagree since {}, and Zeal can't tell which is right",
-            block(at)
-        )
-    };
+    let no_majority =
+        || format!("Your {net} nodes disagree {since}, and Zeal can't tell which is right");
     if forked
         .iter()
         .any(|node| side_of(node) == Some(Side::Implementations))
@@ -306,10 +312,8 @@ fn split_headline(herd: &Herd<'_>, witnesses: &[&NodeInHerd], top: &str) -> Stri
             let place = |node: &NodeInHerd| herd.nodes.iter().position(|n| n.id == node.id);
             pair.sort_by_key(|node| place(node));
             return format!(
-                "{} and {} disagree since {}: one of them may have lost touch with the network, or they disagree about the rules",
-                pair[0].name,
-                pair[1].name,
-                block(at)
+                "{} and {} disagree {since}: one of them may have lost touch with the network, or they disagree about the rules",
+                pair[0].name, pair[1].name,
             );
         }
         let mut zebra: Vec<Family> = Vec::new();
@@ -334,12 +338,11 @@ fn split_headline(herd: &Herd<'_>, witnesses: &[&NodeInHerd], top: &str) -> Stri
             // One side left the split (stopped, or not answering) while the other still shows
             // it for the debounce: there is no family to name it against.
             ([], _) | (_, []) => no_majority(),
-            ([ours], [theirs]) => format!("{ours} and {theirs} disagree since {}", block(at)),
+            ([ours], [theirs]) => format!("{ours} and {theirs} disagree {since}"),
             _ => format!(
-                "{} disagree with {} since {}",
+                "{} disagree with {} {since}",
                 ours.join(" and "),
                 theirs.join(" and "),
-                block(at)
             ),
         };
     }
@@ -405,6 +408,36 @@ mod tests {
                     same_chain: Some(true),
                 },
                 "catching up 34.5 % · same chain",
+            ),
+            (
+                Relation::Forked {
+                    at: 3_560_498,
+                    own: 1_001,
+                    main: 1_001,
+                    side: Side::Minority,
+                    deep: true,
+                },
+                "on a different chain since block 3,560,498 or earlier",
+            ),
+            (
+                Relation::Forked {
+                    at: 3_560_498,
+                    own: 1_001,
+                    main: 1_001,
+                    side: Side::NoMajority,
+                    deep: true,
+                },
+                "disagrees since block 3,560,498 or earlier",
+            ),
+            (
+                Relation::Forked {
+                    at: 3_561_498,
+                    own: 4,
+                    main: 3,
+                    side: Side::Implementations,
+                    deep: false,
+                },
+                "disagrees since block 3,561,498",
             ),
             (Relation::Unknown, "not answering"),
             (

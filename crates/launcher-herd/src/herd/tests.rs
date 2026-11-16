@@ -702,6 +702,77 @@ fn a_fork_past_the_rollback_window_is_deep() {
 }
 
 #[test]
+fn a_deep_fork_names_its_height_as_a_bound() {
+    // The last node's chain splits 1,500 blocks back. The search stops 1,000 blocks below the
+    // lower top, at block 3,550,204, so the fork is there or earlier.
+    let deep = |count: usize, setup: &dyn Fn(&mut Harness)| -> HerdView {
+        let mut herd = Harness::new(Network::Mainnet, count, H);
+        setup(&mut herd);
+        herd.run(10);
+        let branch = herd.chain.branch(H - 1_500);
+        herd.chain.put(&id(count - 1), branch, H);
+        let view = herd.run(20);
+        assert_eq!(view.state, HerdState::Split);
+        assert!(view.branches[1].deep);
+        view
+    };
+    let word = |view: &HerdView, index: usize| view.node(&id(index)).unwrap().word.clone();
+
+    // A minority.
+    let view = deep(3, &|_| {});
+    assert_eq!(
+        word(&view, 2),
+        "on a different chain since block 3,550,204 or earlier"
+    );
+    assert_eq!(
+        view.headline,
+        "Zebra · Mainnet 3 is on a different chain since block 3,550,204 or earlier, and can't rejoin it by itself; your other 2 Mainnet nodes agree on block 3,551,204"
+    );
+
+    // No majority: two nodes on one channel.
+    let view = deep(2, &|_| {});
+    for index in 0..2 {
+        assert_eq!(
+            word(&view, index),
+            "disagrees since block 3,550,204 or earlier"
+        );
+    }
+    assert_eq!(
+        view.headline,
+        "Your Mainnet nodes disagree since block 3,550,204 or earlier, and Zeal can't tell which is right"
+    );
+
+    // Two nodes on two channels.
+    let view = deep(2, &|herd| {
+        herd.nodes[1].program = NodeProgram::BundledNightly
+    });
+    assert!(
+        view.headline.starts_with(
+            "Zebra · Mainnet and Zebra · Mainnet 2 disagree since block 3,550,204 or earlier: one of them"
+        ),
+        "{}",
+        view.headline
+    );
+
+    // Two channels, and two implementations against one channel.
+    let view = deep(3, &|herd| herd.nodes[2].program = NodeProgram::BundledBeta);
+    assert_eq!(word(&view, 2), "disagrees since block 3,550,204 or earlier");
+    assert_eq!(
+        view.headline,
+        "Zebra Stable and Zebra Beta disagree since block 3,550,204 or earlier"
+    );
+    let view = deep(3, &|herd| {
+        herd.nodes[1].kind = NodeKind::Zakura;
+        herd.nodes[1].name = "Zakura · Mainnet".into();
+        herd.nodes[2].program = NodeProgram::BundledBeta;
+    });
+    assert_eq!(
+        view.headline,
+        "Zebra Stable and Zakura disagree with Zebra Beta since block 3,550,204 or earlier"
+    );
+}
+
+#[test]
 fn a_top_that_reorganizes_and_climbs_between_rounds_is_asked_again() {
     // The second node sits 250 blocks below the first, which is asked for its hash there.
     let mut herd = Harness::new(Network::Mainnet, 2, H);
