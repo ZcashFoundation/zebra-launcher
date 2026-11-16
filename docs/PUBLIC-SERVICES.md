@@ -1008,7 +1008,9 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   address change, the address in public logs).
 - **Issuing**: staging first for every new name and every diagnosis (its TLS-ALPN-01 is the
   first proof that 443 reaches here), then production, `classic` profile, a fresh P-256 key;
-  the chain is verified with the platform verifier before it is pushed to the front door.
+  the chain is verified with the platform verifier before it is pushed to the front door. A
+  certificate that does not verify or cannot be stored counts as one failed production order,
+  with the backoff, so a broken verifier or a read-only folder never orders back to back.
 - **Renewal**: at a random time in ARI's window ("exempt from all rate limits"), else at two
   thirds of the lifetime; never an order at startup while a certificate is valid. While paused:
   DNS-01 with a token (PS6), otherwise at resume; Zeal never opens the port to renew. Let's

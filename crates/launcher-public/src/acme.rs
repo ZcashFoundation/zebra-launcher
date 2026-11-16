@@ -561,49 +561,36 @@ async fn run(
                 s.ordering = Some(issuer);
                 s.next_try = None;
             });
-            let result = order(&config, issuer, &challenge).await;
+            let ordered = order(&config, issuer, &challenge).await;
             let now = SystemTime::now();
+            if ordered.as_ref().is_ok_and(|issued| issued.validated) {
+                validated.send_replace(Some(now));
+            }
+            let result = settle(issuer, ordered, |issued| install(&config, issued));
             let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
             attempts.record(issuer, &outcome, now);
             let _ = store::save(&attempts_path, &attempts, false);
             asked = false;
             match result {
-                Ok(issued) => {
-                    if issued.validated {
-                        validated.send_replace(Some(now));
-                    }
-                    match issuer {
-                        CertIssuer::Staging => {
-                            tracing::info!(target: "zeal::public", "Let's Encrypt staging validated the name");
-                            status.send_modify(|s| {
-                                s.ordering = None;
-                                s.staging_validated_at = Some(now);
-                                s.last_problem = None;
-                            });
-                        }
-                        CertIssuer::Production => {
-                            let installed = install(&config, &issued);
-                            match installed {
-                                Ok(key) => {
-                                    tracing::info!(target: "zeal::public", "certificate issued");
-                                    cert.send_replace(Some(key));
-                                    status.send_modify(|s| {
-                                        s.ordering = None;
-                                        s.not_before = Some(issued.not_before);
-                                        s.not_after = Some(issued.not_after);
-                                        s.renew_at =
-                                            Some(renew_at(issued.not_before, issued.not_after));
-                                        s.last_problem = None;
-                                    });
-                                    wanted = false;
-                                }
-                                Err(problem) => status.send_modify(|s| {
-                                    s.ordering = None;
-                                    s.last_problem = Some(problem);
-                                }),
-                            }
-                        }
-                    }
+                Ok((_, None)) => {
+                    tracing::info!(target: "zeal::public", "Let's Encrypt staging validated the name");
+                    status.send_modify(|s| {
+                        s.ordering = None;
+                        s.staging_validated_at = Some(now);
+                        s.last_problem = None;
+                    });
+                }
+                Ok((issued, Some(key))) => {
+                    tracing::info!(target: "zeal::public", "certificate issued");
+                    cert.send_replace(Some(key));
+                    status.send_modify(|s| {
+                        s.ordering = None;
+                        s.not_before = Some(issued.not_before);
+                        s.not_after = Some(issued.not_after);
+                        s.renew_at = Some(renew_at(issued.not_before, issued.not_after));
+                        s.last_problem = None;
+                    });
+                    wanted = false;
                 }
                 Err(problem) => {
                     let logged = logged(&problem, &config.name);
@@ -641,6 +628,24 @@ async fn run(
                 }
             }
             _ = tokio::time::sleep(wake) => {}
+        }
+    }
+}
+
+/// What an order from `issuer` comes to: a staging validation, or a production certificate
+/// with its key for the front door. A production certificate counts once `install` took it,
+/// so one that does not verify or cannot be stored is a failed order, with the backoff.
+fn settle(
+    issuer: CertIssuer,
+    ordered: Result<Issued, AcmeProblem>,
+    install: impl FnOnce(&Issued) -> Result<Arc<CertifiedKey>, AcmeProblem>,
+) -> Result<(Issued, Option<Arc<CertifiedKey>>), AcmeProblem> {
+    let issued = ordered?;
+    match issuer {
+        CertIssuer::Staging => Ok((issued, None)),
+        CertIssuer::Production => {
+            let key = install(&issued)?;
+            Ok((issued, Some(key)))
         }
     }
 }
@@ -766,6 +771,37 @@ mod tests {
             next_order(&fresh, true, at(24)),
             (CertIssuer::Staging, true)
         );
+    }
+
+    #[test]
+    fn a_certificate_that_cannot_be_installed_is_a_failed_order() {
+        let issued = || Issued {
+            chain_pem: String::new(),
+            key_pem: String::new(),
+            not_before: at(0),
+            not_after: at(90 * 24),
+            validated: true,
+        };
+        let mut attempts = Attempts::default();
+        let result = settle(CertIssuer::Production, Ok(issued()), |_| {
+            Err(AcmeProblem::Verify)
+        });
+        let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
+        assert_eq!(outcome, Err(AcmeProblem::Verify));
+        attempts.record(CertIssuer::Production, &outcome, at(0));
+        // Counted once, as a production order and a failure, so the backoff applies.
+        assert_eq!(attempts.production.len(), 1);
+        assert_eq!(attempts.failures.len(), 1);
+        assert_eq!(attempts.consecutive_failures, 1);
+        assert_eq!(
+            attempts.next_allowed(CertIssuer::Production, at(0), false),
+            Some(at(1))
+        );
+        // Staging installs nothing.
+        let staged = settle(CertIssuer::Staging, Ok(issued()), |_| {
+            panic!("staging installs nothing")
+        });
+        assert!(matches!(staged, Ok((_, None))));
     }
 
     #[test]
