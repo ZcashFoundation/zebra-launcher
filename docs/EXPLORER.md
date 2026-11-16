@@ -801,12 +801,14 @@ One explorer per node runtime. Until P6 one explorer serves the registry's first
 the node's own id (`NodeSpec.id`; the first run gives it its network's id, and afterwards it
 keeps it when its network changes); other ids get `UnknownNode`, worded "the Explorer reads the
 first node only for now". The chain it reads is `NodeStats.chain` ("main" is Mainnet, "test"
-Testnet); while zebrad is stopped it is the last chain zebrad reported, and before zebrad first
-reports it is the node's network. The node's network changes at once (the first-run wizard,
-Settings, Node settings), but zebrad changes network only at its next start. In between the
-explorer publishes `LiveState::OtherNetwork` with no tip and answers other calls
-`NodeNotRunning`, saying zebrad changes network at its next start, so a Testnet page never
-shows Mainnet data. When the chain changes, the actor drops its caches and reopens its store at
+Testnet); before a run's first report, and once zebrad has stopped and the monitor has cleared
+its statistics, it is the node's network. The node's network changes at once (the first-run
+wizard, Settings, Node settings), but zebrad changes network only at its next start. In between
+the explorer publishes `LiveState::OtherNetwork` and answers other calls `NodeNotRunning`,
+saying zebrad changes network at its next start. Whenever the chain it holds is not the node's
+network, running or not, it publishes no tip, tip time or reorganisation, so a Testnet page
+never shows Mainnet data, also when zebrad stops before its next start. When the chain changes,
+the actor drops its caches and reopens its store at
 `paths.explorer_dir` of the node, leaving the other network's store in place, so a switch opens
 the other network's store instead of wiping this one. Prefixes, unit and upgrade heights
 come from the chain the node reports. Then `NodeRuntime.explorer`, each with its own limits and

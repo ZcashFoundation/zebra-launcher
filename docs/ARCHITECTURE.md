@@ -775,8 +775,9 @@ differs.
   and answers that node's own id only; other nodes get explorers in EXPLORER.md's P6, and
   until then their ids are answered "the Explorer reads the first node only". When the node's
   network changes while zebrad runs, zebrad keeps the old one until its next start: the
-  actor then publishes `LiveState::OtherNetwork` and reads nothing, so no page shows the
-  other network's chain under the node.
+  actor then publishes `LiveState::OtherNetwork` and reads nothing. Whenever the chain the
+  actor holds is not the node's network, running or stopped, it publishes no tip, tip time
+  or reorganisation, so no page shows the other network's chain under the node.
   The actor owns, without locks, the source (`RpcSource` over an `OwnedSession`, rebuilt
   when `rpc_addr` or `started_at` changes), the `ChainIndex`, a byte-weighted LRU (64 MiB;
   8 MiB after 10 minutes hidden), the reads in flight and the scheduler. Reads run as

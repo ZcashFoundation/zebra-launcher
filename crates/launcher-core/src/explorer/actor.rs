@@ -313,8 +313,8 @@ struct Actor<S, F> {
     recheck: bool,
     visible: bool,
     hidden_since: Option<Instant>,
-    /// The network zebrad last reported, kept while it is stopped.
-    reported: Option<Network>,
+    /// The network of the chain the cache and the index hold: the one zebrad reports, else
+    /// the node's.
     network: Network,
     reorg: Option<ReorgNotice>,
     live: watch::Sender<ExplorerLiveEvent>,
@@ -353,7 +353,6 @@ pub(super) fn start<S: ChainSource>(
         recheck: false,
         visible: false,
         hidden_since: None,
-        reported: None,
         network,
         reorg: None,
         live,
@@ -448,16 +447,25 @@ where
         self.inputs.spec.borrow().id.clone()
     }
 
+    /// The network of the chain the explorer holds, when it is not the node's: the node's
+    /// network changed, and zebrad has not been read on the new one yet.
+    fn foreign(&self) -> Option<Network> {
+        (self.network != self.inputs.spec.borrow().network).then_some(self.network)
+    }
+
     /// The network zebrad runs on, when it is not the node's: the node's network changed
     /// while zebrad ran, and zebrad takes it at its next start.
     fn other_network(&self) -> Option<Network> {
-        let reported = self
-            .inputs
-            .stats
-            .borrow()
-            .as_ref()
-            .and_then(|stats| network_of(&stats.chain))?;
-        (self.run.is_some() && reported != self.inputs.spec.borrow().network).then_some(reported)
+        self.run.as_ref().and(self.foreign())
+    }
+
+    /// The tip as the node's pages may see it: none while the explorer holds another
+    /// network's chain, whether zebrad runs or not.
+    fn node_chain(&self) -> Option<ChainView> {
+        match self.foreign() {
+            Some(_) => None,
+            None => self.chain_view(),
+        }
     }
 
     fn chain_view(&self) -> Option<ChainView> {
@@ -517,17 +525,15 @@ where
             None => self.stop_reading(),
         }
 
-        let reported = self
+        // zebrad's chain is the one it reports. Before a run's first report, and once zebrad
+        // has stopped and the monitor has cleared its statistics, it is the node's: the next
+        // run starts on the node's network.
+        let network = self
             .inputs
             .stats
             .borrow()
             .as_ref()
-            .and_then(|stats| network_of(&stats.chain));
-        if reported.is_some() {
-            self.reported = reported;
-        }
-        let network = self
-            .reported
+            .and_then(|stats| network_of(&stats.chain))
             .unwrap_or_else(|| self.inputs.spec.borrow().network);
         if network != self.network {
             // Another chain: nothing known about this one applies.
@@ -590,8 +596,9 @@ where
                 },
             }
         };
-        // The other network's tip and reorganisations are not this node's.
-        let (tip, reorg) = match other_network {
+        // The other network's tip and reorganisations are not this node's, whether zebrad
+        // runs or not.
+        let (tip, reorg) = match self.foreign() {
             Some(_) => (None, None),
             None => (self.chain_view(), self.reorg),
         };
@@ -634,7 +641,7 @@ where
             let _ = reply.send(Err(err));
             return;
         }
-        let chain = self.chain_view();
+        let chain = self.node_chain();
         match call.request {
             ExplorerRequest::Status => {
                 let live = self.live.borrow().live.clone();

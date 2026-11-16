@@ -105,7 +105,7 @@ struct Harness {
     counts: Counts,
     status: watch::Sender<Status>,
     stats: watch::Sender<Option<NodeStats>>,
-    _details: watch::Sender<Option<NodeDetails>>,
+    details: watch::Sender<Option<NodeDetails>>,
     spec: watch::Sender<NodeSpec>,
 }
 
@@ -189,7 +189,7 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
         counts,
         status: status_tx,
         stats: stats_tx,
-        _details: details_tx,
+        details: details_tx,
         spec: spec_tx,
     }
 }
@@ -697,6 +697,95 @@ async fn the_first_node_answers_by_its_own_id_on_its_own_network() {
         harness.explorer.live().borrow().node.as_str(),
         "zebrad-testnet"
     );
+}
+
+impl Harness {
+    /// zebrad stops, and the monitor clears what it read.
+    async fn stop(&self) {
+        self.status.send_replace(Status::default());
+        self.stats.send_replace(None);
+        self.details.send_replace(None);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    async fn live(&self) -> ExplorerLive {
+        let ExplorerResponse::Status(live) = self.reply(ExplorerRequest::Status).await else {
+            panic!("a status");
+        };
+        live
+    }
+}
+
+#[tokio::test]
+async fn a_network_changed_while_zebrad_is_stopped_leaves_nothing_of_the_old_chain() {
+    let harness = harness();
+    chain_pages(&harness).await;
+    harness.stop().await;
+    let live = harness.live().await;
+    assert!(
+        live.tip.is_some_and(|tip| tip.stale),
+        "a stopped node keeps its last tip: {live:?}"
+    );
+
+    // The node moves to Testnet while zebrad is stopped.
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Testnet);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        harness.live().await,
+        ExplorerLive::default(),
+        "no Mainnet tip under a Testnet node"
+    );
+
+    // zebrad starts on Testnet, and the monitor has not read it yet: the pages read Testnet,
+    // with Testnet's upgrade heights.
+    harness
+        .chain
+        .send_replace(SynthChain::new(Network::Testnet, 3_400_000, NOW));
+    harness.status.send_replace(running_since(100));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(harness.live().await, ExplorerLive::default());
+    let (_, page) = chain_pages(&harness).await;
+    assert_eq!(page.blocks[0].height, 3_400_000);
+    assert_eq!(
+        page.next_upgrade.map(|next| next.height),
+        Some(3_536_500),
+        "Testnet's next upgrade, not Mainnet's at 3,428,143"
+    );
+    let live = harness.explorer.live().borrow().live.clone();
+    assert_eq!(
+        live.tip.map(|tip| (tip.height, tip.epoch)),
+        Some((3_400_000, 0)),
+        "a new index, not Mainnet's reorganised"
+    );
+    assert_eq!(live.reorg, None);
+}
+
+#[tokio::test]
+async fn zebrad_stopped_on_the_old_network_leaves_nothing_of_it() {
+    let harness = harness();
+    chain_pages(&harness).await;
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Testnet);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        harness.live().await.state,
+        LiveState::OtherNetwork {
+            network: Network::Mainnet
+        }
+    );
+    // zebrad stops; for a moment the monitor's last statistics still say Mainnet.
+    harness.status.send_replace(Status::default());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(harness.live().await, ExplorerLive::default());
+    harness.stop().await;
+    assert_eq!(harness.live().await, ExplorerLive::default());
+    // zebrad starts again, still before the monitor reads it.
+    harness.status.send_replace(running_since(100));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(harness.live().await, ExplorerLive::default());
 }
 
 #[tokio::test]

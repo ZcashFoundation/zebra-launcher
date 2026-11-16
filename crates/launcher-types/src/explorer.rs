@@ -815,7 +815,9 @@ pub enum ExplorerErrorKind {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExplorerLive {
     pub state: LiveState,
-    /// The tip the explorer follows, once it has read one.
+    /// The tip the explorer follows, once it has read one. None while the chain it holds is
+    /// another network's than the node's, whether zebrad runs or has stopped: so are
+    /// `tip_time` and `reorg`.
     pub tip: Option<ChainView>,
     /// The tip block's time, in seconds since the Unix epoch, once the explorer has read that
     /// block.
