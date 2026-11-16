@@ -115,14 +115,22 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
         let selected = move || state.network.get() == network;
         let count = move || state.nodes_on(network).len();
         let herd = move || state.herd_of(network);
-        // The herd's sentence joins the name and tooltip, since the folded rail shows only
-        // a letter and the glyph.
+        // The herd joins the name and tooltip, since the folded rail shows only a letter and
+        // the glyph: its state in the name, which must not change with every block, and its
+        // sentence in the tooltip.
         let label = move || {
             let mut label = network_label(network, count());
-            if let Some(part) = herd_view::tab_part(herd().as_ref()) {
+            if let Some(part) = herd_view::tab_state(herd().as_ref()) {
                 label.push_str(&format!(" · {part}"));
             }
             label
+        };
+        let title = move || {
+            let mut title = network_label(network, count());
+            if let Some(part) = herd_view::tab_part(herd().as_ref()) {
+                title.push_str(&format!(" · {part}"));
+            }
+            title
         };
         let glyph = move || herd_view::glyph(herd().as_ref());
         view! {
@@ -135,7 +143,7 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
                 aria-checked=move || selected().to_string()
                 tabindex=move || if selected() { "0" } else { "-1" }
                 aria-label=label
-                title=label
+                title=title
                 on:click=move |_| state.network.set(network)
                 on:keydown=move |event: web_sys::KeyboardEvent| {
                     let by = match event.key().as_str() {

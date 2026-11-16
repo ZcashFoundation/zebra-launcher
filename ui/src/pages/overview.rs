@@ -129,16 +129,26 @@ pub fn Overview(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
 fn HerdLine() -> impl IntoView {
     let state = AppState::get();
     let herd = move || state.herd_of(state.network.get());
-    move || {
-        let herd = herd();
-        let (text, tone) = herd_view::sentence(herd.as_ref())?;
-        let glyph = herd_view::glyph(herd.as_ref());
-        Some(view! {
-            <p class=format!("herd-line {}", tone.class()) role="status">
-                {glyph.map(|glyph| view! { <span class=glyph.class() aria-hidden="true">{glyph.symbol()}</span> })}
-                <span>{text}</span>
-            </p>
-        })
+    // Only a change of the herd's state is live: the sentence names the top block, which
+    // changes with every block.
+    let announced = Memo::new(move |previous: Option<&Option<herd_view::Announcement>>| {
+        herd_view::announcement(previous.and_then(Option::as_ref), herd().as_ref())
+    });
+    view! {
+        <span class="visually-hidden" role="status">
+            {move || announced.with(|said| said.as_ref().map(|said| said.text.clone()))}
+        </span>
+        {move || {
+            let herd = herd();
+            let (text, tone) = herd_view::sentence(herd.as_ref())?;
+            let glyph = herd_view::glyph(herd.as_ref());
+            Some(view! {
+                <p class=format!("herd-line {}", tone.class())>
+                    {glyph.map(|glyph| view! { <span class=glyph.class() aria-hidden="true">{glyph.symbol()}</span> })}
+                    <span>{text}</span>
+                </p>
+            })
+        }}
     }
 }
 

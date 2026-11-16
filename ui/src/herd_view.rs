@@ -5,7 +5,7 @@
 //! none with a vote) shows nothing, so one node looks as it always did.
 
 use launcher_types::{
-    Level, NodeId,
+    Level, Network, NodeId,
     herd::{HerdState, HerdView, Vote},
 };
 
@@ -116,9 +116,65 @@ pub fn title_part(view: Option<&HerdView>, node: &NodeId) -> Option<String> {
     Some(format!("in the herd: {word}"))
 }
 
-/// What a network's tab adds to its name and tooltip: the herd's sentence.
+/// What a network's tab adds to its tooltip: the herd's sentence.
 pub fn tab_part(view: Option<&HerdView>) -> Option<String> {
     sentence(view).map(|(text, _)| text)
+}
+
+/// What a network's tab adds to its accessible name: the herd's state in a few words, after
+/// its level when that asks for attention, since the glyph is not read. No heights or times,
+/// so the name of the focused tab does not change with every block; the tooltip has the
+/// sentence ([`tab_part`]).
+pub fn tab_state(view: Option<&HerdView>) -> Option<String> {
+    let view = shown(view)?;
+    let words = match view.state {
+        HerdState::Off => return None,
+        HerdState::Checking => "not checked yet",
+        HerdState::Single => "one node checks the chain",
+        HerdState::Agreed => "the nodes agree",
+        HerdState::Degraded => "not every node agrees",
+        HerdState::Split => "the nodes disagree",
+        HerdState::Stalled => "no new block",
+    };
+    Some(match view.level.word() {
+        Some(level) if view.level >= Level::Attention => format!("{level}: {words}"),
+        _ => words.to_owned(),
+    })
+}
+
+/// What the overview's live region says: the herd's sentence as it read when the network, the
+/// herd's state or its level last changed. The sentence names the top block and how long the
+/// herd has been quiet, which change with every block or minute; a screen reader hears it
+/// again only when one of those three changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Announcement {
+    network: Network,
+    state: HerdState,
+    level: Level,
+    pub text: String,
+}
+
+/// The announcement for `view`, after `previous`: `previous` itself while the network, the
+/// state and the level are the same, else the sentence now. `None` without a herd.
+pub fn announcement(
+    previous: Option<&Announcement>,
+    view: Option<&HerdView>,
+) -> Option<Announcement> {
+    let view = shown(view)?;
+    match previous {
+        Some(previous)
+            if (previous.network, previous.state, previous.level)
+                == (view.network, view.state, view.level) =>
+        {
+            Some(previous.clone())
+        }
+        _ => Some(Announcement {
+            network: view.network,
+            state: view.state,
+            level: view.level,
+            text: view.headline.clone(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -162,6 +218,8 @@ mod tests {
             assert_eq!(node_state(view, &id), None);
             assert_eq!(title_part(view, &id), None);
             assert_eq!(tab_part(view), None);
+            assert_eq!(tab_state(view), None);
+            assert_eq!(announcement(None, view), None);
         }
     }
 
@@ -191,6 +249,56 @@ mod tests {
             None
         );
         assert_eq!(glyph(Some(&view(HerdState::Single, Level::Neutral))), None);
+    }
+
+    #[test]
+    fn the_tabs_name_says_the_state_without_a_height() {
+        assert_eq!(
+            tab_state(Some(&view(HerdState::Agreed, Level::Healthy))).as_deref(),
+            Some("the nodes agree")
+        );
+        assert_eq!(
+            tab_state(Some(&view(HerdState::Degraded, Level::Attention))).as_deref(),
+            Some("Attention: not every node agrees")
+        );
+        assert_eq!(
+            tab_state(Some(&view(HerdState::Split, Level::Problem))).as_deref(),
+            Some("Problem: the nodes disagree")
+        );
+        assert_eq!(
+            tab_state(Some(&view(HerdState::Checking, Level::Neutral))).as_deref(),
+            Some("not checked yet")
+        );
+    }
+
+    #[test]
+    fn the_live_sentence_changes_only_with_the_state_or_the_level() {
+        let first = view(HerdState::Agreed, Level::Healthy);
+        let said = announcement(None, Some(&first)).expect("a herd");
+        assert_eq!(said.text, first.headline);
+        // A new block: the same state, a new sentence. Nothing new is said.
+        let next = HerdView {
+            headline: "Your 3 Mainnet nodes agree on block 3,551,205".into(),
+            ..first.clone()
+        };
+        assert_eq!(announcement(Some(&said), Some(&next)), Some(said.clone()));
+        // A new level: the sentence as it reads now.
+        let worse = HerdView {
+            headline: "2 of your 3 Mainnet nodes agree on block 3,551,205; Zebra · Mainnet 2 is 6 blocks behind".into(),
+            ..view(HerdState::Degraded, Level::Attention)
+        };
+        let said = announcement(Some(&said), Some(&worse)).expect("a herd");
+        assert_eq!(said.text, worse.headline);
+        // The other network's herd is said too.
+        let testnet = HerdView {
+            network: Network::Testnet,
+            headline: "Your 2 Testnet nodes agree on block 4,471,230".into(),
+            ..worse.clone()
+        };
+        assert_eq!(
+            announcement(Some(&said), Some(&testnet)).map(|said| said.text),
+            Some(testnet.headline.clone())
+        );
     }
 
     #[test]

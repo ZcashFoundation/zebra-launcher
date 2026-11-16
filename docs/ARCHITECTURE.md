@@ -780,7 +780,10 @@ each node ── status, stats (best), spec ── a tip or phase changed ──
   the overview starts with the herd's sentence, each counted node's card says where it stands
   ("In the herd: agrees"), the network's tab in the sidebar has a check while the nodes agree,
   a warning mark or a cross for a problem, and a node's sidebar item has its state in its title
-  (`ui/src/herd_view.rs`, pure and tested natively). A network without a herd shows nothing.
+  (`ui/src/herd_view.rs`, pure and tested natively). The sentence names the top block, so a
+  screen reader hears it only when the herd's state or level changes (`announcement`), and
+  the tab's accessible name carries the state without heights (`tab_state`); the tooltip has
+  the sentence. A network without a herd shows nothing.
   The mock runs the same engine every 5 s over its nodes, with the scenarios of
   `ui/src/mock/agreement.rs`.
 
