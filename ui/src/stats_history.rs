@@ -377,6 +377,7 @@ mod tests {
 
     fn stats(secs: u64, height: u64) -> NodeStats {
         NodeStats {
+            best: None,
             height,
             estimated_height: 3_120_000,
             verification_progress: height as f64 / 3_120_000.0,

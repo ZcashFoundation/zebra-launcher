@@ -9,7 +9,10 @@
 //! a `nodes` list ([`NodeSpec`]); the node registry (`crate::registry`) owns
 //! that list and saves it here with [`SettingsHandle::save_nodes`].
 
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use launcher_types::{
     DEFAULT_STOP_GRACE_SECS, Network, NodeId, PortRole, Settings, is_loopback_http_url,
@@ -19,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::{
-    config, fsutil,
-    nodes::{self, NodeListError, NodeSpec},
+    config, fsutil, herd,
+    nodes::{self, NodeListError, NodeSpec, PeerCache},
     paths::Paths,
 };
 
@@ -167,9 +170,10 @@ impl LegacyNode {
     /// The first node of a launcher that ran one: `zebrad-<network>`, with
     /// its files where they have always been (the same `zebrad.toml`, the
     /// same state folder) and the same ports, the P2P one as `zebrad.toml`
-    /// gives it to zebrad.
+    /// gives it to zebrad. Its peer cache is decided from the same file.
     fn into_first_node(self, paths: &Paths) -> NodeSpec {
         let mut node = NodeSpec::first(self.network);
+        node.peer_cache = PeerCache::Undecided;
         node.data_dir = self.data_dir;
         node.autostart = self.start_node_on_launch;
         node.stop_grace_secs = if STOP_GRACE_SECS.contains(&self.stop_grace_secs) {
@@ -214,9 +218,24 @@ impl SettingsStore {
     /// first node ([`NodeSpec::first`]), whose files stay where they are.
     /// A migrated file is written back; if the write fails the migrated
     /// settings are still used and saved on the next update.
+    ///
+    /// A node saved before Zeal set its `network.cache_dir` gets a peer cache
+    /// of its own, or keeps the value its `zebrad.toml` gives
+    /// ([`herd::peers::adopt`]); [`Self::open_with`] also copies zebrad's
+    /// shared peer file into the node's own folder.
     pub fn open(paths: &Paths) -> Result<SettingsHandle, SettingsError> {
+        Self::open_with(paths, None)
+    }
+
+    /// Like [`Self::open`], with zebrad's default cache folder
+    /// (`firstrun::LegacyLocations::zebra_cache_dir`), whose shared peer
+    /// file a node moving to a peer cache of its own starts from.
+    pub fn open_with(
+        paths: &Paths,
+        zebra_cache_dir: Option<&Path>,
+    ) -> Result<SettingsHandle, SettingsError> {
         let path = paths.settings_file();
-        let (settings, nodes, migrated) = load(paths)?;
+        let (settings, nodes, migrated) = load(paths, zebra_cache_dir)?;
         if migrated {
             match encode(&settings, &nodes) {
                 Ok(json) => match fsutil::write_atomic(&path, &json) {
@@ -386,6 +405,7 @@ fn stored_schema_version(bytes: &[u8]) -> u64 {
 fn parse(
     bytes: &[u8],
     paths: &Paths,
+    zebra_cache_dir: Option<&Path>,
 ) -> Result<(Settings, Vec<NodeSpec>, bool), Box<dyn std::error::Error>> {
     let stored_version = stored_schema_version(bytes);
     let FileIn {
@@ -417,6 +437,13 @@ fn parse(
         }
     }
     nodes::check_list(&nodes)?;
+    for node in &mut nodes {
+        let decided = herd::peers::adopt(node, paths, zebra_cache_dir);
+        if decided != node.peer_cache {
+            node.peer_cache = decided;
+            migrated = true;
+        }
+    }
     if migrated {
         settings.schema_version = Settings::SCHEMA_VERSION;
     }
@@ -424,7 +451,10 @@ fn parse(
 }
 
 /// The settings and nodes in `launcher.json` and whether they were migrated.
-fn load(paths: &Paths) -> Result<(Settings, Vec<NodeSpec>, bool), SettingsError> {
+fn load(
+    paths: &Paths,
+    zebra_cache_dir: Option<&Path>,
+) -> Result<(Settings, Vec<NodeSpec>, bool), SettingsError> {
     let path = paths.settings_file();
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
@@ -434,7 +464,7 @@ fn load(paths: &Paths) -> Result<(Settings, Vec<NodeSpec>, bool), SettingsError>
         }
         Err(err) => return Err(err.into()),
     };
-    match parse(&bytes, paths) {
+    match parse(&bytes, paths, zebra_cache_dir) {
         Ok(loaded) => Ok(loaded),
         Err(err) => {
             let backup = corrupt_path(&path);
@@ -727,13 +757,26 @@ mod tests {
         // they are, and the state is in the chosen folder.
         assert_eq!(node.paths(&paths), paths.launcher_node());
         assert_eq!(node.state_dir(&paths), chosen.join("state"));
-        // Nothing in zebrad.toml changes: the managed keys are the ones it has.
-        assert_eq!(node.managed_keys(&paths), keys);
-        config::ensure(&node.paths(&paths), &node.managed_keys(&paths)).expect("ensure");
+        // The managed keys are the ones zebrad.toml has, and the node gets a
+        // peer cache of its own: that key is the only change.
+        assert_eq!(node.peer_cache, PeerCache::Own);
+        let own_cache = paths.data_dir().to_path_buf();
         assert_eq!(
-            fs::read_to_string(paths.launcher_node().zebrad_config()).expect("read"),
-            zebrad_toml
+            node.managed_keys(&paths),
+            ManagedKeys {
+                peer_cache_dir: Some(own_cache.clone()),
+                ..keys
+            }
         );
+        config::ensure(&node.paths(&paths), &node.managed_keys(&paths)).expect("ensure");
+        let written_toml = fs::read_to_string(paths.launcher_node().zebrad_config()).expect("read");
+        let mut doc: toml_edit::DocumentMut = written_toml.parse().expect("toml");
+        assert_eq!(doc["network"]["cache_dir"].as_str(), own_cache.to_str());
+        doc["network"]
+            .as_table_like_mut()
+            .expect("table")
+            .remove("cache_dir");
+        assert_eq!(doc.to_string(), zebrad_toml, "nothing else changes");
         // The migration is written back once, as version 3.
         let written = fs::read(paths.settings_file()).expect("read");
         assert_eq!(stored_schema_version(&written), 3);
@@ -765,6 +808,65 @@ mod tests {
             node.autostart,
             "a version 2 file without the key started the node"
         );
+    }
+
+    #[tokio::test]
+    async fn nodes_saved_before_get_their_own_peer_cache_unless_their_file_says_otherwise() {
+        let (dir, paths) = paths();
+        let shared = dir.path().join("cache/zebra");
+        let shared_file = herd::peers::peer_file(&shared, Network::Mainnet);
+        fs::create_dir_all(shared_file.parent().expect("parent")).expect("mkdir");
+        fs::write(&shared_file, "[\"192.0.2.7:8233\"]").expect("shared peers");
+        // A version 2 node whose zebrad.toml turns the peer cache off keeps it off.
+        let off = "[network]\nnetwork = \"Mainnet\"\ncache_dir = false\n";
+        version_2_install(
+            &paths,
+            r#"{ "schema_version": 2, "first_run_done": true }"#,
+            Some(off),
+        );
+        let store = SettingsStore::open_with(&paths, Some(&shared)).expect("open");
+        let [node] = store.nodes().try_into().expect("one node");
+        assert_eq!(node.peer_cache, PeerCache::Kept);
+        assert_eq!(node.managed_keys(&paths).peer_cache_dir, None);
+        config::ensure(&node.paths(&paths), &node.managed_keys(&paths)).expect("ensure");
+        assert_eq!(
+            config::read_peer_cache(&paths.launcher_node()).expect("read"),
+            config::PeerCacheKey::Off,
+            "the key stays the user's"
+        );
+        drop(store);
+
+        // A version 3 list from before the key: the second node's file sets
+        // nothing, so it moves to its own folder with a copy of the shared file.
+        let second = NodeSpec {
+            id: launcher_types::NodeId::new("zebrad-mainnet-2").expect("id"),
+            name: "Zebra · Mainnet 2".into(),
+            layout: NodeLayout::Folder,
+            ..NodeSpec::first(Network::Mainnet)
+        };
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(paths.settings_file()).expect("read")).expect("json");
+        let mut listed = serde_json::to_value(&second).expect("node");
+        listed.as_object_mut().expect("object").remove("peer_cache");
+        json["nodes"].as_array_mut().expect("nodes").push(listed);
+        fs::write(paths.settings_file(), json.to_string()).expect("write");
+        let store = SettingsStore::open_with(&paths, Some(&shared)).expect("reopen");
+        let nodes = store.nodes();
+        assert_eq!(nodes[0].peer_cache, PeerCache::Kept);
+        assert_eq!(nodes[1].peer_cache, PeerCache::Own);
+        let folder = paths.node_folder(&second.id).data_dir().to_path_buf();
+        assert_eq!(
+            nodes[1].managed_keys(&paths).peer_cache_dir.as_deref(),
+            Some(folder.as_path())
+        );
+        assert_eq!(
+            fs::read_to_string(herd::peers::peer_file(&folder, Network::Mainnet)).expect("copied"),
+            "[\"192.0.2.7:8233\"]"
+        );
+        // The decision is written back, so it is made once.
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(paths.settings_file()).expect("read")).expect("json");
+        assert_eq!(written["nodes"][1]["peer_cache"], "own");
     }
 
     #[tokio::test]

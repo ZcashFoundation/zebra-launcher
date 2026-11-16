@@ -816,6 +816,7 @@ mod tests {
             managed,
             BTreeSet::from([
                 ("network", "network"),
+                ("network", "cache_dir"),
                 ("rpc", "listen_addr"),
                 ("rpc", "enable_cookie_auth"),
                 ("rpc", "cookie_dir"),
@@ -1468,14 +1469,9 @@ enabled = false
     fn values_are_written_with_their_toml_type() {
         let mut form = FormState::default();
         form.set(("state", "ephemeral"), Some("true".to_owned()));
-        form.set(("network", "cache_dir"), Some("false".to_owned()));
         form.set(("mempool", "eviction_memory_time"), Some("30m".to_owned()));
         form.set(("health", "listen_addr"), Some("[::1]:8080".to_owned()));
         let rendered = render_config("", &form).expect("renders");
-        assert!(
-            rendered.contains("[network]\ncache_dir = false\n"),
-            "{rendered}"
-        );
         assert!(
             rendered.contains("[state]\nephemeral = true\n"),
             "{rendered}"
@@ -1495,14 +1491,24 @@ enabled = false
                 .expect("parses")
         );
 
+        // The peer cache is the launcher's: the form leaves it as written.
         form.set(
             ("network", "cache_dir"),
             Some("/var/cache/zebra".to_owned()),
         );
         let rendered = render_config(&rendered, &form).expect("renders");
-        assert!(
-            rendered.contains("cache_dir = \"/var/cache/zebra\"\n"),
-            "{rendered}"
+        assert!(!rendered.contains("cache_dir"), "{rendered}");
+        // A value that is a boolean or a path is written with its own type.
+        let bool_or_path = |text| {
+            typed_item(Kind::BoolOrPath, text)
+                .expect("typed")
+                .to_string()
+        };
+        assert_eq!(bool_or_path("false").trim(), "false");
+        assert_eq!(bool_or_path("true").trim(), "true");
+        assert_eq!(
+            bool_or_path("/var/cache/zebra").trim(),
+            "\"/var/cache/zebra\""
         );
     }
 

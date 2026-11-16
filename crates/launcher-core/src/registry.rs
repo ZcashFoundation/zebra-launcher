@@ -31,8 +31,8 @@ use std::{
 };
 
 use launcher_types::{
-    MetricsSnapshot, NodeDetails, NodeDraft, NodeId, NodeInfo, NodeProgram, NodeResources,
-    NodeStats, NodeUpdate, Phase, PortRole, Settings, ZebradChannel,
+    ConfigDocument, MetricsSnapshot, NodeDetails, NodeDraft, NodeId, NodeInfo, NodeProgram,
+    NodeResources, NodeStats, NodeUpdate, Phase, PortRole, Settings, ZebradChannel,
 };
 use tokio::{
     sync::{OwnedSemaphorePermit, mpsc, oneshot, watch},
@@ -46,7 +46,7 @@ use crate::{
     gates::NodeGates,
     metrics::poller,
     monitor,
-    nodes::{self, NodeError, NodeLayout, NodeSpec},
+    nodes::{self, NodeError, NodeLayout, NodeSpec, PeerCache},
     paths::{NodePaths, Paths},
     pidfile, resources,
     runtime::{self, NodeActors},
@@ -330,6 +330,10 @@ enum Cmd {
         dir: Option<String>,
         reply: Reply<NodeInfo>,
     },
+    OwnPeerCache {
+        id: NodeId,
+        reply: Reply<()>,
+    },
     Remove {
         id: NodeId,
         delete_data: bool,
@@ -586,6 +590,37 @@ impl RegistryHandle {
         let id = id.clone();
         let info = self.ask(|reply| Cmd::SetDataDir { id, dir, reply }).await?;
         Ok((info, free))
+    }
+
+    /// Replaces the node's `zebrad.toml` with a fresh minimal file holding only the managed
+    /// keys ([`config::reset`]), keeping the old file as `zebrad.toml.bak`, and returns the
+    /// new document. Only while the node is stopped or failed: it holds the node's data and
+    /// config permits, so zebrad cannot start in the middle and no apply runs. The new file
+    /// has no `network.cache_dir` of the user's, so a node that kept its own
+    /// ([`PeerCache::Kept`]) gets its own folder from now on, as a new node does, and its
+    /// spec is saved with [`PeerCache::Own`].
+    pub async fn reset_config(&self, id: &NodeId) -> Result<ConfigDocument, NodeError> {
+        let node = self.node(id)?;
+        let _data = node.gates.data_change_permit().map_err(NodeError::Failed)?;
+        let _config = node.gates.try_config_permit().map_err(NodeError::Failed)?;
+        let spec = node.spec();
+        let keys = NodeSpec {
+            peer_cache: PeerCache::Own,
+            ..spec.clone()
+        }
+        .managed_keys(&node.launcher);
+        let files = node.paths.clone();
+        let document = blocking(move || config::reset(&files, &keys).map_err(io::Error::other))
+            .await
+            .map_err(|err| NodeError::Failed(err.to_string()))?;
+        if spec.peer_cache != PeerCache::Own {
+            let id = id.clone();
+            if let Err(err) = self.ask(|reply| Cmd::OwnPeerCache { id, reply }).await {
+                // The file points at the node's own folder anyway; Zeal leaves the key alone.
+                tracing::warn!(%err, "the reset zebrad.toml has the node's own peer cache, but the node list was not saved");
+            }
+        }
+        Ok(document)
     }
 
     /// Removes a node: it is stopped (killed after its grace period) and
@@ -961,6 +996,10 @@ impl Actor {
                 let result = self.set_data_dir(&id, dir).await;
                 let _ = reply.send(result);
             }
+            Cmd::OwnPeerCache { id, reply } => {
+                let result = self.own_peer_cache(&id).await;
+                let _ = reply.send(result);
+            }
             Cmd::Remove {
                 id,
                 delete_data,
@@ -1151,6 +1190,29 @@ impl Actor {
         tracing::info!(node = %info.id, data_dir = %info.data_dir, "data folder chosen");
         self.publish();
         Ok(info)
+    }
+
+    /// Saves that Zeal sets the node's `network.cache_dir` from now on.
+    async fn own_peer_cache(&mut self, id: &NodeId) -> Result<(), NodeError> {
+        if self.closed {
+            return Err(NodeError::Closed);
+        }
+        let index = self.index_of(id)?;
+        let current = self.nodes[index].spec.borrow().clone();
+        if current.peer_cache == PeerCache::Own {
+            return Ok(());
+        }
+        let next = NodeSpec {
+            peer_cache: PeerCache::Own,
+            ..current
+        };
+        let mut specs = self.specs();
+        specs[index] = next.clone();
+        self.save(specs).await?;
+        self.nodes[index].spec.send_replace(next);
+        tracing::info!(node = %id, "the node keeps its peers in its own folder");
+        self.publish();
+        Ok(())
     }
 
     fn begin_remove(&mut self, id: &NodeId, delete_data: bool, reply: Reply<u64>) {

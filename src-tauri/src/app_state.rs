@@ -11,6 +11,7 @@ use std::{
 
 use launcher_core::{
     firstrun::{LegacyLocations, SizeCache},
+    herd::HerdHandle,
     paths::Paths,
     registry::{NodeHandle, RegistryHandle},
     settings::SettingsHandle,
@@ -33,6 +34,8 @@ pub struct AppState {
     /// first reading and on a platform that is not measured yet. Each node's
     /// process tree is in the registry, with its other handles.
     pub machine: watch::Receiver<Option<MachineResources>>,
+    /// Each network's herd: whether the nodes agree on one chain.
+    pub herd: HerdHandle,
     /// Makes the exit flow run once.
     pub exit: Arc<ExitGuard>,
     /// Set once the tray icon exists, so closing the window may hide it
@@ -52,12 +55,14 @@ impl AppState {
         settings: SettingsHandle,
         sizes: Arc<SizeCache>,
         machine: watch::Receiver<Option<MachineResources>>,
+        herd: HerdHandle,
     ) -> Self {
         Self {
             paths,
             registry,
             settings,
             machine,
+            herd,
             exit: Arc::new(ExitGuard::default()),
             tray_ready: Arc::new(AtomicBool::new(false)),
             sizes,

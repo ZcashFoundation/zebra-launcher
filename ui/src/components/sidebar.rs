@@ -10,6 +10,7 @@ use crate::{
     app::{AppState, Tab},
     charts::widgets::focus_sibling,
     components::zebrad_channel::ZebradChannelChip,
+    herd_view,
     node_state::NodeState,
     node_summary::summarize,
 };
@@ -113,7 +114,25 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
     let network_tab = move |network: Network| {
         let selected = move || state.network.get() == network;
         let count = move || state.nodes_on(network).len();
-        let label = move || network_label(network, count());
+        let herd = move || state.herd_of(network);
+        // The herd joins the name and tooltip, since the folded rail shows only a letter and
+        // the glyph: its state in the name, which must not change with every block, and its
+        // sentence in the tooltip.
+        let label = move || {
+            let mut label = network_label(network, count());
+            if let Some(part) = herd_view::tab_state(herd().as_ref()) {
+                label.push_str(&format!(" · {part}"));
+            }
+            label
+        };
+        let title = move || {
+            let mut title = network_label(network, count());
+            if let Some(part) = herd_view::tab_part(herd().as_ref()) {
+                title.push_str(&format!(" · {part}"));
+            }
+            title
+        };
+        let glyph = move || herd_view::glyph(herd().as_ref());
         view! {
             <button
                 type="button"
@@ -124,7 +143,7 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
                 aria-checked=move || selected().to_string()
                 tabindex=move || if selected() { "0" } else { "-1" }
                 aria-label=label
-                title=label
+                title=title
                 on:click=move |_| state.network.set(network)
                 on:keydown=move |event: web_sys::KeyboardEvent| {
                     let by = match event.key().as_str() {
@@ -140,6 +159,14 @@ pub fn Sidebar(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
                 <span class="net-tab-name">{network.as_str()}</span>
                 <span class="net-tab-short" aria-hidden="true">{&network.as_str()[..1]}</span>
                 <span class="net-tab-count">{count}</span>
+                {move || {
+                    glyph()
+                        .map(|glyph| {
+                            view! {
+                                <span class=glyph.class() aria-hidden="true">{glyph.symbol()}</span>
+                            }
+                        })
+                }}
             </button>
         }
     };
@@ -213,6 +240,10 @@ fn NodeItem(node: NodeState) -> impl IntoView {
             name
         });
         let mut text = format!("{} · {}", name, summary.with(|s| s.text.clone()));
+        let (network, id) = node.info.with(|info| (info.network, info.id.clone()));
+        if let Some(part) = herd_view::title_part(state.herd_of(network).as_ref(), &id) {
+            text.push_str(&format!(" · {part}"));
+        }
         match unseen() {
             0 => {}
             1 => text.push_str(" · 1 new problem in the log"),

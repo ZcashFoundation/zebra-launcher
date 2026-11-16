@@ -2,7 +2,10 @@
 
 ## Status
 
-> **Proposal, 2026-11-03.** A design for review before any code. It builds on
+> **Proposal, 2026-11-03; first slice built, 2026-11-16.** H0 (independent nodes) and the
+> agreement core of H1 and H2 (the engine, the live actors for zebrad herds, the overview's
+> sentence and the sidebar's marks) are built; [Built so far](#built-so-far) says what landed
+> and where the code differs from this design. The rest is still a proposal. It builds on
 > [MULTI-NODE.md](MULTI-NODE.md) (the node registry, kinds, ports and phases) and describes
 > the launcher's current shape where needed. [ARCHITECTURE.md](ARCHITECTURE.md) stays the
 > description of what is built and is updated phase by phase as this lands. Facts marked
@@ -20,6 +23,102 @@ small server, how Zeal checks that the nodes are on one chain and reach the netw
 different peers, and how zeeder fits in as an optional seeder. The block explorer, per-node
 resource monitoring and the Zallet wallet have designs of their own; this one says what they
 take from the herd.
+
+### Built so far
+
+**H0, independent nodes.**
+
+- `network.listen_addr` was already managed per node by MULTI-NODE phase 2a: the port is the
+  node's, written as `[::]:<port>` when the key is missing and the port is not the network's
+  default, and an address the user wrote stays. A v2 node's custom listen address already became its stored P2P port on migration.
+  Neither changed.
+- `network.cache_dir` is now managed: the node's own folder (`NodePaths::data_dir`), so its
+  peer file is `<folder>/network/<net>.peers` (`herd::peers::peer_file`, pinned by a test).
+  For the first node that folder is the launcher's data directory. `NodeSpec.peer_cache`
+  records who sets the key (`own` or `kept`). The decision is made when the node list loads,
+  for every node saved without the field, a v2 node or a phase 2a node alike: `false` or a
+  folder stays the user's and is left alone; no key or `true` becomes the node's own folder
+  with a copy of the shared peer file, made once and never over an existing file. The app
+  gives `SettingsStore::open_with` zebrad's default cache folder for the copy. A node whose
+  configuration change a launcher exit interrupted is decided at the next launch, from the
+  file the rollback restores. Reset config gives a node that kept its value its own folder,
+  since the minimal file has none of the user's. The configuration form shows the key as
+  managed for every node, since the UI is not told which nodes kept their value; its note
+  says that a node that had `false` or a folder keeps it, and that the text editor changes
+  it.
+- `assign_ports` never moves a port onto 8233 or 18233, never gives those to another role,
+  and never gives a P2P port one of the ports zebra-network refuses to dial
+  (`RESERVED_PORTS`, `REFUSED_P2P_PORTS` in launcher-types). `ports_move_out_of_each_others_way`
+  expects `[28233, 18232, 19999]` for the raw function; `node_ports`, which already skipped
+  the other network's defaults, still gives a second Mainnet zebrad 28233 and 28232.
+- Not yet: the peer target of 12 for archives after the primary, Reset peers, and Zakura's
+  `identity_dir` (with Zakura).
+
+**H1 and H2, the agreement core.**
+
+- The move-only commit for `Level`, `STALE_AFTER`, `NO_PEERS_FOR` and `SYNCED_PROGRESS`, then
+  Level's serde derives (and an order by gravity), as planned.
+- The types are in `launcher_types::herd`. `NodeStats.best` is a `BlockRef` from
+  `getblockchaininfo`, as planned; no extra call. Heights are `u32`; a fork's or a race's
+  height (`Relation::Forked.at`, `Branch.fork_at`) is the first block that differs, the one
+  the sentences name ("since block H"). For a deep fork it can be only a bound, since the
+  search stops 1,000 blocks below the lower top, so every sentence and word for one reads
+  "since block H or earlier". The herd's sentence names the lowest fork, and reads "or
+  earlier" when any fork in the split is deep, since a deep one may start below it. A deep
+  fork's bound stays while the pair still differs there and one block below, so it does not
+  rise with every block; an engine started again finds a new one. `Family` has a variant per
+  zebrad channel, so a split between channels reads as implementations that disagree.
+  `ExcludedWhy` adds `Starting`, `Stopping` and `NoStats`. `HerdView` carries the sentence
+  (`headline`) and the branches; no checks, diversity, census, validator line, alerts or
+  events yet.
+- The engine is the module `launcher_herd::herd` beside the public services' rules (`roles`,
+  `spacing`, `search`, `engine`, `verdict`, and `sim`, a simulated chain behind the feature of
+  that name for other crates' tests), not the `agreement/` folder the layout above shows. Its
+  API is `begin`, `answer` and `finish` as designed, plus `round` for the mock and the tests;
+  there is no `RoundId`: answers to probes the current round did not ask are ignored. Probes
+  are `getblockhash` only (`Probe { node, height }`).
+- Placement asks the largest branch's top node first and stops at the first match. The main
+  branch is the branch with the most nodes (then the higher top, then the smaller id); a
+  branch's support counts its nodes through probation above the fork. A node whose probes
+  failed in two rounds reads "not answering" and is set aside for 30 s, so the nodes below it
+  are placed without it, then asked again; the design has no such rule. A node's probation
+  runs against the top of its own branch, so a node first seen on a fork of its own is judged
+  forked, not catching up. A change of state waits for the 10 s, two-round debounce, except
+  entering or leaving Excluded, entering Unknown, and leaving probation, which apply at once.
+  A round with no node placed forgets the top, so time with every node stopped is no herd
+  stall.
+- Not yet: the stall of one family ("Your Zebra nodes stopped at block H while Zakura moved
+  on", in Support and splits and Example 5; each node stuck there reads as stuck on its
+  own), the herd stall's sentence about peers ("Your nodes stopped hearing from their
+  peers…" or "Your nodes still hear from 58 peers…"; the stall reads "No new block on your
+  Mainnet nodes for 6 min" alone), and the note on a fork within one block of an activation
+  height ("at NU7's activation: this node may not know NU7").
+- S_eff is measured as designed once 30 top blocks arrived; until then it is S (no
+  `getblockheader` reads). Wake detection restarts the timers and the herd's grace; the
+  nodes' "catching up after sleep" word is not there.
+- The actors are as designed, without `HerdCmd`, the `broadcast<ChainEvent>`, `herd_event`,
+  `herd_events`, `herd_report`, Restart one by one, Reset peers, staggered starts, the
+  heavy-job gate or the local counts of conditions. Both networks' actors start at launch and
+  follow the registry's node list as a `watch<Vec<MemberInput>>`, not `MemberAdded`,
+  `MemberChanged` and `MemberRemoved` on an mpsc. A panicked actor is started again with a
+  fresh engine, and the launcher line "herd checks restarted", by a task beside it that holds
+  the view's sender, not by the registry. The view is published when more than its time
+  changed; the `herd` event is throttled to once a second per network. The tests drive the
+  actors with a scripted `TipSource` over the simulated chain; fake-zebrad has no
+  `getblockhash` yet, and the Regtest contract test is not written.
+- The UI shows, for the network the window is scoped to, the herd's sentence at the top of the
+  overview, each witness's word on its card ("In the herd: agrees"), a check, warning or cross
+  mark on the network's tab with the sentence in its tooltip, and a node's state in its sidebar
+  item's title. Not yet: the panel's three checks, the herd page, the alert bar, the sidebar
+  word replacing "at tip", the tray line, the node page's card and the health verdict rules.
+- The mock runs the engine every 5 s per network over its nodes and answers from a scripted
+  chain (`ui/src/mock/agreement.rs`); ten minutes of rounds run before the first view. Its
+  scenarios are `?herd&agree` and `&agree=behind` (`lag` too), `stall`, `fork`, `race`,
+  `split`, `impl`, `channels` (Zebra Stable against Zebra Beta), `restart`, `deepfork`,
+  `silent`, `herdstall`, `replaced` (stuck on a block the others replaced), `pair` (zebrad and
+  Zakura alone, split) and `otherchain` (catching up on another chain); the others of the
+  list in [Testing](#testing), `?fast` and the herd presets come with the phases that need
+  them.
 
 ## Goals and non-goals
 
@@ -199,10 +298,11 @@ path checks it again:
 
 ### Ports: a fix first
 
-`assign_ports` moves a second Mainnet node's 8233 up to 18233 today (the test
+Built in H0 (see [Built so far](#built-so-far)). Before it, `assign_ports` moved a second
+Mainnet node's 8233 up to 18233 (the test
 `ports_move_out_of_each_others_way` expects `[18233, 18232, 19999]`), which takes Testnet's
 default port and leaves no default port for a later Testnet primary listener. Port
-assignment gains a reserved list:
+assignment has a reserved list:
 
 - 8233 and 18233 are kept for each network's primary listener, or for a seeder that claims one.
   The reservation covers every port role. Zebend's RPC, which its project puts on
@@ -398,8 +498,12 @@ taken together), and every 5 s for the timers.
 
 Load: each node allows two probe calls in flight (a `Semaphore`), each with a 3 s timeout, so
 probes never queue behind the monitor's poll. In the steady state a round costs about one
-`getblockhash` per node behind the top, about once per block. Answers more than 1,000 blocks
-below the top are cached across rounds, since nothing that deep changes.
+`getblockhash` per node behind the top, about once per block. A node's answers more than
+1,000 blocks below its tip are cached across rounds, since nothing that deep changes. When its
+tip changes, an answer stays only if it is that far below the old tip too: between two rounds
+a node can reorganize and then climb past an answer it gave on the chain it left. A node left
+out of a round (stopped, restarting, not answering or set aside) loses its answers, since its
+chain may change while it is away, for example with another data folder.
 
 ### The fork search
 
@@ -463,7 +567,7 @@ current numbers. Excluded applies at once.
 | Racing | off the main branch, where the longer side is 1 block past the fork point at any age, or 2 blocks for less than 3 S | "agrees"; the event log says "competing block at H (normal)" | ok |
 | Lagging | past probation, on the main branch, more than 2 blocks behind for 4 S, and still advancing | "15 blocks behind" | attention; a problem at more than 12 behind for 12 S |
 | Stalled | tip unchanged for 5 S while the main branch gained 3 or more blocks. This includes a node still holding one block the others replaced: it is placed at the fork point and judged like a node behind, its unchanged time runs from when it took that block, and until 5 S have passed it keeps its last state | "stuck at block H", "stuck on block H, which your other nodes replaced" | attention; a problem at 24 S |
-| Forked | off the main branch with a branch of its own at least 2 blocks long, beyond the race tolerance (the longer side 3 or more blocks past the fork point, or 2 for 3 S) | "on a different chain since block H" | a problem, shown first if the fork is deep, or if a witness reports the other branch `invalid` |
+| Forked | off the main branch with a branch of its own at least 2 blocks long, beyond the race tolerance (the longer side 3 or more blocks past the fork point, or 2 for 3 S) | "on a different chain since block H"; for a deep fork "since block H or earlier" | a problem, shown first if the fork is deep, or if a witness reports the other branch `invalid` |
 | Rejected (validators) | stuck at H while its parent is 3 or more blocks past H for 3 S | "zcashd rejects block H+1" | a problem, shown first once its `getchaintips` shows H+1 `invalid` (unconfirmed for the compatibility build) or the parent is 12 blocks past |
 | Unknown | probes failed for 2 rounds, or a sudden genesis tip | "not answering" | attention after 30 s |
 
@@ -1274,9 +1378,9 @@ A "Herd" item under the network's Overview in the sidebar.
 
 ### Sidebar, tray and node pages
 
-- **Sidebar.** The network's tab gets a check or warning glyph. A witness at the tip shows its
-  herd word instead of "at tip" ("agrees", "6 behind", "stuck", "other chain"), and its dot
-  takes that word's tone.
+- **Sidebar.** The network's tab gets a check, warning or cross glyph. A witness at the tip
+  shows its herd word instead of "at tip" ("agrees", "6 behind", "stuck", "other chain"), and
+  its dot takes that word's tone.
 - **Tray.** The tooltip on macOS and Windows reads "Zeal: 4 running · Mainnet: nodes agree".
   Linux's tray has no tooltip (`src-tauri/src/tray.rs`), so every OS also gets a disabled menu
   line: "Mainnet: 3 of 3 nodes agree", or "Mainnet: nodes disagree — Open…".
@@ -1443,9 +1547,9 @@ screenshots, and ARCHITECTURE.md updated for what landed.
 
 | Phase | Ships | Needs (MULTI-NODE.md phases) | Screenshots from |
 | --- | --- | --- | --- |
-| **H0 Independent nodes** | a per-node `network.cache_dir`, with the shared file copied once on migration; a managed per-node `network.listen_addr`; a v2 node keeping its own `network.cache_dir` (`false` or a custom path) and listen address on migration; `assign_ports` keeping 8233 and 18233 for primary listeners, in every port role, and skipping refused ports; a peer target of 12 for every zebrad archive after the primary, written when it is added; Zakura's `identity_dir` when Zakura lands | rides with phase 2, so a second zebrad never shares the first one's peer cache | the add-node dialog's port line showing 28233 for a second Mainnet node, in the mock without `?herd` (opened from Settings → Nodes, phase 2's single-node entry point; with `?herd`, Zakura · Mainnet already holds 28233 and a new Mainnet node gets 38233 before and after H0); `ports_move_out_of_each_others_way` expects P2P 28233 for a second Mainnet node |
-| **H1 The herd in the mock** | first a move-only commit that moves `Level` and its `impl` from `ui/src/health.rs` to `launcher-types` (re-exported from `ui::health`), with `STALE_AFTER` and `NO_PEERS_FOR` from the same file and `SYNCED_PROGRESS` from `ui/src/format.rs`, then a commit that adds the serde derives the herd types need; `launcher-herd` (roles, spacing, the engine, diversity, alerts, plans, the wallet projection, the report); the panel, the herd page, the alert bar, the sidebar words and the setup flow, all against the mock. Users see nothing new | phase 1 (merged); can run beside phase 2 | `?herd=desktop&agree=fork`, `?herd=desktop&agree=impl`, `?setup&machine=mac` |
-| **H2 Live agreement for zebrad herds** | `NodeStats.best`; the agreement actor; the `herd` and `herd_event` events; the commands `get_herd`, `herd_events`, `herd_report`, `restart_one_by_one` and `reset_peers`; Reset peers without a census (`use_census` stays false until H5); the panel and page go live; the node states in the health verdict; time rules from S_eff, `STALL_AT_TIP` included; staggered starts and Restart one by one; wake detection; the Regtest contract test; the local counts of conditions that fired | phase 2 | a release zebrad beside a development build on every OS, with `?herd=mac` |
+| **H0 Independent nodes** (built, but the peer target and Zakura's identity) | a per-node `network.cache_dir`, with the shared file copied once on migration; a managed per-node `network.listen_addr`; a v2 node keeping its own `network.cache_dir` (`false` or a custom path) and listen address on migration; `assign_ports` keeping 8233 and 18233 for primary listeners, in every port role, and skipping refused ports; a peer target of 12 for every zebrad archive after the primary, written when it is added; Zakura's `identity_dir` when Zakura lands | rides with phase 2, so a second zebrad never shares the first one's peer cache | the add-node dialog's port line showing 28233 for a second Mainnet node, in the mock without `?herd` (opened from Settings → Nodes, phase 2's single-node entry point; with `?herd`, Zakura · Mainnet already holds 28233 and a new Mainnet node gets 38233 before and after H0); `ports_move_out_of_each_others_way` expects P2P 28233 for a second Mainnet node |
+| **H1 The herd in the mock** (the agreement core built: the move, the engine, the overview's sentence and the sidebar's marks, the `agree=` scenarios) | first a move-only commit that moves `Level` and its `impl` from `ui/src/health.rs` to `launcher-types` (re-exported from `ui::health`), with `STALE_AFTER` and `NO_PEERS_FOR` from the same file and `SYNCED_PROGRESS` from `ui/src/format.rs`, then a commit that adds the serde derives the herd types need; `launcher-herd` (roles, spacing, the engine, diversity, alerts, plans, the wallet projection, the report); the panel, the herd page, the alert bar, the sidebar words and the setup flow, all against the mock. Users see nothing new | phase 1 (merged); can run beside phase 2 | `?herd=desktop&agree=fork`, `?herd=desktop&agree=impl`, `?setup&machine=mac` |
+| **H2 Live agreement for zebrad herds** (the core built: `NodeStats.best`, the actor, the `herd` event, `get_herd`, S_eff, wake detection) | `NodeStats.best`; the agreement actor; the `herd` and `herd_event` events; the commands `get_herd`, `herd_events`, `herd_report`, `restart_one_by_one` and `reset_peers`; Reset peers without a census (`use_census` stays false until H5); the panel and page go live; the node states in the health verdict; time rules from S_eff, `STALL_AT_TIP` included; staggered starts and Restart one by one; wake detection; the Regtest contract test; the local counts of conditions that fired | phase 2 | a release zebrad beside a development build on every OS, with `?herd=mac` |
 | **H3 Pruned nodes and recommended herds (Linux)** | storage, origin and roles in the spec, with `validate_spec`; Zakura archive and pruned, with their managed keys and their peer targets (16, or 25 for a primary archive), written when each is added; the snapshot flow with its trust wording and recorded origin, and the download (below the table); the runtime role check (the monitor decodes `pruned` and `pruneheight`); `getchaintips` corroboration; the heavy-job gate and `start_now`; disk estimates per role; `MachineProfile` and the setup flow with a zakurad the user picks, with `machine_profile`, `recommend_herd` and `apply_herd_plan` | phase 3 (Zakura) | `?herd=laptop`, `?setup&machine=laptop`, `&agree=queued` |
 | **H4 Peer diversity** | the flags and "may be cut off"; spreading the seeders; the 24-hour inbound record; the Reach section and its events | H2 | `&agree=eclipse`, `&agree=thin` |
 | **H5 The census** | the zeeder kind in census mode; fixed port claims and the 8233 dialog; census runs and the census card, with `run_census`; peer slices for Reset peers (`use_census`) and new nodes; the upstream asks filed | phase 4 (the adapter machinery) and H4 | `?seeder=census`, `?seeder=portclash` |

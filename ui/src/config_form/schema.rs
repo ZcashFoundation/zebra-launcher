@@ -203,7 +203,11 @@ pub const FIELDS: &[Field] = &[
               uses zebrad's cache directory, false keeps no peer cache, and a path uses that \
               folder. The cache lets the node reconnect quickly even when the DNS seeders are \
               unavailable.",
-        control: Control::User,
+        control: Control::Managed {
+            note: "The launcher points each node at its own folder, so your nodes find \
+                   different peers. A node that had false or a folder of its own before keeps \
+                   that value; change it in the text editor.",
+        },
     },
     Field {
         section: "network",

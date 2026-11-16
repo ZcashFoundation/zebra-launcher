@@ -270,20 +270,46 @@ pub fn node_ports(kind: NodeKind, network: Network, taken: &[u16]) -> Vec<NodePo
     assign_ports(&wanted, &avoid)
 }
 
+/// The default P2P ports, 8233 (Mainnet) and 18233 (Testnet), kept for each network's primary
+/// listener: DNS seeders list only peers on the default port. [`assign_ports`] gives them to
+/// a P2P port that asks for one and is free, and never moves a port onto them.
+pub const RESERVED_PORTS: [u16; 2] = [8233, 18233];
+
+/// Ports zebra-network 7.0.0 refuses to dial (`peer/priority.rs`), so a node listening for
+/// peers on one is never reached: [`assign_ports`] gives none of them to a P2P port.
+pub const REFUSED_P2P_PORTS: [u16; 7] = [8232, 18232, 18344, 8033, 18033, 16125, 26125];
+
+/// Whether `port` may serve `role` when [`assign_ports`] places it: not one of
+/// [`REFUSED_P2P_PORTS`] for P2P, and not one of [`RESERVED_PORTS`] for anything else.
+fn port_fits(role: PortRole, port: u16) -> bool {
+    match role {
+        PortRole::P2p => !REFUSED_P2P_PORTS.contains(&port),
+        _ => !RESERVED_PORTS.contains(&port),
+    }
+}
+
 /// `wanted` with every port that `taken` holds moved out of the way: up by 10,000 at a time
-/// (8233 becomes 18233, then 28233), which keeps a port recognisable, and up by one when that
-/// runs out of room. Ports are also kept apart from each other. The backend checks again,
-/// against the OS, when the node starts.
+/// (8233 becomes 28233, skipping the reserved 18233, then 38233), which keeps a port
+/// recognisable, and up by one when that runs out of room. A port never moves onto one of
+/// [`RESERVED_PORTS`], and a P2P port never lands on one of [`REFUSED_P2P_PORTS`]. Ports are
+/// also kept apart from each other. The backend checks again, against the OS, when the node
+/// starts.
 pub fn assign_ports(wanted: &[NodePort], taken: &[u16]) -> Vec<NodePort> {
     let mut used: Vec<u16> = taken.to_vec();
     wanted
         .iter()
         .map(|want| {
             let mut port = want.port;
-            while used.contains(&port) {
+            // A moved port is no primary listener: the reserved ports are not for it.
+            let mut moved = false;
+            while used.contains(&port)
+                || !port_fits(want.role, port)
+                || (moved && RESERVED_PORTS.contains(&port))
+            {
                 port = port
                     .checked_add(10_000)
                     .unwrap_or(port.wrapping_add(1).max(1024));
+                moved = true;
             }
             used.push(port);
             NodePort {
@@ -566,7 +592,9 @@ mod tests {
         let taken: Vec<u16> = zebrad.iter().map(|port| port.port).collect();
         let second = assign_ports(&NodeKind::Zakura.default_ports(Network::Mainnet), &taken);
         let numbers: Vec<u16> = second.iter().map(|port| port.port).collect();
-        assert_eq!(numbers, [18233, 18232, 19999]);
+        // The P2P port skips Testnet's default, 18233, which a Testnet primary listener may
+        // still want; the RPC port may take 18232.
+        assert_eq!(numbers, [28233, 18232, 19999]);
         // A Testnet zebrad already holds 18233 and 18232: the next step is 28233.
         let third = assign_ports(
             &NodeKind::Zakura.default_ports(Network::Mainnet),
@@ -574,6 +602,13 @@ mod tests {
         );
         let numbers: Vec<u16> = third.iter().map(|port| port.port).collect();
         assert_eq!(numbers, [28233, 28232, 9999]);
+        // A fourth Mainnet node goes on to 38233.
+        let fourth = assign_ports(
+            &NodeKind::Zebrad.default_ports(Network::Mainnet),
+            &[8233, 8232, 9999, 28233, 28232, 19999],
+        );
+        let numbers: Vec<u16> = fourth.iter().map(|port| port.port).collect();
+        assert_eq!(numbers, [38233, 18232, 29999]);
         // Near the top of the range the step is one.
         let high = assign_ports(
             &[NodePort {
@@ -583,6 +618,37 @@ mod tests {
             &[60_000],
         );
         assert_eq!(high[0].port, 60_001);
+    }
+
+    #[test]
+    fn reserved_and_refused_ports_stay_free() {
+        let p2p = |port| NodePort {
+            role: PortRole::P2p,
+            port,
+        };
+        // A primary listener keeps its network's default port while it is free.
+        for network in [Network::Mainnet, Network::Testnet] {
+            let zebrad = NodeKind::Zebrad.default_ports(network);
+            assert_eq!(assign_ports(&zebrad, &[]), zebrad);
+        }
+        // No other role gets a reserved port, even one that asks for it: Zebend's RPC.
+        let zebend = assign_ports(&NodeKind::Zebend.default_ports(Network::Mainnet), &[]);
+        assert_eq!(zebend[0].port, 28233);
+        // A P2P port never lands where zebra-network refuses to dial, nor on a reserved port.
+        for refused in REFUSED_P2P_PORTS {
+            let port = assign_ports(&[p2p(refused)], &[])[0].port;
+            assert!(
+                !REFUSED_P2P_PORTS.contains(&port) && !RESERVED_PORTS.contains(&port),
+                "{refused} moved to {port}"
+            );
+        }
+        assert_eq!(assign_ports(&[p2p(16_125)], &[])[0].port, 36_125);
+        // Other roles may use them: 8232 is zebrad's own RPC port.
+        let rpc = NodePort {
+            role: PortRole::Rpc,
+            port: 8232,
+        };
+        assert_eq!(assign_ports(&[rpc], &[]), [rpc]);
     }
 
     #[test]

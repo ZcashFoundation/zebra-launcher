@@ -1,14 +1,20 @@
 [package]
 name = "launcher-herd"
-description = "Pure rules for the nodes Zeal runs together, starting with the public services: native and wasm, no I/O"
+description = "Pure rules for the nodes Zeal runs together: the public services and the herd's agreement; native and wasm, no I/O"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# A simulated chain (`herd::sim`) for other crates' tests, such as the agreement actor's in
+# launcher-core; this crate's own tests have it anyway.
+sim = []
+
 [dependencies]
 launcher-types = { workspace = true }
+explorer-model = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

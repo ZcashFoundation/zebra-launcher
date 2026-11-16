@@ -248,7 +248,10 @@ unless Zeal assigns ports. When a node is added, Zeal takes the kind's defaults 
 node claims them and they can be bound, otherwise it moves each one up by 10,000 until it is
 free, skipping the other network's defaults: a second Mainnet node gets 28233 and 28232, as
 18233 and 18232 are Testnet's, so a tool pointed at Testnet's default RPC port never reaches
-a Mainnet node. Near the top of the range a port moves up by one. The result is stored in
+a Mainnet node. 8233 and 18233 stay for each network's primary listener: a port moving out of
+the way never lands on them, whatever its role, and a P2P port never lands on a port
+zebra-network refuses to dial ([HERD.md](HERD.md#ports-a-fix-first)). Near the top of the
+range a port moves up by one. The result is stored in
 the node's spec. The managed config keys or flags carry the ports, so zebrad's managed
 `rpc.listen_addr` becomes "this node's RPC port" instead of a constant. Ports are checked
 again at every start; a port taken by something outside Zeal fails the start as

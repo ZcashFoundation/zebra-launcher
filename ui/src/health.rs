@@ -12,6 +12,7 @@ use launcher_types::{
     EOS_WARNING_WINDOW, EosInfo, ExitClass, MetricsSnapshot, NodeStats, Phase, RecoveryAction,
     StaleProcessInfo, Status, UpdateInfo, UpdateState, eos_within,
 };
+pub use launcher_types::{Level, NO_PEERS_FOR, STALE_AFTER};
 
 use crate::{
     charts::{eta_text, percent_1},
@@ -24,16 +25,12 @@ use crate::{
     stats_history::{Field, HERO_RATE_WINDOW, Sample, StatsHistory},
 };
 
-/// A statistics sample older than this, while zebrad runs, means the RPC is not answering.
-pub const STALE_AFTER: Duration = Duration::from_secs(30);
 /// A running zebrad gets this long to answer its first RPC poll.
 pub const RPC_FIRST_ANSWER: Duration = Duration::from_secs(60);
 /// A silent RPC this long is a problem, not a warning.
 pub const RPC_SILENT_PROBLEM: Duration = Duration::from_secs(5 * 60);
 /// A start without an RPC endpoint this long is slow.
 pub const SLOW_START: Duration = Duration::from_secs(5 * 60);
-/// No peers this long is a problem.
-pub const NO_PEERS_FOR: Duration = Duration::from_secs(2 * 60);
 /// Fewer peers than this for [`FEW_PEERS_FOR`] wants a look.
 pub const FEW_PEERS: u32 = 3;
 pub const FEW_PEERS_FOR: Duration = Duration::from_secs(5 * 60);
@@ -65,46 +62,6 @@ const FILTER_CHARS: usize = 60;
 /// How many problems and run events the summary lists.
 const SUMMARY_PROBLEMS: usize = 5;
 const SUMMARY_EVENTS: usize = 8;
-
-/// How the verdict reads. The icon and the word carry it; a status colour only accompanies.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Level {
-    /// At the tip with peers, nothing to do.
-    Healthy,
-    /// A normal state that is not "healthy": syncing, starting, stopping, stopped.
-    Neutral,
-    /// Something to look at.
-    Attention,
-    /// Attention with a deadline (end of support in days, an install counting down).
-    Urgent,
-    /// The node is not doing its job.
-    Problem,
-}
-
-impl Level {
-    /// The chip's word. A neutral verdict has none of its own: its headline (Syncing,
-    /// Starting, Stopping, Stopped, Running) is the word.
-    pub fn word(self) -> Option<&'static str> {
-        match self {
-            Level::Healthy => Some("Healthy"),
-            Level::Neutral => None,
-            Level::Attention | Level::Urgent => Some("Attention"),
-            Level::Problem => Some("Problem"),
-        }
-    }
-
-    /// The status tone's name, for a class or token suffix: `good`, `neutral`, `warning`,
-    /// `serious` or `critical`.
-    pub fn tone(self) -> &'static str {
-        match self {
-            Level::Healthy => "good",
-            Level::Neutral => "neutral",
-            Level::Attention => "warning",
-            Level::Urgent => "serious",
-            Level::Problem => "critical",
-        }
-    }
-}
 
 /// What the verdict offers to fix the situation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1306,6 +1263,7 @@ mod tests {
 
     fn stats(secs: u64, height: u64, peers: u32) -> NodeStats {
         NodeStats {
+            best: None,
             height,
             estimated_height: 3_120_000,
             verification_progress: height as f64 / 3_120_000.0,

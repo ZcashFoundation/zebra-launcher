@@ -2598,6 +2598,7 @@ dependencies = [
  "base64 0.23.1",
  "dirs",
  "explorer-model",
+ "launcher-herd",
  "launcher-types",
  "libc",
  "nix",
@@ -2634,6 +2635,7 @@ dependencies = [
 name = "launcher-herd"
 version = "0.1.0"
 dependencies = [
+ "explorer-model",
  "launcher-types",
  "serde_json",
 ]

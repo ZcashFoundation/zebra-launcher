@@ -1227,6 +1227,7 @@ mod tests {
 
     fn stats_with_eos(days: u64) -> NodeStats {
         NodeStats {
+            best: None,
             height: 1,
             estimated_height: 1,
             verification_progress: 1.0,

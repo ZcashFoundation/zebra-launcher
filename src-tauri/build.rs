@@ -37,6 +37,7 @@ const COMMANDS: &[&str] = &[
     "get_metrics",
     "get_node_resources",
     "get_machine_resources",
+    "get_herd",
     "open_path",
     "get_first_run_info",
     "pick_data_dir",

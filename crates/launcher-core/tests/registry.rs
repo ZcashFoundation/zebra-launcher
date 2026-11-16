@@ -17,7 +17,7 @@ use std::{
 
 use launcher_core::{
     config,
-    nodes::{NodeError, NodeLayout, NodeSpec},
+    nodes::{NodeError, NodeLayout, NodeSpec, PeerCache},
     paths::Paths,
     pidfile,
     policy::RestartPolicy,
@@ -363,6 +363,11 @@ async fn two_nodes_run_side_by_side_on_their_own_ports_folders_and_cookies() {
     assert!(
         toml.contains(&*folder.join("state").to_string_lossy()),
         "{toml}"
+    );
+    // And a peer cache of its own: zebrad keeps it in <folder>/network/testnet.peers.
+    assert_eq!(
+        launcher_core::config::read_peer_cache(&second.paths).expect("readable"),
+        launcher_core::config::PeerCacheKey::Custom(folder.to_string_lossy().into_owned())
     );
     assert_eq!(
         first.paths,
@@ -1315,4 +1320,57 @@ async fn a_light_client_server_set_up_while_its_node_stops_for_removal_keeps_it(
     assert_eq!(fx.registry.first().expect("first").id, first.id);
     assert_eq!(fx.settings.nodes()[0].id, first.id, "and saved first");
     within(fx.registry.shutdown()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resetting_the_config_of_a_node_that_kept_its_peer_cache_gives_it_its_own() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = Paths::under(dir.path());
+    paths.ensure_dirs().expect("dirs");
+    // A node saved before Zeal set the key, whose file had a folder of the user's.
+    let files = paths.launcher_node();
+    files.ensure_dirs().expect("node dirs");
+    fs::write(
+        files.zebrad_config(),
+        "[network]\ncache_dir = \"/srv/peers\"\n",
+    )
+    .expect("zebrad.toml");
+    let settings = SettingsStore::open(&paths).expect("settings");
+    within(settings.save_nodes(vec![NodeSpec {
+        ports: zebrad_ports(),
+        peer_cache: PeerCache::Kept,
+        ..NodeSpec::first(Network::Mainnet)
+    }]))
+    .await
+    .expect("the first node");
+    let registry =
+        registry::spawn(config(&paths, nothing_in_use), settings.clone()).expect("registry");
+    let first = registry.first().expect("first");
+    assert_eq!(
+        config::read_peer_cache(&files).expect("read"),
+        config::PeerCacheKey::Custom("/srv/peers".into()),
+        "a kept value is left alone"
+    );
+
+    let document = within(registry.reset_config(&first.id))
+        .await
+        .expect("reset");
+    let own = paths.data_dir().display().to_string();
+    assert_eq!(
+        config::read_peer_cache(&files).expect("read"),
+        config::PeerCacheKey::Custom(own.clone())
+    );
+    assert!(document.text.contains("cache_dir"), "{}", document.text);
+    assert!(
+        fs::read_to_string(files.zebrad_config_backup())
+            .expect("backup")
+            .contains("/srv/peers")
+    );
+    assert_eq!(settings.nodes()[0].peer_cache, PeerCache::Own);
+    assert_eq!(first.spec().peer_cache, PeerCache::Own);
+    assert_eq!(
+        first.managed_keys().peer_cache_dir,
+        Some(paths.data_dir().to_path_buf())
+    );
+    within(registry.shutdown()).await;
 }

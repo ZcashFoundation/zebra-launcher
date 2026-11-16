@@ -118,6 +118,7 @@ struct Harness {
 
 fn stats_for(chain: &SynthChain) -> NodeStats {
     NodeStats {
+        best: None,
         height: u64::from(chain.tip()),
         estimated_height: u64::from(chain.tip()),
         verification_progress: 1.0,

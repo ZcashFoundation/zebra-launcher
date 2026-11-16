@@ -12,6 +12,7 @@ pub mod explorer;
 pub mod firstrun;
 mod fsutil;
 pub mod gates;
+pub mod herd;
 pub mod logfile;
 pub mod logs;
 pub mod metrics;

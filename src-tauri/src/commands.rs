@@ -29,6 +29,7 @@ use launcher_types::{
     MachineResources, MetricsSnapshot, Network, NodeDataDirChoice, NodeDetails, NodeDocs,
     NodeDraft, NodeId, NodeInfo, NodeResources, NodeStats, NodeUpdate, OpenTarget, Settings,
     Status, ZebradChannel,
+    herd::HerdView,
     public::{
         ConnectionReport, DnsProvider, OpenError, PublicService, PublicStatus, StepAnswer, StepId,
         StillPublic,
@@ -219,21 +220,17 @@ pub async fn read_config(
 
 /// Replaces the node's `zebrad.toml` with a fresh minimal file holding only
 /// the managed keys, keeping the old file as `zebrad.toml.bak`, and returns
-/// the new document. Only while the node is stopped or failed: it holds the
-/// same gate as the data changes, so zebrad cannot start in the middle, and
-/// refuses while a configuration change is being applied.
+/// the new document ([`launcher_core::registry::RegistryHandle::reset_config`]).
+/// Only while the node is stopped or failed: it holds the same gate as the
+/// data changes, so zebrad cannot start in the middle, and refuses while a
+/// configuration change is being applied.
 #[tauri::command]
 pub async fn reset_config(
     state: State<'_, AppState>,
     node: NodeId,
 ) -> Result<ConfigDocument, String> {
-    let handle = state.node(&node)?;
-    let _data = handle.gates.data_change_permit()?;
-    let _config = handle.gates.try_config_permit()?;
-    let keys = handle.managed_keys();
-    let paths = handle.paths.clone();
-    on_node(&node, blocking(move || config::reset(&paths, &keys)))
-        .await?
+    on_node(&node, state.registry.reset_config(&node))
+        .await
         // The UI says what failed ("Could not reset the config"), so only the cause here.
         .map_err(message)
 }
@@ -388,6 +385,13 @@ pub fn get_node_resources(
 #[tauri::command]
 pub fn get_machine_resources(state: State<'_, AppState>) -> Option<MachineResources> {
     state.machine.borrow().clone()
+}
+
+/// Each network's herd now, Mainnet first. Every change is also sent as the
+/// `herd` event, one network at a time.
+#[tauri::command]
+pub fn get_herd(state: State<'_, AppState>) -> Vec<HerdView> {
+    state.herd.views()
 }
 
 fn path_arg(path: &Path) -> String {

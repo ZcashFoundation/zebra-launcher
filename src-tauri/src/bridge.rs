@@ -9,7 +9,8 @@
 //! Logs can arrive by the thousand per second, so they go through a
 //! `tauri::ipc::Channel` in batches, one subscription per node.
 //! The explorer's live state is an event too ([`events::EXPLORER_LIVE`]), at most four a
-//! second.
+//! second, and so is each network's herd ([`events::HERD`]), at most once a second per
+//! network.
 
 use std::{
     sync::{
@@ -20,6 +21,7 @@ use std::{
 };
 
 use launcher_core::{
+    herd::{self, HerdHandle},
     registry::{NodeHandle, NodeSummary, RegistryHandle},
     supervisor::LogSubscription,
 };
@@ -131,6 +133,22 @@ async fn forward_list<R: Runtime>(
         if summaries.changed().await.is_err() {
             return;
         }
+    }
+}
+
+/// The shortest time between two [`events::HERD`] events of one network.
+pub const HERD_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Emits [`events::HERD`] with each network's view now and on every change, at most once per
+/// [`HERD_INTERVAL`] per network, until its actor ends.
+pub fn forward_herd<R: Runtime>(app: AppHandle<R>, herd: &HerdHandle) {
+    for network in herd::NETWORKS {
+        let app = app.clone();
+        tauri::async_runtime::spawn(throttle(herd.watch(network), HERD_INTERVAL, move |view| {
+            if let Err(err) = app.emit(events::HERD, view) {
+                tracing::warn!(%err, "could not emit herd to the UI");
+            }
+        }));
     }
 }
 

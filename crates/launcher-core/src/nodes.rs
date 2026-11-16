@@ -31,6 +31,25 @@ pub enum NodeLayout {
     Folder,
 }
 
+/// Who sets a node's `network.cache_dir`, the folder zebrad keeps its peer
+/// cache in (`<dir>/network/<network>.peers`). zebrad's default shares one
+/// cache among every zebrad of the user, so each node Zeal creates gets its
+/// own (docs/HERD.md, Peer diversity).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerCache {
+    /// Not decided yet: the node was saved before Zeal set the key. Loading
+    /// the list decides (`crate::herd::peers::adopt`), and until then the key
+    /// stays as written.
+    #[default]
+    Undecided,
+    /// Zeal sets the key to the node's own folder ([`NodePaths::data_dir`]).
+    Own,
+    /// The node's `zebrad.toml` keeps the value its user gave it before Zeal
+    /// set the key (`false`, or a folder), and Zeal leaves it alone.
+    Kept,
+}
+
 /// A node as `launcher.json` stores it. [`NodeSpec::info`] is what the UI
 /// sees of it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +78,9 @@ pub struct NodeSpec {
     #[serde(default)]
     pub depends_on: Option<NodeId>,
     pub layout: NodeLayout,
+    /// Who sets `network.cache_dir`.
+    #[serde(default)]
+    pub peer_cache: PeerCache,
 }
 
 fn autostart_default() -> bool {
@@ -87,6 +109,7 @@ impl NodeSpec {
             stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
             depends_on: None,
             layout: NodeLayout::Launcher,
+            peer_cache: PeerCache::Own,
         }
     }
 
@@ -120,9 +143,16 @@ impl NodeSpec {
             .map(|port| port.port)
     }
 
+    /// The folder of the node's peer cache, `network.cache_dir`, while Zeal
+    /// sets it ([`PeerCache::Own`]): the node's own folder, so its peer file
+    /// is `<folder>/network/<network>.peers`.
+    pub fn peer_cache_dir(&self, launcher: &Paths) -> Option<PathBuf> {
+        (self.peer_cache == PeerCache::Own).then(|| self.paths(launcher).data_dir().to_path_buf())
+    }
+
     /// The `zebrad.toml` keys the launcher manages for the node: its network,
-    /// its ports, its cookie and its state folder. A role the node has no
-    /// port for gets the network's default.
+    /// its ports, its peer cache, its cookie and its state folder. A role the
+    /// node has no port for gets the network's default.
     pub fn managed_keys(&self, launcher: &Paths) -> ManagedKeys {
         let defaults = ManagedKeys::defaults(
             self.network,
@@ -132,6 +162,7 @@ impl NodeSpec {
         let loopback = |port: u16| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         ManagedKeys {
             p2p_port: self.port(PortRole::P2p).unwrap_or(defaults.p2p_port),
+            peer_cache_dir: self.peer_cache_dir(launcher),
             rpc_addr: self.port(PortRole::Rpc).map_or(defaults.rpc_addr, loopback),
             metrics_addr: self
                 .port(PortRole::Metrics)
@@ -464,6 +495,7 @@ pub fn plan_new_node(
         stop_grace_secs: DEFAULT_STOP_GRACE_SECS,
         depends_on: None,
         layout: NodeLayout::Folder,
+        peer_cache: PeerCache::Own,
     };
     check_data_dir(&node, nodes, paths)?;
     Ok(node)
@@ -552,12 +584,15 @@ mod tests {
         let keys = node.managed_keys(&paths);
         assert_eq!(
             keys,
-            ManagedKeys::defaults(
-                Network::Testnet,
-                &paths.launcher_node(),
-                paths.launcher_node().default_state_dir()
-            ),
-            "the managed keys of a single-node launcher"
+            ManagedKeys {
+                peer_cache_dir: Some(paths.data_dir().to_path_buf()),
+                ..ManagedKeys::defaults(
+                    Network::Testnet,
+                    &paths.launcher_node(),
+                    paths.launcher_node().default_state_dir()
+                )
+            },
+            "the managed keys of a single-node launcher, with a peer cache of its own"
         );
         let info = node.info(&paths);
         assert_eq!(info.data_dir, paths.data_dir().display().to_string());
@@ -597,12 +632,20 @@ mod tests {
         assert_eq!(keys.metrics_addr.to_string(), "127.0.0.1:19999");
         assert_eq!(keys.cookie_dir, folder.join("rpc"));
         assert_eq!(keys.state_dir, folder.join("state"));
-        // A chosen data folder holds the state, not the node's own files.
+        assert_eq!(keys.peer_cache_dir, Some(folder.clone()));
+        // A chosen data folder holds the state, not the node's own files or its peers.
         let moved = NodeSpec {
             data_dir: Some("/big/disk".into()),
             ..node
         };
         assert_eq!(moved.state_dir(&paths), PathBuf::from("/big/disk/state"));
+        assert_eq!(moved.peer_cache_dir(&paths), Some(folder.clone()));
+        // A node that kept its own value is left alone.
+        let kept = NodeSpec {
+            peer_cache: PeerCache::Kept,
+            ..moved.clone()
+        };
+        assert_eq!(kept.managed_keys(&paths).peer_cache_dir, None);
         assert_eq!(
             moved.paths(&paths).zebrad_config(),
             folder.join("zebrad.toml")

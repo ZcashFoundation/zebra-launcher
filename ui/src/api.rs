@@ -12,6 +12,7 @@ use launcher_types::{
         ExplorerCall, ExplorerError, ExplorerErrorKind, ExplorerLiveEvent, ExplorerReply,
         ExplorerRequest,
     },
+    herd::HerdView,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
@@ -317,6 +318,26 @@ pub async fn on_machine_resources(
         return Ok(());
     }
     Ok(tauri::listen(events::MACHINE_RESOURCES, on_machine, on_error).await?)
+}
+
+/// Calls `on_view` with every `herd` event: one network's herd, whenever it changes.
+pub async fn on_herd(
+    on_view: impl Fn(HerdView) + 'static,
+    on_error: impl Fn(String) + 'static,
+) -> ApiResult<()> {
+    if !is_tauri() {
+        mock::agreement::on_herd(mock_handler("`herd` event", on_view, on_error));
+        return Ok(());
+    }
+    Ok(tauri::listen(events::HERD, on_view, on_error).await?)
+}
+
+/// Each network's herd now, Mainnet first.
+pub async fn get_herd() -> ApiResult<Vec<HerdView>> {
+    if !is_tauri() {
+        return Ok(wire(mock::agreement::get_herd().await)?);
+    }
+    Ok(tauri::invoke0("get_herd").await?)
 }
 
 /// Streams a node's log batches to `on_batch` for the rest of the page's life. When the

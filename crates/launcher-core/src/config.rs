@@ -7,10 +7,11 @@
 //! [`toml_edit`], which keeps the user's comments and layout.
 //!
 //! The managed keys ([`ManagedKeys`]: `network.network`, the port of
-//! `network.listen_addr`, `rpc.listen_addr`, `rpc.enable_cookie_auth`,
-//! `rpc.cookie_dir`, `metrics.endpoint_addr` and `state.cache_dir`) are
-//! launcher-owned: the supervisor and the RPC monitor rely on their values,
-//! and two nodes must not share a port, a cookie or a state folder. [`ensure`] rewrites them at every start, and
+//! `network.listen_addr`, `network.cache_dir`, `rpc.listen_addr`,
+//! `rpc.enable_cookie_auth`, `rpc.cookie_dir`, `metrics.endpoint_addr` and
+//! `state.cache_dir`) are launcher-owned: the supervisor and the RPC monitor
+//! rely on their values, and two nodes must not share a port, a cookie, a
+//! state folder or a peer cache. [`ensure`] rewrites them at every start, and
 //! [`begin_apply_with_managed`] overrides any user edit to them before saving,
 //! so an edit to a managed key never takes effect.
 //!
@@ -61,8 +62,8 @@ const HEADER: &str = "\
 # zebrad configuration managed by Zeal.
 #
 # The launcher keeps network.network, the port of network.listen_addr,
-# rpc.listen_addr, rpc.enable_cookie_auth, rpc.cookie_dir,
-# metrics.endpoint_addr and state.cache_dir up to date.
+# network.cache_dir, rpc.listen_addr, rpc.enable_cookie_auth,
+# rpc.cookie_dir, metrics.endpoint_addr and state.cache_dir up to date.
 # Add your own settings below; the reference shows every option with its
 # default. Keys you do not set use zebrad's defaults.
 
@@ -78,6 +79,10 @@ pub struct ManagedKeys {
     /// written only when the port is not the one zebrad uses without it
     /// ([`default_p2p_port`]), so a file that never set it is left alone.
     pub p2p_port: u16,
+    /// `network.cache_dir`, where zebrad keeps its peer cache
+    /// (`<dir>/network/<network>.peers`); `None` leaves the key as written,
+    /// for a node that kept its own value ([`PeerCacheKey`]).
+    pub peer_cache_dir: Option<PathBuf>,
     /// `rpc.listen_addr`. Always loopback.
     pub rpc_addr: SocketAddr,
     /// `metrics.endpoint_addr`. Always loopback.
@@ -140,6 +145,8 @@ impl ManagedKeys {
     /// The defaults for `network`: P2P on zebrad's default port, RPC on
     /// `127.0.0.1:8232` (Mainnet) or `127.0.0.1:18232` (Testnet), metrics on
     /// `127.0.0.1:9999`, and the cookie in [`NodePaths::rpc_cookie_dir`].
+    /// The peer cache is left as written; a node's spec sets it
+    /// (`NodeSpec::managed_keys`).
     pub fn defaults(network: Network, paths: &NodePaths, state_dir: impl Into<PathBuf>) -> Self {
         let rpc_port = match network {
             Network::Mainnet => MAINNET_RPC_PORT,
@@ -148,6 +155,7 @@ impl ManagedKeys {
         Self {
             network,
             p2p_port: default_p2p_port(network),
+            peer_cache_dir: None,
             rpc_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, rpc_port)),
             metrics_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, METRICS_PORT)),
             cookie_dir: paths.rpc_cookie_dir(),
@@ -281,6 +289,14 @@ fn set_managed(doc: &mut DocumentMut, keys: &ManagedKeys) -> Result<bool, Config
         changed |= set_key(doc, section, key, value)?;
         if (section, key) == ("network", "network") {
             changed |= set_p2p_port(doc, keys.network, keys.p2p_port)?;
+            if let Some(dir) = &keys.peer_cache_dir {
+                changed |= set_key(
+                    doc,
+                    "network",
+                    "cache_dir",
+                    Value::from(path_str("network.cache_dir", dir)?),
+                )?;
+            }
         }
     }
     changed |= match keys.lightwalletd {
@@ -389,6 +405,39 @@ pub fn read_p2p_port(paths: &NodePaths, network: Network) -> u16 {
             || default_p2p_port(network),
             |doc| p2p_port_of(&doc, network),
         )
+}
+
+/// What a `zebrad.toml` says about `network.cache_dir`, zebrad's peer cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PeerCacheKey {
+    /// No key, or `true`: zebrad's default cache directory, which every
+    /// zebrad of the user shares.
+    Shared,
+    /// `false`: no peer cache.
+    Off,
+    /// Anything else, as written: a folder of the user's.
+    Custom(String),
+}
+
+/// `network.cache_dir` in the `zebrad.toml` in `paths`: [`PeerCacheKey::Shared`]
+/// when the file or the key is missing. Fails when the file cannot be read or
+/// parsed.
+pub fn read_peer_cache(paths: &NodePaths) -> Result<PeerCacheKey, ConfigError> {
+    let text = match fs::read_to_string(paths.zebrad_config()) {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(PeerCacheKey::Shared),
+        Err(err) => return Err(err.into()),
+    };
+    let doc: DocumentMut = text.parse()?;
+    Ok(match lookup(&doc, "network", "cache_dir") {
+        None => PeerCacheKey::Shared,
+        Some(item) => match (item.as_bool(), item.as_str()) {
+            (Some(true), _) => PeerCacheKey::Shared,
+            (Some(false), _) => PeerCacheKey::Off,
+            (_, Some(path)) => PeerCacheKey::Custom(path.to_string()),
+            _ => PeerCacheKey::Custom(item.to_string().trim().to_string()),
+        },
+    })
 }
 
 /// Sets `section.key` to `new`, keeping the existing key's comments.
@@ -1004,6 +1053,76 @@ tx_cost_limit = 1000
         // A missing file reads as the network's default.
         let other = Paths::under(_dir.path().join("elsewhere")).launcher_node();
         assert_eq!(read_p2p_port(&other, Network::Testnet), TESTNET_P2P_PORT);
+    }
+
+    #[test]
+    fn the_peer_cache_is_the_nodes_own_or_left_as_written() {
+        let (_dir, paths, keys) = setup();
+        fs::create_dir_all(paths.config_dir()).expect("mkdir");
+        fs::write(
+            paths.zebrad_config(),
+            "[network]\nnetwork = \"Mainnet\"\ncache_dir = true # shared\n",
+        )
+        .expect("write");
+        assert_eq!(read_peer_cache(&paths).expect("read"), PeerCacheKey::Shared);
+        // Left as written while the node keeps its own value.
+        ensure(&paths, &keys).expect("ensure");
+        assert!(
+            fs::read_to_string(paths.zebrad_config())
+                .expect("read")
+                .contains("cache_dir = true # shared")
+        );
+        // Set to the node's folder, keeping the comment; an edit cannot change it.
+        let own = ManagedKeys {
+            peer_cache_dir: Some(PathBuf::from("/nodes/zebrad-mainnet-2")),
+            ..keys
+        };
+        ensure(&paths, &own).expect("ensure");
+        let text = fs::read_to_string(paths.zebrad_config()).expect("read");
+        assert!(
+            text.contains("cache_dir = \"/nodes/zebrad-mainnet-2\" # shared"),
+            "{text}"
+        );
+        assert_eq!(
+            read_peer_cache(&paths).expect("read"),
+            PeerCacheKey::Custom("/nodes/zebrad-mainnet-2".into())
+        );
+        let current = read(&paths).expect("read");
+        let edited = current
+            .text
+            .replace("/nodes/zebrad-mainnet-2", "/elsewhere");
+        begin_apply_with_managed(&paths, &edited, &current.token, &own)
+            .expect("apply")
+            .commit()
+            .expect("commit");
+        assert!(
+            fs::read_to_string(paths.zebrad_config())
+                .expect("read")
+                .contains("cache_dir = \"/nodes/zebrad-mainnet-2\"")
+        );
+        // A new file has it in the network section.
+        let minimal = render_minimal(&own).expect("render");
+        let doc: DocumentMut = minimal.parse().expect("toml");
+        assert_eq!(
+            doc["network"]["cache_dir"].as_str(),
+            Some("/nodes/zebrad-mainnet-2")
+        );
+        // What other files say.
+        for (text, expected) in [
+            ("[rpc]\n", PeerCacheKey::Shared),
+            ("[network]\ncache_dir = false\n", PeerCacheKey::Off),
+            (
+                "[network]\ncache_dir = 5\n",
+                PeerCacheKey::Custom("5".into()),
+            ),
+        ] {
+            fs::write(paths.zebrad_config(), text).expect("write");
+            assert_eq!(read_peer_cache(&paths).expect("read"), expected, "{text}");
+        }
+        fs::write(paths.zebrad_config(), "[network\n").expect("write");
+        assert!(read_peer_cache(&paths).is_err());
+        fs::remove_file(paths.zebrad_config()).expect("remove");
+        assert_eq!(read_peer_cache(&paths).expect("read"), PeerCacheKey::Shared);
     }
 
     #[test]

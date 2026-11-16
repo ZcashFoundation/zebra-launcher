@@ -46,7 +46,7 @@ kept as the historical design record; where the two differ, this file describes 
 | `crates/explorer-model` | The block explorer's pure model: zebrad's response shapes, the block ledger and shielded budget, network upgrade heights, the search classifier, the pages' views and a synthetic chain for the mock and tests. serde only; builds natively and to wasm. |
 | `crates/launcher-core` | Logic that does not need Tauri: the node registry and node specs, per-channel sidecar resolution, supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind. |
 | `crates/launcher-core/src/bin/fake-zebrad.rs` | Scripted stand-in for zebrad, used by tests and PR bundle builds. |
-| `crates/launcher-herd` | Pure rules for the nodes Zeal runs together, so far the public services': the setup's plan, pauses, the front door's mode, evidence ages, the wallet check. Native and wasm, no I/O; the UI's mock runs it too. |
+| `crates/launcher-herd` | Pure rules for the nodes Zeal runs together: the public services' (the setup's plan, pauses, the front door's mode, evidence ages, the wallet check) and the herd's agreement engine (placement, the fork search, the nodes' and the herd's states, their words). Native and wasm, no I/O; the UI's mock runs it too. |
 | `crates/launcher-gateway` | The front door: the TLS server a public service faces the internet through. tokio, rustls with ring, socket2 and h2 only. |
 | `crates/launcher-public` | The public services without Tauri: the service actor, ACME, dynamic DNS, the network checks, the keychain, the self-tests. |
 | `src-tauri` | Thin Tauri 2.12 app: commands, the `Channel` bridge, per-channel sidecar and offline documentation resources, tray, updater, exit flow, capabilities. |
@@ -98,7 +98,10 @@ files are brought up to date and its actors started in
   free one, `zebrad-testnet`, `zebrad-mainnet-2`, when the draft leaves it out); ports no
   other node has and no other program holds (assigned from the kind's defaults with
   `node_ports` around every node's ports and off the other network's defaults, then around
-  ports in use, when the draft leaves them out); and a data folder that is not another node's and whose state does not
+  ports in use, when the draft leaves them out; `assign_ports` never moves a port onto 8233
+  or 18233, which stay for each network's primary listener, and never gives a P2P port one
+  that zebra-network 7.0.0 refuses to dial: 8232, 18232, 18344, 8033, 18033, 16125 and
+  26125); and a data folder that is not another node's and whose state does not
   overlap another node's, and that Zeal can write to when the user chose it
   (`check_chosen_dir`, as for `choose_data_dir`; the node's own folder chosen by hand
   counts as its default). The add-node dialog shows the free space where the chain would
@@ -128,6 +131,20 @@ files are brought up to date and its actors started in
   banner since the node has gone. Kept data stays where it is. A removed node's id is held
   back only while `<app data>/nodes/<id>` exists: the first node keeps its files in the
   launcher's own folders, so its id can go to a new node even when its data was kept.
+- **A peer cache of its own.** zebrad's default `network.cache_dir = true` shares one peer
+  file among every zebrad of the user, so each node's `network.cache_dir` is managed: the
+  node's own folder (`NodePaths::data_dir`: the launcher's data directory for the first
+  node, `<data>/nodes/<id>` for the others), where zebra-network keeps
+  `network/<net>.peers` (`herd::peers::peer_file`). `NodeSpec.peer_cache` says who sets the
+  key: Zeal (`own`), or the node's own `zebrad.toml` (`kept`) for a node saved before Zeal
+  set it whose file said `false` or named a folder. Loading the node list decides once for
+  every node saved without the field (`herd::peers::adopt`): no key or `true` becomes the
+  node's own folder, starting from a copy of the shared file in zebrad's default cache
+  folder (made once, never over an existing file; the app passes that folder to
+  `SettingsStore::open_with`), and the decision is written back. A node with an
+  interrupted apply waits for the next launch, since its file is the abandoned one until
+  the runtime restores the backup. `reset_config` gives a `kept` node its own folder: the
+  new file has no value of the user's, and the spec is saved as `own`.
 - **Ports at every start.** The supervisor tries binding each of the node's addresses
   (P2P on `0.0.0.0`, RPC and metrics on loopback) before it spawns zebrad: one that
   another program holds fails the start as `PortInUse`, naming the port, before zebrad
@@ -232,6 +249,9 @@ for a node's folders and metrics page. `list_nodes`, `add_node` (a `NodeDraft`),
 `update_node` (a `NodeUpdate`) and `remove_node` manage the list.
 The public services add the `public_status` event (a changed `PublicStatus` of a public
 service) and its snapshot `get_public_status`.
+The herd adds the `herd` event (one network's `HerdView`, at most once a second per
+network, no node id) and its snapshot `get_herd` (both networks' views); see [The
+herd](#the-herd).
 
 Events carry changes the UI did not ask for: `nodes` (the list, a `Vec<NodeInfo>`,
 whenever a node's info changes), and for each node, as a `NodeEvent {node, value}`,
@@ -401,12 +421,13 @@ The launcher writes a **minimal** `zebrad.toml` for each node: the keys it manag
 the user's edits, never full `zebrad generate` output. Every zebrad section is
 `deny_unknown_fields`, so a stale defaulted key would break the next zebrad bump. The
 managed keys carry the node's own network, ports, cookie and state folder, so two nodes
-never share a port, a folder or a cookie (`NodeSpec::managed_keys`).
+never share a port, a folder, a cookie or a peer cache (`NodeSpec::managed_keys`).
 
 | Managed key | Value |
 | --- | --- |
 | `network.network` | the node's network, chosen at first run for the first node |
 | the port of `network.listen_addr` | the node's P2P port (8233, or 18233 on Testnet, for a single node); the address stays as the user wrote it, and the key is written only when the port differs from the one zebrad uses without it, so a file that never set it is left as it is |
+| `network.cache_dir` | the node's own folder, where zebrad keeps `network/<net>.peers`; left as written for a node that kept its own value from before (`PeerCache::Kept`, see [Nodes](#nodes)) |
 | `rpc.listen_addr` | `127.0.0.1:<the node's RPC port>`: `8232` (`18232` on Testnet) for a single node |
 | `rpc.enable_cookie_auth` | `true` |
 | `rpc.cookie_dir` | the node's `rpc` folder: `<app_local_data_dir>/rpc` for the first node |
@@ -450,10 +471,12 @@ Applying an edit:
    next launch via the marker.
 
 `reset_config` (Configure → "Reset to managed defaults", and the post-update recovery
-panel) replaces the file with the minimal one `config::ensure` creates, keeping the old
-file as the same `zebrad.toml.bak`, and returns the new `ConfigDocument`. It runs only
-while zebrad is `Stopped` or `Failed`, holding the data-change gate (see below) so zebrad
-cannot start meanwhile, and refuses while an apply is in flight or its marker is pending.
+panel; `RegistryHandle::reset_config`) replaces the file with the minimal one
+`config::ensure` creates, keeping the old file as the same `zebrad.toml.bak`, and returns
+the new `ConfigDocument`. It runs only while zebrad is `Stopped` or `Failed`, holding the
+data-change gate (see below) so zebrad cannot start meanwhile, and refuses while an apply
+is in flight or its marker is pending. The new file has the node's own peer cache, and a
+node that kept its own value is saved as `peer_cache: own`.
 
 A bundled zebrad version change is not special-cased: the next start runs the existing
 file against the new zebrad, and a key the new version rejects fails that start as
@@ -479,7 +502,8 @@ their autostart. A version 2 file ran one node: its `network`, `data_dir`,
 `start_node_on_launch` and `stop_grace_secs` become the first node, `zebrad-<network>`,
 in the launcher's own locations and with the ports it has always used (the P2P one as its
 `zebrad.toml` gives it), so its managed keys are the ones that file already has and
-nothing moves or is rewritten. A migrated file is written back. Without a file,
+nothing moves; the one key added is `network.cache_dir`, a peer cache of its own, unless
+the file sets `false` or a folder (see [Nodes](#nodes)). A migrated file is written back. Without a file,
 `first_run_done` starts false and the list holds the first node on Mainnet, which the
 first run may move to Testnet.
 
@@ -543,7 +567,9 @@ Show / second launch (single-instance) / macOS dock -> show + focus the window
 Each node has its own RPC monitor and metrics poller, which follow its supervisor's
 status. `rpc.rs` and `monitor.rs` poll zebrad's cookie-authenticated RPC every 5 s
 (`getblockchaininfo`, `getinfo`, `getmempoolinfo`, `getpeerinfo`; hourly
-`getdeprecationinfo` on Mainnet only) and publish `watch<Option<NodeStats>>` and, from
+`getdeprecationinfo` on Mainnet only) and publish `watch<Option<NodeStats>>` (with
+`best`, the best block's height and hash from the same `getblockchaininfo` state read,
+which the herd compares) and, from
 the same calls, `watch<Option<NodeDetails>>`: the peer list (address, direction, user
 agent, protocol version, state, last seen, ping), the best block hash, headers,
 difficulty, size on disk, the chain supply and value pools in ZEC, the active network
@@ -692,7 +718,9 @@ restarts on This run), `?eos=soon` and `?eos=halt` (the end-of-support warning a
 (the install countdown and a launcher update that did not come back healthy). The mock samples
 its main zebrad's resources every 5 s while it has a pid; `?os=macos` and `?os=windows` give the
 Resources card those platforms' figures and labels.
-chains come from `?attip`, `?tip=<h>`, `?explorer=slow|empty|nobi` and `?reorg`.
+chains come from `?attip`, `?tip=<h>`, `?explorer=slow|empty|nobi` and `?reorg`. The herd's
+agreement comes from `?herd&agree` and `&agree=behind|stall|fork|race|split|impl|channels|
+restart|deepfork|silent|herdstall|replaced|pair|otherchain` (see [The herd](#the-herd)).
 
 **Appearance.** `Settings.theme` (`system`, `light`, `dark`) is resolved against the
 system preference in `ui/src/theme.rs` and applied as `data-theme` on `<html>`; every
@@ -701,6 +729,65 @@ colour in the stylesheets is a token, and the embedded Grafana follows the same 
 On Mainnet, zebrad warns 42 days and halts 56 days after its estimated release height,
 so an install that never updates stops working. The UI shows an EOS countdown, a warning
 banner, and a blocking halt card with no restart loop.
+
+## The herd
+
+The nodes Zeal runs check each other ([HERD.md](HERD.md); the agreement core of its phases
+H1 and H2 is built, and its "Built so far" section lists where the code differs). For each
+network, from every witness node's best block, Zeal says in one sentence whether the nodes are
+on one chain, and which are behind, stuck or on another branch.
+
+```text
+registry ── members_of ── watch<Vec<MemberInput>> ──▶ agreement[Mainnet], agreement[Testnet]
+each node ── status, stats (best), spec ── a tip or phase changed ──▶ │ Engine (launcher-herd)
+                                                                      │ getblockhash probes: RpcTipSource,
+                                                                      │ Semaphore(2) and 3 s each per node
+                                          watch<HerdView> per network ◀┘
+                                                 ├──▶ event `herd` (at most 1/s per network)
+                                                 └──▶ command `get_herd`
+```
+
+- **The engine** (`crates/launcher-herd/src/herd/`) is sans-IO: `Engine::begin` takes each
+  node's facts (kind, program, phase, statistics) and the time (`Now`: a monotonic clock for
+  durations, the wall clock for the statistics' age and wake detection) and returns probes;
+  `answer` takes their results and returns follow-ups; `finish` classifies. Placement
+  (`search::place`) puts each distinct tip, highest first, on the branch whose top node has
+  its hash at its height, or on a branch of its own; the fork search (`search::fork_search`)
+  walks three heights down, gallops by 4, 8, 16 and so on to 1,000 blocks below, then bisects,
+  trying the pair's last fork first, and reports a split past zebrad's rollback window as
+  deep. A node's relation is excluded (stopped, starting, restarting, stopping, halted, no
+  statistics, not counted), catching up (syncing, or in its probation of 2 minutes, 10 s for
+  one already at the tip), in agreement (within 2 blocks), racing, lagging, stalled, forked
+  or unknown (probes failed twice; it is set aside for 30 s so it holds up no one), with a
+  10 s debounce across two rounds. The herd is off (fewer than two witnesses), checking,
+  single, agreed, degraded, split or stalled, with a level and one sentence
+  (`verdict::headline`). The time rules follow the target spacing at the top (75 s before
+  NU7, 25 s from it, from explorer-model's activation heights), measured as S_eff between S and
+  3 S once 30 blocks arrived; Testnet races up to 6 blocks and stalls only at attention.
+  zebrad on every channel and Zakura are witnesses; a split that lines up with families
+  (zebrad's channels count as families) reads as implementations that disagree. A round asks
+  at most 64 probes; answers more than 1,000 blocks below a tip outlive it.
+- **The actors** (`crates/launcher-core/src/herd/agreement.rs`), one per network, own their
+  engine. A small task per node says when its tip, phase or spec changed; a round runs then
+  (changes within 250 ms make one) and every 5 s, and once more if the tips moved while it ran.
+  Probes run on the node's own cookie-authenticated RPC (`tips::RpcTipSource`, rebuilt when the
+  RPC address changes), at most two in flight per node, each within 3 s, and reach the engine
+  as they arrive. The view is published on a `watch` when more than its time changed. A task
+  beside each actor holds that `watch`'s sender and starts a new actor, with a fresh engine,
+  when one panics, logging "herd checks restarted".
+- **The app** starts the actors over the registry (`herd::spawn`), forwards each network's
+  watch as the `herd` event and answers `get_herd` (`src-tauri/src/bridge.rs`,
+  `commands.rs`).
+- **The UI** keeps each network's view (`AppState.herds`). For the network the window shows,
+  the overview starts with the herd's sentence, each counted node's card says where it stands
+  ("In the herd: agrees"), the network's tab in the sidebar has a check while the nodes agree,
+  a warning mark or a cross for a problem, and a node's sidebar item has its state in its title
+  (`ui/src/herd_view.rs`, pure and tested natively). The sentence names the top block, so a
+  screen reader hears it only when the herd's state or level changes (`announcement`), and
+  the tab's accessible name carries the state without heights (`tab_state`); the tooltip has
+  the sentence. A network without a herd shows nothing.
+  The mock runs the same engine every 5 s over its nodes, with the scenarios of
+  `ui/src/mock/agreement.rs`.
 
 ## Public services
 
