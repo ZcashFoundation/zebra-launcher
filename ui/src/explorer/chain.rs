@@ -13,7 +13,7 @@ use launcher_types::{
         Pool,
     },
 };
-use leptos::{ev, prelude::*};
+use leptos::{ev, html, prelude::*};
 use wasm_bindgen::JsCast;
 
 use super::{
@@ -22,7 +22,7 @@ use super::{
     text,
 };
 use crate::{
-    app::AppState,
+    app::{AppState, Tab},
     format::{bytes, relative, thousands},
 };
 
@@ -76,6 +76,7 @@ fn Chain(page: Page, nav: NodeExplorer, unit: &'static str, network: Network) ->
 
 /// The block strip (V1): older blocks to the left, the newest on the right, each a link; under
 /// them, a bar per gap as tall as its seconds against the target. ← and → move between tiles.
+/// Where the page is too narrow for all twelve, the strip opens scrolled to the newest.
 #[component]
 fn Strip(
     blocks: Vec<BlockSummary>,
@@ -85,6 +86,19 @@ fn Strip(
 ) -> impl IntoView {
     let app = AppState::get();
     let count = blocks.len();
+    // Once drawn, and whenever the tab is shown again (a hidden strip has no width to scroll),
+    // the strip shows its newest end; older tiles are a scroll to the left.
+    let list = NodeRef::<html::Ol>::new();
+    Effect::new(move |_| {
+        if app.tab.get() != Tab::Explorer {
+            return;
+        }
+        request_animation_frame(move || {
+            if let Some(list) = list.get_untracked() {
+                list.set_scroll_left(list.scroll_width());
+            }
+        });
+    });
     let keydown = move |event: ev::KeyboardEvent| {
         let step: i32 = match event.key().as_str() {
             "ArrowRight" => 1,
@@ -127,7 +141,7 @@ fn Strip(
     };
     let tallest = f64::from(target) * INTERVAL_CAP;
     view! {
-        <ol class="ex-strip" aria-label="The newest blocks, oldest first" on:keydown=keydown>
+        <ol class="ex-strip" aria-label="The newest blocks, oldest first" node_ref=list on:keydown=keydown>
             {blocks
                 .into_iter()
                 .enumerate()

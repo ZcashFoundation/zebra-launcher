@@ -274,7 +274,8 @@ button.link.ex-link {
   color: var(--muted);
 }
 
-/* The block strip (V1): oldest left, newest right, gaps under them. */
+/* The block strip (V1): oldest left, newest right, gaps under them. Too narrow for all twelve,
+   it scrolls, and opens at its newest end (chain.rs). */
 
 .ex-strip {
   display: grid;
