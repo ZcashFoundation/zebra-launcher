@@ -1287,7 +1287,8 @@ learns it all. Zeal keeps as little as it can:
   "include addresses" is ticked, and never carry tokens or keys. A DuckDNS name keeps its zone,
   which thousands of names share (`z**.duckdns.org`); any other name keeps only its last label
   (`z**.a**.net`), since its zone is the user's own domain and certificate logs are searched by
-  domain.
+  domain. The launcher log's tail goes into the diagnostics as it is, so its lines that quote
+  Let's Encrypt or the certificate verifier mask the name the same way.
 
 Third parties, each named at consent: Let's Encrypt (the name, and the address of Zeal's ACME
 client), the DNS provider (the name, the address, the token), the public resolver the user

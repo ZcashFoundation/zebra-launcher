@@ -157,9 +157,24 @@ pub fn verify_chain(
     extra_roots: &[CertificateDer<'static>],
 ) -> Result<(), AcmeProblem> {
     check_chain(chain_pem, name, extra_roots).map_err(|detail| {
+        let detail = masked(&detail, name);
         tracing::warn!(target: "zeal::public", %detail, "the issued chain does not verify");
         AcmeProblem::Verify
     })
+}
+
+/// `text` with every copy of `name` masked as Copy diagnostics shows it, for the launcher's
+/// log, whose tail goes into the diagnostics as it is.
+fn masked(text: &str, name: &str) -> String {
+    if name.is_empty() {
+        return text.to_string();
+    }
+    text.replace(name, &launcher_core::diagnostics::mask_name(name))
+}
+
+/// `problem` for the log: Let's Encrypt's words for one Zeal does not map quote the name.
+fn logged(problem: &AcmeProblem, name: &str) -> String {
+    masked(&format!("{problem:?}"), name)
 }
 
 /// [`verify_chain`], with the verifier's own words on failure.
@@ -580,7 +595,8 @@ async fn run(
                     }
                 }
                 Err(problem) => {
-                    tracing::warn!(target: "zeal::public", ?problem, ?issuer, "certificate order failed");
+                    let logged = logged(&problem, &config.name);
+                    tracing::warn!(target: "zeal::public", problem = %logged, ?issuer, "certificate order failed");
                     let next = attempts.next_allowed(issuer, now, false);
                     status.send_modify(|s| {
                         s.ordering = None;
@@ -710,6 +726,22 @@ mod tests {
             attempts.next_allowed(CertIssuer::Production, at(10), true),
             Some(at(30))
         );
+    }
+
+    #[test]
+    fn the_log_masks_the_name_in_let_s_encrypts_words() {
+        let name = "zec-alice.duckdns.org";
+        let problem = AcmeProblem::Other {
+            detail: format!(
+                "Error creating new order :: Cannot issue for \"{name}\": The ACME server refuses to issue a certificate for this domain name, because it is forbidden by policy"
+            ),
+        };
+        let line = logged(&problem, name);
+        assert!(!line.contains("zec-alice"), "{line}");
+        assert!(line.contains("z**.duckdns.org") && line.contains("forbidden by policy"));
+        assert_eq!(logged(&AcmeProblem::Caa, name), "Caa");
+        let verifier = format!("certificate not valid for name \"{name}\"");
+        assert!(!masked(&verifier, name).contains("zec-alice"));
     }
 
     #[test]
