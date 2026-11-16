@@ -1,5 +1,5 @@
-//! A simulated chain with branches, for the engine's tests and the browser mock (feature
-//! `sim`): each node sits at a height on a branch, and answers probes as zebrad's
+//! A simulated chain with branches, for the engine's tests and, with the feature `sim`, other
+//! crates' tests: each node sits at a height on a branch, and answers probes as zebrad's
 //! `getblockhash` would.
 
 use std::collections::{BTreeMap, BTreeSet};

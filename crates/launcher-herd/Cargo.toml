@@ -8,7 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-# A simulated chain for the browser mock (`herd::sim`); the tests have it anyway.
+# A simulated chain (`herd::sim`) for other crates' tests, such as the agreement actor's in
+# launcher-core; this crate's own tests have it anyway.
 sim = []
 
 [dependencies]
