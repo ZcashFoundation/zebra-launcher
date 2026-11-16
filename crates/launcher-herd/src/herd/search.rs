@@ -40,7 +40,8 @@ pub enum Outcome<T> {
 }
 
 /// The block hashes known of each node's best chain. Answers well below a node's old and new
-/// tips outlive the round; the rest are dropped when the node's tip changes.
+/// tips outlive the round; the rest are dropped when the node's tip changes, and all of them
+/// when the node is left out of a round.
 #[derive(Clone, Debug, Default)]
 pub struct Answers {
     hashes: BTreeMap<(NodeId, u32), String>,
@@ -64,10 +65,15 @@ enum Look<'a> {
 impl Answers {
     /// Starts a round with these tips: a node whose tip changed loses its answers within
     /// [`MAX_REORG`] of the lower of its old tip and its new one, since its best chain may
-    /// have changed there. An answer it keeps was final when it was read.
+    /// have changed there. An answer it keeps was final when it was read. A node left out
+    /// (stopped, restarting, not answering) loses them all: its chain may change while it is
+    /// away, for example with another data folder.
     pub fn begin(&mut self, tips: impl IntoIterator<Item = (NodeId, BlockRef)>) {
         self.failed.clear();
         self.tips = tips.into_iter().collect();
+        let tips = &self.tips;
+        self.hashes.retain(|(owner, _), _| tips.contains_key(owner));
+        self.read_under.retain(|node, _| tips.contains_key(node));
         for (node, tip) in &self.tips {
             if self.read_under.get(node) != Some(tip) {
                 let lowest = self
@@ -570,5 +576,28 @@ mod tests {
             "answers final when read stay"
         );
         assert!(matches!(answers.holds(&a, &old), Outcome::Need(_)));
+    }
+
+    #[test]
+    fn a_node_left_out_of_a_round_loses_its_answers() {
+        let (a, b) = (id("a"), id("b"));
+        let mut chain = SimChain::new(1);
+        chain.put(&a, 0, 5_000);
+        chain.put(&b, 0, 5_000);
+        let both = [(a.clone(), chain.tip(&a)), (b.clone(), chain.tip(&b))];
+        let mut answers = Answers::default();
+        answers.begin(both.clone());
+        for node in [&a, &b] {
+            let probe = Probe {
+                node: node.clone(),
+                height: 3_000,
+            };
+            answers.record(probe.clone(), chain.answer(&probe));
+        }
+        // A stopped node is not in the round, and its chain may change while it is away.
+        answers.begin([(b.clone(), chain.tip(&b))]);
+        answers.begin(both);
+        assert!(matches!(answers.look(&a, 3_000), Look::Need(_)));
+        assert!(matches!(answers.look(&b, 3_000), Look::Hash(_)));
     }
 }

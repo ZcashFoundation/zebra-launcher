@@ -724,6 +724,26 @@ fn a_top_that_reorganizes_and_climbs_between_rounds_is_asked_again() {
 }
 
 #[test]
+fn a_node_whose_chain_changed_while_it_was_stopped_is_asked_again() {
+    // The third node sits 2,000 blocks below the others, and the first is asked for its hash
+    // there: an answer deep enough to keep.
+    let mut herd = Harness::new(Network::Mainnet, 3, H);
+    herd.chain.put(&id(2), 0, H - 2_000);
+    let view = herd.run(30);
+    assert_eq!(view.branches.len(), 1);
+    // The user stops the first node and gives it a data folder with a chain that split from
+    // the others' 3,000 blocks ago.
+    herd.nodes[0].phase = Phase::Stopped;
+    herd.run(10);
+    herd.chain.fork(&id(0), H - 3_000, H + 5);
+    herd.nodes[0].phase = Phase::Running;
+    let view = herd.run(10);
+    assert_eq!(view.branches.len(), 2);
+    assert_eq!(view.branches[0].nodes, [id(1), id(2)]);
+    assert_eq!(view.branches[1].nodes, [id(0)]);
+}
+
+#[test]
 fn probes_that_fail_twice_make_a_node_unknown() {
     let mut herd = Harness::new(Network::Mainnet, 3, H);
     herd.chain.put(&id(2), 0, H - 1);

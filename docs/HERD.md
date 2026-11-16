@@ -495,7 +495,9 @@ probes never queue behind the monitor's poll. In the steady state a round costs 
 `getblockhash` per node behind the top, about once per block. A node's answers more than
 1,000 blocks below its tip are cached across rounds, since nothing that deep changes. When its
 tip changes, an answer stays only if it is that far below the old tip too: between two rounds
-a node can reorganize and then climb past an answer it gave on the chain it left.
+a node can reorganize and then climb past an answer it gave on the chain it left. A node left
+out of a round (stopped, restarting, not answering or set aside) loses its answers, since its
+chain may change while it is away, for example with another data folder.
 
 ### The fork search
 
