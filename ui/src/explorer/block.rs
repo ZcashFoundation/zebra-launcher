@@ -17,18 +17,19 @@ use leptos::prelude::*;
 
 use super::{
     parts::{Failure, HashText, Loading, PoolChip, RouteLink},
+    prefs::Prefs,
     state::{Loaded, NodeExplorer, load},
-    text,
+    text::{self, Unit},
 };
 use crate::{
     app::{AppState, Tab},
-    format::{bytes, local_datetime_short, relative, short_hash, thousands},
+    format::{bytes, relative, short_hash, thousands},
 };
 
 #[component]
 pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId) -> impl IntoView {
     let app = AppState::get();
-    let unit = text::unit(network);
+    let prefs = Prefs::get();
     let tip = move || {
         nav.live.with(|live| {
             live.as_ref()
@@ -101,6 +102,8 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
                 },
                 Loaded::Ready(reply) => match reply.response {
                     ExplorerResponse::Block(page) => {
+                        // A new unit draws the same answer again; nothing is read for it.
+                        let unit = prefs.unit(network);
                         view! { <Block page=*page nav unit node=node.clone() /> }.into_any()
                     }
                     ExplorerResponse::Future(future) => view! { <Future future nav /> }.into_any(),
@@ -112,8 +115,9 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
 }
 
 #[component]
-fn Block(page: Page, nav: NodeExplorer, unit: &'static str, node: NodeId) -> impl IntoView {
+fn Block(page: Page, nav: NodeExplorer, unit: Unit, node: NodeId) -> impl IntoView {
     let app = AppState::get();
+    let prefs = Prefs::get();
     let summary = page.summary.clone();
     let height = summary.height;
     let time = UNIX_EPOCH + Duration::from_secs(summary.time);
@@ -156,7 +160,7 @@ fn Block(page: Page, nav: NodeExplorer, unit: &'static str, node: NodeId) -> imp
             </div>
             <HashText hash=summary.hash full=true />
             <p class="ex-meta">
-                <span>{local_datetime_short(time)}</span>
+                <span>{move || text::time_text(summary.time, prefs.time.get())}</span>
                 <span class="muted">{move || relative(time, app.now.get())}</span>
                 {move || confirmations().map(|(count, finality)| view! {
                     <span>{format!("{} confirmation{}", thousands(u64::from(count)), if count == 1 { "" } else { "s" })}</span>
@@ -204,7 +208,7 @@ fn Block(page: Page, nav: NodeExplorer, unit: &'static str, node: NodeId) -> imp
 /// The turnstile (V2): each pool's change, split into what the coinbase paid and what users'
 /// transactions moved, then the fees and the burn. Exact zatoshis in a table.
 #[component]
-fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
+fn Turnstile(ledger: BlockLedger, unit: Unit) -> impl IntoView {
     let (Some(deltas), Some(coinbase), Some(users)) =
         (ledger.deltas, ledger.coinbase, ledger.users)
     else {
@@ -247,9 +251,9 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
                         })}
                     </span>
                 </td>
-                <td class="ex-num">{text::coins(paid as i64)}</td>
-                <td class="ex-num">{(!lockbox).then(|| text::coins(moved))}</td>
-                <td class="ex-num" title=format!("{delta} zatoshis")>{text::coins(delta)}</td>
+                <td class="ex-num">{unit.number(paid as i64)}</td>
+                <td class="ex-num">{(!lockbox).then(|| unit.number(moved))}</td>
+                <td class="ex-num" title=format!("{delta} zatoshis")>{unit.number(delta)}</td>
             </tr>
         }
     });
@@ -273,14 +277,14 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
                         <tr>
                             <th scope="row">"Fees"</th>
                             <td></td><td></td><td></td>
-                            <td class="ex-num">{text::coins(fees as i64)}</td>
+                            <td class="ex-num">{unit.number(fees as i64)}</td>
                         </tr>
                     })}
                     {burned.map(|burned| view! {
                         <tr>
                             <th scope="row" title="NU7 removes ⌊6 F / 10⌋ of a block's fees from circulation">"Burned"</th>
                             <td></td><td></td><td></td>
-                            <td class="ex-num">{text::coins(burned as i64)}</td>
+                            <td class="ex-num">{unit.number(burned as i64)}</td>
                         </tr>
                     })}
                 </tfoot>
@@ -319,7 +323,7 @@ fn turnstile_scale(deltas: &PerPool<i64>, coinbase: &PerPool<u64>, users: &PerPo
 /// The reward split (V3): one bar of the miner's part, the streams, the fees the miner kept and
 /// the burned fees, with the amounts and payout addresses.
 #[component]
-fn RewardBar(reward: RewardSplit, unit: &'static str) -> impl IntoView {
+fn RewardBar(reward: RewardSplit, unit: Unit) -> impl IntoView {
     let mut parts: Vec<(String, u64, &'static str, Option<String>)> =
         vec![("Miner".to_owned(), reward.miner, "ex-fill-miner", None)];
     for stream in &reward.streams {
@@ -347,7 +351,7 @@ fn RewardBar(reward: RewardSplit, unit: &'static str) -> impl IntoView {
         text::amount(reward.subsidy as i64, unit),
         parts
             .iter()
-            .map(|(name, zat, _, _)| format!("{name} {}", text::coins(*zat as i64)))
+            .map(|(name, zat, _, _)| format!("{name} {}", unit.number(*zat as i64)))
             .collect::<Vec<_>>()
             .join(", ")
     );

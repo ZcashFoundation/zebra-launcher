@@ -798,7 +798,9 @@ differs.
   line and one banner) and `ui/src/explorer/` holds the pages (Chain, Block, Transaction,
   Search), their parts, text and per-node state; `ui/styles/explorer.css` uses the
   `--pool-*` colour tokens. The tab is offered for nodes that keep the chain
-  (`NodeKind::has_explorer`), and amounts are in ZEC, or TAZ on Testnet.
+  (`NodeKind::has_explorer`), and amounts are in ZEC, or TAZ on Testnet, or in zatoshis, with
+  times local, UTC or Unix: the source line's toggles, kept in `localStorage`
+  (`ui/src/explorer/prefs.rs`) as the Grafana page keeps its pickers.
 - **Mock.** `ui/src/mock/explorer.rs` answers the same requests from explorer-model's
   synthetic chain, for the first node only as the backend does (`?herd`'s other nodes get
   its answer), and the dashboard's details read the same chain.

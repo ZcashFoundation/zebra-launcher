@@ -2,7 +2,7 @@
 //! Nothing it shows comes from anywhere else, and nothing searched leaves the computer.
 //!
 //! The shell holds back and forward, the search box, the source line (which node, which
-//! network, which tip) and one banner; under it, the page of the node's current route. Each
+//! network, which tip, and the unit and time toggles) and one banner; under it, the page of the node's current route. Each
 //! node keeps its own place ([`state::Explorers`]). The tab tells the node's explorer when it
 //! is on screen (`Interest`), so the explorer follows the tip only then.
 
@@ -10,6 +10,7 @@ mod block;
 mod chain;
 mod history;
 mod parts;
+mod prefs;
 mod search;
 mod state;
 pub mod text;
@@ -30,12 +31,14 @@ use crate::{
     api,
     app::{AppState, Tab},
     components::{icons::info_icon, nav::is_mac},
-    format::{controls, local_datetime_short, relative, thousands},
+    format::{controls, relative, thousands},
 };
 use block::BlockPage;
 use chain::ChainPage;
+use prefs::Prefs;
 use search::{SearchBox, SearchPage};
 use state::{Explorers, NodeExplorer};
+use text::TimeFormat;
 use tx::TxPage;
 
 /// How long a reorganisation stays in the banner.
@@ -45,6 +48,7 @@ const REORG_SHOWN_FOR: Duration = Duration::from_secs(10 * 60);
 pub fn Explorer() -> impl IntoView {
     let app = AppState::get();
     let explorers = Explorers::new();
+    Prefs::provide();
     let node_id = Memo::new(move |_| app.node().info.with(|info| info.id.clone()));
     let network = Signal::derive(move || app.node().info.with(|info| info.network));
     let nav = Signal::derive(move || explorers.of(&node_id.get()));
@@ -385,12 +389,7 @@ fn SourceLine(
                     {chip}
                 </span>
             })}
-            <span
-                class=move || if network.get() == Network::Testnet { "chip ex-unit ex-unit-test" } else { "chip ex-unit" }
-                title="The unit amounts are shown in"
-            >
-                {move || text::unit(network.get())}
-            </span>
+            <Toggles network />
             <span class="ex-promise muted">
                 {info_icon()}
                 "Everything here comes from your own node. Nothing you search leaves this computer."
@@ -399,11 +398,55 @@ fn SourceLine(
     }
 }
 
+/// The unit and time toggles: amounts in the network's coin (TAZ in the warning tone, as
+/// Testnet is everywhere) or in zatoshis; times local, in UTC or as Unix seconds. The choices
+/// are remembered ([`Prefs`]).
+#[component]
+fn Toggles(network: Signal<Network>) -> impl IntoView {
+    let prefs = Prefs::get();
+    let pressed = |on: bool| if on { "true" } else { "false" };
+    view! {
+        <span class="ex-toggle" role="group" aria-label="Amounts in">
+            <button
+                type="button"
+                class:ex-unit-test=move || network.get() == Network::Testnet
+                aria-pressed=move || pressed(!prefs.zat.get())
+                on:click=move |_| prefs.set_zat(false)
+            >
+                {move || text::unit(network.get())}
+            </button>
+            <button
+                type="button"
+                title="Zatoshis: 100,000,000 to the coin"
+                aria-pressed=move || pressed(prefs.zat.get())
+                on:click=move |_| prefs.set_zat(true)
+            >
+                "zat"
+            </button>
+        </span>
+        <span class="ex-toggle" role="group" aria-label="Times in">
+            {TimeFormat::ALL
+                .into_iter()
+                .map(|format| view! {
+                    <button
+                        type="button"
+                        aria-pressed=move || pressed(prefs.time.get() == format)
+                        on:click=move |_| prefs.set_time(format)
+                    >
+                        {format.label()}
+                    </button>
+                })
+                .collect_view()}
+        </span>
+    }
+}
+
 /// One banner, the most important first: a node that does not run, one that syncs, a recent
 /// reorganisation. Start shows where the status strip offers it too.
 #[component]
 fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
     let app = AppState::get();
+    let prefs = Prefs::get();
     let started = RwSignal::new(None::<String>);
     let starting = RwSignal::new(false);
     let banner = move || {
@@ -489,10 +532,7 @@ fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
                     Some(reorg) => view! {
                         <div class="banner banner-warn ex-banner" role="status">
                             <span>
-                                {text::reorg_text(
-                                    &reorg,
-                                    &local_datetime_short(UNIX_EPOCH + Duration::from_secs(reorg.at)),
-                                )}
+                                {text::reorg_text(&reorg, &text::time_text(reorg.at, prefs.time.get()))}
                             </span>
                         </div>
                     }

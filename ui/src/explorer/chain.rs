@@ -18,8 +18,9 @@ use wasm_bindgen::JsCast;
 
 use super::{
     parts::{Failure, Loading, RouteLink},
+    prefs::Prefs,
     state::{Loaded, NodeExplorer, load},
-    text,
+    text::{self, Unit},
 };
 use crate::{
     app::{AppState, Tab},
@@ -33,7 +34,7 @@ const INTERVAL_CAP: f64 = 4.0;
 
 #[component]
 pub fn ChainPage(node: NodeId, nav: NodeExplorer, network: Network) -> impl IntoView {
-    let unit = text::unit(network);
+    let prefs = Prefs::get();
     // A new tip, or a new epoch after a reorganisation, asks again. The first answer comes
     // without the fees whose coinbases the explorer has not read yet; then the page asks for
     // them, and waits for them from then on (a new tip brings one more).
@@ -65,7 +66,11 @@ pub fn ChainPage(node: NodeId, nav: NodeExplorer, network: Network) -> impl Into
                 Loaded::Loading => view! { <Loading /> }.into_any(),
                 Loaded::Failed(error) => view! { <Failure error /> }.into_any(),
                 Loaded::Ready(reply) => match reply.response {
-                    ExplorerResponse::Chain(page) => view! { <Chain page nav unit network /> }.into_any(),
+                    ExplorerResponse::Chain(page) => {
+                        // A new unit draws the same answer again; nothing is read for it.
+                        let unit = prefs.unit(network);
+                        view! { <Chain page nav unit network /> }.into_any()
+                    }
                     _ => view! { <Loading /> }.into_any(),
                 },
             }}
@@ -74,7 +79,7 @@ pub fn ChainPage(node: NodeId, nav: NodeExplorer, network: Network) -> impl Into
 }
 
 #[component]
-fn Chain(page: Page, nav: NodeExplorer, unit: &'static str, network: Network) -> impl IntoView {
+fn Chain(page: Page, nav: NodeExplorer, unit: Unit, network: Network) -> impl IntoView {
     let strip: Vec<BlockSummary> = page.blocks.iter().take(STRIP).rev().cloned().collect();
     let target = page.target_spacing;
     let pending = page.fees_pending;
@@ -104,7 +109,7 @@ fn pending_cell(pending: bool) -> Option<&'static str> {
 fn Strip(
     blocks: Vec<BlockSummary>,
     nav: NodeExplorer,
-    unit: &'static str,
+    unit: Unit,
     target: u32,
     /// Some coinbases are still being read.
     pending: bool,
@@ -238,7 +243,7 @@ fn strip_step(at: usize, count: usize, key: &str) -> Option<usize> {
 /// The tiles under the strip: the tip, the mempool, the supply, the next upgrade and the
 /// difficulty.
 #[component]
-fn Tiles(page: Page, unit: &'static str, network: Network) -> impl IntoView {
+fn Tiles(page: Page, unit: Unit, network: Network) -> impl IntoView {
     let app = AppState::get();
     let tip = page.blocks.first().cloned();
     let interval = page.average_interval.map(|average| {
@@ -326,7 +331,7 @@ fn Tiles(page: Page, unit: &'static str, network: Network) -> impl IntoView {
 fn RecentBlocks(
     blocks: Vec<BlockSummary>,
     nav: NodeExplorer,
-    unit: &'static str,
+    unit: Unit,
     /// Some coinbases are still being read.
     pending: bool,
 ) -> impl IntoView {
@@ -342,9 +347,9 @@ fn RecentBlocks(
                         <th scope="col" class="ex-num">"Txs"</th>
                         <th scope="col" class="ex-num">"Size"</th>
                         <th scope="col" class="ex-num" title="Note commitments created: Sapling, Orchard, Ironwood">"Notes S · O · I"</th>
-                        <th scope="col" class="ex-num" title="What users moved into shielded pools, net">"Net shielding"</th>
-                        <th scope="col" class="ex-num">"Fees"</th>
-                        <th scope="col" class="ex-num">"Burned"</th>
+                        <th scope="col" class="ex-num" title="What users moved into shielded pools, net">{format!("Net shielding ({unit})")}</th>
+                        <th scope="col" class="ex-num">{format!("Fees ({unit})")}</th>
+                        <th scope="col" class="ex-num">{format!("Burned ({unit})")}</th>
                         <th scope="col" class="ex-num">"Budget"</th>
                     </tr>
                 </thead>
@@ -361,7 +366,7 @@ fn RecentBlocks(
                             let shielding = ledger.users.as_ref().map(|users| {
                                 let net = text::net_shielding(users);
                                 let sign = if net > 0 { "+" } else { "" };
-                                format!("{sign}{}", text::coins(net))
+                                format!("{sign}{}", unit.number(net))
                             });
                             view! {
                                 <tr>
@@ -374,20 +379,18 @@ fn RecentBlocks(
                                     <td class="ex-num">{block.size.map(|size| bytes(u64::from(size)))}</td>
                                     <td class="ex-num">{notes}</td>
                                     <td class="ex-num">
-                                        {shielding
-                                            .map(|text| format!("{text} {unit}"))
-                                            .or_else(|| pending_cell(pending).map(str::to_owned))}
+                                        {shielding.or_else(|| pending_cell(pending).map(str::to_owned))}
                                     </td>
                                     <td class="ex-num">
                                         {ledger
                                             .fees
-                                            .map(|fees| text::coins(fees as i64))
+                                            .map(|fees| unit.number(fees as i64))
                                             .or_else(|| pending_cell(pending).map(str::to_owned))}
                                     </td>
                                     <td class="ex-num">
                                         {ledger
                                             .burned
-                                            .map(|burned| text::coins(burned as i64))
+                                            .map(|burned| unit.number(burned as i64))
                                             .or_else(|| pending_cell(pending && ledger.fees.is_none()).map(str::to_owned))}
                                     </td>
                                     <td class="ex-num">{text::budget_text(&ledger.budget)}</td>

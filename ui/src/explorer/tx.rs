@@ -14,8 +14,9 @@ use leptos::prelude::*;
 
 use super::{
     parts::{Failure, HashText, Hidden, KindBadge, Loading, PoolChip, RouteLink},
+    prefs::Prefs,
     state::{Loaded, NodeExplorer, load},
-    text,
+    text::{self, Unit},
 };
 use crate::format::{bytes, short_hash, thousands};
 
@@ -27,7 +28,7 @@ pub fn TxPage(
     txid: TxId,
     out: Option<u32>,
 ) -> impl IntoView {
-    let unit = text::unit(network);
+    let prefs = Prefs::get();
     let tip = move || {
         nav.live.with(|live| {
             live.as_ref()
@@ -59,7 +60,11 @@ pub fn TxPage(
                 Loaded::Loading => view! { <Loading /> }.into_any(),
                 Loaded::Failed(error) => view! { <Failure error /> }.into_any(),
                 Loaded::Ready(reply) => match reply.response {
-                    ExplorerResponse::Tx(page) => view! { <Tx page=*page nav unit out /> }.into_any(),
+                    ExplorerResponse::Tx(page) => {
+                        // A new unit draws the same answer again; nothing is read for it.
+                        let unit = prefs.unit(network);
+                        view! { <Tx page=*page nav unit out /> }.into_any()
+                    }
                     _ => view! { <Loading /> }.into_any(),
                 },
             }}
@@ -68,7 +73,7 @@ pub fn TxPage(
 }
 
 #[component]
-fn Tx(page: Page, nav: NodeExplorer, unit: &'static str, out: Option<u32>) -> impl IntoView {
+fn Tx(page: Page, nav: NodeExplorer, unit: Unit, out: Option<u32>) -> impl IntoView {
     let sentence = text::tx_sentence(&page, unit);
     let coinbase = matches!(page.kind, TxKind::Coinbase { .. });
     let status = page.status.clone();
@@ -204,7 +209,7 @@ fn Status(status: TxStatus, nav: NodeExplorer) -> impl IntoView {
 /// One shielded pool's part: counts, the net movement, and the per-note amounts: hidden, or in
 /// a coinbase public by consensus but not decrypted here.
 #[component]
-fn PoolCard(part: PoolPart, unit: &'static str, coinbase: bool) -> impl IntoView {
+fn PoolCard(part: PoolPart, unit: Unit, coinbase: bool) -> impl IntoView {
     let counts = match part.pool {
         Pool::Sapling => format!(
             "{} spend{} · {} output{}",
@@ -291,7 +296,7 @@ fn Inputs(page: Page, nav: NodeExplorer) -> impl IntoView {
 }
 
 #[component]
-fn Outputs(page: Page, unit: &'static str, out: Option<u32>) -> impl IntoView {
+fn Outputs(page: Page, unit: Unit, out: Option<u32>) -> impl IntoView {
     if page.outputs.is_empty() {
         return view! { <p class="muted">"No transparent outputs."</p> }.into_any();
     }
@@ -327,7 +332,7 @@ fn Outputs(page: Page, unit: &'static str, out: Option<u32>) -> impl IntoView {
                                     </td>
                                     <td><code class="ex-address">{output.address.unwrap_or_default()}</code></td>
                                     <td>{output.script}</td>
-                                    <td class="ex-num">{text::coins(output.zat as i64)}</td>
+                                    <td class="ex-num">{unit.number(output.zat as i64)}</td>
                                 </tr>
                             }
                         })

@@ -85,7 +85,40 @@
   color: var(--text-secondary);
 }
 
-.ex-unit-test {
+/* The unit and time toggles: segmented buttons, the pressed one in the accent. TAZ keeps
+   Testnet's warning tone. */
+.ex-toggle {
+  display: inline-flex;
+}
+
+.ex-toggle button {
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 0;
+  font-size: 12px;
+}
+
+.ex-toggle button:first-child {
+  border-radius: 999px 0 0 999px;
+}
+
+.ex-toggle button:last-child {
+  border-radius: 0 999px 999px 0;
+}
+
+.ex-toggle button + button {
+  margin-left: -1px;
+}
+
+.ex-toggle button[aria-pressed="true"] {
+  position: relative;
+  border-color: var(--accent);
+  background: var(--banner-accent-bg);
+  color: var(--accent-text);
+}
+
+.ex-toggle button.ex-unit-test,
+.ex-toggle button.ex-unit-test[aria-pressed="true"] {
   border-color: var(--warn);
   color: var(--warn);
 }
