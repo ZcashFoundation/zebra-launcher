@@ -921,7 +921,7 @@ pub struct NetFacts {
     pub gateway: Option<IpAddr>,
     /// The default route's interface.
     pub interface: Option<String>,
-    /// The VPN interface carrying the default route, if any (a heuristic).
+    /// The VPN interface on the default route the kernel prefers, if any (a heuristic).
     pub vpn: Option<String>,
     pub wan: WanKind,
     /// The router's public address, from NAT-PMP.

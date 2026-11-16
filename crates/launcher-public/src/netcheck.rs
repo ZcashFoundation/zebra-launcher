@@ -1,8 +1,9 @@
 //! The read-only network checks: this computer's LAN address and gateway from the default
-//! route, a VPN on it, and the router's public address from NAT-PMP's external-address
-//! request (RFC 6886, opcode 0), which creates no mapping. Nothing here changes the router.
+//! route, a VPN on the route the kernel prefers, and the router's public address from
+//! NAT-PMP's external-address request (RFC 6886, opcode 0), which creates no mapping. Nothing
+//! here changes the router.
 //!
-//! PS1 reads the default route from `/proc/net/route` (Linux). UPnP IGD's
+//! PS1 reads the routes from `/proc/net/route` (Linux). UPnP IGD's
 //! `GetExternalIPAddress` and the router's model come later; without NAT-PMP the router's
 //! address is unknown and the outside checks decide.
 
@@ -38,34 +39,88 @@ const VPN_PREFIXES: [&str; 9] = [
     "proton",
 ];
 
-/// The default route: its interface and gateway.
+/// A route of the main table, as `/proc/net/route` lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Route {
+    pub interface: String,
+    pub destination: Ipv4Addr,
+    pub mask: Ipv4Addr,
+    /// `None` for a route without a gateway, such as a tunnel's or the LAN's own.
+    pub gateway: Option<Ipv4Addr>,
+    pub metric: u32,
+}
+
+impl Route {
+    fn is_default(&self) -> bool {
+        self.destination.is_unspecified() && self.mask.is_unspecified()
+    }
+}
+
+/// The IPv4 routes in `/proc/net/route` text, which lists the main table. The kernel writes
+/// addresses as little-endian hex and the metric in decimal. Routes without an interface
+/// (unreachable, prohibit) are left out.
+pub fn parse_routes(text: &str) -> Vec<Route> {
+    let addr = |field: &str| {
+        u32::from_str_radix(field, 16)
+            .ok()
+            .map(|hex| Ipv4Addr::from(hex.swap_bytes()))
+    };
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let interface = *fields.first()?;
+            if interface == "*" {
+                return None;
+            }
+            let gateway = addr(fields.get(2)?)?;
+            Some(Route {
+                interface: interface.to_owned(),
+                destination: addr(fields.get(1)?)?,
+                mask: addr(fields.get(7)?)?,
+                gateway: (!gateway.is_unspecified()).then_some(gateway),
+                metric: fields.get(6)?.parse().ok()?,
+            })
+        })
+        .collect()
+}
+
+/// The default route through the LAN's router: its interface and gateway.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DefaultRoute {
     pub interface: String,
     pub gateway: Ipv4Addr,
 }
 
-/// The IPv4 default route in `/proc/net/route` text: the first line with destination and
-/// mask 0 and a gateway. The kernel writes addresses as little-endian hex.
-pub fn parse_proc_route(text: &str) -> Option<DefaultRoute> {
-    let hex = |field: &str| u32::from_str_radix(field, 16).ok();
-    text.lines().skip(1).find_map(|line| {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        let (interface, destination, gateway, mask) = (
-            fields.first()?,
-            fields.get(1)?,
-            fields.get(2)?,
-            fields.get(7)?,
-        );
-        if hex(destination)? != 0 || hex(mask)? != 0 {
-            return None;
-        }
-        let gateway = Ipv4Addr::from(hex(gateway)?.swap_bytes());
-        (!gateway.is_unspecified()).then(|| DefaultRoute {
-            interface: interface.to_string(),
+/// The default route with a gateway and the lowest metric.
+pub fn default_route(routes: &[Route]) -> Option<DefaultRoute> {
+    routes
+        .iter()
+        .filter(|route| route.is_default())
+        .filter_map(|route| Some((route, route.gateway?)))
+        .min_by_key(|(route, _)| route.metric)
+        .map(|(route, gateway)| DefaultRoute {
+            interface: route.interface.clone(),
             gateway,
         })
-    })
+}
+
+/// The default route the kernel prefers, with a gateway or without: the lowest metric, the
+/// first listed of equals.
+fn preferred_default(routes: &[Route]) -> Option<&Route> {
+    routes
+        .iter()
+        .filter(|route| route.is_default())
+        .min_by_key(|route| route.metric)
+}
+
+/// The VPN on the default route the kernel prefers, if any: its interface when the name looks
+/// like a VPN's, or when it is not the router's, as with a tunnel's default without a gateway
+/// at a lower metric than the router's. Without a router, only a VPN's name counts.
+pub fn vpn_on_route(routes: &[Route], router: Option<&DefaultRoute>) -> Option<String> {
+    let preferred = preferred_default(routes)?;
+    let elsewhere = router.is_some_and(|router| router.interface != preferred.interface);
+    (elsewhere || is_vpn_interface(&preferred.interface)).then(|| preferred.interface.clone())
 }
 
 /// Whether `interface` looks like a VPN's.
@@ -128,34 +183,35 @@ pub fn parse_nat_pmp(answer: &[u8]) -> Option<Ipv4Addr> {
 
 /// Every read-only fact, at `now`.
 pub async fn check(now: SystemTime) -> NetFacts {
-    let route = tokio::fs::read_to_string("/proc/net/route")
+    let routes = tokio::fs::read_to_string("/proc/net/route")
         .await
-        .ok()
-        .and_then(|text| parse_proc_route(&text));
-    let Some(route) = route else {
+        .map(|text| parse_routes(&text))
+        .unwrap_or_default();
+    let router = default_route(&routes);
+    let vpn = vpn_on_route(&routes, router.as_ref());
+    let Some(router) = router else {
         return NetFacts {
             lan_addr: None,
             gateway: None,
             interface: None,
-            vpn: None,
+            vpn,
             wan: WanKind::Unknown,
             wan_addr: None,
             checked_at: now,
         };
     };
-    let lan_addr = lan_address(route.gateway).await;
-    let vpn = is_vpn_interface(&route.interface).then(|| route.interface.clone());
+    let lan_addr = lan_address(router.gateway).await;
     let wan_addr = if vpn.is_some() {
         None
     } else {
-        nat_pmp_external(SocketAddr::from((route.gateway, NAT_PMP_PORT)))
+        nat_pmp_external(SocketAddr::from((router.gateway, NAT_PMP_PORT)))
             .await
             .map(IpAddr::V4)
     };
     NetFacts {
         lan_addr,
-        gateway: Some(IpAddr::V4(route.gateway)),
-        interface: Some(route.interface),
+        gateway: Some(IpAddr::V4(router.gateway)),
+        interface: Some(router.interface),
         vpn,
         wan: classify_wan(wan_addr),
         wan_addr,
@@ -173,16 +229,111 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
 eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
 ";
 
+    /// Parses `text` and gives the router and the VPN, as `check` does.
+    fn router_and_vpn(text: &str) -> (Option<DefaultRoute>, Option<String>) {
+        let routes = parse_routes(text);
+        let router = default_route(&routes);
+        let vpn = vpn_on_route(&routes, router.as_ref());
+        (router, vpn)
+    }
+
+    fn router(interface: &str) -> Option<DefaultRoute> {
+        Some(DefaultRoute {
+            interface: interface.into(),
+            gateway: Ipv4Addr::new(192, 168, 1, 1),
+        })
+    }
+
     #[test]
     fn the_default_route_names_its_gateway() {
+        assert_eq!(router_and_vpn(ROUTE), (router("eth0"), None));
+        assert_eq!(router_and_vpn("Iface\tDestination\n"), (None, None));
         assert_eq!(
-            parse_proc_route(ROUTE),
-            Some(DefaultRoute {
+            parse_routes(ROUTE)[0],
+            Route {
                 interface: "eth0".into(),
-                gateway: Ipv4Addr::new(192, 168, 1, 1),
-            })
+                destination: Ipv4Addr::new(192, 168, 1, 0),
+                mask: Ipv4Addr::new(255, 255, 255, 0),
+                gateway: None,
+                metric: 0,
+            }
         );
-        assert_eq!(parse_proc_route("Iface\tDestination\n"), None);
+    }
+
+    /// openconnect's vpnc-script on a NetworkManager laptop: `ip route replace default dev
+    /// tun0` adds a default without a gateway at metric 0 beside the DHCP default at 600.
+    const TUNNEL_FIRST: &str = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+tun0\t00000000\t00000000\t0001\t0\t0\t0\t00000000\t0\t0\t0
+wlan0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
+wlan0\t0001A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0
+";
+
+    /// Captured from a kernel: a VPN's `default dev tun0 metric 50` beside the router's
+    /// default at metric 100.
+    const TUNNEL_METRIC_50: &str = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+tun0\t00000000\t00000000\t0001\t0\t0\t50\t00000000\t0\t0\t0
+eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
+tun0\t0000080A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
+eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
+";
+
+    #[test]
+    fn a_preferred_default_without_a_gateway_is_the_vpn() {
+        assert_eq!(
+            router_and_vpn(TUNNEL_FIRST),
+            (router("wlan0"), Some("tun0".into()))
+        );
+        assert_eq!(
+            router_and_vpn(TUNNEL_METRIC_50),
+            (router("eth0"), Some("tun0".into()))
+        );
+        // The metric decides, not the order of the lines.
+        let mut lines: Vec<&str> = TUNNEL_FIRST.lines().collect();
+        lines.swap(1, 2);
+        assert_eq!(
+            router_and_vpn(&lines.join("\n")),
+            (router("wlan0"), Some("tun0".into()))
+        );
+        // A tunnel's default behind the router's carries nothing.
+        let behind = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
+tun0\t00000000\t00000000\t0001\t0\t0\t900\t00000000\t0\t0\t0
+";
+        assert_eq!(router_and_vpn(behind), (router("eth0"), None));
+    }
+
+    #[test]
+    fn a_vpn_that_replaced_the_default_route_is_seen_without_a_router() {
+        let replaced = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+tun0\t00000000\t00000000\t0001\t0\t0\t0\t00000000\t0\t0\t0
+wlan0\t0001A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0
+";
+        assert_eq!(router_and_vpn(replaced), (None, Some("tun0".into())));
+        // Without a router, a default without a gateway is a VPN's only by its name.
+        let bare = replaced.replace("tun0", "eth0");
+        assert_eq!(router_and_vpn(&bare), (None, None));
+        // An unreachable default names no interface.
+        let unreachable = replaced.replace("tun0", "*");
+        assert_eq!(router_and_vpn(&unreachable), (None, None));
+    }
+
+    #[test]
+    fn a_vpn_default_with_a_gateway_ahead_of_the_routers_is_the_vpn() {
+        let ahead = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+tun0\t00000000\t0100080A\t0003\t0\t0\t50\t00000000\t0\t0\t0
+eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
+";
+        let (router, vpn) = router_and_vpn(ahead);
+        assert_eq!(
+            router.map(|router| router.interface).as_deref(),
+            Some("tun0")
+        );
+        assert_eq!(vpn.as_deref(), Some("tun0"));
     }
 
     #[test]

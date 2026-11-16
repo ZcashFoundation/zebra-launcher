@@ -96,8 +96,10 @@ which gate the release on each network.
   by hand without prost; its decoder is pinned to `LightdInfo` bytes captured from zebrad.
 - The front door's `Unavailable` answers with h2's server directly, not hyper's, with hyper's
   limits set by hand: 16 streams a connection and a 16 KiB header list.
-- The network checks read the default route from `/proc/net/route` and send NAT-PMP's
-  two-byte external-address request themselves: no netdev or crab_nat in PS1.
+- The network checks read the routes from `/proc/net/route` and send NAT-PMP's two-byte
+  external-address request themselves: no netdev or crab_nat in PS1. The router is the
+  default route with a gateway and the lowest metric; the VPN check looks at the default the
+  kernel prefers, the lowest metric with a gateway or without.
 - Consent given at step 1, before a name exists, binds to the first name chosen; another name
   asks again.
 - A network change waits for the user's Resume even after switching back (the pause holds),
@@ -853,8 +855,10 @@ and Next stays disabled until the gates pass.
    - The LAN address and gateway come from the default route (`netdev`). The user reserves the
      address in the router's DHCP settings ("a forward targets an address"); Zeal records it
      and re-checks it at every start and every 5 minutes.
-   - A VPN or exit node on the default route (`tun`, `utun`, `wg`, `ppp`, Tailscale: a
-     heuristic) stops the setup: "Turn it off, or set it to leave Zeal out."
+   - A VPN or exit node on the default route the kernel prefers stops the setup: one on a
+     VPN's interface (`tun`, `utun`, `wg`, `ppp`, Tailscale: a heuristic), or a default on
+     another interface than the router's, such as a tunnel's without a gateway at a lower
+     metric. "Turn it off, or set it to leave Zeal out."
    - The router's WAN address, read-only: NAT-PMP's external-address request (opcode 0,
      `crab_nat`) and UPnP IGD's `GetExternalIPAddress` (`igd-next`). PCP isn't used here: it
      reports the address only for a MAP or PEER request, which creates a mapping. Public:
@@ -959,12 +963,12 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   NAT, a second router), DuckDNS takes the address it sees, which may change unseen, so that
   update goes again every 5 minutes (DuckDNS answers `NOCHANGE`). No update goes out until a
   network check made since the service started, or resumed from a pause only the user ends,
-  finds the default route's gateway and this computer's LAN address, no VPN on that route
-  and, once open, the LAN address the forward targets: a laptop that starts Zeal or resumes on
-  a café's network never points the name there, and neither does one whose default route
-  could not be read (a VPN's route without a gateway is skipped, so no VPN is seen). A
-  mismatch for 15 minutes, against the router's address or else the one DuckDNS saw, pauses
-  the service. After a change:
+  finds the router's default route and this computer's LAN address, no VPN on the default
+  route the kernel prefers and, once open, the LAN address the forward targets: a laptop that
+  starts Zeal or resumes on a café's network never points the name there, and neither does
+  one without a default route through a router, as when a VPN replaced it by its own without
+  a gateway (that VPN is found too). A mismatch for 15 minutes, against the router's address
+  or else the one DuckDNS saw, pauses the service. After a change:
   "Address changed at 14:02. DNS updated; resolvers may use the old one for up to 5 minutes."
 - **Tokens** go to the OS keychain (`keyring` 4.2.0, service `org.zfnd.zeal`, account
   `dns:<provider>:<zone>`: a DuckDNS token covers every name on the user's DuckDNS account,
