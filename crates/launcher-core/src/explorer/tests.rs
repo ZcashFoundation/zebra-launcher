@@ -1,6 +1,6 @@
 //! The explorer actor over a synthetic chain: what each page costs the node, merging and the
-//! cache, the node and network rules, a reorganisation followed at the tip, and logs that
-//! never carry what was asked for.
+//! cache, the node and network rules, a reorganisation followed at the tip, the time limits at
+//! their own values on Tokio's paused clock, and logs that never carry what was asked for.
 
 use std::{
     net::{Ipv4Addr, SocketAddr},
@@ -967,19 +967,18 @@ async fn a_new_run_of_zebrad_keeps_the_cache() {
     );
 }
 
-#[tokio::test]
-async fn a_hidden_explorer_shrinks_its_cache() {
+// The time limits at their own values, on Tokio's paused clock: a sleep there takes no time,
+// and the actor's limits read the same clock.
+
+#[tokio::test(start_paused = true)]
+async fn a_hidden_explorer_shrinks_its_cache_after_ten_minutes() {
+    // An empty idle budget, so the shrinking shows; the wait is the default 10 minutes.
     let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
-        config.idle_after = Duration::from_millis(20);
         config.idle_cache_bytes = 0;
-        config.tip_poll = Duration::from_millis(10);
     });
     let id = BlockId::Hash(harness.chain.borrow().hash(TIP - 2_000).unwrap());
     harness.reply(ExplorerRequest::Block { id }).await;
-    let before = harness.counts();
-    harness.reply(ExplorerRequest::Block { id }).await;
-    assert_eq!(delta(harness.counts(), before), [0; 6], "from the cache");
-    // Shown, then hidden for longer than `idle_after`.
+    // Shown, then hidden.
     harness.show(PageKind::Block).await;
     harness
         .reply(ExplorerRequest::Interest {
@@ -987,7 +986,16 @@ async fn a_hidden_explorer_shrinks_its_cache() {
             page: PageKind::Block,
         })
         .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_secs(9 * 60)).await;
+    let before = harness.counts();
+    harness.reply(ExplorerRequest::Block { id }).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0; 6],
+        "nine minutes: kept"
+    );
+    // Asking does not show the page: the explorer stays hidden, and shrinks at ten minutes.
+    tokio::time::sleep(Duration::from_secs(60 + 5)).await;
     let before = harness.counts();
     harness.reply(ExplorerRequest::Block { id }).await;
     assert_eq!(
@@ -997,12 +1005,9 @@ async fn a_hidden_explorer_shrinks_its_cache() {
     );
 }
 
-#[tokio::test]
-async fn a_height_near_the_tip_is_read_again_once_the_check_is_stale() {
-    let fresh = Duration::from_millis(100);
-    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
-        config.fresh = fresh;
-    });
+#[tokio::test(start_paused = true)]
+async fn a_height_near_the_tip_is_read_again_once_the_check_is_ten_seconds_old() {
+    let harness = harness();
     let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
         panic!("a chain page");
     };
@@ -1010,12 +1015,17 @@ async fn a_height_near_the_tip_is_read_again_once_the_check_is_stale() {
     for id in [near, deep] {
         harness.reply(ExplorerRequest::Block { id }).await;
     }
+    tokio::time::sleep(Duration::from_secs(9)).await;
     let before = harness.counts();
     for id in [near, deep] {
         harness.reply(ExplorerRequest::Block { id }).await;
     }
-    assert_eq!(delta(harness.counts(), before), [0; 6], "from the cache");
-    tokio::time::sleep(fresh + Duration::from_millis(50)).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0; 6],
+        "nine seconds: from the cache"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
     let before = harness.counts();
     for id in [near, deep] {
         harness.reply(ExplorerRequest::Block { id }).await;
@@ -1027,24 +1037,57 @@ async fn a_height_near_the_tip_is_read_again_once_the_check_is_stale() {
     );
 }
 
-#[tokio::test]
-async fn the_follower_checks_the_tip_at_every_poll() {
-    let poll = Duration::from_millis(100);
-    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
-        config.tip_poll = poll;
-    });
+#[tokio::test(start_paused = true)]
+async fn the_follower_checks_the_tip_every_two_seconds_while_shown() {
+    let harness = harness();
+    harness.show(PageKind::Chain).await;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let before = harness.counts()[0];
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let checks = harness.counts()[0] - before;
+    // One check a poll: fifteen in 30 s. A check every other poll would make about seven.
+    assert!((14..=16).contains(&checks), "{checks} tip checks in 30 s");
+    // Hidden, it checks nothing.
     harness
         .reply(ExplorerRequest::Interest {
-            visible: true,
+            visible: false,
             page: PageKind::Chain,
         })
         .await;
-    tokio::time::sleep(poll * 3).await;
-    let before = harness.counts()[0];
-    tokio::time::sleep(poll * 15).await;
-    let checks = harness.counts()[0] - before;
-    // One check a poll; a check that skipped every other poll would make about seven.
-    assert!(checks >= 11, "{checks} tip checks in 15 polls");
+    let before = harness.counts();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0; 6],
+        "nothing while hidden"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn another_network_clears_the_cache() {
+    let harness = harness();
+    let id = BlockId::Hash(harness.chain.borrow().hash(TIP - 2_000).unwrap());
+    harness.reply(ExplorerRequest::Block { id }).await;
+    let before = harness.counts();
+    harness.reply(ExplorerRequest::Block { id }).await;
+    assert_eq!(delta(harness.counts(), before), [0; 6], "from the cache");
+    // zebrad reports Testnet, then Mainnet again: nothing known about the first chain is
+    // kept across.
+    for chain in ["test", "main"] {
+        harness.stats.send_modify(|stats| {
+            if let Some(stats) = stats {
+                stats.chain = chain.into();
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let before = harness.counts();
+    harness.reply(ExplorerRequest::Block { id }).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0, 2, 0, 0, 1, 1],
+        "read again"
+    );
 }
 
 /// Every event's fields, as text, from the explorer's threads.
