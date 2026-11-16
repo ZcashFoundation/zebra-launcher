@@ -249,6 +249,22 @@ async fn the_chain_page_stays_within_its_budget_and_a_revisit_is_free() {
 }
 
 #[tokio::test]
+async fn the_tip_goes_out_with_its_time() {
+    let harness = harness();
+    let ExplorerResponse::Chain(page) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    let mut live = harness.explorer.live();
+    let event = tokio::time::timeout(LIMIT, live.wait_for(|event| event.live.tip_time.is_some()))
+        .await
+        .expect("the tip's time goes out")
+        .expect("the explorer runs")
+        .clone();
+    assert_eq!(event.live.tip.map(|tip| tip.height), Some(TIP));
+    assert_eq!(event.live.tip_time, Some(page.blocks[0].time));
+}
+
+#[tokio::test]
 async fn a_block_page_reads_two_blocks_its_coinbase_and_its_subsidy() {
     let harness = harness();
     let height = TIP - 2_000;
@@ -534,6 +550,7 @@ async fn the_first_node_answers_by_its_own_id_on_its_own_network() {
                 network: Network::Mainnet
             },
             tip: None,
+            tip_time: None,
             reorg: None,
         },
         "no Mainnet tip under a Testnet node"

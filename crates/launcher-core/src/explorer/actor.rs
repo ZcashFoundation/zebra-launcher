@@ -524,6 +524,14 @@ where
         self.publish();
     }
 
+    /// The time of the block `hash`, when the cache has the block.
+    fn block_time(&mut self, hash: BlockHash) -> Option<u64> {
+        match self.cache.get(&CacheKey::Block(hash))? {
+            ReadResult::Block(block) => block.time.and_then(|time| u64::try_from(time).ok()),
+            _ => None,
+        }
+    }
+
     /// zebrad stopped: queued reads fail; reads in flight report back on their own.
     fn stop_reading(&mut self) {
         self.run = None;
@@ -566,9 +574,15 @@ where
             Some(_) => (None, None),
             None => (self.chain_view(), self.reorg),
         };
+        let tip_time = tip.and_then(|tip| self.block_time(tip.hash));
         let next = ExplorerLiveEvent {
             node: self.served(),
-            live: ExplorerLive { state, tip, reorg },
+            live: ExplorerLive {
+                state,
+                tip,
+                tip_time,
+                reorg,
+            },
         };
         self.live.send_if_modified(|current| {
             let changed = *current != next;
@@ -867,6 +881,10 @@ where
                 let bytes = 400 + 32 * block.tx.len();
                 self.cache
                     .insert(CacheKey::Block(block.hash), value.clone(), bytes);
+                // The tip's block: its time goes out with the tip.
+                if self.index.tip().is_some_and(|(_, tip)| tip == block.hash) {
+                    self.publish();
+                }
             }
             ReadResult::Tx(tx) => {
                 // Only a transaction of a best-chain block keeps its place.

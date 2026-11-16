@@ -30,7 +30,7 @@ use crate::{
     api,
     app::{AppState, Tab},
     components::{icons::info_icon, nav::is_mac},
-    format::{controls, local_datetime_short, thousands},
+    format::{controls, local_datetime_short, relative, thousands},
 };
 use block::BlockPage;
 use chain::ChainPage;
@@ -359,6 +359,16 @@ fn SourceLine(
         }
         if let Some(tip) = tip.get() {
             parts.push(format!("tip {}", thousands(u64::from(tip))));
+            // How old the tip block is, by its time; the clock's tick keeps it current.
+            if let Some(time) = nav
+                .live
+                .with(|live| live.as_ref().and_then(|live| live.tip_time))
+            {
+                parts.push(relative(
+                    UNIX_EPOCH + Duration::from_secs(time),
+                    app.now.get(),
+                ));
+            }
         }
         parts.join(" · ")
     };

@@ -811,6 +811,9 @@ pub struct ExplorerLive {
     pub state: LiveState,
     /// The tip the explorer follows, once it has read one.
     pub tip: Option<ChainView>,
+    /// The tip block's time, in seconds since the Unix epoch, once the explorer has read that
+    /// block.
+    pub tip_time: Option<u64>,
     /// The last reorganisation the explorer followed.
     pub reorg: Option<ReorgNotice>,
 }
@@ -949,11 +952,19 @@ mod tests {
                 estimated: 2,
             },
             tip: None,
+            tip_time: Some(1_800_000_000),
             reorg: None,
         };
         let back: ExplorerLive =
             serde_json::from_value(serde_json::to_value(&live).unwrap()).unwrap();
         assert_eq!(back, live);
+        assert_eq!(
+            serde_json::to_value(LiveState::OtherNetwork {
+                network: Network::Testnet
+            })
+            .unwrap(),
+            json!({"state": "other_network", "network": "testnet"})
+        );
     }
 
     #[test]

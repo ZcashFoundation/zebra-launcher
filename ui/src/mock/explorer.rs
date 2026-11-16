@@ -194,6 +194,7 @@ impl Explorer {
             return ExplorerLive {
                 state: LiveState::OtherNetwork { network },
                 tip: None,
+                tip_time: None,
                 reorg: None,
             };
         }
@@ -208,6 +209,9 @@ impl Explorer {
                 stale: !view.running,
                 ..known
             }),
+            tip_time: self
+                .known
+                .and_then(|known| u64::try_from(self.chain.time_at(known.height)).ok()),
             reorg: self.reorg,
         }
     }
