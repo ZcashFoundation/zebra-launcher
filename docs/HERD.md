@@ -39,9 +39,10 @@ take from the herd.
   for every node saved without the field, a v2 node or a phase 2a node alike: `false` or a
   folder stays the user's and is left alone; no key or `true` becomes the node's own folder
   with a copy of the shared peer file, made once and never over an existing file. The app
-  gives `SettingsStore::open_with` zebrad's default cache folder for the copy. The
-  configuration form shows the key as managed, also for a node that kept its value (the
-  text view still edits it there).
+  gives `SettingsStore::open_with` zebrad's default cache folder for the copy. Reset config
+  gives a node that kept its value its own folder, since the minimal file has none of the
+  user's. The configuration form shows the key as managed, also for a node that kept its
+  value (the text view still edits it there).
 - `assign_ports` never moves a port onto 8233 or 18233, never gives those to another role,
   and never gives a P2P port one of the ports zebra-network refuses to dial
   (`RESERVED_PORTS`, `REFUSED_P2P_PORTS` in launcher-types). `ports_move_out_of_each_others_way`

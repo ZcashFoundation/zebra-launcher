@@ -220,21 +220,17 @@ pub async fn read_config(
 
 /// Replaces the node's `zebrad.toml` with a fresh minimal file holding only
 /// the managed keys, keeping the old file as `zebrad.toml.bak`, and returns
-/// the new document. Only while the node is stopped or failed: it holds the
-/// same gate as the data changes, so zebrad cannot start in the middle, and
-/// refuses while a configuration change is being applied.
+/// the new document ([`launcher_core::registry::RegistryHandle::reset_config`]).
+/// Only while the node is stopped or failed: it holds the same gate as the
+/// data changes, so zebrad cannot start in the middle, and refuses while a
+/// configuration change is being applied.
 #[tauri::command]
 pub async fn reset_config(
     state: State<'_, AppState>,
     node: NodeId,
 ) -> Result<ConfigDocument, String> {
-    let handle = state.node(&node)?;
-    let _data = handle.gates.data_change_permit()?;
-    let _config = handle.gates.try_config_permit()?;
-    let keys = handle.managed_keys();
-    let paths = handle.paths.clone();
-    on_node(&node, blocking(move || config::reset(&paths, &keys)))
-        .await?
+    on_node(&node, state.registry.reset_config(&node))
+        .await
         // The UI says what failed ("Could not reset the config"), so only the cause here.
         .map_err(message)
 }

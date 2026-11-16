@@ -141,7 +141,9 @@ files are brought up to date and its actors started in
   every node saved without the field (`herd::peers::adopt`): no key or `true` becomes the
   node's own folder, starting from a copy of the shared file in zebrad's default cache
   folder (made once, never over an existing file; the app passes that folder to
-  `SettingsStore::open_with`), and the decision is written back.
+  `SettingsStore::open_with`), and the decision is written back. `reset_config` gives a
+  `kept` node its own folder: the new file has no value of the user's, and the spec is
+  saved as `own`.
 - **Ports at every start.** The supervisor tries binding each of the node's addresses
   (P2P on `0.0.0.0`, RPC and metrics on loopback) before it spawns zebrad: one that
   another program holds fails the start as `PortInUse`, naming the port, before zebrad
@@ -468,10 +470,12 @@ Applying an edit:
    next launch via the marker.
 
 `reset_config` (Configure → "Reset to managed defaults", and the post-update recovery
-panel) replaces the file with the minimal one `config::ensure` creates, keeping the old
-file as the same `zebrad.toml.bak`, and returns the new `ConfigDocument`. It runs only
-while zebrad is `Stopped` or `Failed`, holding the data-change gate (see below) so zebrad
-cannot start meanwhile, and refuses while an apply is in flight or its marker is pending.
+panel; `RegistryHandle::reset_config`) replaces the file with the minimal one
+`config::ensure` creates, keeping the old file as the same `zebrad.toml.bak`, and returns
+the new `ConfigDocument`. It runs only while zebrad is `Stopped` or `Failed`, holding the
+data-change gate (see below) so zebrad cannot start meanwhile, and refuses while an apply
+is in flight or its marker is pending. The new file has the node's own peer cache, and a
+node that kept its own value is saved as `peer_cache: own`.
 
 A bundled zebrad version change is not special-cased: the next start runs the existing
 file against the new zebrad, and a key the new version rejects fails that start as
