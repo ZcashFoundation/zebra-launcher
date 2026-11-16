@@ -625,12 +625,31 @@ short; the panel and zebrad's Stop and Restart say so.
   thread with the process group and `PR_SET_PDEATHSIG(SIGTERM)`, the pid file with its executable
   check (`kill_stale` ends a `zeal-zingod` an earlier Zeal left), the log ring and the rotating
   file, the restart policy, the check of the port before the spawn and the process-tree probe.
-  `SupervisorConfig.command` becomes `Launch { Zebrad(ZebradCommand), Zingod(ZingodCommand) }`,
-  with `From<ZebradCommand>`, so today's callers don't change. The four places in
-  `supervisor/actor.rs` that know only zebrad (the detector, the line parser, the exit
-  classifier, and `Running` at `Starting zebrad`) go through a reader that `Launch` picks, and
-  the actor's notes name the program ("zingod started (pid N)"). The change is made in place: no
-  code moves, and zebrad's tests stay as they are.
+  The change is made in place, in one behaviour commit, with no code moves:
+  - `SupervisorConfig.command` (`crates/launcher-core/src/supervisor.rs:64`) becomes
+    `Launch { Zebrad(ZebradCommand), Zingod(ZingodCommand) }`. `From<ZebradCommand>` keeps
+    `SupervisorConfig::new(command)` as it is, and `Launch` has accessors: `binary()`,
+    `stop_is_graceful()` (used at `supervisor.rs:243`) and `zebrad_mut()`, an
+    `Option<&mut ZebradCommand>`.
+  - The callers that read or change the command's fields change mechanically in the same commit:
+    `src-tauri/src/lib.rs:296` (the registry's customize closure), and in launcher-core's tests
+    `registry.rs:118, 245`, `supervisor.rs:187, 263, 302, 772, 822` and `real_zebrad.rs:364`.
+    zebrad's tests change only in how they reach the command; their assertions stay as they are.
+  - The spawner: `Spawner::spawn`, `SpawnRequest` and `spawn_here`
+    (`crates/launcher-core/src/process.rs:237-322`) take a `Launch`. zebrad's branch is
+    today's: `-c <config> start`, the `ZEBRA_*` variables removed, the colour variables forced
+    off and the stdin-close pairing checked. zingod's branch gets `-c <config> start`, stdin null,
+    a cleared environment with its five variables (below), and no
+    stdin-close argument. `unix::prepare` takes a nice value and sets it in the same `pre_exec`
+    as the parent-death signal.
+  - The actor (`supervisor/actor.rs`): the spawn (`:456`) passes the `Launch`; the pid file
+    records `Launch::binary()` (`:509`); the "started" note names the program, "zingod started
+    (pid N)" (`:536`); and the detector, the line parser, the exit classifier and `Running` at
+    `Starting zebrad` go through a reader that `Launch` picks.
+  - Redaction before the file: `push_line` (`:825-830`) writes the raw line to the rotating file
+    before `parse_line` runs. So the reader also has a `redact` step, the identity for zebrad,
+    and `push_line` runs it first and hands the redacted text to both `log_file.write_line` and
+    the parser.
 - **The command.** `zeal-zingod -c <config> start` (`-c` is global,
   `packages/zingod/src/cli.rs:15-54`), with stdin null and nice 10, as this document planned for
   Zaino: zebrad gets the CPU first during the build, when zingod otherwise uses every core (rayon,
@@ -977,7 +996,8 @@ network sees it come from Zeal's node, as with zebrad's endpoint.
   a minute, and each minute's first failed and first unavailable request with its method. It
   logs the txid of a transaction that wasn't accepted, at WARN
   (`packages/zingod-chainview/src/submit/driver.rs`), so Zeal's reader replaces every `txid=`
-  value with `[txid]` before the line reaches the ring or the file.
+  value with `[txid]` before the line reaches the ring or the file: `push_line` redacts before
+  it writes ([How Zeal runs zingod](#how-zeal-runs-zingod)).
 - **Diagnostics** carry zingod's `/status`, its configuration (paths only; the cookie is a path)
   and the last 200 of its redacted lines.
 - **Never turned on**:
@@ -1214,7 +1234,8 @@ over.
   - the logfmt reader; `Running` at `Listening` with `component=Grpc`, not `Admin`;
   - each exit class, from captured lines, with the held lock classed `DbLocked` and a refused
     permission at open `Crash`, never `IndexBroken`;
-  - the txid redaction, before the ring and the file.
+  - the txid redaction, read back from both the ring and the log file's contents;
+  - zebrad's lines reaching the file unchanged.
 - **The runner against fakes** (launcher-public, under `tokio::time::pause`). `fake-zingod`, a
   launcher-core bin beside `fake-zebrad`:
   - reads its `-c` file and refuses an unknown key with zingod's `unknown field` message;
@@ -1262,8 +1283,8 @@ over.
 
 These replace PS5. Each is one pull request or a short series, with its tests, mock flags and
 screenshots, and ARCHITECTURE.md updated for what landed. Z1 and Z2 change nothing users see and
-can land beside the explorer, herd and resources work; only Z2's `Launch` touches shared code.
-None of them needs front door v2 (PS2) or MULTI-NODE phase 5.
+can land beside the explorer, herd and resources work; only Z2's `Launch`, in the supervisor and
+the spawner, touches shared code. None of them needs front door v2 (PS2) or MULTI-NODE phase 5.
 
 | Phase | Ships | Needs |
 | --- | --- | --- |
