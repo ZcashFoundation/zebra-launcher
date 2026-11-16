@@ -444,6 +444,20 @@ pub fn load_stored(paths: &PublicPaths, name: &str, now: SystemTime) -> Option<I
     })
 }
 
+/// The dates of an expired certificate kept on disk for `name`. It is never served, but it
+/// tells the actor after a restart that the certificate lapsed, so it is ordered again unasked
+/// and the user may try again, as before the restart.
+fn lapsed_stored(
+    paths: &PublicPaths,
+    name: &str,
+    now: SystemTime,
+) -> Option<(SystemTime, SystemTime)> {
+    let chain_pem = std::fs::read_to_string(paths.cert(name)).ok()?;
+    validity(&chain_pem)
+        .ok()
+        .filter(|(_, not_after)| *not_after <= now)
+}
+
 /// What the actor may be asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AcmeCmd {
@@ -473,6 +487,8 @@ impl AcmeHandle {
     /// Starts the actor for `config.name`. `challenge` goes to the front door. `can_validate`
     /// says whether the front door is up, so renewals wait for it: Zeal never opens the port
     /// to renew. `staging_validated_at` is the last staging validation kept from earlier runs.
+    /// A stored certificate that is valid is served; one that expired is not, but its dates
+    /// stay in the status, so it counts as lapsed.
     pub fn spawn(
         config: AcmeConfig,
         challenge: watch::Sender<Option<Arc<Challenge>>>,
@@ -484,12 +500,14 @@ impl AcmeHandle {
         let cert = stored.as_ref().and_then(|issued| {
             launcher_gateway::certified_key_from_pem(&issued.chain_pem, &issued.key_pem).ok()
         });
+        let dates = stored
+            .as_ref()
+            .map(|issued| (issued.not_before, issued.not_after))
+            .or_else(|| lapsed_stored(&config.paths, &config.name, now));
         let status = CertStatus {
-            not_after: stored.as_ref().map(|issued| issued.not_after),
-            not_before: stored.as_ref().map(|issued| issued.not_before),
-            renew_at: stored
-                .as_ref()
-                .map(|issued| renew_at(issued.not_before, issued.not_after)),
+            not_after: dates.map(|(_, not_after)| not_after),
+            not_before: dates.map(|(not_before, _)| not_before),
+            renew_at: dates.map(|(not_before, not_after)| renew_at(not_before, not_after)),
             staging_validated_at,
             ordering: None,
             next_try: None,
@@ -771,6 +789,46 @@ mod tests {
             next_order(&fresh, true, at(24)),
             (CertIssuer::Staging, true)
         );
+    }
+
+    #[tokio::test]
+    async fn an_expired_certificate_on_disk_is_ordered_again_unasked() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = PublicPaths::new(dir.path());
+        let name = "zec-alice.duckdns.org";
+        let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).unwrap();
+        params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2025, 4, 1);
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        store::write_private(&paths.key(name), key.serialize_pem().as_bytes()).unwrap();
+        store::write_public(&paths.cert(name), cert.pem().as_bytes()).unwrap();
+        let (_, expired) = validity(&cert.pem()).unwrap();
+        assert!(load_stored(&paths, name, SystemTime::now()).is_none());
+
+        // Zeal starts again with it on disk: not served, but known to have lapsed.
+        let mut config = AcmeConfig::lets_encrypt(paths, name);
+        config.staging = "https://127.0.0.1:1/directory".into();
+        config.production = config.staging.clone();
+        let (challenge, _) = watch::channel(None);
+        let (door_up, can_validate) = watch::channel(false);
+        let handle = AcmeHandle::spawn(config, challenge, can_validate, Some(at(0)));
+        assert_eq!(handle.status.borrow().not_after, Some(expired));
+        assert!(
+            handle.cert.borrow().is_none(),
+            "an expired key is not served"
+        );
+        // An earlier step fails, so the setup never asks; once the front door is up, the
+        // actor orders by itself.
+        door_up.send_replace(true);
+        let mut status = handle.status.clone();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            status.wait_for(|status| status.ordering.is_some() || status.last_problem.is_some()),
+        )
+        .await
+        .expect("an order unasked")
+        .unwrap();
     }
 
     #[test]

@@ -1049,7 +1049,10 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   Unix and under the per-user AppData ACL on Windows, a key others can read is refused, and
   every write is atomic.
 - **Expiry**: the panel shows the days left and the next window; a banner 14 days before expiry
-  if renewal fails; `ChallengeOnly` at expiry; a daily check of the served chain.
+  if renewal fails; `ChallengeOnly` at expiry; a daily check of the served chain. An expired
+  certificate is ordered again under the budget without being asked, and the panel offers
+  "Try again"; one found expired on disk when Zeal starts is never served, but its dates are
+  kept, so it counts as lapsed whatever step of the setup is current.
 
 ### Ports, the router and NAT
 

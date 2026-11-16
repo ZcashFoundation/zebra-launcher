@@ -491,6 +491,61 @@ async fn an_off_that_cannot_be_saved_still_closes_the_service() {
     .await;
 }
 
+/// Zeal starts again with an open service whose certificate expired on disk, while a step
+/// before the certificate's fails: the status still says the certificate expired, which makes
+/// the actor order it again and the panel offer to try again.
+#[tokio::test]
+async fn an_expired_certificate_is_known_after_a_restart_with_an_earlier_step_failing() {
+    use launcher_public::store::{self, PublicPaths};
+    use launcher_types::public::{PublicHostname, PublicServiceSpec, StepState};
+    let s = setup().await;
+    let name = "zec-alice.duckdns.org";
+    let paths = PublicPaths::new(s.dir.path());
+    let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).unwrap();
+    params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+    params.not_after = rcgen::date_time_ymd(2025, 4, 1);
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    store::write_private(&paths.key(name), key.serialize_pem().as_bytes()).unwrap();
+    store::write_public(&paths.cert(name), cert.pem().as_bytes()).unwrap();
+    let (_, expired) = launcher_public::acme::validity(&cert.pem()).unwrap();
+
+    let mut spec = PublicServiceSpec::new_light_server(
+        launcher_types::NodeId::new("zebrad-mainnet").unwrap(),
+        Network::Mainnet,
+    );
+    spec.name = Some(PublicHostname::parse(name).unwrap());
+    spec.consent = Some(launcher_types::public::Consent {
+        version: CONSENT_VERSION,
+        at: std::time::SystemTime::now(),
+        hostname: name.into(),
+    });
+    spec.opened = true;
+    s.settings
+        .update(move |settings| settings.public.services.push(spec))
+        .await
+        .unwrap();
+    let status = wait_for(&s.services, |status| {
+        status
+            .cert
+            .as_ref()
+            .is_some_and(|cert| cert.not_after.is_some())
+    })
+    .await;
+    assert_eq!(status.cert.unwrap().not_after, Some(expired));
+    // No light client server answers: the setup stops before the certificate step, so it never
+    // asks for an order itself.
+    let current = status
+        .steps
+        .iter()
+        .find(|step| step.state != StepState::Done)
+        .map(|step| step.id);
+    assert!(
+        current.is_some_and(|current| current < StepId::Certificate),
+        "{current:?}"
+    );
+}
+
 #[tokio::test]
 async fn what_was_proven_belongs_to_its_name() {
     use launcher_types::public::{DnsProvider, Reachability};
