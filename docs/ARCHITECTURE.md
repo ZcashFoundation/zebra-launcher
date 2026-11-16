@@ -745,7 +745,8 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   `UNAVAILABLE`. A wrong or missing name gets no certificate. v1 forwards the decrypted bytes
   (one task owns both streams), with a semaphore for all connections, an actor for the
   per-address caps and token bucket (IPv4 address or IPv6 /64, keyed by SipHash under a
-  random key), a 10 s handshake, a 10 minute idle timer, a 2 hour connection age and an
+  random key; it counts open connections as they change and keeps a bounded number of idle
+  addresses, so an admission's work does not grow with them), a 10 s handshake, a 10 minute idle timer, a 2 hour connection age and an
   upload bucket. A mode change closes the connections opened before it, Stop closes the port
   and every connection at once, and nothing logs a client address.
 - **Certificates** (`launcher-public/src/acme.rs`): instant-acme with ring, TLS-ALPN-01 through

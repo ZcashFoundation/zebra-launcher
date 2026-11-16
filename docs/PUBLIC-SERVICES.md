@@ -1308,9 +1308,11 @@ learns it all. Zeal keeps as little as it can:
   logs no client address for a gRPC call in any case, and Zeal never turns on Zaino's PROXY
   protocol);
 - the limiter is keyed by SipHash-2-4 of the address or /64 under a random key per run, pruned
-  after 2 minutes idle, or an hour after its last `SendTransaction` for an address that sent one
-  (the hourly cap's window), and never written down; "a connection from outside" keeps only a
-  time;
+  once an address without a connection has its whole burst back, after 2 minutes idle at most,
+  or an hour after its last `SendTransaction` for an address that sent one (the hourly cap's
+  window), and never written down; it keeps at most 16 idle addresses per connection slot,
+  forgetting the ones idle longest, so its memory and the work of an admission do not grow with
+  the number of networks that try; "a connection from outside" keeps only a time;
 - zeeder's lines are filtered and redacted ([Configuration](#configuration));
 - diagnostics (`copy_diagnostics`, Copy summary) blank the addresses and the name unless
   "include addresses" is ticked, and never carry tokens or keys. A DuckDNS name keeps its zone,
