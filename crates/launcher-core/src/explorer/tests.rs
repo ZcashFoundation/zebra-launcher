@@ -305,7 +305,7 @@ async fn the_chain_page_stays_within_its_budget_and_a_revisit_is_free() {
     assert_eq!(delta(harness.counts(), before), [0; 6]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_page_goes_before_the_chain_pages_coinbases() {
     let harness = harness();
     let txid = {
@@ -337,6 +337,45 @@ async fn a_page_goes_before_the_chain_pages_coinbases() {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(harness.counts()[4], 3, "the page's read is under way");
+    // Once the Chain page's check of the tip is too old for a page, the pages that need the
+    // tip check it again ahead of the coinbases too.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let before = harness.counts();
+    let ExplorerResponse::Future(future) = harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Height(TIP + 100),
+        })
+        .await
+    else {
+        panic!("a countdown");
+    };
+    assert_eq!(future.blocks_left, 100);
+    assert_eq!(delta(harness.counts(), before)[0], 1, "the tip was checked");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        harness
+            .reply(ExplorerRequest::Resolve {
+                query: "tip-5".into()
+            })
+            .await,
+        ExplorerResponse::Resolve(Resolution::Go {
+            route: ExplorerRoute::Block {
+                id: BlockId::Height(TIP - 5)
+            }
+        })
+    );
+    // And so does the follower, once the Chain page is shown.
+    harness.change_chain(|chain| chain.mine(1));
+    harness.show(PageKind::Chain).await;
+    let mut live = harness.explorer.live();
+    tokio::time::timeout(
+        LIMIT,
+        live.wait_for(|event| event.live.tip.is_some_and(|tip| tip.height == TIP + 1)),
+    )
+    .await
+    .expect("the follower moved on")
+    .expect("the explorer runs");
+    assert_eq!(harness.counts()[4], 3, "the coinbases are still held");
     harness.tx_gate.send_replace(true);
     assert!(matches!(
         page.await.expect("no panic").expect("a page").response,
@@ -348,11 +387,12 @@ async fn a_page_goes_before_the_chain_pages_coinbases() {
     else {
         panic!("a chain page");
     };
+    assert_eq!(full.blocks[0].height, TIP + 1);
     assert!(full.blocks.iter().all(|block| block.ledger.fees.is_some()));
     assert_eq!(
         harness.counts()[4],
-        26,
-        "25 coinbases and the page's transaction"
+        27,
+        "the first page's 25 coinbases, the new tip's and the page's transaction"
     );
 }
 

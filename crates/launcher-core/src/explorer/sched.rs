@@ -10,9 +10,9 @@ use std::collections::VecDeque;
 /// Who is waiting for a read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Lane {
-    /// A page on screen.
+    /// A page on screen, and following the tip, which pages wait for.
     Interactive,
-    /// Work a page can wait for, and following the tip.
+    /// Work a page can wait for: the Chain page's coinbases.
     Prefetch,
 }
 

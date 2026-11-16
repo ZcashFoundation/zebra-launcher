@@ -784,10 +784,11 @@ differs.
   The actor owns, without locks, the source (`RpcSource` over an `OwnedSession`, rebuilt
   when `rpc_addr` or `started_at` changes), the `ChainIndex`, a byte-weighted LRU (64 MiB;
   8 MiB after 10 minutes hidden), the reads in flight and the scheduler. Reads run as
-  tasks that hold a semaphore permit (six, four while the node syncs; interactive reads
-  first, the newest first), their results come back over a channel, and reads of one key
-  merge. `assemble.rs` builds each page from explorer-model's views, and `source.rs` names
-  every RPC method in a closed `ReadCall`, so nothing from IPC picks a method.
+  tasks that hold a semaphore permit (six, four while the node syncs; the reads of pages
+  and of the tip follower first, the newest first, and the Chain page's coinbases in what
+  is left), their results come back over a channel, and reads of one key merge.
+  `assemble.rs` builds each page from explorer-model's views, and `source.rs` names every
+  RPC method in a closed `ReadCall`, so nothing from IPC picks a method.
 - **Reads only when asked.** Nothing is read until a page asks, and the pages ask only
   once the tab has been opened. The UI sends `Interest` when the tab or the document is
   shown or hidden; while shown and at the tip, the actor polls `getbestblockheightandhash`

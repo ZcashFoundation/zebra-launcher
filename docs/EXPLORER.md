@@ -1254,15 +1254,15 @@ code differs from the design above:
   zebrad still runs on the network the node had before, `LiveState::OtherNetwork` until
   zebrad's next start. Hiding the window to
   the tray does not send `Interest` yet: the tab and the document's visibility do.
-- **The actor.** Two lanes, interactive and prefetch (the follower and the Chain page's
-  coinbases); every P1 read weighs one, since P1 makes no heavy call, and the background lane
-  comes with the store (P5). Six permits, four while the node syncs; no HTTP 429 back-off yet,
-  since six reads never come near zebrad's 100. A new network clears everything, where the
-  design says a new genesis hash: reads under way on the old one fail, and their answers are
-  dropped when they come. Hashes above the final 1,000 are trusted for 10 s after a tip
-  check, else a block asked for by height is read again; headers above them are cached per
-  epoch. Its time limits read Tokio's clock, so the tests run them at their own values on a
-  paused clock.
+- **The actor.** Two lanes, interactive (pages, and the follower, which pages wait for) and
+  prefetch (the Chain page's coinbases); every P1 read weighs one, since P1 makes no heavy call,
+  and the background lane comes with the store (P5). Six permits, four while the node syncs; no
+  HTTP 429 back-off yet, since six reads never come near zebrad's 100. A new network clears
+  everything, where the design says a new genesis hash: reads under way on the old one fail, and
+  their answers are dropped when they come. Hashes above the final 1,000 are trusted for 10 s
+  after a tip check, else a block asked for by height is read again; headers above them are
+  cached per epoch. Its time limits read Tokio's clock, so the tests run them at their own
+  values on a paused clock.
 - **The follower** polls `getbestblockheightandhash` every 2 s while the page is shown and the
   node is at the tip on its own network (not in `OtherNetwork`), and a page that needs the tip
   checks it when the last check is older than it can use; the monitor's `best_block_hash` is not
@@ -1280,14 +1280,14 @@ code differs from the design above:
   answers from its cache) and hover cards.
 - **Call budgets** are pinned by launcher-core's actor tests over an in-memory synthetic source
   that counts its calls: the Chain page costs 1 tip, 25 coinbases, 1 header, at most 27 blocks
-  (26, and the one before NU7 once past it) and at most 2 subsidies over its two asks (the
-  first answers once the blocks are in, `with_fees` once the coinbases are, and a page asked
-  for meanwhile goes before them); a revisit costs nothing; a Block page 2 blocks, its coinbase
-  and its subsidy; a Transaction page one read; two pages asking for one block share its
-  reads; a reorganisation takes at most ten `getblockhash`. A test also checks that no log
-  field carries a requested hash, txid or height. Of the actor tests in [Testing](#testing),
-  only the store's wait, for the store (P5). fake-zebrad's synthetic mode and the end-to-end tests through `fakegetcallcounts` wait with
-  the move above.
+  (26, and the one before NU7 once past it) and at most 2 subsidies over its two asks (the first
+  answers once the blocks are in, `with_fees` once the coinbases are, and a page asked for
+  meanwhile, or a check of the tip, goes before them); a revisit costs nothing; a Block page 2
+  blocks, its coinbase and its subsidy; a Transaction page one read; two pages asking for one
+  block share its reads; a reorganisation takes at most ten `getblockhash`. A test also checks
+  that no log field carries a requested hash, txid or height. Of the actor tests in
+  [Testing](#testing), only the store's wait, for the store (P5). fake-zebrad's synthetic mode
+  and the end-to-end tests through `fakegetcallcounts` wait with the move above.
 - **The UI** is `ui/src/explorer.rs` (the shell) and `ui/src/explorer/` (`chain`, `block`, `tx`,
   `search`, `parts`, `state`, `history`, `prefs`, `text`), with `ui/styles/explorer.css`. Each
   node's place lives in the Explorer tab (`Explorers`), not in `NodeState`. Nothing is read

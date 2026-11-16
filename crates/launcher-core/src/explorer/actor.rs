@@ -1049,13 +1049,18 @@ where
 
 /// Checks the node's tip against what the index knew: a block on top, a jump, a tip that went
 /// back, or a reorganisation, which a binary search of the vouched heights bounds: the chains
-/// share the highest height that still matches and differ at the lowest that does not.
+/// share the highest height that still matches and differ at the lowest that does not. Its
+/// reads are interactive, one at a time: pages wait for the tip, and the Chain page's
+/// coinbases on the prefetch lane must not hold it up.
 async fn follow(
     fetch: Fetcher,
     old: Option<(u32, BlockHash)>,
     window: Vec<(u32, BlockHash)>,
 ) -> Result<TipUpdate, ExplorerError> {
-    let best = fetch.request(ReadCall::Best, Lane::Prefetch).best().await?;
+    let best = fetch
+        .request(ReadCall::Best, Lane::Interactive)
+        .best()
+        .await?;
     let tip = (best.height, best.hash);
     let update = |change, learned| TipUpdate {
         tip,
@@ -1070,7 +1075,7 @@ async fn follow(
     }
     let hash_at = |at: u32| {
         fetch
-            .request(ReadCall::BlockHash(at), Lane::Prefetch)
+            .request(ReadCall::BlockHash(at), Lane::Interactive)
             .hash()
     };
     // Every answer is the node's own hash at its height, so all of them hold.
@@ -1081,7 +1086,7 @@ async fn follow(
             return Ok(update(Change::Jumped, learned));
         }
         let block = fetch
-            .request(ReadCall::Block(BlockId::Hash(best.hash)), Lane::Prefetch)
+            .request(ReadCall::Block(BlockId::Hash(best.hash)), Lane::Interactive)
             .block()
             .await?;
         if best.height == height + 1 && block.previous == Some(hash) {
