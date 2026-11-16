@@ -736,9 +736,14 @@ path = "<index dir>/indexes/compact_block"
   - `[metrics]`: the admin listener has no authentication, its metrics name the validator, and
     zingod's example puts it on 127.0.0.1:9999, zebrad's metrics port.
   - `[snapshot]`: it downloads indexes from Zingo Labs' server through `aria2c` from `PATH`.
-  - `indexer_address`: zebrad's push streams. A research run saw them work with a zebrad built at
-    7.0.0's commit, but MULTI-NODE.md says Zeal's bundled zebrad lacks the `indexer` feature
-    (unconfirmed which holds); meanwhile zingod polls every second.
+  - `indexer_address`: zebrad's push streams. The bundled zebrad 7.0.0 has the indexer gRPC
+    server, which stays off until `rpc.indexer_listen_addr` is set: it logs "configure an
+    indexer_listen_addr to start the indexer RPC server" (fixture
+    `zebrad-7.0.0-lightwalletd-start-shutdown.stdout.log`, line 58), and
+    `zebrad/src/commands/start.rs:557-573` starts it with no feature gate (WALLET.md, "What
+    `indexer` does"). MULTI-NODE.md's `indexer` feature is zebra-state's spending index, which
+    Zallet needs, not this server. Leaving the key out is a choice, not an unknown: it would
+    cost one more loopback port and managed key, and zingod polls every second without it.
   - the validator's user and password.
 - **Regtest**, for the contract test only: `network = "regtest"`. There zingod's boot waits for
   the validator's first answer, and only there may `[sync] finalised_depth` go below 1,000
@@ -1235,8 +1240,8 @@ of "unavailable", measured in Z4. Back to Zebra reverses it; the index stays unt
 - A live log view (`subscribe_public_logs` over `bridge::forward_logs`).
 - PROXY v2 from the front door, with `trusted_proxies = ["127.0.0.1/32"]` and v2 `LOCAL` headers
   on Zeal's own probes, so zingod's per-address limits see each client.
-- zebrad's push streams (`indexer_address`), once a contract test confirms the bundled zebrad
-  serves them.
+- zebrad's push streams (`indexer_address`), with `rpc.indexer_listen_addr` as one more managed
+  loopback key, once the contract test covers them.
 - A per-index rebuild from `zingod verify`, and choosing the index's folder.
 - A weekly fetch-and-advisory run, and a watcher for zingod releases.
 - No restart with zebrad for zebrad 7.1.0 and later.
