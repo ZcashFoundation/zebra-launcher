@@ -34,6 +34,11 @@
 //! without it, so the parent did not reap it (an orphan, reaped by init), and the growth left
 //! belongs to its siblings.
 //!
+//! macOS rolls a reaped child's CPU time into its parent the same way (`ri_child_user_time`
+//! and `ri_child_system_time`), but not its I/O: a member that leaves moves the bytes it was
+//! last seen with to `lost` at once. On Windows the job keeps the CPU and I/O totals of every
+//! process ever in it, so the fold takes those and tracks no departures.
+//!
 //! The published totals never decrease within a run, which hides the one-reading dip of a torn
 //! read.
 
@@ -44,7 +49,7 @@ use std::{
 
 use launcher_types::{MAX_MEMBERS, NodeResources, Platform, ProcessUsage};
 
-use super::{Identity, MemberReading, TreeReading};
+use super::{Identity, JobTotals, MemberReading, TreeReading};
 use crate::process::TreeProbe;
 
 /// CPU seconds below which two figures count as equal: under one clock tick.
@@ -162,6 +167,29 @@ fn tree_order(members: &[ProcEntry], root: Option<Identity>) -> Vec<Identity> {
     order
 }
 
+/// Where the counters of a member that left go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rollup {
+    /// Into the parent that reaps it, whose rollup or counts then hold its total: Linux's CPU
+    /// and I/O, macOS's CPU.
+    IntoParent,
+    /// Into `lost` at once, as last seen: macOS's I/O, which XNU does not roll up.
+    LostOnExit,
+    /// Nowhere: the job's totals hold every process ever in it (Windows).
+    JobTotal,
+}
+
+impl Rollup {
+    /// The rules for CPU and for I/O on `platform`.
+    fn of(platform: Platform) -> (Rollup, Rollup) {
+        match platform {
+            Platform::Linux => (Rollup::IntoParent, Rollup::IntoParent),
+            Platform::Macos => (Rollup::IntoParent, Rollup::LostOnExit),
+            Platform::Windows => (Rollup::JobTotal, Rollup::JobTotal),
+        }
+    }
+}
+
 /// Counters that add up across members.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Counters {
@@ -180,6 +208,7 @@ struct Seen {
     read: Option<u64>,
     written: Option<u64>,
     memory: Option<u64>,
+    committed: Option<u64>,
 }
 
 /// A member that left, whose time should be in a live ancestor's rollup.
@@ -210,6 +239,9 @@ pub(crate) struct Fold {
     root_pid: u32,
     spawned: Instant,
     platform: Platform,
+    /// Where a departed member's CPU time and I/O go.
+    cpu_rollup: Rollup,
+    io_rollup: Rollup,
     /// The root's identity, once a reading found it: the root is known by it from then on.
     root: Option<Identity>,
     last: HashMap<Identity, Seen>,
@@ -228,11 +260,14 @@ pub(crate) struct Fold {
 
 impl Fold {
     pub(crate) fn new(probe: &TreeProbe, platform: Platform) -> Self {
+        let (cpu_rollup, io_rollup) = Rollup::of(platform);
         Fold {
             run: probe.run,
             root_pid: probe.pid,
             spawned: probe.spawned,
             platform,
+            cpu_rollup,
+            io_rollup,
             root: None,
             last: HashMap::new(),
             pending: Vec::new(),
@@ -260,7 +295,11 @@ impl Fold {
     /// Folds a reading into the run's totals and returns the sample to publish.
     pub(crate) fn fold(&mut self, reading: TreeReading) -> NodeResources {
         let TreeReading {
-            at, mono, members, ..
+            at,
+            mono,
+            members,
+            denied,
+            job,
         } = reading;
         if self.root.is_none() {
             self.root = members
@@ -277,10 +316,13 @@ impl Fold {
             .iter()
             .map(|member| parent_of(&members, member))
             .collect();
-        self.settle_departures(&members, &index);
+        if self.cpu_rollup != Rollup::JobTotal {
+            self.settle_departures(&members, &index);
+        }
 
         let mut totals = self.lost;
         let mut memory = 0u64;
+        let mut committed: Option<u64> = None;
         let mut member_peak = 0u64;
         let mut threads: Option<u32> = None;
         let mut descriptors: Option<u32> = None;
@@ -295,12 +337,18 @@ impl Fold {
             let member_memory = member
                 .memory
                 .or_else(|| before.and_then(|seen| seen.memory));
+            let member_committed = member
+                .committed
+                .or_else(|| before.and_then(|seen| seen.committed));
             let cpu = member.cpu_own + member.cpu_rollup;
             totals.cpu += cpu;
             totals.read += read.unwrap_or(0);
             totals.written += written.unwrap_or(0);
             self.io_seen |= read.is_some() || written.is_some();
             memory = memory.saturating_add(member_memory.unwrap_or(0));
+            if let Some(bytes) = member_committed {
+                committed = Some(committed.unwrap_or(0).saturating_add(bytes));
+            }
             member_peak = member_peak.max(member.peak.unwrap_or(0));
             if let Some(count) = member.threads {
                 threads = Some(threads.unwrap_or(0).saturating_add(count));
@@ -317,28 +365,45 @@ impl Fold {
                     read,
                     written,
                     memory: member_memory,
+                    committed: member_committed,
                 },
             );
         }
         self.last = last;
+        if self.cpu_rollup == Rollup::JobTotal {
+            // The members' sum misses the processes that exited; a reading without the job's
+            // totals keeps the last ones.
+            totals = job.map_or(self.published, |job: JobTotals| Counters {
+                cpu: job.cpu,
+                read: job.read,
+                written: job.written,
+            });
+            self.io_seen |= job.is_some();
+        }
         self.published.cpu = self.published.cpu.max(totals.cpu);
         self.published.read = self.published.read.max(totals.read);
         self.published.written = self.published.written.max(totals.written);
         self.peak = self.peak.max(memory).max(member_peak);
 
         let run_secs = mono.saturating_duration_since(self.spawned).as_secs_f64();
-        self.rate = match self.previous {
-            Some((then, cpu)) => {
-                let secs = mono.saturating_duration_since(then).as_secs_f64();
-                if secs > 0.0 {
-                    Some((self.published.cpu - cpu) / secs)
-                } else {
-                    self.rate
+        if denied.cpu {
+            // No rate from times that were not read.
+            self.rate = None;
+            self.previous = None;
+        } else {
+            self.rate = match self.previous {
+                Some((then, cpu)) => {
+                    let secs = mono.saturating_duration_since(then).as_secs_f64();
+                    if secs > 0.0 {
+                        Some((self.published.cpu - cpu) / secs)
+                    } else {
+                        self.rate
+                    }
                 }
-            }
-            None => Some(self.published.cpu / run_secs.max(MIN_FIRST_RATE_SECS)),
-        };
-        self.previous = Some((mono, self.published.cpu));
+                None => Some(self.published.cpu / run_secs.max(MIN_FIRST_RATE_SECS)),
+            };
+            self.previous = Some((mono, self.published.cpu));
+        }
 
         let usage = members
             .iter()
@@ -365,7 +430,7 @@ impl Fold {
             cpu_cores: self.rate,
             memory_bytes: memory,
             peak_memory_bytes: self.peak,
-            committed_bytes: None,
+            committed_bytes: committed,
             read_bytes: self.io_seen.then_some(self.published.read),
             written_bytes: self.io_seen.then_some(self.published.written),
             processes: u32::try_from(members.len()).unwrap_or(u32::MAX),
@@ -404,6 +469,18 @@ impl Fold {
         departed.sort_by_key(|(id, _)| (id.pid, id.start));
         let mut orphans = Vec::new();
         for (id, seen) in departed {
+            // Where no parent's count holds a member's bytes, they are lost as it leaves, and
+            // only its CPU time waits for a rollup.
+            let (read, written) = if self.io_rollup == Rollup::LostOnExit {
+                orphans.push(Counters {
+                    cpu: 0.0,
+                    read: seen.read.unwrap_or(0),
+                    written: seen.written.unwrap_or(0),
+                });
+                (None, None)
+            } else {
+                (seen.read, seen.written)
+            };
             let mut parent = seen.parent;
             let mut depth = 1;
             let anchor = loop {
@@ -426,15 +503,15 @@ impl Fold {
                     anchor,
                     depth,
                     cpu: seen.cpu,
-                    read: seen.read,
-                    written: seen.written,
+                    read,
+                    written,
                     waited: false,
                     suspect: false,
                 }),
                 None => orphans.push(Counters {
                     cpu: seen.cpu,
-                    read: seen.read.unwrap_or(0),
-                    written: seen.written.unwrap_or(0),
+                    read: read.unwrap_or(0),
+                    written: written.unwrap_or(0),
                 }),
             }
         }
@@ -533,6 +610,7 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::resources::Denied;
 
     fn id(pid: u32, start: u64) -> Identity {
         Identity { pid, start }
@@ -634,6 +712,7 @@ mod tests {
                 mono: self.spawned + Duration::from_secs(5 * tick),
                 members,
                 denied: Default::default(),
+                job: None,
             }
         }
     }
@@ -655,6 +734,7 @@ mod tests {
             cpu_rollup: rollup,
             memory: Some(1000),
             peak: Some(1500),
+            committed: None,
             read: Some(read),
             written: Some(read * 2),
             threads: Some(2),
@@ -997,6 +1077,131 @@ mod tests {
         ]);
         assert!(close(settled.cpu_secs, 107.5), "{}", settled.cpu_secs);
         assert!(close(fold.lost.cpu, 2.0), "{}", fold.lost.cpu);
+    }
+
+    #[test]
+    fn on_macos_a_members_bytes_are_lost_as_it_leaves() {
+        // The worked example on macOS: the child's CPU reaches its parent's rollup, but XNU
+        // rolls up no I/O, so the child's 70 bytes stay as last seen.
+        let clock = clock();
+        let mut fold = Fold::new(&clock.probe(1), Platform::Macos);
+        let first = fold.fold(clock.reading(
+            1,
+            vec![
+                member(100, 1, 100.0, 0.0, 0),
+                member(101, 100, 10.0, 0.0, 70),
+            ],
+        ));
+        assert_eq!(first.read_bytes, Some(70));
+        let second = fold.fold(clock.reading(2, vec![member(100, 1, 105.0, 11.0, 0)]));
+        assert!(close(second.cpu_secs, 116.0), "{}", second.cpu_secs);
+        assert_eq!(second.read_bytes, Some(70), "the child's bytes, once");
+        assert_eq!(second.written_bytes, Some(140));
+        assert!(close(fold.lost.cpu, 0.0), "its CPU is in the rollup");
+        let third = fold.fold(clock.reading(3, vec![member(100, 1, 110.0, 11.0, 0)]));
+        assert!(close(third.cpu_secs, 121.0), "{}", third.cpu_secs);
+        assert_eq!(third.read_bytes, Some(70));
+
+        // A torn read: the child is gone before its parent's rollup grew. Its bytes are lost at
+        // once, and its CPU waits for the rollup as on Linux.
+        let mut fold = Fold::new(&clock.probe(2), Platform::Macos);
+        fold.fold(clock.reading(
+            1,
+            vec![
+                member(100, 1, 100.0, 0.0, 10),
+                member(101, 100, 10.0, 0.0, 70),
+            ],
+        ));
+        let torn = fold.fold(clock.reading(2, vec![member(100, 1, 105.0, 0.0, 10)]));
+        assert!(close(torn.cpu_secs, 110.0), "{}", torn.cpu_secs);
+        assert_eq!(torn.read_bytes, Some(80));
+        let after = fold.fold(clock.reading(3, vec![member(100, 1, 110.0, 11.0, 10)]));
+        assert!(close(after.cpu_secs, 121.0), "{}", after.cpu_secs);
+        assert_eq!(after.read_bytes, Some(80));
+
+        // An orphan reaped outside the tree loses its CPU and its bytes, once.
+        let (settled, fold) = {
+            let mut fold = Fold::new(&clock.probe(3), Platform::Macos);
+            fold.fold(clock.reading(
+                1,
+                vec![member(100, 1, 100.0, 0.0, 10), member(104, 1, 2.0, 0.0, 5)],
+            ));
+            let mut last = None;
+            for tick in 2..=3 {
+                last = Some(fold.fold(clock.reading(tick, vec![member(100, 1, 100.0, 0.0, 10)])));
+            }
+            (last.unwrap(), fold)
+        };
+        assert!(close(settled.cpu_secs, 102.0), "{}", settled.cpu_secs);
+        assert_eq!(settled.read_bytes, Some(15));
+        assert!(close(fold.lost.cpu, 2.0));
+    }
+
+    #[test]
+    fn windows_takes_the_jobs_totals() {
+        let clock = clock();
+        let mut fold = Fold::new(&clock.probe(1), Platform::Windows);
+        let job = |cpu, read| {
+            Some(JobTotals {
+                cpu,
+                read,
+                written: read * 2,
+            })
+        };
+        // No parent links on Windows: ppid 0.
+        let mut root = member(100, 0, 3.0, 0.0, 10);
+        root.committed = Some(2000);
+        let mut child = member(101, 0, 1.0, 0.0, 20);
+        child.committed = Some(500);
+        let first = fold.fold(TreeReading {
+            job: job(4.5, 40),
+            ..clock.reading(1, vec![root.clone(), child])
+        });
+        assert!(
+            close(first.cpu_secs, 4.5),
+            "the job's, which holds a process already gone: {}",
+            first.cpu_secs
+        );
+        assert_eq!(first.read_bytes, Some(40));
+        assert_eq!(first.written_bytes, Some(80));
+        assert_eq!(first.committed_bytes, Some(2500));
+        assert_eq!(first.memory_bytes, 2000);
+        assert_eq!(first.members[1].parent, None);
+        assert_eq!(first.platform, Platform::Windows);
+        // The child exits: the job still holds its time, and nothing is lost or counted twice.
+        let second = fold.fold(TreeReading {
+            job: job(9.5, 45),
+            ..clock.reading(2, vec![root.clone()])
+        });
+        assert!(close(second.cpu_secs, 9.5), "{}", second.cpu_secs);
+        assert!(close(second.cpu_cores.unwrap(), 1.0));
+        assert_eq!(second.processes, 1);
+        assert_eq!(second.committed_bytes, Some(2000));
+        assert!(close(fold.lost.cpu, 0.0));
+        // A reading without the job's totals keeps the last ones.
+        let third = fold.fold(clock.reading(3, vec![root]));
+        assert!(close(third.cpu_secs, 9.5), "{}", third.cpu_secs);
+        assert_eq!(third.read_bytes, Some(45));
+    }
+
+    #[test]
+    fn cpu_that_cannot_be_read_has_no_rate() {
+        // An x86-64 build under Rosetta: the reader reads no times, and says so.
+        let clock = clock();
+        let mut fold = Fold::new(&clock.probe(1), Platform::Macos);
+        let blind = |tick| TreeReading {
+            denied: Denied {
+                cpu: true,
+                ..Denied::default()
+            },
+            ..clock.reading(tick, vec![member(100, 1, 0.0, 0.0, 10)])
+        };
+        let first = fold.fold(blind(1));
+        assert_eq!(first.cpu_cores, None);
+        assert_eq!(first.cpu_secs, 0.0);
+        assert_eq!(first.read_bytes, Some(10), "the other figures are read");
+        assert_eq!(first.memory_bytes, 1000);
+        assert_eq!(fold.fold(blind(2)).cpu_cores, None);
     }
 
     #[test]

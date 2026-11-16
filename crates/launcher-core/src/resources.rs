@@ -44,7 +44,8 @@ use fold::Fold;
 pub const INTERVAL: Duration = Duration::from_secs(5);
 
 /// A process as the OS has it: its pid and its start time in the OS's unit (clock ticks since
-/// boot on Linux), which tells it apart from a later process with the same pid.
+/// boot on Linux, microseconds since 1970 on macOS, 100 ns since 1601 on Windows), which tells
+/// it apart from a later process with the same pid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Identity {
     pub pid: u32,
@@ -55,32 +56,52 @@ pub struct Identity {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemberReading {
     pub id: Identity,
+    /// 0 on Windows, where parent pids are not read.
     pub ppid: u32,
     /// Cleaned to one line of plain text ([`clean_name`]).
     pub name: String,
     pub started_at: SystemTime,
-    /// Its own user and system time, its threads' included.
+    /// Its own user and system time, its threads' included; 0 when [`Denied::cpu`] is set.
     pub cpu_own: f64,
-    /// The time of the children it reaped (Linux `cutime` + `cstime`).
+    /// The time of the children it reaped (Linux `cutime` + `cstime`, macOS `ri_child_*`); 0 on
+    /// Windows.
     pub cpu_rollup: f64,
-    /// Resident memory; 0 for a zombie.
+    /// Its memory as the OS's monitor shows it (resident memory, the physical footprint or the
+    /// working set); 0 for a zombie.
     pub memory: Option<u64>,
-    /// The highest resident memory it reached.
+    /// The highest memory it reached.
     pub peak: Option<u64>,
-    /// Bytes read from and written to storage, the children it reaped included.
+    /// Windows only: its commit charge (`PrivateUsage`).
+    pub committed: Option<u64>,
+    /// Bytes read and written: from storage on Linux, the children it reaped included; from
+    /// storage on macOS; all I/O on Windows.
     pub read: Option<u64>,
     pub written: Option<u64>,
+    /// `None` on Windows.
     pub threads: Option<u32>,
-    /// Open files.
+    /// Open files, or handles on Windows.
     pub descriptors: Option<u32>,
 }
 
 /// The fields the OS refused for at least one member of a reading.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Denied {
+    /// CPU times cannot be read for any member: an x86-64 build under Rosetta, whose Mach
+    /// timebase is unchecked (docs/RESOURCES.md).
+    pub cpu: bool,
     pub memory: bool,
     pub io: bool,
     pub descriptors: bool,
+}
+
+/// Windows: what the job counted for every process ever in it, the exited ones included.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct JobTotals {
+    /// User plus kernel time, in seconds.
+    pub cpu: f64,
+    /// Bytes of all I/O: files, network and devices.
+    pub read: u64,
+    pub written: u64,
 }
 
 /// One reading of a tree, before the fold.
@@ -89,9 +110,12 @@ pub struct TreeReading {
     pub at: SystemTime,
     /// When the members were read, on the monotonic clock.
     pub mono: Instant,
-    /// In tree order: each member before its children.
+    /// In tree order: each member before its children. On Windows, where parents are not
+    /// read, the root and then the others by start time.
     pub members: Vec<MemberReading>,
     pub denied: Denied,
+    /// Windows: the job's totals, which replace the sum over the members.
+    pub job: Option<JobTotals>,
 }
 
 /// Reads a node's process tree.
@@ -362,6 +386,7 @@ async fn sample_run(
 /// Logs each field the OS refused, once per sampler.
 fn log_denied(logged: &mut Denied, denied: Denied) {
     for (now, before, field) in [
+        (denied.cpu, &mut logged.cpu, "CPU"),
         (denied.memory, &mut logged.memory, "memory"),
         (denied.io, &mut logged.io, "disk I/O"),
         (denied.descriptors, &mut logged.descriptors, "open files"),
@@ -528,12 +553,14 @@ mod tests {
                 cpu_rollup: 0.0,
                 memory: Some(1 << 30),
                 peak: Some(1 << 30),
+                committed: None,
                 read: Some(0),
                 written: Some(0),
                 threads: Some(68),
                 descriptors: Some(412),
             }],
             denied: Denied::default(),
+            job: None,
         })
     }
 

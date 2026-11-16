@@ -138,6 +138,7 @@ impl LinuxReader {
             cpu_rollup: self.secs(stat.cutime + stat.cstime),
             memory,
             peak,
+            committed: None,
             read: io.map(|io| io.read_bytes),
             written: io.map(|io| io.write_bytes),
             threads: Some(stat.threads),
@@ -228,6 +229,7 @@ impl Reader for LinuxReader {
             mono,
             members,
             denied,
+            job: None,
         })
     }
 }
