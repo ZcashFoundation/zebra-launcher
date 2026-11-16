@@ -31,12 +31,12 @@
 //! A member missing from readings and back within [`RETURN_READINGS`] had not left: XNU may
 //! refuse to answer for a process while it tears it down, before it is a zombie, and that can
 //! outlast a reading. What it lost is taken back, and a departure waiting for it is dropped. A
-//! departure that moved up past it while it was missing anchors on it again, with a fresh
-//! grace, and claims what its rollup gained since it was last seen: its final total holds the
-//! departure's. What it claimed of an ancestor's growth while it was missing was another
-//! member's, and is given back to that ancestor for the departures waiting there. Until then
-//! the reader looks for it by its identity, which names one process, so what is kept can only
-//! be matched by that process and costs only memory.
+//! departure beneath it that moved up past it while it was missing, or went to `lost` then,
+//! anchors on it again, with a fresh grace, and claims what its rollup gained since it was
+//! last seen: its final total holds the departure's. What it claimed of an ancestor's growth
+//! while it was missing was another member's, and is given back to that ancestor for the
+//! departures waiting there. Until then the reader looks for it by its identity, which names
+//! one process, so what is kept can only be matched by that process and costs only memory.
 //!
 //! Members that waited claim an ancestor's growth before those that just left, since their
 //! reap may be what the reading shows. A member that could not claim although its parent's
@@ -212,6 +212,15 @@ struct Counters {
     written: u64,
 }
 
+impl Counters {
+    /// Takes `counters` back out of these, which hold them.
+    fn take_back(&mut self, counters: &Counters) {
+        self.cpu = (self.cpu - counters.cpu).max(0.0);
+        self.read = self.read.saturating_sub(counters.read);
+        self.written = self.written.saturating_sub(counters.written);
+    }
+}
+
 /// A member as the previous reading left it.
 #[derive(Clone, Debug, PartialEq)]
 struct Seen {
@@ -245,11 +254,15 @@ struct Departed {
     suspect: bool,
 }
 
-/// What went to `lost` for a member, at which reading, in case the member is back.
+/// What went to `lost` for a member, at which reading, in case the member or an ancestor is
+/// back.
 #[derive(Clone, Debug, PartialEq)]
 struct Loss {
     id: Identity,
     at: u64,
+    /// The member's parent as last seen, when an ancestor's rollup may hold what was lost:
+    /// `None` for macOS bytes, which no rollup holds.
+    parent: Option<Identity>,
     counters: Counters,
 }
 
@@ -503,9 +516,7 @@ impl Fold {
             if !live(&loss.id) {
                 return kept(loss.at);
             }
-            lost.cpu = (lost.cpu - loss.counters.cpu).max(0.0);
-            lost.read = lost.read.saturating_sub(loss.counters.read);
-            lost.written = lost.written.saturating_sub(loss.counters.written);
+            lost.take_back(&loss.counters);
             false
         });
         // What it claimed was another member's growth: the departures waiting on that anchor
@@ -560,6 +571,48 @@ impl Fold {
                 depth += 1;
             }
         }
+        // A departure that went to `lost` while an ancestor was missing, and that ancestor is
+        // back: the ancestor may have reaped it, so its final total may hold the departure's.
+        // The departure waits on it again, with a fresh grace.
+        for loss in std::mem::take(&mut self.losses) {
+            let mut up = loss.parent;
+            let mut depth = 1;
+            let anchor = loop {
+                match up {
+                    Some(id) if live(&id) => {
+                        break absent
+                            .get(&id)
+                            .filter(|(left, _)| loss.at >= *left)
+                            .map(|_| id);
+                    }
+                    Some(id) if depth < MAX_CHAIN => {
+                        up = self
+                            .last
+                            .get(&id)
+                            .or_else(|| absent.get(&id).map(|(_, seen)| seen))
+                            .and_then(|seen| seen.parent);
+                        depth += 1;
+                    }
+                    _ => break None,
+                }
+            };
+            let Some(anchor) = anchor else {
+                self.losses.push(loss);
+                continue;
+            };
+            self.lost.take_back(&loss.counters);
+            pending.push(Departed {
+                id: loss.id,
+                parent: loss.parent,
+                anchor,
+                depth,
+                cpu: loss.counters.cpu,
+                read: Some(loss.counters.read),
+                written: Some(loss.counters.written),
+                waited: false,
+                suspect: false,
+            });
+        }
         let mut departed: Vec<(&Identity, &Seen)> =
             self.last.iter().filter(|(id, _)| !live(id)).collect();
         departed.sort_by_key(|(id, _)| (id.pid, id.start));
@@ -574,6 +627,7 @@ impl Fold {
             let (read, written) = if self.io_rollup == Rollup::LostOnExit {
                 orphans.push((
                     *id,
+                    None,
                     Counters {
                         cpu: 0.0,
                         read: seen.read.unwrap_or(0),
@@ -613,6 +667,7 @@ impl Fold {
                 }),
                 None => orphans.push((
                     *id,
+                    seen.parent,
                     Counters {
                         cpu: seen.cpu,
                         read: read.unwrap_or(0),
@@ -621,8 +676,8 @@ impl Fold {
                 )),
             }
         }
-        for (id, counters) in orphans {
-            self.lose(id, counters);
+        for (id, parent, counters) in orphans {
+            self.lose(id, parent, counters);
         }
 
         // What each anchor's rollup gained since it was last seen, plus what its waiting
@@ -685,6 +740,7 @@ impl Fold {
             } else {
                 self.lose(
                     departure.id,
+                    departure.parent,
                     Counters {
                         cpu: departure.cpu,
                         read: departure.read.unwrap_or(0),
@@ -708,13 +764,14 @@ impl Fold {
         self.absent = absent;
     }
 
-    fn lose(&mut self, id: Identity, counters: Counters) {
+    fn lose(&mut self, id: Identity, parent: Option<Identity>, counters: Counters) {
         self.lost.cpu += counters.cpu;
         self.lost.read = self.lost.read.saturating_add(counters.read);
         self.lost.written = self.lost.written.saturating_add(counters.written);
         self.losses.push(Loss {
             id,
             at: self.readings,
+            parent,
             counters,
         });
     }
@@ -1509,6 +1566,81 @@ mod tests {
         );
         assert!(close(settled.cpu_secs, 104.0), "{}", settled.cpu_secs);
         assert!(close(fold.lost.cpu, 0.0), "{}", fold.lost.cpu);
+    }
+
+    #[test]
+    fn a_departure_lost_while_its_parent_was_missing_waits_for_it_again() {
+        // As above, but XNU refuses sh for two readings, so cmd waits on zebrad in vain and goes
+        // to `lost`. sh is back with cmd's 2.5 s in its rollup: cmd waits on sh again and
+        // claims it there. Linux rolls cmd's 7 bytes into sh too; macOS loses them as cmd
+        // leaves.
+        for platform in [Platform::Linux, Platform::Macos] {
+            let rolled = if platform == Platform::Linux { 7 } else { 0 };
+            let (settled, fold) = fold_on(
+                platform,
+                vec![
+                    vec![
+                        member(100, 1, 100.0, 0.0, 0),
+                        member(101, 100, 1.0, 0.0, 0),
+                        member(102, 101, 2.0, 0.0, 7),
+                    ],
+                    vec![member(100, 1, 100.0, 0.0, 0)],
+                    vec![member(100, 1, 100.0, 0.0, 0)],
+                    vec![
+                        member(100, 1, 100.0, 0.0, 0),
+                        member(101, 100, 1.5, 2.5, rolled),
+                    ],
+                    vec![member(100, 1, 100.0, 4.0, rolled)],
+                    vec![member(100, 1, 100.0, 4.0, rolled)],
+                ],
+            );
+            assert!(
+                close(settled.cpu_secs, 104.0),
+                "{platform:?}: {}",
+                settled.cpu_secs
+            );
+            assert!(close(fold.lost.cpu, 0.0), "{platform:?}: {}", fold.lost.cpu);
+            assert_eq!(settled.read_bytes, Some(7), "{platform:?}");
+            assert_eq!(fold.lost.read, 7 - rolled, "{platform:?}");
+        }
+        // The root, refused for one reading or two after it reaped its child: the child, lost
+        // at once with no live ancestor, is in the root's rollup.
+        for platform in [Platform::Linux, Platform::Macos] {
+            for missing in 1..=2 {
+                let mut readings = vec![vec![
+                    member(100, 1, 100.0, 0.0, 0),
+                    member(101, 100, 5.0, 0.0, 0),
+                ]];
+                readings.extend((0..missing).map(|_| Vec::new()));
+                readings.push(vec![member(100, 1, 100.0, 5.0, 0)]);
+                let (settled, fold) = fold_on(platform, readings);
+                assert!(
+                    close(settled.cpu_secs, 105.0),
+                    "{platform:?}, {missing}: {}",
+                    settled.cpu_secs
+                );
+                assert!(close(fold.lost.cpu, 0.0), "{platform:?}, {missing}");
+            }
+        }
+        // A departure lost before its parent went missing stays lost: sh ignores SIGCHLD, so
+        // cmd is lost, and the 2 s sh's rollup gained while it was missing are another child's.
+        let (settled, fold) = fold_on(
+            Platform::Macos,
+            vec![
+                vec![
+                    member(100, 1, 100.0, 0.0, 0),
+                    member(101, 100, 1.0, 0.0, 0),
+                    member(102, 101, 2.0, 0.0, 0),
+                ],
+                vec![member(100, 1, 100.0, 0.0, 0), member(101, 100, 1.0, 0.0, 0)],
+                vec![member(100, 1, 100.0, 0.0, 0), member(101, 100, 1.0, 0.0, 0)],
+                vec![member(100, 1, 100.0, 0.0, 0)],
+                vec![member(100, 1, 100.0, 0.0, 0), member(101, 100, 1.5, 2.0, 0)],
+                vec![member(100, 1, 100.0, 3.5, 0)],
+            ],
+        );
+        assert!(close(settled.cpu_secs, 105.5), "{}", settled.cpu_secs);
+        assert!(close(fold.lost.cpu, 2.0), "{}", fold.lost.cpu);
     }
 
     #[test]

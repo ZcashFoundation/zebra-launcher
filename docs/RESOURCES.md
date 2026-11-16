@@ -1171,6 +1171,8 @@ timebase path runs) and windows-2025 (`ci.yml`).
   - An orphan reaped outside the tree keeps its seen part in `lost`.
   - A Linux auto-reap is held for one tick and then moved to `lost`.
   - On macOS, a member's I/O goes to `lost` when it exits.
+  - A member missing from readings and back within a minute had not left: what it lost,
+    what it claimed, and what went to `lost` beneath it while it was missing are given back.
   - Windows job totals pass through.
   - A new run resets the counters.
   - An unreadable field keeps its last value in the totals.
@@ -1529,14 +1531,17 @@ Each phase is one pull request that ships on its own, with screenshots from the 
        sticky ids, so one found only by its identity is looked for again. A departure that
        moved up past one that is back (a shell's command whose shell was refused in its exit
        window) anchors on it again with a fresh grace, and claims what its rollup gained
-       since it was last seen. Without this their time would count twice. Growth a member
-       claimed while it was missing was another member's, such as a sibling's that the same
-       ancestor reaped in that interval. The fold keeps each claim by member for the same
-       minute, and gives it back to the ancestor when the member is back, so a departure
-       still waiting there claims it; otherwise the sibling's whole time would count twice.
-       A departure that went to `lost` before the member was back stays there, which takes
-       the member missing from two readings or more. An identity names one process, so what
-       is kept is matched only by that process, and nothing changes on Linux.
+       since it was last seen. So does a departure beneath it that went to `lost` while it
+       was missing: the command, when the shell was refused for two readings, or the root's
+       child, lost at once while the root was refused. Without this their time would count
+       twice. Growth a member claimed while it was missing was another member's, such as a
+       sibling's that the same ancestor reaped in that interval. The fold keeps each claim by
+       member for the same minute, and gives it back to the ancestor when the member is
+       back, so a departure still waiting there claims it; otherwise the sibling's whole time
+       would count twice. A sibling that went to `lost` before the member was back stays
+       there, which takes the member missing from two readings or more. An identity names
+       one process, so what is kept is matched only by that process, and nothing changes on
+       Linux.
      - The name is `pbi_name`, or `pbi_comm` where that is empty.
      - The VM statistics are in the kernel's pages, so the page size comes from
        `host_page_size` (libsyscall answers it with `vm_kernel_page_size`): a third local
