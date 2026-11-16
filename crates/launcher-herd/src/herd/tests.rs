@@ -487,10 +487,9 @@ fn probes_that_fail_twice_make_a_node_unknown() {
     let mut herd = Harness::new(Network::Mainnet, 3, H);
     herd.chain.put(&id(2), 0, H - 1);
     herd.run(10);
-    // The top nodes take a block and stop answering: the node below cannot be placed
-    // against them, and keeps its state.
+    // The top nodes take a block, and the first, which the others are placed against, stops
+    // answering: the node below cannot be placed, and keeps its state.
     herd.chain.fail(&id(0), true);
-    herd.chain.fail(&id(1), true);
     herd.grow(&[0, 1]);
     let view = herd.round();
     assert_eq!(relation(&view, 2), Relation::InAgreement { behind: 1 });
@@ -499,10 +498,19 @@ fn probes_that_fail_twice_make_a_node_unknown() {
     let view = herd.round();
     assert_eq!(relation(&view, 0), Relation::Unknown);
     assert_eq!(view.node(&id(0)).unwrap().word, "not answering");
-    // Answering again, they are back.
+    // Set aside, it holds up no one: the third node is placed against the second.
+    herd.mono += Duration::from_secs(5);
+    herd.wall += Duration::from_secs(5);
+    let view = herd.round();
+    assert_eq!(relation(&view, 2), Relation::InAgreement { behind: 2 });
+    assert_eq!(view.state, HerdState::Degraded);
+    assert_eq!(
+        view.headline,
+        "2 of your 3 Mainnet nodes agree on block 3,551,205; Zebra · Mainnet is not answering"
+    );
+    // Answering again, it is asked again after a while, and is back.
     herd.chain.fail(&id(0), false);
-    herd.chain.fail(&id(1), false);
-    let view = herd.run(15);
+    let view = herd.run(45);
     assert_eq!(view.state, HerdState::Agreed);
 }
 

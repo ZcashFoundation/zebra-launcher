@@ -36,6 +36,10 @@ const WAKE_SLACK: Duration = Duration::from_secs(30);
 /// A node not answering this long wants a look.
 const UNKNOWN_ATTENTION: Duration = Duration::from_secs(30);
 
+/// A node whose probes failed for two rounds is set aside this long, so the others are
+/// placed without it, and then asked again.
+const ASIDE_FOR: Duration = Duration::from_secs(30);
+
 /// What the engine needs to know of one node for a round.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemberFacts {
@@ -77,6 +81,8 @@ struct Memory {
     /// It has had fresh statistics in its current run.
     in_run: bool,
     failed_rounds: u32,
+    /// Not placed until then: its probes kept failing.
+    aside_until: Option<Duration>,
     unknown_since: Option<Duration>,
     shown: Option<Relation>,
     /// A state waiting for the debounce: its kind, since when, and in how many rounds.
@@ -93,6 +99,8 @@ enum Lane {
     Catching(BlockRef, f64),
     /// Placed among the others.
     Near(BlockRef, f64),
+    /// Its probes kept failing: not placed for a while, so it holds up no one.
+    Aside,
 }
 
 #[derive(Clone, Debug)]
@@ -174,9 +182,15 @@ impl Engine {
             .map(|fact| {
                 let memory = self.memory.entry(fact.id.clone()).or_default();
                 let lane = lane_of(&fact, memory, now);
+                let lane = match lane {
+                    Lane::Near(..) if memory.aside_until.is_some_and(|until| now.mono < until) => {
+                        Lane::Aside
+                    }
+                    lane => lane,
+                };
                 let tip = match &lane {
                     Lane::Catching(tip, _) | Lane::Near(tip, _) => Some(tip.clone()),
-                    Lane::Out(_) | Lane::Genesis => None,
+                    Lane::Out(_) | Lane::Genesis | Lane::Aside => None,
                 };
                 match &lane {
                     Lane::Catching(..) | Lane::Near(..) => {
@@ -198,7 +212,7 @@ impl Engine {
                         memory.through = false;
                         memory.behind_since = None;
                     }
-                    Lane::Genesis => {}
+                    Lane::Genesis | Lane::Aside => {}
                 }
                 Member {
                     id: fact.id,
@@ -499,10 +513,23 @@ impl Engine {
         for member in self.round.members.clone() {
             let failed = self.answers.failed_for(&member.id);
             let memory = self.memory.get_mut(&member.id).expect("remembered");
-            memory.failed_rounds = if failed { memory.failed_rounds + 1 } else { 0 };
+            match &member.lane {
+                Lane::Aside => {}
+                _ if failed => {
+                    memory.failed_rounds += 1;
+                    if memory.failed_rounds >= 2 {
+                        memory.aside_until = Some(now.mono + ASIDE_FOR);
+                    }
+                }
+                Lane::Near(..) => {
+                    memory.failed_rounds = 0;
+                    memory.aside_until = None;
+                }
+                _ => {}
+            }
             let raw = match &member.lane {
                 Lane::Out(why) => Some(Relation::Excluded { why: *why }),
-                Lane::Genesis => Some(Relation::Unknown),
+                Lane::Genesis | Lane::Aside => Some(Relation::Unknown),
                 Lane::Catching(_, progress) => Some(Relation::CatchingUp {
                     progress: *progress,
                     same_chain: analysis.checks.get(&member.id).copied().flatten(),
