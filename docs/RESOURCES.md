@@ -1295,8 +1295,8 @@ windows-sys = { workspace = true, features = [
 | --- | --- | --- |
 | `resources/linux.rs` | none | `std::fs` reads and nix's safe `sysconf`; `firstrun.rs` already uses nix's safe `statvfs`. |
 | `resources/macos.rs` | `proc_listpgrppids`, `proc_listchildpids`, `proc_pidinfo` (`PROC_PIDTASKALLINFO`, `PROC_PIDTBSDINFO`, `PROC_PIDLISTFDS`), `proc_pid_rusage`, `sysctlbyname` (`hw.memsize`, `vm.swapusage`, `kern.memorystatus_vm_pressure_level`, `sysctl.proc_translated`), `sysconf` (`_SC_NPROCESSORS_ONLN`), `host_statistics`, `host_statistics64`, and three local declarations (below) | libproc and Mach have no safe binding in the tree, and nix's safe `sysconf` has no `_NPROCESSORS_ONLN` on macOS. |
-| `resources/windows.rs` | `OpenProcess`, `WaitForSingleObject`, `GetProcessTimes`, `K32GetProcessMemoryInfo`, `GetProcessIoCounters`, `GetProcessHandleCount`, `QueryFullProcessImageNameW` (the existing pattern), `GetSystemTimes`, `GetActiveProcessorCount`, `K32GetPerformanceInfo` | Win32. |
-| `process/windows.rs` | `QueryInformationJobObject` (two classes), `IsProcessInJob` | The job handle stays in this file. |
+| `resources/windows.rs` | `OpenProcess`, `WaitForSingleObject`, `GetProcessTimes`, `K32GetProcessMemoryInfo`, `GetProcessIoCounters`, `GetProcessHandleCount`, `GetSystemTimes`, `GetActiveProcessorCount`, `K32GetPerformanceInfo` | Win32. |
+| `process/windows.rs` | `QueryInformationJobObject` (two classes), `IsProcessInJob`, `QueryFullProcessImageNameW` (existing; `image_path`, now shared with the reader) | The job handle stays in this file. |
 | `firstrun.rs` | `GetDiskFreeSpaceExW` (existing, now with its total), `GetVolumePathNameW` | Win32. |
 
 Each call follows the house pattern:
@@ -1348,7 +1348,7 @@ libc 0.2.191 binds the first two but marks them deprecated
   keeps no child rollups, it cannot use the job, and it lists every process on each
   refresh ([Alternatives considered](#alternatives-considered)). The `Reader` trait keeps a
   sysinfo-backed reader possible later, for an OS without a reader of its own.
-- the `mach2` crate, for two symbols;
+- the `mach2` crate, for three symbols;
 - the `procfs` and `libproc` crates, which have more surface than the parsers they would
   replace;
 - a cgroup v2 boundary, because delegation varies across desktop sessions and AppImage
