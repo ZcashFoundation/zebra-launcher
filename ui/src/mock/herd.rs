@@ -202,7 +202,7 @@ fn herd(agree: Option<Agree>) -> Vec<HerdNode> {
             &[(PortRole::Rpc, 38232)],
         )),
     ];
-    if let Some(agree) = agree {
+    if let Some(agree) = agree.filter(|agree| agree.second_zebrad()) {
         let second = NodeInfo {
             name: "Zebra · Mainnet 2".into(),
             ..info(

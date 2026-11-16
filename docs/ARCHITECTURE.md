@@ -720,7 +720,7 @@ its main zebrad's resources every 5 s while it has a pid; `?os=macos` and `?os=w
 Resources card those platforms' figures and labels.
 chains come from `?attip`, `?tip=<h>`, `?explorer=slow|empty|nobi` and `?reorg`. The herd's
 agreement comes from `?herd&agree` and `&agree=behind|stall|fork|race|split|impl|channels|
-restart|deepfork|silent` (see [The herd](#the-herd)).
+restart|deepfork|silent|herdstall|replaced|pair|otherchain` (see [The herd](#the-herd)).
 
 **Appearance.** `Settings.theme` (`system`, `light`, `dark`) is resolved against the
 system preference in `ui/src/theme.rs` and applied as `data-theme` on `<html>`; every

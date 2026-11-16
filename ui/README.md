@@ -155,7 +155,16 @@ every node command and event carries a node's id, and the mock's zebrad below is
     Mainnet 2 is restarting";
   - `deepfork`: Zebra · Mainnet 2 is on a chain that split 1,500 blocks ago, past zebrad's
     rollback window;
-  - `silent`: Zebra · Mainnet 2, a block ahead, does not answer the probes and is set aside.
+  - `silent`: Zebra · Mainnet 2, a block ahead, does not answer the probes and is set aside;
+  - `herdstall`: no node has had a new block for 5.5 min: "No new block on your Mainnet nodes
+    for 6 min" (a warning), a problem 4.5 min later;
+  - `replaced`: Zebra · Mainnet 2 still holds a block the others replaced: "Zebra · Mainnet 2
+    is stuck on block …, which your other nodes replaced" (a warning, a problem at 10 min);
+  - `pair`: no Zebra · Mainnet 2, and zebrad and Zakura · Mainnet are each on a chain of their
+    own: "Zebra · Mainnet and Zakura · Mainnet disagree since block …: one of them may have
+    lost touch with the network, or they disagree about the rules";
+  - `otherchain`: Zakura · Mainnet catches up on another chain: "… is on another chain while
+    it catches up: another network or a damaged database" (a problem).
 - the Explorer (Ctrl/Cmd+3, or Ctrl+K, Cmd+K on macOS, for its search): as in the backend it
   serves the first node, the mock's own zebrad, over a synthetic chain from explorer-model,
   answered with the backend's own page builders, and the dashboard's best block, pools,

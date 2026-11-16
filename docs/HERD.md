@@ -96,9 +96,11 @@ take from the herd.
 - The mock runs the engine every 5 s per network over its nodes and answers from a scripted
   chain (`ui/src/mock/agreement.rs`); ten minutes of rounds run before the first view. Its
   scenarios are `?herd&agree` and `&agree=behind` (`lag` too), `stall`, `fork`, `race`,
-  `split`, `impl`, `channels` (Zebra Stable against Zebra Beta), `restart`, `deepfork` and
-  `silent`; the others of the list in [Testing](#testing), `?fast` and the herd presets come
-  with the phases that need them.
+  `split`, `impl`, `channels` (Zebra Stable against Zebra Beta), `restart`, `deepfork`,
+  `silent`, `herdstall`, `replaced` (stuck on a block the others replaced), `pair` (zebrad and
+  Zakura alone, split) and `otherchain` (catching up on another chain); the others of the
+  list in [Testing](#testing), `?fast` and the herd presets come with the phases that need
+  them.
 
 ## Goals and non-goals
 

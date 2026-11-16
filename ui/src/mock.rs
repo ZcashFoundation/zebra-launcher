@@ -42,7 +42,7 @@
 //! | `?explorer=nobi` | Every seventh block lacks zebrad's value-pool row, so its successor shows the zero-diff case. |
 //! | `?reorg` | About every 90 s at the tip, the main node's top two blocks are replaced. |
 //! | `?herd&agree` | The herd's agreement ([`agreement`], docs/HERD.md): Zebra · Mainnet 2 joins, zebrad and Zakura · Mainnet are at the tip, and the three agree. Implies `?herd` and `?attip`. |
-//! | `&agree=behind`, `stall`, `fork`, `race`, `split`, `impl`, `channels`, `restart`, `deepfork`, `silent` | A scenario: a node lagging, stuck, on a chain of its own, racing; a split without a majority; Zakura on its own chain (implementations disagree); Zebra · Mainnet 3 on Beta on its own chain (channels disagree); a node restarting; a fork past the rollback window; a node that does not answer probes ([`agreement`]). |
+//! | `&agree=behind`, `stall`, `fork`, `race`, `split`, `impl`, `channels`, `restart`, `deepfork`, `silent`, `herdstall`, `replaced`, `pair`, `otherchain` | A scenario: a node lagging, stuck, on a chain of its own, racing; a split without a majority; Zakura on its own chain (implementations disagree); Zebra · Mainnet 3 on Beta on its own chain (channels disagree); a node restarting; a fork past the rollback window; a node that does not answer probes; no new block on any node (the herd stalls); a node stuck on a block the others replaced; zebrad and Zakura alone, each on a chain of its own; Zakura catching up on another chain ([`agreement`]). |
 //!
 //! The launcher's own notes (`zebrad started (pid N)`, `stop requested (stdin closed)`,
 //! `zebrad exited (exit code 0, Clean, stop requested)`, `restarting zebrad in 5s`) join the
@@ -769,8 +769,11 @@ impl Mock {
         let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
         match scenario {
             Scenario::Normal if at_tip.is_some() => {
-                // At the tip: a block per target spacing.
-                if (tick + 1).is_multiple_of(target_spacing(network, stats.height + 1)) {
+                // At the tip: a block per target spacing, unless the herd's scenario stopped
+                // the chain.
+                if !agreement::chain_stopped()
+                    && (tick + 1).is_multiple_of(target_spacing(network, stats.height + 1))
+                {
                     stats.height += 1;
                 }
                 stats.estimated_height = stats.height;

@@ -4,11 +4,11 @@
 //! best block comes from [`best`]: on the main chain, or on a branch of its own where a
 //! scenario puts it.
 //!
-//! `?herd&agree=…` picks a scenario. It adds Zebra · Mainnet 2 (and for `channels` Zebra ·
-//! Mainnet 3 on Beta), keeps zebrad at the tip, and puts Zakura · Mainnet at the tip too
-//! (except for `split` and `channels`, where it is still catching up). Before the first view,
-//! ten minutes of rounds run at once for the nodes at the tip, so a scenario's state shows from
-//! the start.
+//! `?herd&agree=…` picks a scenario. It adds Zebra · Mainnet 2 (except for `pair`; and for
+//! `channels` Zebra · Mainnet 3 on Beta), keeps zebrad at the tip, and puts Zakura · Mainnet at
+//! the tip too (except for `split`, `channels` and `otherchain`, where it is still catching
+//! up). Before the first view, ten minutes of rounds run at once for the nodes at the tip, so a
+//! scenario's state shows from the start.
 //!
 //! | `agree=` | Mainnet |
 //! | --- | --- |
@@ -23,6 +23,10 @@
 //! | `restart` | Zebra · Mainnet 2 is restarting |
 //! | `deepfork` | Zebra · Mainnet 2 is on a chain that split 1,500 blocks ago |
 //! | `silent` | Zebra · Mainnet 2, a block ahead, does not answer probes |
+//! | `herdstall` | no new block for 5.5 min: the herd is stalled, a problem 4.5 min later |
+//! | `replaced` | Zebra · Mainnet 2 still holds a block the others replaced: stuck on it |
+//! | `pair` | the two nodes, zebrad and Zakura · Mainnet, are on chains of their own |
+//! | `otherchain` | Zakura · Mainnet catches up on another chain: another network or a damaged database |
 //!
 //! Testnet's two nodes agree. Without a scenario the Mainnet nodes are still catching up.
 
@@ -57,6 +61,10 @@ pub(super) enum Agree {
     Restart,
     DeepFork,
     Silent,
+    HerdStall,
+    Replaced,
+    Pair,
+    OtherChain,
 }
 
 impl Agree {
@@ -73,14 +81,28 @@ impl Agree {
             "restart" => Agree::Restart,
             "deepfork" => Agree::DeepFork,
             "silent" => Agree::Silent,
+            "herdstall" => Agree::HerdStall,
+            "replaced" => Agree::Replaced,
+            "pair" => Agree::Pair,
+            "otherchain" => Agree::OtherChain,
             _ => Agree::Agreed,
         }
     }
 
     /// Whether Zakura · Mainnet is at the tip in this scenario, or still catching up.
     pub(super) fn zakura_at_tip(self) -> bool {
-        !matches!(self, Agree::Split | Agree::Channels)
+        !matches!(self, Agree::Split | Agree::Channels | Agree::OtherChain)
     }
+
+    /// Whether Zebra · Mainnet 2 joins the herd: in every scenario but `pair`.
+    pub(super) fn second_zebrad(self) -> bool {
+        self != Agree::Pair
+    }
+}
+
+/// Whether the main zebrad, and with it the Mainnet chain, has no new block: `herdstall`.
+pub(super) fn chain_stopped() -> bool {
+    scenario() == Some(Agree::HerdStall)
 }
 
 /// How much history the rounds before the first view cover.
@@ -97,6 +119,12 @@ const STALL_SINCE: i64 = -400;
 /// passed its probation.
 const BEHIND: u32 = 6;
 const BEHIND_SINCE: i64 = -300;
+/// When `herdstall`'s chain had its last block: 13.2 S before the first view, so the herd is
+/// stalled from the start, and a problem at 24 S.
+const HERD_STALL_SINCE: i64 = -330;
+/// When `replaced`'s node took the block the others then replaced: more than 5 S ago, so it
+/// is stuck on it from the start.
+const REPLACED_SINCE: i64 = -200;
 
 #[derive(Default)]
 struct State {
@@ -143,11 +171,16 @@ fn seconds() -> i64 {
         .map_or(0, |since| since.as_secs() as i64)
 }
 
-/// The main chain's top at `t` seconds: a block every 25 s before the first view, the main
-/// zebrad's own height after it.
+/// The main chain's top at `t` seconds: a block every 25 s before the first view (none since
+/// `herdstall`'s last), the main zebrad's own height after it.
 fn top_at(t: i64) -> u32 {
     if t < 0 {
-        return top_zero().saturating_sub(((-t + SPACING - 1) / SPACING) as u32);
+        let ago = if chain_stopped() {
+            (HERD_STALL_SINCE - t).max(0)
+        } else {
+            -t
+        };
+        return top_zero().saturating_sub(((ago + SPACING - 1) / SPACING) as u32);
     }
     mock()
         .stats
@@ -173,6 +206,12 @@ fn script(node: &str, top: u32, t: i64) -> Option<(u32, Option<u32>)> {
         (Agree::Channels, "zebrad-mainnet-3") if forked => (top, Some(fork())),
         (Agree::DeepFork, "zebrad-mainnet-2") => (top, Some(top_zero().saturating_sub(1_500))),
         (Agree::Silent, "zebrad-mainnet-2") => (top + 1, None),
+        (Agree::HerdStall, "zebrad-mainnet") => (top, None),
+        (Agree::Replaced, "zebrad-mainnet-2") if t >= REPLACED_SINCE => {
+            let block = top_at(REPLACED_SINCE) + 1;
+            (block, Some(block))
+        }
+        (Agree::Pair, "zakura-mainnet") if forked => (top, Some(fork())),
         (agree, "zakura-mainnet") if !agree.zakura_at_tip() => return None,
         (_, "zebrad-mainnet-2" | "zebrad-mainnet-3" | "zakura-mainnet") => (top, None),
         _ => return None,
@@ -203,12 +242,21 @@ fn hash(network: Network, branch: Option<u32>, height: u32) -> String {
         .collect()
 }
 
+/// The first height of the branch the scenario puts `node` on, if any. `otherchain`'s Zakura
+/// catches up on a chain of its own from block 1, wherever its sync has got to.
+fn branch_of(node: &str, top: u32, t: i64) -> Option<u32> {
+    match (scenario(), node) {
+        (Some(Agree::OtherChain), "zakura-mainnet") => Some(1),
+        _ => script(node, top, t).and_then(|(_, branch)| branch),
+    }
+}
+
 /// `node`'s best block at `height` on `network`, on the branch the scenario puts it on. It is
 /// remembered, so the probes answer from the same chain as the statistics.
 pub(super) fn best(node: &NodeId, network: Network, height: u64) -> Option<BlockRef> {
     let height = u32::try_from(height).ok()?;
     let t = seconds();
-    let branch = script(node.as_str(), top_at(t), t).and_then(|(_, branch)| branch);
+    let branch = branch_of(node.as_str(), top_at(t), t);
     STATE.with_borrow_mut(|state| {
         state.positions.insert(node.clone(), (height, branch));
     });
@@ -416,8 +464,13 @@ mod tests {
         assert_eq!(Agree::parse("lag"), Agree::Behind);
         assert_eq!(Agree::parse(""), Agree::Agreed);
         assert_eq!(Agree::parse("bogus"), Agree::Agreed);
+        assert_eq!(Agree::parse("herdstall"), Agree::HerdStall);
+        assert_eq!(Agree::parse("otherchain"), Agree::OtherChain);
         assert!(!Agree::Split.zakura_at_tip());
+        assert!(!Agree::OtherChain.zakura_at_tip());
         assert!(Agree::Fork.zakura_at_tip());
+        assert!(!Agree::Pair.second_zebrad());
+        assert!(Agree::Replaced.second_zebrad());
     }
 
     #[test]
