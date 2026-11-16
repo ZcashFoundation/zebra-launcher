@@ -15,7 +15,7 @@ use launcher_core::{
     resources::{self, ResourceSampler, platform_reader},
     supervisor::{self, SupervisorHandle},
 };
-use launcher_types::{NodeResources, Platform};
+use launcher_types::{NodeResources, Platform, ProcessUsage};
 use tokio::sync::watch;
 
 #[path = "support/helpers.rs"]
@@ -27,6 +27,10 @@ const INTERVAL: Duration = Duration::from_millis(200);
 
 /// Whether members name their parent: on Unix, not on Windows, where the job's list is the tree.
 const PARENT_LINKS: bool = cfg!(unix);
+
+/// Whether a child that has exited stays a member until it is reaped: a zombie on Unix keeps
+/// its final times, while Windows lists no process that has exited.
+const EXITED_ARE_LISTED: bool = cfg!(unix);
 
 /// fake-zebrad as the OS names it.
 const FAKE_NAME: &str = if cfg!(windows) {
@@ -102,9 +106,30 @@ impl Live {
     }
 }
 
-/// The root's own CPU, its children's excluded.
+/// Whether `member` is the console host Windows may run for a console program started without
+/// a window, as Zeal starts zebrad. It can be a member of the job; these tests leave it out.
+fn console_host(member: &ProcessUsage) -> bool {
+    cfg!(windows) && member.name.eq_ignore_ascii_case("conhost.exe")
+}
+
+/// The tree's processes as the tests count them: without a console host.
+fn tree(sample: &NodeResources) -> Vec<&ProcessUsage> {
+    sample
+        .members
+        .iter()
+        .filter(|member| !console_host(member))
+        .collect()
+}
+
+/// The root's own CPU, its children's excluded, and a console host's.
 fn root_cpu(sample: &NodeResources) -> f64 {
-    sample.members.first().map_or(0.0, |root| root.cpu_secs)
+    let host: f64 = sample
+        .members
+        .iter()
+        .filter(|member| console_host(member))
+        .map(|member| member.cpu_secs)
+        .sum();
+    sample.members.first().map_or(0.0, |root| root.cpu_secs) + host
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -120,7 +145,7 @@ async fn a_busy_thread_shows_as_cpu() {
         )
         .await;
     assert_eq!(sample.platform, resources::platform());
-    assert_eq!(sample.processes, 1);
+    assert_eq!(tree(&sample).len(), 1, "{sample:?}");
     let root = &sample.members[0];
     assert_eq!(Some(root.pid), live.handle.status().pid);
     assert_eq!(root.parent, None);
@@ -172,31 +197,38 @@ async fn written_bytes_count_from_the_spawn() {
 }
 
 /// Waits until the child shows up and is gone again, and checks that its CPU, still visible
-/// while it lived, is in the total once: the root's own time plus the child's.
+/// while it lived, is in the total once: the root's own time plus the child's. On Windows the
+/// child's last interval before its exit may go unseen, while the job's total holds it.
 async fn child_is_counted_once(live: &mut Live) -> NodeResources {
     let child = live
-        .until(LIMIT, "the child", |_| {}, |sample| sample.processes == 2)
+        .until(LIMIT, "the child", |_| {}, |sample| tree(sample).len() == 2)
         .await;
-    let root = child.members[0].pid;
+    let members = tree(&child);
+    let root = members[0].pid;
     let parent = PARENT_LINKS.then_some(root);
-    assert_eq!(child.members[1].parent, parent, "{child:?}");
-    let mut child_cpu = child.members[1].cpu_secs;
+    assert_eq!(members[1].parent, parent, "{child:?}");
+    let mut child_cpu = members[1].cpu_secs;
     let gone = live
         .until(
             LIMIT,
             "the child to be reaped",
             |sample| {
-                if let Some(member) = sample.members.get(1) {
+                if let Some(member) = tree(sample).get(1) {
                     child_cpu = child_cpu.max(member.cpu_secs);
                 }
             },
-            |sample| sample.processes == 1,
+            |sample| tree(sample).len() == 1,
         )
         .await;
     assert!(child_cpu > 0.2, "the child spun: {child_cpu}");
     let rollup = gone.cpu_secs - root_cpu(&gone);
+    let unseen = if EXITED_ARE_LISTED {
+        0.0
+    } else {
+        INTERVAL.as_secs_f64()
+    };
     assert!(
-        (rollup - child_cpu).abs() < 0.05,
+        rollup > child_cpu - 0.05 && rollup < child_cpu + unseen + 0.05,
         "the child's {child_cpu} s are counted once: the total holds {rollup} s beside the root's own"
     );
     gone
@@ -206,9 +238,9 @@ async fn child_is_counted_once(live: &mut Live) -> NodeResources {
 async fn a_child_counts_while_it_lives_and_after_it_is_reaped() {
     let mut live = Live::start(&[("FAKE_ZEBRAD_CHILD", "busy")], INTERVAL).await;
     let child = live
-        .until(LIMIT, "the child", |_| {}, |sample| sample.processes == 2)
+        .until(LIMIT, "the child", |_| {}, |sample| tree(sample).len() == 2)
         .await;
-    assert_eq!(child.members[1].name, FAKE_NAME);
+    assert_eq!(tree(&child)[1].name, FAKE_NAME);
     child_is_counted_once(&mut live).await;
     live.stop().await;
 }
@@ -217,11 +249,12 @@ async fn a_child_counts_while_it_lives_and_after_it_is_reaped() {
 async fn a_child_in_a_session_of_its_own_is_a_member() {
     let mut live = Live::start(&[("FAKE_ZEBRAD_CHILD", "session")], INTERVAL).await;
     let sample = live
-        .until(LIMIT, "the child", |_| {}, |sample| sample.processes == 2)
+        .until(LIMIT, "the child", |_| {}, |sample| tree(sample).len() == 2)
         .await;
     // On Unix by its parent link; on Windows, where the child skips `setsid`, by the job.
-    let parent = PARENT_LINKS.then_some(sample.members[0].pid);
-    assert_eq!(sample.members[1].parent, parent);
+    let members = tree(&sample);
+    let parent = PARENT_LINKS.then_some(members[0].pid);
+    assert_eq!(members[1].parent, parent);
     live.stop().await;
 }
 
@@ -233,7 +266,7 @@ async fn a_child_between_two_samples_is_counted_but_never_listed() {
         .until(
             LIMIT,
             "three seconds of samples",
-            |sample| most = most.max(sample.processes),
+            |sample| most = most.max(tree(sample).len()),
             |sample| sample.run_secs >= 3.0,
         )
         .await;
@@ -316,12 +349,11 @@ async fn the_job_closes_when_the_run_is_finalized() {
             LIMIT,
             "the grandchild",
             |_| {},
-            |sample| sample.members.iter().any(|member| member.pid != root),
+            |sample| tree(sample).iter().any(|member| member.pid != root),
         )
         .await;
-    let grandchild = lingering
-        .members
-        .iter()
+    let grandchild = tree(&lingering)
+        .into_iter()
         .find(|member| member.pid != root)
         .expect("the grandchild")
         .pid;

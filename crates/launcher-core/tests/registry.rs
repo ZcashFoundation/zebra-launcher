@@ -475,7 +475,13 @@ async fn each_node_samples_its_own_process_tree() {
         .clone()
         .expect("a sample");
     assert_eq!(small.members[0].pid, pid_a, "{small:?}");
-    assert_eq!(small.processes, 1, "{small:?}");
+    // On Windows a console host may share zebrad's job (tests/resources.rs).
+    let processes = small
+        .members
+        .iter()
+        .filter(|member| !member.name.eq_ignore_ascii_case("conhost.exe"))
+        .count();
+    assert_eq!(processes, 1, "{small:?}");
     assert!(
         small.memory_bytes < 100 << 20,
         "the other node's memory is not in this one's: {small:?}"
