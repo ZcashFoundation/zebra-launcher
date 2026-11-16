@@ -496,7 +496,7 @@ pieces below.
 | --- | --- | --- |
 | Serves | once zebrad is at the tip | once its index reaches zebrad's tip: "about an hour on NVMe" for a first build (its README), unmeasured on a desktop; its Mainnet live test allows 48 h |
 | Disk beside zebrad's | none | 71.3 GB on Mainnet at height 3,544,662 (Zingo Labs' snapshot manifest, read 2026-11-16); Testnet unmeasured |
-| Protocol | v0.3.6 with Ironwood's fields: no transparent compact data, no `GetStandardFee`, an empty `lightwalletProtocolVersion` | v0.6.0: transparent `poolTypes`, `vin` and `vout`, `CompactTx.fee`, `GetStandardFee`, `upgradeName` and `upgradeHeight` |
+| Protocol | v0.3.6 with Ironwood's fields: no transparent compact data, no `GetStandardFee`, an empty `lightwalletProtocolVersion` | v0.6.0: transparent `poolTypes`, `vin` and `vout`, `CompactTx.fee`, `GetStandardFee`, `upgradeName` and `upgradeHeight` (at the pin an empty name and height 0 on Mainnet and Testnet: 1.1.0 knows no upgrade after NU7, which is active on both) |
 | Zingo wallets | zingolib's pepper-sync refuses a server whose `lightwalletProtocolVersion` is empty or below v0.5.0 (`crates/pepper-sync/src/client.rs` at `zingolib_v8.0.0` and at `dev`, `0a39640`); which zingolib Zingo mobile 3.0.0 and Zingo PC 2.0.27 ship is unconfirmed | pass that check |
 | Not served | `Ping` | `Ping`, `GetBlockNullifiers` (removed from its proto), gRPC reflection |
 | Limits of its own | 20 streams a connection | connections, streams, read lanes, request sizes, timeouts, connection age ([below](#the-front-door-for-zingod)) |
@@ -949,7 +949,11 @@ reports vendor `zingod`, version `1.1.0`, `lightwalletProtocolVersion` `v0.6.0`,
 (`main` or `test`), the served tip as `blockHeight` and the verified best as `estimatedHeight`.
 `gitCommit`, `branch`, `buildDate`, `buildUser`, `zcashdBuild`, `zcashdSubversion` and
 `donationAddress` stay empty, so Zaino's builder-login leak doesn't exist here, and Share offers
-no donation address.
+no donation address. `upgradeName` and `upgradeHeight` name the next upgrade above the served
+height, and are empty and 0 when there is none (`routes/info.rs:47-51, 65-66`). 1.1.0's
+schedules end at NU7 (the `zcash_protocol` fork `605917a3`,
+`components/zcash_protocol/src/consensus.rs:557-569, 591-603`), so on Mainnet and Testnet
+wallets get an empty name and height 0 until a zingod knows a later upgrade.
 
 zingod implements 19 methods (`packages/zingod-grpc/src/service.rs:48-68`), every one in
 [What wallets need](#what-wallets-need) among them. Besides the protocol rows above, a wallet may
@@ -965,8 +969,10 @@ hit:
   zebrad allows 10,000.
 
 Whether Zodl's `validateServerEndpoint` or Zkool react to vendor `zingod`, to an empty
-`zcashdBuild`, or to the `Nu7` spelling of `upgradeName` is unconfirmed. The wallet runs check
-it before Share names a wallet for zingod.
+`zcashdBuild`, or to an empty `upgradeName` with `upgradeHeight` 0 is unconfirmed. The wallet runs
+check it before Share names a wallet for zingod. How wallets read the spelling of a named
+upgrade matters only once a zingod knows a scheduled one, in Z4's upgrade window; the wallet runs
+for that zingod check it.
 
 #### Disk, memory and the first build
 
