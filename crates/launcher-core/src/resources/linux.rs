@@ -261,6 +261,9 @@ impl MachineReader for LinuxReader {
                 .swap_total
                 .zip(memory.swap_free)
                 .map(|(total, free)| total.saturating_sub(free)),
+            commit: None,
+            commit_limit: None,
+            pressure: None,
         })
     }
 }

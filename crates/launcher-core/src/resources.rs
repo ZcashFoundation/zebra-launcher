@@ -26,7 +26,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use launcher_types::{MachineResources, NodeResources, Platform};
+use launcher_types::{MachineResources, MemoryPressure, NodeResources, Platform};
 use tokio::{sync::watch, time::MissedTickBehavior};
 use tracing::Instrument;
 
@@ -136,8 +136,14 @@ pub struct MachineReading {
     pub cpu_idle: u64,
     pub memory_total: u64,
     pub memory_available: Option<u64>,
+    /// Linux and macOS.
     pub swap_total: Option<u64>,
     pub swap_used: Option<u64>,
+    /// Windows: the commit charge and its limit.
+    pub commit: Option<u64>,
+    pub commit_limit: Option<u64>,
+    /// macOS: the kernel's memory pressure level.
+    pub pressure: Option<MemoryPressure>,
 }
 
 /// Reads the computer's CPU and memory.
@@ -459,9 +465,9 @@ async fn sample_machine(
                     memory_available_bytes: reading.memory_available,
                     swap_total_bytes: reading.swap_total,
                     swap_used_bytes: reading.swap_used,
-                    commit_bytes: None,
-                    commit_limit_bytes: None,
-                    pressure: None,
+                    commit_bytes: reading.commit,
+                    commit_limit_bytes: reading.commit_limit,
+                    pressure: reading.pressure,
                 }));
             }
             Ok(Err(err)) if err.kind() == io::ErrorKind::Unsupported => {
@@ -722,7 +728,8 @@ mod tests {
     impl MachineReader for Machine {
         fn machine(&self) -> io::Result<MachineReading> {
             let call = u64::from(self.calls.fetch_add(1, Ordering::SeqCst));
-            // 8 CPUs, a quarter busy.
+            // 8 CPUs, a quarter busy; Windows' commit and macOS's pressure, as one reader
+            // gives none of both.
             Ok(MachineReading {
                 at: SystemTime::now(),
                 logical_cpus: 8,
@@ -732,6 +739,9 @@ mod tests {
                 memory_available: Some(4 << 30),
                 swap_total: Some(2 << 30),
                 swap_used: Some(0),
+                commit: Some(9 << 30),
+                commit_limit: Some(24 << 30),
+                pressure: Some(MemoryPressure::Warning),
             })
         }
     }
@@ -760,7 +770,9 @@ mod tests {
             .unwrap();
         let second = rx.borrow_and_update().clone().unwrap();
         assert_eq!(second.cpu_busy_cores, Some(2.0));
-        assert_eq!(second.pressure, None);
+        assert_eq!(second.commit_bytes, Some(9 << 30));
+        assert_eq!(second.commit_limit_bytes, Some(24 << 30));
+        assert_eq!(second.pressure, Some(MemoryPressure::Warning));
     }
 
     #[test]
@@ -774,6 +786,9 @@ mod tests {
             memory_available: None,
             swap_total: None,
             swap_used: None,
+            commit: None,
+            commit_limit: None,
+            pressure: None,
         };
         assert_eq!(busy_cores(&reading(10, 10), &reading(10, 10)), None);
         assert_eq!(busy_cores(&reading(10, 10), &reading(30, 10)), Some(4.0));
