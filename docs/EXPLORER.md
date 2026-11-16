@@ -419,7 +419,13 @@ backend; chips are buttons whose text lives in the route: `kind:` (`shielding`, 
   palette validator against `--panel` in both themes (worst adjacent colour-vision ΔE 17.6
   light, 13.0 dark). In light mode Sapling (2.82:1) and Lockbox (2.69:1) are under 3:1, so pool
   marks always carry labels or a legend and a table view. Orange, blue and aqua are the existing
-  `--series-2`, `--series-1`, `--series-3` (styles.css:51-53, :102-104).
+  `--series-2`, `--series-1`, `--series-3` (styles.css:51-53, :102-104), so those series
+  tokens never mark anything that is not their pool. Parts that are not pools take colours no
+  pool wears: in the reward split (V3) the miner's share is `--reward-miner` (yellow, its fees
+  at half opacity), the funding streams `--reward-stream` (a neutral), and the burned fees have
+  no fill; only the lockbox wears its pool colour. Beside each other and the lockbox they pass
+  the validator's colour-vision and normal-vision checks in both themes (worst adjacent 16.3
+  light, 13.2 dark).
 - **Two hues where any marks can touch** (block map, projection): public orange, shielded blue;
   a transaction crossing between them is split diagonally.
 - **Sign:** blue into shielded pools, orange out, around grey zero; never red against green.

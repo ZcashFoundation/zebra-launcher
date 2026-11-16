@@ -462,7 +462,9 @@ button.link.ex-link {
   top: calc(50% - 6px);
 }
 
-/* The reward split (V3). */
+/* The reward split (V3). Only the lockbox is a pool and wears its colour: the miner's share
+   has a hue no pool wears (its fees lighter), the funding streams a neutral, and the burned
+   fees no fill, since they are nowhere. A gap of the page's colour parts the segments. */
 
 .ex-stack {
   display: flex;
@@ -476,20 +478,26 @@ button.link.ex-link {
   height: 100%;
 }
 
-.ex-fill-miner {
-  background: var(--series-1);
+.ex-stack-part + .ex-stack-part {
+  border-left: 2px solid var(--bg);
 }
 
-.ex-fill-stream {
-  background: var(--series-3);
+.ex-fill-miner {
+  background: var(--reward-miner);
 }
 
 .ex-fill-fees {
-  background: var(--series-2);
+  background: var(--reward-miner);
+  opacity: 0.5;
+}
+
+.ex-fill-stream {
+  background: var(--reward-stream);
 }
 
 .ex-fill-burned {
-  background: var(--series-muted);
+  border: 1px dashed var(--text-secondary);
+  background: transparent;
 }
 
 .ex-reward-rows {
