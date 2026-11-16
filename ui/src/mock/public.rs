@@ -12,6 +12,7 @@
 //! | `cgnat` | the setup stopped at the network step: carrier-grade NAT |
 //! | `expiring` | open, with a certificate that expires in 10 days and a renewal that failed |
 //! | `keychain` | open, with a keychain that will not delete the token: "Turn off and forget" says it is still there |
+//! | `consent` | open, with a consent an earlier Zeal asked for: paused until the user agrees again |
 
 use std::{
     net::{IpAddr, Ipv4Addr},
@@ -48,6 +49,7 @@ pub(crate) enum PublicFlag {
     Cgnat,
     Expiring,
     Keychain,
+    Consent,
 }
 
 impl PublicFlag {
@@ -59,6 +61,7 @@ impl PublicFlag {
             "cgnat" => Some(PublicFlag::Cgnat),
             "expiring" => Some(PublicFlag::Expiring),
             "keychain" => Some(PublicFlag::Keychain),
+            "consent" => Some(PublicFlag::Consent),
             _ => None,
         }
     }
@@ -221,6 +224,13 @@ impl World {
                 keychain_locked: true,
                 ..World::serving(network)
             },
+            Some(PublicFlag::Consent) => {
+                let mut world = World::serving(network);
+                if let Some(consent) = world.spec.as_mut().and_then(|spec| spec.consent.as_mut()) {
+                    consent.version = CONSENT_VERSION - 1;
+                }
+                world
+            }
         }
     }
 
@@ -639,6 +649,10 @@ mod tests {
         assert_eq!(
             PublicFlag::parse(Some("keychain")),
             Some(PublicFlag::Keychain)
+        );
+        assert_eq!(
+            PublicFlag::parse(Some("consent")),
+            Some(PublicFlag::Consent)
         );
         assert_eq!(PublicFlag::parse(Some("nonsense")), None);
         assert_eq!(PublicFlag::parse(None), None);

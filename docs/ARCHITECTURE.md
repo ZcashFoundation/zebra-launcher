@@ -758,7 +758,7 @@ The commands are `get_public_status`, `check_connection`, `begin_public_setup`,
 `forget_public_service` and `open_signup`. The UI's screens are in Settings → Public services,
 with a card on the dashboard and a header banner on the node's pages; every sentence comes
 from `ui/src/public_text.rs`, and the mock's `?public=setup`, `serving`, `unconfirmed`,
-`cgnat`, `expiring` and `keychain` run launcher-herd's rules over fake facts. What PS1 left for later is
+`cgnat`, `expiring`, `keychain` and `consent` run launcher-herd's rules over fake facts. What PS1 left for later is
 listed in PUBLIC-SERVICES.md ("PS1 as built").
 
 ## Block explorer

@@ -52,7 +52,7 @@ pub fn tip_settled(facts: &Facts) -> bool {
 }
 
 /// Whether zebrad's light wallet endpoint should exist now: the service is switched on, the
-/// consent covers it, the launcher runs zebrad on the service's network, and no pause waits
+/// consent covers it (an open service pauses for it otherwise), the launcher runs zebrad on the service's network, and no pause waits
 /// for the user. Other automatic pauses keep the endpoint, so a resume needs no restart.
 pub fn wants_endpoint(spec: &PublicServiceSpec, facts: &Facts) -> bool {
     spec.switch_on

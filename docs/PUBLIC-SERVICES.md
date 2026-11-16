@@ -78,7 +78,7 @@ supervised zebrad, today's `launcher.json`), Linux only and labelled experimenta
 - The types (`launcher_types::public`), the pure rules (`launcher-herd`), and the screens:
   consent, setup, the status panel with the Share strings, the banners; in Settings → Public
   services, with a card on the node's dashboard and the banner on the node's pages, all in the
-  mock (`?public=setup`, `serving`, `unconfirmed`, `cgnat`, `expiring`, `keychain`).
+  mock (`?public=setup`, `serving`, `unconfirmed`, `cgnat`, `expiring`, `keychain`, `consent`).
 
 **Moved to a point release:** deSEC; ARI (`renewal_info`, `replaces`); "Test now" and the phone
 test (the setup's staging validation is the evidence from outside meanwhile); UPnP IGD's
@@ -831,8 +831,12 @@ and Next stays disabled until the gates pass.
 
 1. **What becomes public.** The consent screen ([UI](#the-consent-screen)) with the real name,
    address and versions. Gate: an explicit tick, stored as `Consent { version, at, hostname }`
-   and asked again when `CONSENT_VERSION` or the name changes. For the light client server it
-   also accepts Let's Encrypt's Subscriber Agreement (ACME's `termsOfServiceAgreed`).
+   and asked again when `CONSENT_VERSION` or the name changes. An open service whose consent
+   a Zeal release no longer covers pauses (`ConsentNeeded`, until the user agrees again on the
+   consent screen, which the panel then shows): the front door, the name's updates and the
+   endpoint stop, and at launch the endpoint goes before zebrad's first start. For the light
+   client server it also accepts Let's Encrypt's Subscriber Agreement (ACME's
+   `termsOfServiceAgreed`).
 2. **The service.** Light client server: Zeal takes the network's zebrad (in PS1, the one it
    runs), assigns the endpoint's loopback port and restarts zebrad with it. Gates: the zebrad
    is on Zeal's tested list (in PS1, the bundled 7.0.0); zebrad logged
@@ -1840,7 +1844,7 @@ upstream gate opens first ships first.
 | Phase | Ships | Needs | Screenshots from |
 | --- | --- | --- | --- |
 | **PS0 Decide and ask** | this document, the edits below, the upstream issues | — | — |
-| **PS1 A light client server from zebrad (Linux)** | zebrad's endpoint as a managed loopback key, with the restart, the log line and the health checks; front door v1 in Zeal's process (`launcher-gateway`), its modes and v1 limits; `AcmeActor` (TLS-ALPN-01, staging then production, renewal) against Pebble in CI; the name step (DuckDNS, deSEC, by hand) with `DdnsActor` and the keychain; the read-only network checks and "Check my connection"; the forward by hand with the vendor guides; the firewall commands; the local, hairpin and phone tests and "Test now"; Open, pause and resume; keep-awake; the types, the pure logic and the screens (consent, setup, panel, Share, tray items, banners); Testnet and Mainnet, labelled experimental | today's single supervisor and settings: the endpoint's port is a default with a free-port check, not MULTI-NODE.md's allocator, and the screens sit in Settings → Public services and on the node's page; Zeal's wallet runs passing on Testnet and Mainnet before the release | `?public=setup`, `serving`, `unconfirmed`, `cgnat`, `expiring`, `keychain` |
+| **PS1 A light client server from zebrad (Linux)** | zebrad's endpoint as a managed loopback key, with the restart, the log line and the health checks; front door v1 in Zeal's process (`launcher-gateway`), its modes and v1 limits; `AcmeActor` (TLS-ALPN-01, staging then production, renewal) against Pebble in CI; the name step (DuckDNS, deSEC, by hand) with `DdnsActor` and the keychain; the read-only network checks and "Check my connection"; the forward by hand with the vendor guides; the firewall commands; the local, hairpin and phone tests and "Test now"; Open, pause and resume; keep-awake; the types, the pure logic and the screens (consent, setup, panel, Share, tray items, banners); Testnet and Mainnet, labelled experimental | today's single supervisor and settings: the endpoint's port is a default with a free-port check, not MULTI-NODE.md's allocator, and the screens sit in Settings → Public services and on the node's page; Zeal's wallet runs passing on Testnet and Mainnet before the release | `?public=setup`, `serving`, `unconfirmed`, `cgnat`, `expiring`, `keychain`, `consent` |
 | **PS2 Front door v2** | HTTP/2 ended in the front door: the allow-list (no reflection), per-method limits, deadlines, header stripping, connection age with GOAWAY, trailers-only errors, the browser page, calls per method in the status panel | PS1; the first-sync times and bytes from PS1's wallet runs | `?public=serving`, `ratelimited` |
 | **PS3 macOS** | the light client server on macOS: the Local Network prompt and `NSLocalNetworkUsageDescription`, `caffeinate`, the firewall checks | PS1; how Tauri 2 merges a `src-tauri/Info.plist`, checked | `?public=setup` on macOS |
 | **PS4 The public DNS seeder (Linux)** | the bundled `zeal-zeeder`; the domain step (Cloudflare, deSEC, by hand, a dynamic-DNS NS target), the port 53 guide, firewall help, warm-up, Open, the probe, the watchdog, the panel, Share, redaction, on PS1's shared flow | HERD H5 (the zeeder kind, census, the 8233 dialog, on MULTI-NODE phase 4); PS1; zeeder's crawler setting, or the 8233 dialog | `?public=seeder`, `seeder-warmup`, `seeder-attack`, `portclash` |

@@ -7,8 +7,8 @@ use launcher_herd::public::{current_step, names::DUCKDNS_ZONE};
 use launcher_types::{
     Network,
     public::{
-        CONSENT_VERSION, CheckOutcome, ConnectionReport, DnsProvider, PublicStatus, StepAnswer,
-        StepId, StepState, UploadPreset,
+        CONSENT_VERSION, CheckOutcome, ConnectionReport, DnsProvider, PauseReason, PublicState,
+        PublicStatus, StepAnswer, StepId, StepState, UploadPreset,
     },
 };
 use leptos::{prelude::*, task::spawn_local};
@@ -214,6 +214,29 @@ fn LightServer(status: Memo<Option<PublicStatus>>) -> impl IntoView {
     let read =
         move |f: fn(&PublicStatus) -> bool| move || status.with(|s| s.as_ref().is_some_and(f));
     let opened = Memo::new(move |_| status.with(|s| s.as_ref().is_some_and(|s| s.opened)));
+    // An open service whose consent a Zeal release no longer covers asks for it again.
+    let consent_lapsed = Memo::new(move |_| {
+        status.with(|s| {
+            s.as_ref().is_some_and(|s| {
+                matches!(
+                    s.state,
+                    PublicState::Paused {
+                        why: PauseReason::ConsentNeeded,
+                        ..
+                    }
+                )
+            })
+        })
+    });
+    let agree = Callback::new(move |()| {
+        act(busy, note, async move {
+            api::public::answer_public_step(StepAnswer::Consent {
+                version: CONSENT_VERSION,
+            })
+            .await
+            .map_err(|error| error.to_string())
+        });
+    });
     let network =
         Memo::new(move |_| status.with(|s| s.as_ref().map_or(Network::Mainnet, |s| s.network)));
     let in_scope = move || state.network.get() == network.get();
@@ -255,7 +278,17 @@ fn LightServer(status: Memo<Option<PublicStatus>>) -> impl IntoView {
                 }
             >
                 {move || {
-                    if opened.get() {
+                    if consent_lapsed.get() {
+                        view! {
+                            <p>
+                                "What Zeal tells you before serving changed since you agreed. \
+                                 The light client server stays paused until you read it and \
+                                 agree again."
+                            </p>
+                            <ConsentScreen status busy on_agree=agree />
+                        }
+                        .into_any()
+                    } else if opened.get() {
                         view! { <Serving status /> }.into_any()
                     } else {
                         view! { <Checklist status /> }.into_any()

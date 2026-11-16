@@ -86,6 +86,9 @@ pub fn pause_text(why: &PauseReason, status: &PublicStatus) -> String {
         PauseReason::NotResumed => {
             "Zeal started without opening it, as you chose. Switch it on to resume.".into()
         }
+        PauseReason::ConsentNeeded => {
+            "what Zeal tells you before serving changed. Read it again and agree to resume.".into()
+        }
     }
 }
 

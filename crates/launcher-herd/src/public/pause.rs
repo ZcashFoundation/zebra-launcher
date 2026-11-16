@@ -28,6 +28,10 @@ pub fn pause(spec: &PublicServiceSpec, facts: &Facts) -> Option<(PauseReason, Re
     if !spec.switch_on {
         return Some((PauseReason::ByYou, Resume::NeedsYou));
     }
+    // During the setup, consent is the first step's.
+    if spec.opened && !spec.consent_current() {
+        return Some((PauseReason::ConsentNeeded, Resume::NeedsYou));
+    }
     if spec.network != facts.network {
         return Some((PauseReason::NetworkChanged, Resume::NeedsYou));
     }
@@ -344,6 +348,18 @@ mod tests {
         assert_eq!(
             pause(&spec, &failed),
             Some((PauseReason::BackingStopped, Resume::Automatic))
+        );
+        let lapsed = PublicServiceSpec {
+            consent: Some(Consent {
+                version: CONSENT_VERSION - 1,
+                ..spec.consent.clone().unwrap()
+            }),
+            ..spec.clone()
+        };
+        assert_eq!(
+            pause(&lapsed, &base),
+            Some((PauseReason::ConsentNeeded, Resume::NeedsYou)),
+            "a release that changed the consent asks again"
         );
         let held = Facts {
             held: Some(PauseReason::NotResumed),

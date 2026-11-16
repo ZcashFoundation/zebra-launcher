@@ -496,6 +496,8 @@ pub enum PauseReason {
     NetworkChanged,
     /// Zeal started and did not open the service by itself.
     NotResumed,
+    /// The consent no longer covers the service: a Zeal release changed what it says.
+    ConsentNeeded,
 }
 
 /// How a paused service comes back.

@@ -122,7 +122,8 @@ pub fn prepare_launch(settings: &mut Settings) -> bool {
         return false;
     };
     let held = spec.switch_on && spec.opened && !spec.resume_on_launch;
-    if !spec.switch_on || held {
+    // A consent this release no longer covers waits for the user too.
+    if !spec.switch_on || held || !spec.consent_current() {
         spec.backend_port = None;
     }
     held
@@ -1603,6 +1604,11 @@ mod tests {
         );
         spec.backend_port = Some(9067);
         spec.opened = true;
+        spec.consent = Some(launcher_types::public::Consent {
+            version: CONSENT_VERSION,
+            at: SystemTime::UNIX_EPOCH,
+            hostname: String::new(),
+        });
         settings.public.services.push(spec);
         // Resumes: the key stays, so zebrad's first start opens the endpoint.
         assert!(!prepare_launch(&mut settings));
@@ -1618,6 +1624,18 @@ mod tests {
         let spec = settings.public.light_server_mut().unwrap();
         spec.switch_on = false;
         spec.backend_port = Some(9067);
+        assert!(!prepare_launch(&mut settings));
+        assert_eq!(settings.public.light_server().unwrap().backend_port, None);
+        // A consent this release does not cover: the key goes before zebrad starts.
+        let spec = settings.public.light_server_mut().unwrap();
+        spec.switch_on = true;
+        spec.resume_on_launch = true;
+        spec.backend_port = Some(9067);
+        spec.consent = Some(launcher_types::public::Consent {
+            version: CONSENT_VERSION - 1,
+            at: SystemTime::UNIX_EPOCH,
+            hostname: String::new(),
+        });
         assert!(!prepare_launch(&mut settings));
         assert_eq!(settings.public.light_server().unwrap().backend_port, None);
     }
