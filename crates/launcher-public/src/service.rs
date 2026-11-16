@@ -325,8 +325,8 @@ struct Actor {
     acme_asked: bool,
     state: State,
     state_saved: tokio::time::Instant,
-    /// The month's upload before the current front door started.
-    door_base: u64,
+    /// This run's upload this month.
+    upload: Upload,
 
     light: Option<Child<LightMonitor>>,
     ddns: Option<Child<DdnsHandle>>,
@@ -355,6 +355,33 @@ fn door_limits(limits: &launcher_types::public::PublicLimits) -> launcher_gatewa
         new_per_second: limits.new_per_second,
         new_burst: limits.new_burst,
         upload_kbit: limits.upload_kbit,
+    }
+}
+
+/// This run's upload this month: what its stopped front doors sent, and the running one's
+/// count, which goes on from before the month began.
+#[derive(Debug, Default)]
+struct Upload {
+    /// Sent this month by front doors that stopped.
+    stopped: u64,
+    /// The running front door's count when the month began.
+    offset: u64,
+}
+
+impl Upload {
+    /// This run's upload this month, with the running front door's count `door`.
+    fn this_run(&self, door: Option<u64>) -> u64 {
+        self.stopped + door.map_or(0, |door| door.saturating_sub(self.offset))
+    }
+
+    fn door_stopped(&mut self, door: u64) {
+        self.stopped += door.saturating_sub(self.offset);
+        self.offset = 0;
+    }
+
+    fn new_month(&mut self, door: Option<u64>) {
+        self.stopped = 0;
+        self.offset = door.unwrap_or(0);
     }
 }
 
@@ -411,7 +438,7 @@ impl Actor {
             acme_asked: false,
             state,
             state_saved: tokio::time::Instant::now(),
-            door_base: 0,
+            upload: Upload::default(),
             light: None,
             ddns: None,
             ddns_wanted: watch::channel(None).0,
@@ -536,7 +563,7 @@ impl Actor {
             .as_ref()
             .map(|door| door.handle.stats.borrow().clone())
             .unwrap_or_default();
-        facts.month_bytes_up = self.state.month_bytes_up + self.door_base + stats.bytes_up;
+        facts.month_bytes_up = self.state.month_bytes_up + self.upload.this_run(self.door_up());
         facts.gateway = GatewayStats {
             open_connections: stats.open_connections,
             client_networks: stats.client_networks,
@@ -725,11 +752,16 @@ impl Actor {
         }
     }
 
+    /// The running front door's upload since it started.
+    fn door_up(&self) -> Option<u64> {
+        self.door
+            .as_ref()
+            .map(|door| door.handle.stats.borrow().bytes_up)
+    }
+
     fn save_state(&mut self) {
         let mut state = self.state.clone();
-        if let Some(door) = &self.door {
-            state.month_bytes_up += self.door_base + door.handle.stats.borrow().bytes_up;
-        }
+        state.month_bytes_up += self.upload.this_run(self.door_up());
         let _ = store::save(&self.options.paths.state(), &state, false);
         self.state_saved = tokio::time::Instant::now();
     }
@@ -739,7 +771,7 @@ impl Actor {
         if self.state.month != month {
             self.state.month = month;
             self.state.month_bytes_up = 0;
-            self.door_base = 0;
+            self.upload.new_month(self.door_up());
             self.save_state();
         } else if self.state_saved.elapsed() >= SAVE_EVERY {
             self.save_state();
@@ -749,7 +781,8 @@ impl Actor {
     /// Ends the front door and moves its upload into the month's total.
     fn stop_door(&mut self) {
         if let Some(door) = self.door.take() {
-            self.door_base += door.handle.stats.borrow().bytes_up;
+            self.upload
+                .door_stopped(door.handle.stats.borrow().bytes_up);
             door.handle.stop();
         }
         self.can_validate
@@ -767,7 +800,7 @@ impl Actor {
     fn shutdown(&mut self) {
         self.stop_door();
         self.awake = None;
-        self.state.month_bytes_up += std::mem::take(&mut self.door_base);
+        self.state.month_bytes_up += std::mem::take(&mut self.upload).this_run(None);
         let _ = store::save(&self.options.paths.state(), &self.state, false);
     }
 
@@ -1458,6 +1491,22 @@ mod tests {
         spec.backend_port = Some(9067);
         assert!(!prepare_launch(&mut settings));
         assert_eq!(settings.public.light_server().unwrap().backend_port, None);
+    }
+
+    #[test]
+    fn a_new_month_starts_at_zero_with_a_front_door_running() {
+        let mut upload = Upload::default();
+        // A front door that started last month has sent 250 so far.
+        assert_eq!(upload.this_run(Some(250)), 250);
+        upload.new_month(Some(250));
+        assert_eq!(upload.this_run(Some(250)), 0);
+        assert_eq!(upload.this_run(Some(260)), 10);
+        upload.door_stopped(260);
+        assert_eq!(upload.this_run(None), 10);
+        // The next front door counts from zero.
+        assert_eq!(upload.this_run(Some(5)), 15);
+        upload.new_month(None);
+        assert_eq!(upload.this_run(Some(7)), 7);
     }
 
     #[test]
