@@ -1,9 +1,9 @@
 # The bundled sidecars
 
 Zeal ships three zebrads as Tauri sidecars, so a node on any supported channel
-works without a runtime download. Linux bundles also carry zingod, for the
-light client server ([The bundled zingod](#the-bundled-zingod-linux)). The
-zebrads:
+works without a runtime download. From Z1 (proposed, not built yet), Linux
+bundles also carry zingod, for the light client server
+([The bundled zingod](#the-bundled-zingod-linux)). The zebrads:
 
 | Channel | Sidecar in `src-tauri/binaries/` | Version | Pinned Zebra commit | Release/snapshot date |
 | --- | --- | --- | --- | --- |
