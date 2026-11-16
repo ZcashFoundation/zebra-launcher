@@ -582,7 +582,8 @@ on the computer: 0.6 ms for 150 processes, 11 ms for 2,600). Linux reads `/proc`
 (`resources/windows.rs`, with the job's queries in `process/windows.rs`); `unsafe` sits only
 around those OS calls. The fold's rule for a departed member follows the OS: Linux rolls a
 reaped child's CPU and I/O into its parent, macOS only its CPU, and on Windows the job's
-totals replace the sum. On other platforms the samplers publish `None` and the dashboard's
+totals replace the sum; a member missing from one reading and back in the next (XNU may
+refuse an exiting process for a moment) had not left. On other platforms the samplers publish `None` and the dashboard's
 Resources card stays hidden.
 
 **Dashboard.** The UI keeps three histories since the launcher opened; nothing is persisted.

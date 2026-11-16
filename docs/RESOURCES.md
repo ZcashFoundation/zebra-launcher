@@ -1513,6 +1513,12 @@ Each phase is one pull request that ships on its own, with screenshots from the 
        with its final times and peak from `proc_pid_rusage`.
      - A member whose `proc_pid_rusage` is refused counts no CPU, since a member's CPU is not
        optional, and marks memory and I/O as refused.
+     - In XNU's source, `proc_pidinfo` and `proc_pid_rusage` refuse a process with ESRCH from
+       the moment its references drain until it is a zombie, while the list calls still name
+       it. Such a member misses a reading and is back in the next, so the fold keeps what
+       went to `lost` at the last reading by member: a member that is back had not left, its
+       part is taken back, and a departure waiting for it is dropped. Without this its time
+       would count twice. An identity names one process, so nothing changes on Linux.
      - The name is `pbi_name`, or `pbi_comm` where that is empty.
      - The VM statistics are in the kernel's pages, so the page size comes from
        `host_page_size` (libsyscall answers it with `vm_kernel_page_size`): a third local
@@ -1520,8 +1526,9 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      - The 32-bit tick counters of `HOST_CPU_LOAD_INFO` wrap after weeks; the sampler then
        gives no busy figure for one interval.
    - Windows:
-     - A pid that cannot be opened is skipped; the job's totals count it. A member whose image
-       name cannot be read is named "unknown".
+     - A pid that cannot be opened is skipped; the job's totals count it. So is a process
+       that exits during its reads, while a failure of a running one fails the reading. A
+       member whose image name cannot be read is named "unknown".
      - The job's accounting is read after the members, so its totals hold at least what they
        read. `Job::process_ids` grows to at most 65,536 pids, and after its last try returns
        what fitted.
@@ -1565,6 +1572,7 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - whether `QueryInformationJobObject` fails with `ERROR_MORE_DATA` on a short list (the loop
      handles both answers);
    - whether zebrad's console host is in its job (the tests pass either way);
+   - the window in which XNU refuses an exiting process, which the fold absorbs;
    - screenshots from both OSes.
 4. **History charts.**
    - `Unit` and gap support in the chart code; the existing charts are byte-identical.
