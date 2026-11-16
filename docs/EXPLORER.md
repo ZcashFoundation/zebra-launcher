@@ -158,8 +158,8 @@ a coinbase's value balance is minus its outputs. So from v1 of a block and its p
   window shows (the Mainnet and Testnet tabs, MULTI-NODE.md:312-316), so the Testnet tab has a
   Testnet explorer: amounts read TAZ, and the Testnet band stays over the page. "Open in Zebra ·
   Testnet" from another network's search moves the window to Testnet with that node.
-- **Ctrl/Cmd+K** anywhere opens the selected node's Explorer with search focused; on Zaino,
-  that of the node it reads.
+- **Ctrl/Cmd+K** (Cmd on macOS, Ctrl elsewhere) anywhere outside a text field opens the
+  selected node's Explorer with search focused; on Zaino, that of the node it reads (P6).
 - **Links in:** `AppState.explorer_request: RwSignal<Option<(NodeId, ExplorerRoute)>>`, like
   `log_filter_request` (app.rs:206-208), set by the dashboard's best block, the status strip's
   height, and log lines with `Height(N)` (ui/src/insights/fields.rs:56-65) or a 64-hex hash.
@@ -1132,10 +1132,10 @@ CI through fake-zebrad's `fakegetcallcounts`.
 - **The actor,** with an in-memory synth `ChainSource` that counts calls and holds them on
   oneshot gates: merging, no call for cached content, interactive first, pauses while syncing
   or hidden, `NodeNotRunning`, caches kept on a new `rpc_addr` and cleared on a new chain, one
-  reorg notice; a network change: the other id gets `NodeNotRunning` with the next-start message
-  until zebrad restarts,
-  then the Explorer answers under the new id and the other network's store stays in place; TTLs
-  under tokio's paused clock (`test-util` is a dev-dependency).
+  reorg notice; a network change: the node's pages get `NodeNotRunning` with the next-start
+  message until zebrad restarts, then the Explorer answers from the new network's chain and the
+  other network's store stays in place; TTLs under tokio's paused clock (`test-util` is a
+  dev-dependency).
 - **Privacy:** the actor tests run under a capturing `tracing` subscriber at TRACE and fail if
   any event or span field holds a requested address, txid, hash, height or query (synth values
   chosen so they cannot appear by chance). Two actors on the same synth chain, one that opens
@@ -1227,9 +1227,11 @@ code differs from the design above:
   `spawn_fake_with` stays in rpc_monitor.rs and fake-zebrad in one file: nothing in this phase
   needs them elsewhere, and two other branches change fake-zebrad.
 - **Wire types** in `launcher_types::explorer` carry P1's requests only: `Status`, `Interest`,
-  `Chain`, `Block`, `BlockTxs`, `Tx` and `Resolve`. `ExplorerCall` has no `scope` (cancelling
-  paged requests) or `trace` (Show RPC, P2) yet, and there is no `explorer_job` command until
-  the first job (P4).
+  `Chain { with_fees }`, `Block`, `BlockTxs`, `Tx` and `Resolve`. `ExplorerCall` has no `scope`
+  (cancelling paged requests) or `trace` (Show RPC, P2) yet, and there is no `explorer_job`
+  command until the first job (P4). `ExplorerLive` carries the tip block's time
+  (`tip_time`) for the source line, and `LiveState::OtherNetwork` while zebrad still runs on
+  the network its node had before.
 - **explorer-model's modules** are `shapes`, `upgrades`, `ledger` (with the ZIP 218 budget from
   the note trees), `views`, `classify` and `synth`. The pool rules the pages show sit with the
   pages; `zip317`, `pools`, `query`, `filter`, `flow`, `m4`, `template` and `glossary` come with
@@ -1239,20 +1241,21 @@ code differs from the design above:
   outpoints, and refuses keys and phrases anywhere in a link or a search route. Of a pasted
   link it reads `q`, else the path's last segment, else the fragment (a place on the page, such
   as `#1`, unless nothing else is read), each percent-decoded; not an id inside JSON, and it
-  names a `zcash:` request instead of opening its address. The other classes are recognised for the hint and
-  answered "a later version".
+  names a `zcash:` request instead of opening its address. The other classes are recognised
+  for the hint and answered "a later version".
 - **Tauri.** The explorer's handle is Tauri state of its own, as the updater's is, not an
   `AppState` field, and the node-id rule is the actor's, behind `ExplorerHandle::call(node,
   call)`: it answers the first node's own id, and while zebrad still runs on the network the
   node had before, `LiveState::OtherNetwork` until zebrad's next start. Hiding the window to
   the tray does not send `Interest` yet: the tab and the document's visibility do.
 - **The actor.** Two lanes, interactive and prefetch (the follower and the Chain page's
-  coinbases); every P1 read weighs one,
-  since P1 makes no heavy call, and the background lane comes with the store (P5). Six permits,
-  four while the node syncs; no HTTP 429 back-off yet, since six reads never come near zebrad's
-  100. A new network clears everything, where the design says a new genesis hash. Hashes above
-  the final 1,000 are trusted for 10 s after a tip check, else a block asked for by height is
-  read again; headers above them are cached per epoch.
+  coinbases); every P1 read weighs one, since P1 makes no heavy call, and the background lane
+  comes with the store (P5). Six permits, four while the node syncs; no HTTP 429 back-off yet,
+  since six reads never come near zebrad's 100. A new network clears everything, where the
+  design says a new genesis hash. Hashes above the final 1,000 are trusted for 10 s after a tip
+  check, else a block asked for by height is read again; headers above them are cached per
+  epoch. Its time limits read Tokio's clock, so the tests run them at their own values on a
+  paused clock.
 - **The follower** polls `getbestblockheightandhash` every 2 s while the page is shown and the
   node is at the tip, and a page that needs the tip checks it when the last check is older than
   it can use; the monitor's `best_block_hash` is not used. It reads the new tip's block: one on
@@ -1271,17 +1274,33 @@ code differs from the design above:
   that counts its calls: the Chain page costs 1 tip, 25 coinbases, 1 header, at most 27 blocks
   (26, and the one before NU7 once past it) and at most 2 subsidies over its two asks (the
   first answers once the blocks are in, `with_fees` once the coinbases are, and a page asked
-  for meanwhile goes before them); a revisit costs nothing; a
-  Block page 2 blocks, its coinbase and its subsidy; a Transaction page one read; two pages
-  asking for one block share its reads; a reorganisation takes at most ten `getblockhash`. A
-  test also checks that no log field carries a requested hash, txid or height. fake-zebrad's
-  synthetic mode and the end-to-end tests through `fakegetcallcounts` wait with the move above.
+  for meanwhile goes before them); a revisit costs nothing; a Block page 2 blocks, its coinbase
+  and its subsidy; a Transaction page one read; two pages asking for one block share its
+  reads; a reorganisation takes at most ten `getblockhash`. A test also checks that no log
+  field carries a requested hash, txid or height. Of the actor tests in [Testing](#testing),
+  only the store's wait, for the store (P5). fake-zebrad's synthetic mode and the end-to-end tests through `fakegetcallcounts` wait with
+  the move above.
 - **The UI** is `ui/src/explorer.rs` (the shell) and `ui/src/explorer/` (`chain`, `block`, `tx`,
-  `search`, `parts`, `state`, `history`, `text`), with `ui/styles/explorer.css`. Each node's
-  place lives in the Explorer tab (`Explorers`), not in `NodeState`. Nothing is read before the
-  tab is first opened. The Transaction page lists transparent inputs as links to the outputs
-  they spend, without values, and shows the fee only for a transaction without transparent
-  inputs.
+  `search`, `parts`, `state`, `history`, `prefs`, `text`), with `ui/styles/explorer.css`. Each
+  node's place lives in the Explorer tab (`Explorers`), not in `NodeState`. Nothing is read
+  before the tab is first opened. The source line has the tip's age and the unit and time
+  toggles. The search box shows a `/` keycap but none for Ctrl K, and there is no "Show RPC"
+  (P2).
+  After a link is followed, focus moves to the new page's heading. The Transaction page lists
+  transparent inputs as links to the outputs they spend, without values, and shows the fee
+  only for a transaction without transparent inputs.
+- **Visualizations, in part.** P1 draws V1 to V4 as HTML, not SVG, and leaves out these parts
+  of them, which come with the phases named:
+  - V1, the strip: twelve tiles, rebuilt at each answer rather than keyed by hash; no
+    next-block tile (P3), no six turnstile ticks per tile, no "replaced" badge (the fork log,
+    P3), no hover cards (P2), and it does not hold still under the pointer ("+1 new block",
+    P3).
+  - V2, the turnstile: no miner-share row (fees and the burn have theirs), only the change
+    column gives exact zatoshis (as a title), and a pool does not open its page (P5).
+  - V3, the reward split: no coinbase text ("text chosen by the miner") and no address links
+    (P4).
+  - V4, the budget meter: one fill, not split into Orchard, Ironwood, Sapling spends and
+    outputs and JoinSplits, with no counts on hover; a tick at 300, the bar's end at 330.
 - **The mock** is one file, `ui/src/mock/explorer.rs`, with the flags `?attip`, `?tip=`,
   `?explorer=slow|empty|nobi` and `?reorg`; the other flags come with their phases. Like the
   backend it serves the first node only, so `?herd`'s other nodes show the backend's answer
