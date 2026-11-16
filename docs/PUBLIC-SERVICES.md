@@ -346,6 +346,9 @@ listener; it has neither (an upstream ask, [Phases](#phases)).
   launch, `ensure` writes the key before zebrad's first start, so there is no second restart.
   Automatic pauses close only the front door and keep the endpoint, except a network change
   (below); the switch off, "Turn off and forget" and a launch that doesn't resume remove it.
+  The off also holds in the service actor's memory, so if `launcher.json` cannot be written the
+  front door stays closed and the reply says the off was not saved; a launch writes the key
+  from the settings it prepared, saved or not.
 - **A network change.** In PS1 a light client server belongs to the network it was set up on,
   and the endpoint key is written only while `Settings.network` is that network. Saving the
   other network in Settings → Node pauses the service (`PauseReason::NetworkChanged`) and

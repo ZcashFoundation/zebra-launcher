@@ -1175,15 +1175,17 @@ impl Actor {
             }
             Msg::Switch { on, reply } => {
                 if !on {
-                    // Less exposure acts at once: the front door closes before anything else.
+                    // Less exposure acts at once: the front door closes before anything else,
+                    // and stays closed even if the off cannot be saved.
+                    self.held = Some(launcher_types::public::PauseReason::ByYou);
                     self.stop_door();
                     self.awake = None;
                 }
-                if on {
-                    self.held = None;
-                }
                 self.endpoint_error = None;
                 let result = self.update_spec(move |spec| spec.switch_on = on).await;
+                if on && result.is_ok() {
+                    self.held = None;
+                }
                 let _ = reply.send(result);
             }
             Msg::Answer { answer, reply } => {
@@ -1416,6 +1418,8 @@ impl Actor {
 
     async fn forget(&mut self, remove_token: bool) -> Result<StillPublic, String> {
         let spec = self.spec().ok_or("no light client server is set up")?;
+        // Closed until the service is gone, even if a write below fails.
+        self.held = Some(launcher_types::public::PauseReason::ByYou);
         self.stop_children();
         self.update_spec(|spec| {
             spec.switch_on = false;
@@ -1450,6 +1454,7 @@ impl Actor {
             })
             .await
             .map_err(|err| err.to_string())?;
+        self.held = None;
         self.name_changed();
         self.net = None;
         self.port_free = None;

@@ -410,3 +410,62 @@ async fn forget_says_when_the_keychain_kept_the_token() {
     assert!(s.services.forget(true).await.unwrap().token_left);
     assert!(!s.settings.current().public.light_server().is_some());
 }
+
+/// launcher.json cannot be written: the off still holds.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_off_that_cannot_be_saved_still_closes_the_service() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = setup().await;
+    s.services.begin_setup(Network::Mainnet).await.unwrap();
+    s.services
+        .answer(StepAnswer::Consent {
+            version: CONSENT_VERSION,
+        })
+        .await
+        .unwrap();
+    wait_for(&s.services, |status| {
+        status
+            .light
+            .as_ref()
+            .is_some_and(|light| light.endpoint.is_some())
+    })
+    .await;
+    let config_dir = Paths::under(s.dir.path())
+        .settings_file()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::write(config_dir.join("probe"), b"").is_ok() {
+        // Permissions do not bind this user (root): nothing to test.
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+    let off = s.services.set_switch(false).await;
+    // Several looks later, the service is still paused by the user.
+    for _ in 0..3 {
+        s.services.run_checks(StepId::Consent).await.unwrap();
+    }
+    let status = s.services.statuses()[0].clone();
+    std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(off.is_err(), "the off was not saved");
+    assert!(
+        matches!(
+            status.state,
+            PublicState::Paused {
+                why: PauseReason::ByYou,
+                ..
+            }
+        ),
+        "{:?}",
+        status.state
+    );
+    assert_eq!(status.gateway, None, "the front door stays closed");
+    // Once the file can be written again, on resumes.
+    s.services.set_switch(true).await.unwrap();
+    wait_for(&s.services, |status| {
+        !matches!(status.state, PublicState::Paused { .. })
+    })
+    .await;
+}
