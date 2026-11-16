@@ -410,7 +410,19 @@ pub fn hint(classified: &Classified, tip: Option<u32>, network: Network) -> Stri
             None => "Height".to_owned(),
         },
         Classified::BelowTip(0) => "The latest block".to_owned(),
-        Classified::BelowTip(back) => format!("{back} blocks below the tip"),
+        Classified::BelowTip(back) => {
+            let blocks = match back {
+                1 => "1 block".to_owned(),
+                n => format!("{} blocks", thousands(u64::from(*n))),
+            };
+            match tip.and_then(|tip| tip.checked_sub(*back)) {
+                Some(height) => format!(
+                    "{blocks} below the tip · block {}",
+                    thousands(u64::from(height))
+                ),
+                None => format!("{blocks} below the tip"),
+            }
+        }
         Classified::Hash(_) => "A block hash or a transaction id".to_owned(),
         Classified::Outpoint(_) => "A transaction output".to_owned(),
         Classified::Route(_) => "A page of the Explorer".to_owned(),
@@ -467,6 +479,7 @@ pub fn not_found_text(hint: &NotFoundHint) -> String {
 
 #[cfg(test)]
 mod tests {
+    use explorer_model::classify::classify_query;
     use launcher_types::explorer::{BlockLedger, Hash32, PoolPart, TxStatus};
 
     use super::*;
@@ -731,6 +744,18 @@ mod tests {
                 net
             ),
             "A transparent address of the other network; this node is on Mainnet"
+        );
+        // `tip-1` and `-2` both name the block under the tip.
+        for query in ["tip-1", "-2"] {
+            assert_eq!(
+                hint(&classify_query(query, net), Some(3_601_234), net),
+                "1 block below the tip · block 3,601,233",
+                "{query}"
+            );
+        }
+        assert_eq!(
+            hint(&classify_query("tip-1500", net), None, net),
+            "1,500 blocks below the tip"
         );
         assert!(hint(&Classified::Secret(SecretKind::ViewingKey), None, net).contains("never"));
         assert!(refusal(SecretKind::RecoveryPhrase).contains("not saved"));
