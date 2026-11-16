@@ -709,7 +709,7 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   `org.zfnd.zeal`, account `dns:<provider>:<zone>`: one DuckDNS token is kept as
   `dns:duckdns:duckdns.org` for every name); the spec holds the account name only. "Turn off
   and forget" also deletes the per-name entry an older Zeal kept, and says when the keychain
-  kept the token.
+  refused to delete the token.
 - **`PublicServices`** (`launcher-public/src/service.rs`) is one actor. At every change of
   zebrad's status or statistics, of the settings or of a child, and every 10 s, it gathers the
   facts, runs launcher-herd's `plan`, `pause`, `state` and `gateway_mode`, drives its children

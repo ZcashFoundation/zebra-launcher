@@ -839,7 +839,7 @@ fn Forget() -> impl IntoView {
                     }
                     if still.token_left {
                         lines.push(
-                            "The DuckDNS token is still in the keychain: Zeal could not delete it. Delete it in your keychain app, or make a new token on DuckDNS."
+                            "Zeal could not delete the DuckDNS token from the keychain, so it may still be there. Delete it in your keychain app, or make a new token on DuckDNS."
                                 .to_owned(),
                         );
                     }

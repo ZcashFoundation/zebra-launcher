@@ -1129,7 +1129,7 @@ pub struct StillPublic {
     pub firewall_remove: Vec<String>,
     /// The name, which stays in DNS history services and in certificate logs.
     pub name: Option<PublicHostname>,
-    /// The DuckDNS token was to be deleted, and the keychain kept it.
+    /// The DuckDNS token was to be deleted, and the keychain refused, so it may still be there.
     #[serde(default)]
     pub token_left: bool,
 }

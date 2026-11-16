@@ -11,7 +11,7 @@
 //! | `unconfirmed` | open, with no evidence from outside yet |
 //! | `cgnat` | the setup stopped at the network step: carrier-grade NAT |
 //! | `expiring` | open, with a certificate that expires in 10 days and a renewal that failed |
-//! | `keychain` | open, with a keychain that will not delete the token: "Turn off and forget" says it is still there |
+//! | `keychain` | open, with a keychain that will not delete the token: "Turn off and forget" says it may still be there |
 //! | `consent` | open, with a consent an earlier Zeal asked for: paused until the user agrees again |
 
 use std::{

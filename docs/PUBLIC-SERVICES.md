@@ -968,7 +968,8 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   entry); `launcher.json` holds a `SecretRef`, and the UI only learns `has_token`. A token an
   older Zeal kept under the name (`dns:duckdns:<name>`) is read as a fallback and moves to
   the zone's entry when the name changes. "Turn off and forget" with the token box ticked
-  deletes every entry the token may be under and says when the keychain kept it. Without a Secret Service on Linux, a 0600 file, as an explicit choice. No request
+  deletes every entry the token may be under and says when the keychain refused, so the token
+  may still be there. Without a Secret Service on Linux, a 0600 file, as an explicit choice. No request
   URL is formatted into an error, a log line or the status. `DdnsActor` reports the provider and
   the kind of failure (with reqwest, through `Error::without_url()`). A test makes a DuckDNS
   update fail and finds no token in the ring, `launcher.<date>.log`, the status or Copy
