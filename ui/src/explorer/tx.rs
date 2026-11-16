@@ -297,13 +297,25 @@ fn Outputs(page: Page, unit: &'static str, out: Option<u32>) -> impl IntoView {
                     {page
                         .outputs
                         .into_iter()
-                        .map(|output| view! {
-                            <tr class:ex-row-selected=out == Some(output.n)>
-                                <td class="ex-num">{output.n}</td>
-                                <td><code class="ex-address">{output.address.unwrap_or_default()}</code></td>
-                                <td>{output.script}</td>
-                                <td class="ex-num">{text::coins(output.zat as i64)}</td>
-                            </tr>
+                        .map(|output| {
+                            // The output an input link led here for: marked in words and by a
+                            // bar, not by the row's tint alone.
+                            let followed = out == Some(output.n);
+                            view! {
+                                <tr class:ex-row-selected=followed aria-current=followed.then_some("true")>
+                                    <td class="ex-num">
+                                        {followed.then(|| view! {
+                                            <span class="chip ex-followed" title="The output the input you followed spends">
+                                                "followed"
+                                            </span>
+                                        })}
+                                        {output.n}
+                                    </td>
+                                    <td><code class="ex-address">{output.address.unwrap_or_default()}</code></td>
+                                    <td>{output.script}</td>
+                                    <td class="ex-num">{text::coins(output.zat as i64)}</td>
+                                </tr>
+                            }
                         })
                         .collect_view()}
                 </tbody>

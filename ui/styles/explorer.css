@@ -419,8 +419,20 @@ button.link.ex-link {
   text-align: right;
 }
 
+/* The output an input link led to: a tint, a bar at its start and the word "followed", so
+   it shows without colour and under forced colours too. */
 .ex-row-selected {
   background: var(--banner-accent-bg);
+}
+
+.ex-row-selected > :first-child {
+  border-left: 3px solid var(--accent);
+}
+
+.ex-followed {
+  margin-right: 8px;
+  border-color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* The turnstile (V2): bars either side of an axis, coinbase lighter. */
