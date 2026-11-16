@@ -1292,7 +1292,8 @@ code differs from the design above:
   node's place lives in the Explorer tab (`Explorers`), not in `NodeState`. Nothing is read
   before the tab is first opened. The source line has the tip's age and the unit and time
   toggles. The search box shows a `/` keycap but none for Ctrl K, and there is no "Show RPC"
-  (P2).
+  (P2). A node the Explorer does not serve gets the reason as its one banner, in every phase,
+  and its pages add nothing.
   After a link is followed, focus moves to the new page's heading. The Transaction page lists
   transparent inputs as links to the outputs they spend, without values, and shows the fee
   only for a transaction without transparent inputs.

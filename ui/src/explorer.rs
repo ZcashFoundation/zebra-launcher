@@ -489,8 +489,9 @@ fn Toggles(network: Signal<Network>) -> impl IntoView {
     }
 }
 
-/// One banner, the most important first: a node that does not run, one that syncs, a recent
-/// reorganisation. Start shows where the status strip offers it too.
+/// One banner, the most important first: a node the explorer does not serve, one that does not
+/// run, one that syncs, a recent reorganisation. Start shows where the status strip offers it
+/// too.
 #[component]
 fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
     let app = AppState::get();
@@ -499,6 +500,16 @@ fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
     let starting = RwSignal::new(false);
     let banner = move || {
         let node = app.node();
+        // The explorer said why it would not answer (it serves one node only, say): starting
+        // the node would not change that, so that reason is the one banner in every phase.
+        if let Some(error) = nav.get().unavailable.get() {
+            return view! {
+                <div class="banner banner-warn ex-banner" role="status">
+                    <span>{error.message}</span>
+                </div>
+            }
+            .into_any();
+        }
         let phase = node.status.with(|status| status.phase.clone());
         let live: Option<ExplorerLive> = nav.get().live.get();
         if let Some(words) = text::not_running_text(&phase) {
@@ -534,20 +545,12 @@ fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
             .into_any();
         }
         match live.as_ref().map(|live| live.state.clone()) {
-            // Unless the explorer said why it would not answer: it serves the first node only,
-            // say.
-            None | Some(LiveState::NotRunning) => {
-                let waiting = nav.get().unavailable.get().map_or_else(
-                    || "Waiting for the node to open its RPC port.".to_owned(),
-                    |error| error.message,
-                );
-                view! {
-                    <div class="banner banner-warn ex-banner" role="status">
-                        <span>{waiting}</span>
-                    </div>
-                }
-                .into_any()
+            None | Some(LiveState::NotRunning) => view! {
+                <div class="banner banner-warn ex-banner" role="status">
+                    <span>"Waiting for the node to open its RPC port."</span>
+                </div>
             }
+            .into_any(),
             Some(LiveState::OtherNetwork { network }) => {
                 let ours = node.info.with(|info| info.network);
                 view! {
