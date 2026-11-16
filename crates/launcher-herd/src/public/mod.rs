@@ -26,7 +26,7 @@ use launcher_types::{
 };
 
 pub use pause::{degraded, pause};
-pub use plan::{current_step, open_gates, plan};
+pub use plan::{current_step, expected_address, open_gates, plan};
 
 /// The zebrad versions Zeal has tested as a light client server.
 pub const TESTED_ZEBRAD: [&str; 1] = ["7.0.0"];

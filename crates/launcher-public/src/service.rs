@@ -614,11 +614,8 @@ impl Actor {
         facts.at_tip_since = self.at_tip_since;
         self.behind_since = track_since(self.behind_since, behind(facts.height, facts.tip), now);
         facts.behind_since = self.behind_since;
-        let expected = facts
-            .net
-            .as_ref()
-            .filter(|net| net.wan == WanKind::Public)
-            .and_then(|net| net.wan_addr);
+        // Without NAT-PMP's answer, the address DuckDNS saw, as the name step checks.
+        let expected = rules::expected_address(&facts);
         let elsewhere = match (&facts.dns, expected) {
             (Some(dns), Some(expected)) if dns.checked_at.is_some() => {
                 !dns.resolved.contains(&expected)
