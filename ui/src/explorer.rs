@@ -137,9 +137,14 @@ pub fn Explorer() -> impl IntoView {
         if (command && event.key().eq_ignore_ascii_case("k")) || slash {
             event.prevent_default();
             app.tab.set(Tab::Explorer);
-            if let Some(input) = search_input.get_untracked() {
-                let _ = input.focus();
-            }
+            // From another tab the Explorer is still hidden here, and a hidden field takes no
+            // focus: focus it once the tab shows.
+            request_animation_frame(move || {
+                if let Some(input) = search_input.get_untracked() {
+                    let _ = input.focus();
+                    input.select();
+                }
+            });
         }
     });
     on_cleanup(move || keys.remove());
