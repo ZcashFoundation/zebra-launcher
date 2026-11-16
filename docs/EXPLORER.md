@@ -1295,9 +1295,11 @@ code differs from the design above:
   toggles, each a radio group (one Tab stop; the arrow keys choose). The search box shows a `/`
   keycap but none for Ctrl K, and there is no "Show RPC" (P2). A node the Explorer does not
   serve gets the reason as its one banner, in every phase, and its pages add nothing.
-  After a link is followed, focus moves to the new page's heading. The Transaction page lists
-  transparent inputs as links to the outputs they spend, without values, and shows the fee
-  only for a transaction without transparent inputs.
+  After a link is followed, focus moves to the new page's heading. While the page reads, focus
+  rests on the page and moves on once the heading is drawn, however long the read takes,
+  unless focus has gone elsewhere meanwhile. The Transaction page lists transparent inputs as
+  links to the outputs they spend, without values, and shows the fee only for a transaction
+  without transparent inputs.
 - **Visualizations, in part.** P1 draws V1 to V4 as HTML, not SVG, and leaves out these parts
   of them, which come with the phases named:
   - V1, the strip: twelve tiles, rebuilt at each answer rather than keyed by hash; no

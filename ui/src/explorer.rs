@@ -300,29 +300,29 @@ fn focus_lost() -> bool {
         .is_none_or(|element| element.tag_name() == "BODY")
 }
 
-/// How many frames, about two seconds, a page that is still loading gets to draw its heading
-/// before focus stays on the page itself.
-const HEADING_FRAMES: u32 = 120;
-
 /// Focuses the page's first heading, made focusable for this. A page still loading has none
 /// yet: the page itself takes focus, and hands it to the heading once the heading is drawn,
-/// unless focus has moved on meanwhile.
+/// however long the page reads, unless focus has moved on meanwhile.
 fn focus_page(page: &web_sys::HtmlElement) {
     if !focus_heading(page) {
         let _ = page.focus();
-        focus_heading_once_drawn(page.clone(), HEADING_FRAMES);
+        focus_heading_once_drawn(page.clone());
     }
 }
 
-fn focus_heading_once_drawn(page: web_sys::HtmlElement, frames: u32) {
+fn focus_heading_once_drawn(page: web_sys::HtmlElement) {
     let still_on_page = web_sys::window()
         .and_then(|window| window.document())
         .and_then(|document| document.active_element())
         .is_some_and(|active| active.is_same_node(Some(&page)));
-    if !still_on_page || focus_heading(&page) || frames == 0 {
+    if !still_on_page || focus_heading(&page) {
         return;
     }
-    request_animation_frame(move || focus_heading_once_drawn(page, frames - 1));
+    // A page shows `parts::Loading` until its answer comes. One that answered without a
+    // heading, as a failure does with its alert, keeps focus on the page.
+    if page.query_selector(".ex-loading").ok().flatten().is_some() {
+        request_animation_frame(move || focus_heading_once_drawn(page));
+    }
 }
 
 /// Focuses the page's first heading, if it has one.

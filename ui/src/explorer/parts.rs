@@ -125,7 +125,8 @@ pub fn Failure(error: ExplorerError) -> impl IntoView {
     })
 }
 
-/// The placeholder a page shows before its first answer.
+/// The placeholder a page shows before its first answer. While it shows, the shell waits for
+/// the page's heading to hand focus to (`focus_page` in `explorer.rs`).
 #[component]
 pub fn Loading() -> impl IntoView {
     view! { <p class="muted ex-loading">"Reading from your node…"</p> }
