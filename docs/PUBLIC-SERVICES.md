@@ -800,12 +800,22 @@ answers 503 through a whole first sync, so Zeal doesn't read it.
 | zingod says | Zeal |
 | --- | --- |
 | `provisioning` | `IndexerStarting` |
-| `syncing`, `detail {height, target, blocks_per_sec}` | `IndexBuilding { served, target, eta_secs }`; the panel says "Catching up" once fewer than 1,000 blocks remain (proposal) |
+| `syncing`, `detail {height, target, blocks_per_sec}` | `IndexBuilding { served, target, eta_secs }`, with the ETA from `blocks_per_sec` once zingod has a rate (it can be `null`); the panel says "Catching up", with no ETA, once fewer than 1,000 blocks remain (proposal) |
+| `syncing` with a `null` detail: no sync target yet (`packages/zingod/src/health.rs:263-267`) | `IndexBuilding` with no numbers: "Building zingod's index", and "an hour or more"; never `NoAnswer` |
 | `serving`, `degraded` | ready, under the rules below; zingod's `degraded` (a fresh tip no validator vouches for) keeps serving, as zingod intends |
 | `down`, `detail {reason, message}` | `IndexerDown`, with zingod's reason and message |
 | `held` | `IndexerDown`: Zeal never runs `zingod hold` |
 | no answer, three reads in a row | `IndexerDown`, "zingod isn't answering" |
 
+- **`syncing` at the tip.** zingod also says `syncing` while zebrad's mempool is off and no
+  validator's is on (`packages/zingod-grpc-snapshot/src/grpc_snapshot.rs:128-151`;
+  `docs/running.md:165`), which zingod's docs say lasts minutes after each catch-up. zingod
+  restarts with every zebrad run, so this follows every zebrad restart: `served` is at or near
+  `target`, and the panel shows PS1's "Catching up · wallets are told to try again", with no
+  ETA. The front door stays `Unavailable` until zingod says `serving`; the wallet runs record how
+  long that takes. So `IndexerStatus` keeps the syncing detail as an `Option`, with
+  `blocks_per_sec` an `Option` inside it, and captured fixtures cover both a `null` detail and
+  this state.
 - **Can't reach zebrad**: `chain.validators.answering` is 0 for 30 s. zingod's own state can't
   say this in time: a booted zingod stays `serving` until its tip is stale, 24 target spacings,
   about 10 minutes at NU7's 25 s, and only then reports `tip_unvouched`
@@ -1087,8 +1097,10 @@ Reachability, Certificate and Use:
 - Every sentence comes from typed facts in `ui/src/public_text.rs`; the choice uses
   `RadioChoice`.
 - **Mock flags** (`ui/src/mock/public.rs`, listed in `ui/src/mock.rs` and ui/README.md):
-  `?public=zingod-choose` (the consent screen with both choices), `zingod` (serving) and the
-  flag of each row in [the table above](#what-can-go-wrong-and-what-the-user-sees). Each builds
+  `?public=zingod-choose` (the consent screen with both choices), `zingod` (serving),
+  `zingod-building-early` (`syncing` with a `null` detail), `zingod-catchup` (`syncing` at the
+  tip while zebrad's mempool is off) and the flag of each row in
+  [the table above](#what-can-go-wrong-and-what-the-user-sees). Each builds
   facts from captured `/status` answers and runs launcher-herd's real rules. Screenshots come
   from the headless-Chromium workflow.
 
@@ -1109,7 +1121,8 @@ NotAvailable::UntestedZingod { version: String, network: Network }
 CheckId: ZingodTested, UpgradesKnown, IndexSpace, IndexReady, TipMatches
                                 // beside ZebradTested, AtTip, EndpointOpened and WalletCheck
 DegradedReason: IndexerStarting { waiting: IndexerWait },         // ZebradTip, Boot, Backoff
-    IndexBuilding { served: u64, target: u64, eta_secs: Option<u64> }, IndexBehind { blocks: u64 },
+    IndexBuilding { served: Option<u64>, target: Option<u64>, eta_secs: Option<u64> },
+    IndexBehind { blocks: u64 },
     IndexerDown { why: DownReason },                              // Zingod { reason, message }, NoAnswer, NoValidator
     IndexerStuck { at: u64, zebrad_at: u64 }, IndexerFailed { class: ExitClass }, IndexBroken,
     ChainMismatch { at: u64 }, DiskLow { free_bytes: u64 }
@@ -2666,6 +2679,7 @@ before the move to zingod: a release with #1655; fixes for #1665 and #1537; a
   `health.rs`, `error.rs`); `packages/zingod-grpc/src/` (`service.rs`, `limits.rs`, `health.rs`,
   `transport.rs`, `proxy_protocol.rs`, `routes/info.rs`, `routes/transactions.rs`);
   `packages/zingod-source/src/` (`endpoint.rs`, `decode.rs`);
+  `packages/zingod-grpc-snapshot/src/grpc_snapshot.rs`;
   `packages/zingod-sync/src/follower.rs` and `usage.md`; `packages/zingod-persistence/src/`
   (`error.rs`, `manifest.rs`, `pages.rs`); `packages/zingod-primitives/src/protocol.rs`; `packages/zingod-chainview/src/submit/driver.rs`;
   `docs/running.md`, `docs/architecture.md`, `docs/rpc_api.md` and `docs/client-requirements.md`;
