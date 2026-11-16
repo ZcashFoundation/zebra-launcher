@@ -31,15 +31,22 @@ pub fn peer_file(cache_dir: &Path, network: Network) -> PathBuf {
 /// ([`PeerCache::Kept`]); no key or `true` becomes the node's own folder ([`PeerCache::Own`]),
 /// starting from a copy of the shared peer file in `zebra_cache_dir` (zebrad's default cache
 /// folder) when there is one and the node has none yet. A file that cannot be read leaves
-/// the node [`PeerCache::Undecided`], to be decided at the next launch. A copy that fails is
-/// logged: the node then finds its peers from the DNS seeders.
+/// the node [`PeerCache::Undecided`], to be decided at the next launch, and so does a
+/// configuration change that a launcher exit interrupted: its file is the abandoned one, and
+/// the runtime restores the previous one ([`config::recover`]) only after the list loads. A
+/// copy that fails is logged: the node then finds its peers from the DNS seeders.
 pub fn adopt(node: &NodeSpec, paths: &Paths, zebra_cache_dir: Option<&Path>) -> PeerCache {
     if node.peer_cache != PeerCache::Undecided {
         return node.peer_cache;
     }
-    match config::read_peer_cache(&node.paths(paths)) {
+    let files = node.paths(paths);
+    if files.pending_apply_marker().exists() {
+        tracing::info!(node = %node.id, "a configuration change is to be rolled back; deciding the peer cache at the next launch");
+        return PeerCache::Undecided;
+    }
+    match config::read_peer_cache(&files) {
         Ok(PeerCacheKey::Shared) => {
-            let own = node.paths(paths).data_dir().to_path_buf();
+            let own = files.data_dir().to_path_buf();
             if let Some(shared) = zebra_cache_dir
                 && let Err(err) = copy_shared(shared, &own, node.network)
             {
@@ -163,5 +170,33 @@ mod tests {
             ..testnet
         };
         assert_eq!(adopt(&decided, &paths, Some(&shared)), PeerCache::Kept);
+    }
+
+    #[test]
+    fn a_node_with_an_unfinished_apply_is_decided_from_the_file_it_gets_back() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::under(root.path().join("zeal"));
+        let node = undecided(Network::Mainnet, "zebrad-mainnet-2", NodeLayout::Folder);
+        let files = node.paths(&paths);
+        files.ensure_dirs().expect("dirs");
+        // The user removed their cache_dir in the editor, and Zeal quit before the change
+        // was committed: the backup has it, the abandoned file does not.
+        fs::write(
+            files.zebrad_config_backup(),
+            "[network]\ncache_dir = \"/srv/peers\"\n",
+        )
+        .expect("backup");
+        fs::write(files.pending_apply_marker(), "").expect("marker");
+        fs::write(files.zebrad_config(), "[network]\n").expect("config");
+        assert_eq!(adopt(&node, &paths, None), PeerCache::Undecided);
+
+        // The runtime rolls the change back and leaves the restored key alone.
+        crate::runtime::prepare_files(&paths, &node);
+        assert_eq!(
+            config::read_peer_cache(&files).expect("read"),
+            PeerCacheKey::Custom("/srv/peers".into())
+        );
+        // The next launch decides from it.
+        assert_eq!(adopt(&node, &paths, None), PeerCache::Kept);
     }
 }
