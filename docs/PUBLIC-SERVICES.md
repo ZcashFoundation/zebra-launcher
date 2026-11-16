@@ -1126,21 +1126,48 @@ Consent { #[serde(default)] pub backend: LightBackend }           // a consent c
 StepAnswer::Backend { backend: LightBackend }
 CheckId: ZingodTested, UpgradesKnown, IndexSpace, IndexReady, TipMatches
                                 // beside ZebradTested, AtTip, EndpointOpened and WalletCheck
+Finding: UntestedZingod { version: String, zebrad: String, network: Network },
+    UpgradeUnknown { upgrade: String, height: Option<u64> },
+    IndexSpace { path: PathBuf, free_bytes: u64, need_bytes: u64 },
+    NetworkFilesystem { path: PathBuf },                          // a Warn
+    LowMemory { total_bytes: u64, want_bytes: u64 },              // a Warn
+    IndexBuilding { served: Option<u64>, target: Option<u64>, eta_secs: Option<u64> },
+                                                                  // a Warn, like zebrad's Syncing
+    ChainMismatch { at: u64 }, IndexerPortTaken { ports: Vec<u16> }
 DegradedReason: IndexerStarting { waiting: IndexerWait },         // ZebradTip, Boot, Backoff
     IndexBuilding { served: Option<u64>, target: Option<u64>, eta_secs: Option<u64> },
     IndexBehind { blocks: u64 },
     IndexerDown { why: DownReason },                              // Zingod { reason, message }, NoAnswer, NoValidator
     IndexerUntested { version: String, zebrad: String, network: Network },
-    IndexerStuck { at: u64, zebrad_at: u64 }, IndexerFailed { class: ExitClass }, IndexBroken,
+    IndexerStuck { at: u64, zebrad_at: u64 }, IndexBroken,
+    IndexerFailed { class: ExitClass, detail: FailDetail },
     ChainMismatch { at: u64 }, DiskLow { free_bytes: u64 }
+pub enum FailDetail { None, Ports { tried: Vec<u16> }, Dir { path: PathBuf },
+    OpenFiles { needed: u64, limit: u64 }, Cookie { path: PathBuf, error: String } }
 PauseReason::BuildTooOld { upgrade: String, height: u64 }
 PublicStatus { pub indexer: Option<IndexerStats> }
 pub struct IndexerStats { version, phase: Phase, status: Option<IndexerStatus>, dir, index_bytes,
-    free_bytes, resources: Option<NodeResources>, last_exit: Option<ExitInfo> }
-pub struct IndexerStatus { state, served, tip, target, rate, network, trusted, answering, alarms,
-    version }                                                     // zingod's /status, parsed
+    free_bytes, resources: Option<IndexerResources>, last_exit: Option<ExitInfo> }
+pub struct IndexerResources { rss_bytes: u64, cpu_millicores: u32, read_bytes: u64,
+    written_bytes: u64 }                                          // integers only
+pub struct IndexerStatus { state, served, tip, target: Option<u64>,
+    milli_blocks_per_sec: Option<u64>, network, trusted, answering, alarms, version }
+                                                                  // zingod's /status, parsed
 // launcher_types: ExitClass gains DiskFull and IndexBroken, both deterministic
 ```
+
+- **Findings.** A check that fails or warns carries its facts only in its `Finding`, and
+  `CheckOutcome::Running` has none, so each sentence of the Service step has a variant above:
+  the untested pair, the unknown upgrade, the free and needed space, the network-filesystem and
+  memory warnings, the build's progress, a mismatch at a height and the ports tried. Each has a
+  sentence in `public_text.rs` and a serde round-trip test.
+- **`Eq` stays.** `PublicStatus` and launcher-herd's `Facts` derive `Eq`, and `NodeResources` and
+  zingod's `blocks_per_sec` are floats. So the runner turns the `ResourceSampler`'s figures into
+  integers (`IndexerResources`) and the rate into milli-blocks a second, and herd facts carry only
+  those.
+- **Failure details.** The panel's lines for a failed zingod name the ports tried, the folder,
+  the open-file limit to raise, or the cookie and its error; `FailDetail` carries them from the
+  reader's classification.
 
 The names say "indexer" where the code doesn't depend on zingod, so a node kind can take them
 over.
