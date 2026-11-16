@@ -58,6 +58,11 @@ pub(super) enum Internal {
     },
     /// The tip, checked within `max_age`.
     Tip { max_age: Duration, reply: TipReply },
+    /// What the cache has for a read, without reading.
+    Peek {
+        call: ReadCall,
+        reply: oneshot::Sender<Option<ReadResult>>,
+    },
     /// A read task ended.
     Done {
         call: ReadCall,
@@ -151,6 +156,22 @@ impl Fetcher {
 
     pub(super) fn header(&self, id: BlockId) -> Pending {
         self.request(ReadCall::Header(id), Lane::Interactive)
+    }
+
+    /// A transaction a page can wait for, on the prefetch lane: interactive reads go first.
+    pub(super) fn tx_later(&self, txid: TxId) -> Pending {
+        self.request(ReadCall::Tx(txid), Lane::Prefetch)
+    }
+
+    /// The cached transaction `txid`, if the cache has it; nothing is read.
+    pub(super) async fn cached_tx(&self, txid: TxId) -> Option<Arc<Tx>> {
+        let (reply, response) = oneshot::channel();
+        let call = ReadCall::Tx(txid);
+        let _ = self.tx.send(Internal::Peek { call, reply });
+        match response.await.ok()?? {
+            ReadResult::Tx(tx) => Some(tx),
+            _ => None,
+        }
     }
 
     /// The tip, checked against the node within `max_age`.
@@ -749,6 +770,12 @@ where
                 }
                 self.tip_waiters.push(reply);
                 self.follow();
+            }
+            Internal::Peek { call, reply } => {
+                let found = self
+                    .cache_key(call, now())
+                    .and_then(|key| self.cache.get(&key).cloned());
+                let _ = reply.send(found);
             }
             Internal::Done { call, lane, result } => {
                 self.sched.done(lane);

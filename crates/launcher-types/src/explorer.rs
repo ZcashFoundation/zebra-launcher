@@ -332,6 +332,9 @@ pub struct ChainPage {
     pub next_upgrade: Option<UpgradeCountdown>,
     /// The network difficulty at the tip.
     pub difficulty: Option<f64>,
+    /// Some rows' coinbases are still being read, so their fees, burn and net shielding are
+    /// missing for now: asked again `with_fees`, the page has them.
+    pub fees_pending: bool,
 }
 
 /// An upgrade that has not activated yet.
@@ -711,8 +714,11 @@ pub enum ExplorerRequest {
     /// Whether the Explorer is on screen, and which page: the explorer follows the tip only
     /// while it is.
     Interest { visible: bool, page: PageKind },
-    /// The Chain page.
-    Chain,
+    /// The Chain page. Each row's fees, burn and net shielding need its coinbase. Without
+    /// `with_fees` the page answers once it has the blocks, with the coinbases already read,
+    /// and the others are read in the background ([`ChainPage::fees_pending`]); with it, the
+    /// page waits for every one.
+    Chain { with_fees: bool },
     /// The Block page; a height above the tip answers [`ExplorerResponse::Future`].
     Block { id: BlockId },
     /// A page of a block's transaction ids.

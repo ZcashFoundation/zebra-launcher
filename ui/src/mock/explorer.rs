@@ -12,6 +12,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -51,6 +52,9 @@ struct Explorer {
     known: Option<ChainView>,
     /// The last event sent, so only changes go out.
     sent: Option<ExplorerLive>,
+    /// The blocks whose coinbases the Chain page has read, as the backend's cache would keep
+    /// them: a first Chain page answers without the others' fees.
+    coinbases_read: HashSet<BlockHash>,
 }
 
 /// Who hears the `explorer_live` events.
@@ -169,6 +173,7 @@ impl Explorer {
             reorg: None,
             known: None,
             sent: None,
+            coinbases_read: HashSet::new(),
         }
     }
 
@@ -395,8 +400,13 @@ pub async fn handle(node: &NodeId, call: ExplorerCall) -> Result<ExplorerReply, 
             with_explorer(&view, |explorer| {
                 explorer.known = Some(explorer.chain_view(true));
                 let chain = explorer.known;
-                answer(&explorer.chain, &view, request)
-                    .map(|response| ExplorerReply { chain, response })
+                let response = match request {
+                    ExplorerRequest::Chain { with_fees } => Ok(ExplorerResponse::Chain(
+                        chain_page(&explorer.chain, with_fees, &mut explorer.coinbases_read),
+                    )),
+                    request => answer(&explorer.chain, &view, request),
+                };
+                response.map(|response| ExplorerReply { chain, response })
             })?
         }
     }
@@ -409,7 +419,11 @@ fn answer(
 ) -> Result<ExplorerResponse, ExplorerError> {
     let heights = chain.heights();
     match request {
-        ExplorerRequest::Chain => Ok(ExplorerResponse::Chain(chain_page(chain))),
+        // With the explorer's cache of coinbases: `handle` answers it.
+        ExplorerRequest::Chain { .. } => Err(ExplorerError::new(
+            ExplorerErrorKind::Internal,
+            "the Chain page needs the explorer's state",
+        )),
         ExplorerRequest::Block { id } => match chain.block(id) {
             Some(block) => {
                 let height = block.height.unwrap_or(0);
@@ -500,8 +514,9 @@ fn future(
     )))
 }
 
-/// The Chain page, read as the backend reads it.
-fn chain_page(chain: &SynthChain) -> ChainPage {
+/// The Chain page, read as the backend reads it: without `with_fees`, the rows whose coinbases
+/// were not read yet have no fees, and their coinbases count as read for the next ask.
+fn chain_page(chain: &SynthChain, with_fees: bool, read: &mut HashSet<BlockHash>) -> ChainPage {
     let heights = chain.heights();
     let tip = chain.tip();
     let rows = RECENT_BLOCKS.min(tip + 1);
@@ -511,10 +526,18 @@ fn chain_page(chain: &SynthChain) -> ChainPage {
         .rev()
         .filter_map(|height| Some((block(height)?, height.checked_sub(1).and_then(block))))
         .collect();
+    let mut fees_pending = false;
     let summaries = blocks
         .iter()
         .map(|(block, parent)| {
-            let coinbase = block.tx.first().and_then(|txid| chain.tx(txid));
+            let cached = with_fees || read.contains(&block.hash);
+            fees_pending |= !cached;
+            read.insert(block.hash);
+            let coinbase = block
+                .tx
+                .first()
+                .filter(|_| cached)
+                .and_then(|txid| chain.tx(txid));
             views::block_summary(block, parent.as_ref(), coinbase.as_ref(), heights)
         })
         .collect();
@@ -543,6 +566,7 @@ fn chain_page(chain: &SynthChain) -> ChainPage {
         burned_since_nu7,
         next_upgrade: views::next_upgrade(tip, heights),
         difficulty: tip_block.and_then(|block| block.difficulty),
+        fees_pending,
     }
 }
 
@@ -600,14 +624,21 @@ mod tests {
     #[test]
     fn the_chain_page_reads_newest_first() {
         let chain = SynthChain::new(Network::Mainnet, 3_551_000, NOW);
-        let page = chain_page(&chain);
+        let mut read = HashSet::new();
+        // As in the backend: the first answer waits for no coinbase, the next has them all.
+        let first = chain_page(&chain, false, &mut read);
+        assert!(first.fees_pending);
+        assert!(first.blocks.iter().all(|block| block.ledger.fees.is_none()));
+        let page = chain_page(&chain, false, &mut read);
+        assert!(!page.fees_pending);
+        assert_eq!(page, chain_page(&chain, true, &mut HashSet::new()));
         assert_eq!(page.blocks.len(), 25);
         assert_eq!(page.blocks[0].height, 3_551_000);
         assert!(page.blocks.iter().all(|block| block.ledger.fees.is_some()));
         assert!(page.burned_since_nu7.is_some());
         assert_eq!(page.target_spacing, 25);
         // A ten-block chain has ten rows.
-        let short = chain_page(&SynthChain::new(Network::Mainnet, 9, NOW));
+        let short = chain_page(&SynthChain::new(Network::Mainnet, 9, NOW), true, &mut read);
         assert_eq!(short.blocks.len(), 10);
         assert_eq!(short.blocks[9].height, 0);
     }

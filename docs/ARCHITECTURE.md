@@ -258,11 +258,13 @@ history before live lines, so logs need no snapshot request. An event for a node
 has not brought yet is dropped; that node's snapshots cover it.
 
 **Explorer IPC.** The block explorer has one command and one event. `explorer {node,
-call}` takes an `ExplorerCall` (an `ExplorerRequest`: `Status`, `Interest`, `Chain`,
-`Block`, `BlockTxs`, `Tx` or `Resolve`) and answers an `ExplorerReply` (the `ChainView` it
-was read against, and the `ExplorerResponse`), or rejects with an `ExplorerError {kind,
-message}`. `explorer_live` carries an `ExplorerLiveEvent {node, live}` when the explorer's
-state (not running, syncing, at the tip), tip or last reorganisation changes, at most
+call}` takes an `ExplorerCall` (an `ExplorerRequest`: `Status`, `Interest`, `Chain
+{with_fees}`, `Block`, `BlockTxs`, `Tx` or `Resolve`) and answers an `ExplorerReply` (the
+`ChainView` it was read against, and the `ExplorerResponse`), or rejects with an
+`ExplorerError {kind, message}`. The Chain page first answers without the fees of rows whose
+coinbases are not read yet (`fees_pending`), then the UI asks `with_fees`. `explorer_live`
+carries an `ExplorerLiveEvent {node, live}` when the explorer's state (not running, syncing,
+at the tip, zebrad still on the other network), tip, tip time or last reorganisation changes, at most
 every 250 ms, and always the latest value. Its snapshot is the `Status` request, which the
 UI sends for a node it has no news of yet.
 An event that arrives while a snapshot request is in flight is newer than the snapshot,

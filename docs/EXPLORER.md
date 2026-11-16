@@ -1246,7 +1246,8 @@ code differs from the design above:
   call)`: it answers the first node's own id, and while zebrad still runs on the network the
   node had before, `LiveState::OtherNetwork` until zebrad's next start. Hiding the window to
   the tray does not send `Interest` yet: the tab and the document's visibility do.
-- **The actor.** Two lanes, interactive and prefetch (the follower); every P1 read weighs one,
+- **The actor.** Two lanes, interactive and prefetch (the follower and the Chain page's
+  coinbases); every P1 read weighs one,
   since P1 makes no heavy call, and the background lane comes with the store (P5). Six permits,
   four while the node syncs; no HTTP 429 back-off yet, since six reads never come near zebrad's
   100. A new network clears everything, where the design says a new genesis hash. Hashes above
@@ -1268,7 +1269,9 @@ code differs from the design above:
   answers from its cache) and hover cards.
 - **Call budgets** are pinned by launcher-core's actor tests over an in-memory synthetic source
   that counts its calls: the Chain page costs 1 tip, 25 coinbases, 1 header, at most 27 blocks
-  (26, and the one before NU7 once past it) and at most 2 subsidies; a revisit costs nothing; a
+  (26, and the one before NU7 once past it) and at most 2 subsidies over its two asks (the
+  first answers once the blocks are in, `with_fees` once the coinbases are, and a page asked
+  for meanwhile goes before them); a revisit costs nothing; a
   Block page 2 blocks, its coinbase and its subsidy; a Transaction page one read; two pages
   asking for one block share its reads; a reorganisation takes at most ten `getblockhash`. A
   test also checks that no log field carries a requested hash, txid or height. fake-zebrad's

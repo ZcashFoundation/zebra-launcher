@@ -34,17 +34,33 @@ const INTERVAL_CAP: f64 = 4.0;
 #[component]
 pub fn ChainPage(node: NodeId, nav: NodeExplorer, network: Network) -> impl IntoView {
     let unit = text::unit(network);
-    // A new tip, or a new epoch after a reorganisation, asks again.
+    // A new tip, or a new epoch after a reorganisation, asks again. The first answer comes
+    // without the fees whose coinbases the explorer has not read yet; then the page asks for
+    // them, and waits for them from then on (a new tip brings one more).
+    let with_fees = RwSignal::new(false);
     let answer = load(node, nav, move || {
         let revision = nav.live.with(|live| {
             live.as_ref()
                 .and_then(|live| live.tip)
                 .map_or(0, |tip| (tip.epoch << 32) | u64::from(tip.height))
         });
-        Some((ExplorerRequest::Chain, revision))
+        let with_fees = with_fees.get();
+        Some((ExplorerRequest::Chain { with_fees }, revision))
+    });
+    let fees_pending = move || {
+        answer.value.with(|value| {
+            matches!(value, Loaded::Ready(reply)
+                if matches!(&reply.response, ExplorerResponse::Chain(page) if page.fees_pending))
+        })
+    };
+    Effect::new(move |_| {
+        if fees_pending() {
+            with_fees.set(true);
+        }
     });
     view! {
-        <div class="ex-chain" class:ex-refreshing=move || answer.refreshing.get()>
+        // Filling in the fees is no refetch: the page is not dimmed for it.
+        <div class="ex-chain" class:ex-refreshing=move || answer.refreshing.get() && !fees_pending()>
             {move || match answer.value.get() {
                 Loaded::Loading => view! { <Loading /> }.into_any(),
                 Loaded::Failed(error) => view! { <Failure error /> }.into_any(),
@@ -61,17 +77,24 @@ pub fn ChainPage(node: NodeId, nav: NodeExplorer, network: Network) -> impl Into
 fn Chain(page: Page, nav: NodeExplorer, unit: &'static str, network: Network) -> impl IntoView {
     let strip: Vec<BlockSummary> = page.blocks.iter().take(STRIP).rev().cloned().collect();
     let target = page.target_spacing;
+    let pending = page.fees_pending;
     view! {
         <section class="ex-section" aria-labelledby="ex-strip-title">
             <h2 id="ex-strip-title" class="visually-hidden">"The newest blocks"</h2>
-            <Strip blocks=strip nav unit target />
+            <Strip blocks=strip nav unit target pending />
         </section>
         <Tiles page=page.clone() unit network />
         <section class="ex-section" aria-labelledby="ex-recent-title">
             <h2 id="ex-recent-title">"Recent blocks"</h2>
-            <RecentBlocks blocks=page.blocks nav unit />
+            <RecentBlocks blocks=page.blocks nav unit pending />
         </section>
     }
+}
+
+/// What a row shows for a fee figure it has not got: "…" while its coinbase is being read,
+/// nothing once it is unknown.
+fn pending_cell(pending: bool) -> Option<&'static str> {
+    pending.then_some("…")
 }
 
 /// The block strip (V1): older blocks to the left, the newest on the right, each a link; under
@@ -83,6 +106,8 @@ fn Strip(
     nav: NodeExplorer,
     unit: &'static str,
     target: u32,
+    /// Some coinbases are still being read.
+    pending: bool,
 ) -> impl IntoView {
     let app = AppState::get();
     let count = blocks.len();
@@ -167,7 +192,11 @@ fn Strip(
                                         })
                                         .collect_view()}
                                 </span>
-                                <span class="ex-tile-fees">{fees.unwrap_or_else(|| "fees unknown".into())}</span>
+                                <span class="ex-tile-fees">
+                                    {fees.unwrap_or_else(|| {
+                                        if pending { "reading fees…" } else { "fees unknown" }.into()
+                                    })}
+                                </span>
                                 {burned.map(|burned| view! { <span class="ex-tile-burn muted">{burned}</span> })}
                                 <span class="ex-tile-budget muted">{budget}</span>
                             </button>
@@ -294,7 +323,13 @@ fn Tiles(page: Page, unit: &'static str, network: Network) -> impl IntoView {
 
 /// The 25 newest blocks as a table.
 #[component]
-fn RecentBlocks(blocks: Vec<BlockSummary>, nav: NodeExplorer, unit: &'static str) -> impl IntoView {
+fn RecentBlocks(
+    blocks: Vec<BlockSummary>,
+    nav: NodeExplorer,
+    unit: &'static str,
+    /// Some coinbases are still being read.
+    pending: bool,
+) -> impl IntoView {
     let app = AppState::get();
     view! {
         <div class="ex-table-wrap">
@@ -338,9 +373,23 @@ fn RecentBlocks(blocks: Vec<BlockSummary>, nav: NodeExplorer, unit: &'static str
                                     <td class="ex-num">{thousands(u64::from(block.tx_count))}</td>
                                     <td class="ex-num">{block.size.map(|size| bytes(u64::from(size)))}</td>
                                     <td class="ex-num">{notes}</td>
-                                    <td class="ex-num">{shielding.map(|text| format!("{text} {unit}"))}</td>
-                                    <td class="ex-num">{ledger.fees.map(|fees| text::coins(fees as i64))}</td>
-                                    <td class="ex-num">{ledger.burned.map(|burned| text::coins(burned as i64))}</td>
+                                    <td class="ex-num">
+                                        {shielding
+                                            .map(|text| format!("{text} {unit}"))
+                                            .or_else(|| pending_cell(pending).map(str::to_owned))}
+                                    </td>
+                                    <td class="ex-num">
+                                        {ledger
+                                            .fees
+                                            .map(|fees| text::coins(fees as i64))
+                                            .or_else(|| pending_cell(pending).map(str::to_owned))}
+                                    </td>
+                                    <td class="ex-num">
+                                        {ledger
+                                            .burned
+                                            .map(|burned| text::coins(burned as i64))
+                                            .or_else(|| pending_cell(pending && ledger.fees.is_none()).map(str::to_owned))}
+                                    </td>
                                     <td class="ex-num">{text::budget_text(&ledger.budget)}</td>
                                 </tr>
                             }

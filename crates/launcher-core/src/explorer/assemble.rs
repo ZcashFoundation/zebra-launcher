@@ -28,8 +28,8 @@ pub(super) async fn handle(
     context: Context,
 ) -> Result<ExplorerReply, ExplorerError> {
     let (chain, response) = match request {
-        ExplorerRequest::Chain => {
-            let (chain, page) = chain_page(&context).await?;
+        ExplorerRequest::Chain { with_fees } => {
+            let (chain, page) = chain_page(&context, with_fees).await?;
             (Some(chain), ExplorerResponse::Chain(page))
         }
         ExplorerRequest::Block { id } => (context.chain, block(&context, id).await?),
@@ -60,8 +60,13 @@ pub(super) async fn handle(
 }
 
 /// The Chain page: the tip's 25 blocks with their ledgers, the average interval of the last
-/// 100, the supply and what NU7 burned, and the next upgrade.
-async fn chain_page(context: &Context) -> Result<(ChainView, ChainPage), ExplorerError> {
+/// 100, the supply and what NU7 burned, and the next upgrade. The rows' coinbases are read on
+/// the prefetch lane, so a page asked for meanwhile goes first; `with_fees` waits for them,
+/// and without it the page takes the cached ones and leaves the others to fill the cache.
+async fn chain_page(
+    context: &Context,
+    with_fees: bool,
+) -> Result<(ChainView, ChainPage), ExplorerError> {
     let fetch = &context.fetch;
     let chain = fetch.tip(TIP_AGE).await?;
     let tip = chain.height;
@@ -90,16 +95,40 @@ async fn chain_page(context: &Context) -> Result<(ChainView, ChainPage), Explore
         blocks.insert(height, block.block().await?);
     }
     // Each row's coinbase, for its fees; a coinbase that cannot be read leaves them unknown.
-    let coinbases: Vec<_> = (oldest..=tip)
+    let txids: Vec<Option<TxId>> = (oldest..=tip)
         .rev()
-        .map(|height| blocks[&height].tx.first().map(|txid| fetch.tx(*txid)))
+        .map(|height| blocks[&height].tx.first().copied())
         .collect();
+    let mut coinbases = Vec::with_capacity(txids.len());
+    let mut fees_pending = false;
+    if with_fees {
+        let reads: Vec<_> = txids
+            .iter()
+            .map(|txid| txid.map(|txid| fetch.tx_later(txid)))
+            .collect();
+        for read in reads {
+            coinbases.push(match read {
+                Some(pending) => pending.tx().await.ok(),
+                None => None,
+            });
+        }
+    } else {
+        for txid in txids {
+            let Some(txid) = txid else {
+                coinbases.push(None);
+                continue;
+            };
+            let cached = fetch.cached_tx(txid).await;
+            if cached.is_none() {
+                // Read in the background: the answer fills the cache for the next ask.
+                drop(fetch.tx_later(txid));
+                fees_pending = true;
+            }
+            coinbases.push(cached);
+        }
+    }
     let mut summaries = Vec::with_capacity(rows as usize);
     for (height, coinbase) in (oldest..=tip).rev().zip(coinbases) {
-        let coinbase = match coinbase {
-            Some(pending) => pending.tx().await.ok(),
-            None => None,
-        };
         let block = &blocks[&height];
         let parent = height.checked_sub(1).and_then(|parent| blocks.get(&parent));
         summaries.push(views::block_summary(
@@ -158,6 +187,7 @@ async fn chain_page(context: &Context) -> Result<(ChainView, ChainPage), Explore
         burned_since_nu7,
         next_upgrade: views::next_upgrade(tip, &context.heights),
         difficulty: tip_block.difficulty,
+        fees_pending,
     };
     Ok((chain, page))
 }
