@@ -84,9 +84,13 @@ take from the herd.
   nodes' "catching up after sleep" word is not there.
 - The actors are as designed, without `HerdCmd`, the `broadcast<ChainEvent>`, `herd_event`,
   `herd_events`, `herd_report`, Restart one by one, Reset peers, staggered starts, the
-  heavy-job gate or the local counts of conditions. The view is published when more than its
-  time changed; the `herd` event is throttled to once a second per network. The tests drive
-  the actors with a scripted `TipSource` over the simulated chain; fake-zebrad has no
+  heavy-job gate or the local counts of conditions. Both networks' actors start at launch and
+  follow the registry's node list as a `watch<Vec<MemberInput>>`, not `MemberAdded`,
+  `MemberChanged` and `MemberRemoved` on an mpsc. A panicked actor is started again with a
+  fresh engine, and the launcher line "herd checks restarted", by a task beside it that holds
+  the view's sender, not by the registry. The view is published when more than its time
+  changed; the `herd` event is throttled to once a second per network. The tests drive the
+  actors with a scripted `TipSource` over the simulated chain; fake-zebrad has no
   `getblockhash` yet, and the Regtest contract test is not written.
 - The UI shows, for the network the window is scoped to, the herd's sentence at the top of the
   overview, each witness's word on its card ("In the herd: agrees"), a check, warning or cross

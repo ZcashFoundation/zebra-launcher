@@ -772,7 +772,9 @@ each node ── status, stats (best), spec ── a tip or phase changed ──
   (changes within 250 ms make one) and every 5 s, and once more if the tips moved while it ran.
   Probes run on the node's own cookie-authenticated RPC (`tips::RpcTipSource`, rebuilt when the
   RPC address changes), at most two in flight per node, each within 3 s, and reach the engine
-  as they arrive. The view is published on a `watch` when more than its time changed.
+  as they arrive. The view is published on a `watch` when more than its time changed. A task
+  beside each actor holds that `watch`'s sender and starts a new actor, with a fresh engine,
+  when one panics, logging "herd checks restarted".
 - **The app** starts the actors over the registry (`herd::spawn`), forwards each network's
   watch as the `herd` event and answers `get_herd` (`src-tauri/src/bridge.rs`,
   `commands.rs`).

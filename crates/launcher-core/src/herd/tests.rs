@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -75,6 +75,15 @@ impl Fixture {
     /// `networks.len()` running zebrad nodes at `H` on the main chain; the node at `slow`
     /// answers after 10 s, past the probe timeout.
     fn start(networks: &[Network], slow: Option<usize>) -> (Self, super::HerdHandle) {
+        Self::start_with(networks, slow, false)
+    }
+
+    /// [`Fixture::start`], where building the first source panics when `panic_once` is set.
+    fn start_with(
+        networks: &[Network],
+        slow: Option<usize>,
+        panic_once: bool,
+    ) -> (Self, super::HerdHandle) {
         let mut chain = SimChain::new(9);
         for index in 0..networks.len() {
             chain.put(&id(index), 0, H);
@@ -135,7 +144,11 @@ impl Fixture {
             members: members_tx,
         };
         fixture.publish();
+        let panicked = AtomicBool::new(false);
         let handle = spawn_with(members_rx, HerdConfig::default(), move |addr, _| {
+            if panic_once && !panicked.swap(true, Ordering::SeqCst) {
+                panic!("a source that fails once");
+            }
             sources.get(&addr).cloned()
         });
         (fixture, handle)
@@ -333,4 +346,19 @@ async fn each_network_has_its_own_herd_and_follows_the_node_list() {
         .members
         .send_modify(|members| members.retain(|member| member.id != id(2)));
     until(&mut testnet, "the removal", |view| view.nodes.len() == 1).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_actor_that_panics_is_started_again() {
+    // The Mainnet actor panics in its first round, when it builds its first source.
+    let (_fixture, herd) = Fixture::start_with(&[Network::Mainnet; 3], None, true);
+    let mut view = herd.watch(Network::Mainnet);
+    let agreed = until(&mut view, "agreement after the restart", |view| {
+        view.state == HerdState::Agreed
+    })
+    .await;
+    assert_eq!(
+        agreed.headline,
+        "Your 3 Mainnet nodes agree on block 3,551,204"
+    );
 }

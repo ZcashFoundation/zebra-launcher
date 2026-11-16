@@ -12,7 +12,8 @@
 //! and every 5 s for the engine's timers. Probes run concurrently, at most two per node, each
 //! with a 3 s timeout, and their answers reach the engine as they arrive, so a slow node does
 //! not hold up the others. A round whose tips moved while it ran runs once more before it is
-//! published. No locks: the actor owns the engine and the sources.
+//! published. No locks: the actor owns the engine and the sources. A task beside each actor
+//! holds the view's sender and starts a new actor, with a fresh engine, when one panics.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -185,25 +186,59 @@ where
         .iter()
         .map(|&network| {
             let (tx, rx) = watch::channel(HerdView::off(network, SystemTime::now()));
-            let (ticks_tx, ticks_rx) = mpsc::channel(1);
-            let actor = Actor {
+            tokio::spawn(supervise(
                 network,
-                members: members.clone(),
-                config: config.clone(),
-                new_source: new_source.clone(),
-                out: tx,
-                engine: Engine::new(network),
-                start: Instant::now(),
-                sources: BTreeMap::new(),
-                forwarders: BTreeMap::new(),
-                ticks_tx,
-                ticks_rx,
-            };
-            tokio::spawn(actor.run());
+                members.clone(),
+                config.clone(),
+                new_source.clone(),
+                Arc::new(tx),
+            ));
             (network, rx)
         })
         .collect();
     HerdHandle { views }
+}
+
+/// Runs `network`'s actor, and a new one with a fresh engine after a panic, so the view never
+/// stays on its last sentence with no one updating it (docs/HERD.md, Actors and channels). The
+/// view's sender is shared with the actor, so it outlives a panicked one. A new actor starts
+/// a round's interval later, so a panic at every round does not spin.
+async fn supervise<S, F>(
+    network: Network,
+    members: watch::Receiver<Vec<MemberInput>>,
+    config: HerdConfig,
+    new_source: Arc<F>,
+    out: Arc<watch::Sender<HerdView>>,
+) where
+    S: TipSource,
+    F: Fn(SocketAddr, &Path) -> Option<S> + Send + Sync + 'static,
+{
+    loop {
+        let (ticks_tx, ticks_rx) = mpsc::channel(1);
+        let actor = Actor {
+            network,
+            members: members.clone(),
+            config: config.clone(),
+            new_source: new_source.clone(),
+            out: out.clone(),
+            engine: Engine::new(network),
+            start: Instant::now(),
+            sources: BTreeMap::new(),
+            forwarders: BTreeMap::new(),
+            ticks_tx,
+            ticks_rx,
+        };
+        match tokio::spawn(actor.run()).await {
+            Err(err) if err.is_panic() => {
+                tracing::error!(network = network.as_str(), %err, "herd checks restarted");
+            }
+            _ => return,
+        }
+        tokio::select! {
+            () = tokio::time::sleep(config.every) => {}
+            () = out.closed() => return,
+        }
+    }
 }
 
 /// A node's source for its current run.
@@ -218,7 +253,7 @@ struct Actor<S, F> {
     members: watch::Receiver<Vec<MemberInput>>,
     config: HerdConfig,
     new_source: Arc<F>,
-    out: watch::Sender<HerdView>,
+    out: Arc<watch::Sender<HerdView>>,
     engine: Engine,
     start: Instant,
     sources: BTreeMap<NodeId, Source<S>>,
