@@ -144,6 +144,29 @@ pub fn Explorer() -> impl IntoView {
     });
     on_cleanup(move || keys.remove());
 
+    // A link followed inside a page goes with the page it was on, and focus with it. It moves
+    // to the new page's heading (or the page, while it loads), so the keyboard carries on
+    // there and not from the top of the window. Focus kept elsewhere, in the search box or on
+    // Back, stays put.
+    let page_ref = NodeRef::<html::Div>::new();
+    Effect::new(move |previous: Option<(NodeId, ExplorerRoute)>| {
+        let next = (node_id.get(), nav.get().route());
+        if previous
+            .as_ref()
+            .is_some_and(|(node, route)| *node == next.0 && *route != next.1)
+            && app.tab.get_untracked() == Tab::Explorer
+        {
+            request_animation_frame(move || {
+                if let Some(page) = page_ref.get_untracked()
+                    && focus_lost()
+                {
+                    focus_page(&page);
+                }
+            });
+        }
+        next
+    });
+
     // Nothing is read before the tab is first opened: the pages are mounted with the app.
     let opened = RwSignal::new(false);
     Effect::new(move |_| {
@@ -203,7 +226,7 @@ pub fn Explorer() -> impl IntoView {
             </div>
             <SourceLine nav network tip />
             <Banner nav />
-            <div class="ex-page" aria-live="off">{page}</div>
+            <div class="ex-page" aria-live="off" tabindex="-1" node_ref=page_ref>{page}</div>
         </div>
     }
 }
@@ -223,6 +246,33 @@ fn document_visible_now() -> bool {
 
 fn document_visible() -> bool {
     document_visible_now()
+}
+
+/// Whether focus is nowhere: on the document's body, as after the focused element left the
+/// page.
+fn focus_lost() -> bool {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.active_element())
+        .is_none_or(|element| element.tag_name() == "BODY")
+}
+
+/// Focuses the page's first heading, made focusable for this, or the page itself while it has
+/// none.
+fn focus_page(page: &web_sys::HtmlElement) {
+    let heading = page
+        .query_selector("h2")
+        .ok()
+        .flatten()
+        .and_then(|heading| heading.dyn_into::<web_sys::HtmlElement>().ok());
+    let target = match heading {
+        Some(heading) => {
+            let _ = heading.set_attribute("tabindex", "-1");
+            heading
+        }
+        None => page.clone(),
+    };
+    let _ = target.focus();
 }
 
 /// Whether a key went to a field that takes text.

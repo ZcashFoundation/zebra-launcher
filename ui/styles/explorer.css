@@ -118,6 +118,13 @@
   min-width: 0;
 }
 
+/* After a link is followed, focus moves to the new page's heading or the page: a place for the
+   keyboard to carry on from, not a control, so it has no outline. */
+.ex-page:focus,
+.ex-page h2:focus {
+  outline: none;
+}
+
 .ex-refreshing {
   opacity: 0.6;
 }
