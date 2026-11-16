@@ -29,6 +29,7 @@ use launcher_types::{
     MachineResources, MetricsSnapshot, Network, NodeDataDirChoice, NodeDetails, NodeDocs,
     NodeDraft, NodeId, NodeInfo, NodeResources, NodeStats, NodeUpdate, OpenTarget, Settings,
     Status, ZebradChannel,
+    herd::HerdView,
     public::{
         ConnectionReport, DnsProvider, OpenError, PublicService, PublicStatus, StepAnswer, StepId,
         StillPublic,
@@ -388,6 +389,13 @@ pub fn get_node_resources(
 #[tauri::command]
 pub fn get_machine_resources(state: State<'_, AppState>) -> Option<MachineResources> {
     state.machine.borrow().clone()
+}
+
+/// Each network's herd now, Mainnet first. Every change is also sent as the
+/// `herd` event, one network at a time.
+#[tauri::command]
+pub fn get_herd(state: State<'_, AppState>) -> Vec<HerdView> {
+    state.herd.views()
 }
 
 fn path_arg(path: &Path) -> String {

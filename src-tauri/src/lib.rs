@@ -26,6 +26,7 @@ use std::{sync::Arc, time::Duration};
 use launcher_core::{
     config,
     firstrun::{self, LegacyLocations, SizeCache},
+    herd::HerdConfig,
     pidfile::StaleProcess,
     registry::{self, NodeHandle, RegistryConfig, StartError},
     resources::MachineSampler,
@@ -91,6 +92,7 @@ pub fn run() {
             commands::get_metrics,
             commands::get_node_resources,
             commands::get_machine_resources,
+            commands::get_herd,
             commands::open_path,
             commands::get_first_run_info,
             commands::pick_data_dir,
@@ -161,6 +163,7 @@ fn setup(app: &AppHandle) {
             app.manage(updater::start(app, &state, &plan));
             bridge::forward_nodes(app.clone(), state.registry.clone());
             bridge::forward_machine_resources(app.clone(), state.machine.clone());
+            bridge::forward_herd(app.clone(), &state.herd);
             let explorer = explorer::start(&state);
             bridge::forward_explorer_live(app.clone(), explorer.live());
             app.manage(explorer);
@@ -320,7 +323,9 @@ async fn start(app: &AppHandle) -> Result<(AppState, bool), StartupError> {
     // Each node's runtime samples its own process tree; the computer is the
     // app's.
     let machine = MachineSampler::spawn();
-    let state = AppState::new(paths, registry, settings, sizes, machine);
+    // Each network's herd compares its nodes' chains through their own RPC.
+    let herd = launcher_core::herd::spawn(&registry, HerdConfig::default());
+    let state = AppState::new(paths, registry, settings, sizes, machine, herd);
     Ok((state, held))
 }
 

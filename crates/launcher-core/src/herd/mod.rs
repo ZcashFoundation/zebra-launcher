@@ -9,4 +9,4 @@ pub mod tips;
 #[cfg(test)]
 mod tests;
 
-pub use agreement::{HerdConfig, HerdHandle, MemberInput, members_of, spawn};
+pub use agreement::{HerdConfig, HerdHandle, MemberInput, NETWORKS, members_of, spawn};
