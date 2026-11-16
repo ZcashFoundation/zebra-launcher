@@ -119,6 +119,21 @@ impl LightwalletdKey {
             Some(_) => LightwalletdKey::Absent,
         }
     }
+
+    /// The key for zebrad on `network` from the endpoint the light client
+    /// server's actor decided on, saved or not: on loopback at `port`, and
+    /// removed for `None` or while zebrad runs on another network than the
+    /// service's, as it may since the actor decided.
+    pub fn for_endpoint(
+        public: &launcher_types::public::PublicConfig,
+        port: Option<u16>,
+        network: Network,
+    ) -> Self {
+        match (public.light_server(), port) {
+            (Some(spec), Some(port)) if spec.network == network => LightwalletdKey::Listen(port),
+            _ => LightwalletdKey::Absent,
+        }
+    }
 }
 
 impl ManagedKeys {
@@ -871,6 +886,39 @@ tx_cost_limit = 1000
         // Saving the other network removes the key, which the service keeps for later.
         assert_eq!(
             LightwalletdKey::for_public(&public, Network::Testnet),
+            LightwalletdKey::Absent
+        );
+    }
+
+    #[test]
+    fn the_endpoint_key_follows_the_actor_on_the_services_network() {
+        use launcher_types::{
+            NodeId,
+            public::{PublicConfig, PublicServiceSpec},
+        };
+        let mut public = PublicConfig::default();
+        let mut spec = PublicServiceSpec::new_light_server(
+            NodeId::new("zebrad-mainnet").unwrap(),
+            Network::Mainnet,
+        );
+        // The stored port, which an off that could not be saved leaves behind, does not count.
+        spec.backend_port = Some(9067);
+        public.services.push(spec);
+        assert_eq!(
+            LightwalletdKey::for_endpoint(&public, None, Network::Mainnet),
+            LightwalletdKey::Absent
+        );
+        assert_eq!(
+            LightwalletdKey::for_endpoint(&public, Some(9068), Network::Mainnet),
+            LightwalletdKey::Listen(9068)
+        );
+        // A node that switched network since the actor decided gets no endpoint.
+        assert_eq!(
+            LightwalletdKey::for_endpoint(&public, Some(9067), Network::Testnet),
+            LightwalletdKey::Absent
+        );
+        assert_eq!(
+            LightwalletdKey::for_endpoint(&PublicConfig::default(), Some(9067), Network::Mainnet),
             LightwalletdKey::Absent
         );
     }

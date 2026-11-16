@@ -50,7 +50,7 @@ use crate::{
     paths::{NodePaths, Paths},
     pidfile, resources,
     runtime::{self, NodeActors},
-    settings::SettingsHandle,
+    settings::{SettingsError, SettingsHandle},
     supervisor::{self, Listener, Note, StartOptions, SupervisorConfig, SupervisorError},
 };
 
@@ -931,7 +931,20 @@ impl Actor {
         self.settings
             .save_nodes(specs)
             .await
-            .map_err(|err| NodeError::Failed(err.to_string()))
+            .map_err(|err| match err {
+                SettingsError::ServesPublic(id) => {
+                    let name = self
+                        .nodes
+                        .iter()
+                        .find(|runtime| runtime.handle.id == id)
+                        .map_or_else(
+                            || id.to_string(),
+                            |runtime| runtime.spec.borrow().name.clone(),
+                        );
+                    NodeError::ServesPublic(name)
+                }
+                err => NodeError::Failed(err.to_string()),
+            })
     }
 
     async fn on_cmd(&mut self, cmd: Cmd) {
@@ -1167,7 +1180,9 @@ impl Actor {
             let _ = reply.send(Err(NodeError::LastNode(name)));
             return;
         }
-        // The first node serves the light client server, which was set up for it alone.
+        // The first node serves the light client server, which was set up for it alone. A
+        // setup saved while the node stops is refused when the list is saved, by the settings
+        // actor, which sees both changes in order.
         if index == 0 && self.settings.current().public.light_server().is_some() {
             let name = self.nodes[index].spec.borrow().name.clone();
             let _ = reply.send(Err(NodeError::ServesPublic(name)));

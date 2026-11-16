@@ -101,7 +101,7 @@ which gate the release on each network.
 - Consent given at step 1, before a name exists, binds to the first name chosen; another name
   asks again.
 - A network change waits for the user's Resume even after switching back (the pause holds),
-  and removes the key without restarting zebrad (`EndpointHost::apply(node, restart)`).
+  and removes the key without restarting zebrad (`EndpointHost::apply(node, port, restart)`).
 - The commands take no node in PS1, which has one light client server; the UI reads the steps
   from the status instead of a `public_plan` command, and the upload preset is a step answer
   instead of `set_public_limits`.
@@ -347,8 +347,10 @@ listener; it has neither (an upstream ask, [Phases](#phases)).
   Automatic pauses close only the front door and keep the endpoint, except a network change
   (below); the switch off, "Turn off and forget" and a launch that doesn't resume remove it.
   The off also holds in the service actor's memory, so if `launcher.json` cannot be written the
-  front door stays closed and the reply says the off was not saved; a launch writes the key
-  from the settings it prepared, saved or not.
+  front door stays closed, the endpoint key is removed all the same (the actor gives the app
+  the endpoint it decided on, not the stored port) and the reply says the off was not saved;
+  the actor clears the stored port once it can, and a launch writes the key from the settings
+  it prepared, saved or not.
 - **A network change.** In PS1 a light client server belongs to the network it was set up on,
   and the endpoint key is written only while `Settings.network` is that network. Saving the
   other network in Settings → Node pauses the service (`PauseReason::NetworkChanged`) and
@@ -957,8 +959,10 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   NAT, a second router), DuckDNS takes the address it sees, which may change unseen, so that
   update goes again every 5 minutes (DuckDNS answers `NOCHANGE`). No update goes out until a
   network check made since the service started, or resumed from a pause only the user ends,
-  finds no VPN on the default route and, once open, the LAN address the forward targets: a
-  laptop that starts Zeal or resumes on a café's network never points the name there. A
+  finds the default route's gateway and this computer's LAN address, no VPN on that route
+  and, once open, the LAN address the forward targets: a laptop that starts Zeal or resumes on
+  a café's network never points the name there, and neither does one whose default route
+  could not be read (a VPN's route without a gateway is skipped, so no VPN is seen). A
   mismatch for 15 minutes, against the router's address or else the one DuckDNS saw, pauses
   the service. After a change:
   "Address changed at 14:02. DNS updated; resolvers may use the old one for up to 5 minutes."
@@ -967,7 +971,9 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   so it is kept once as `dns:duckdns:duckdns.org` and a new name or provider leaves no other
   entry); `launcher.json` holds a `SecretRef`, and the UI only learns `has_token`. A token an
   older Zeal kept under the name (`dns:duckdns:<name>`) is read as a fallback and moves to
-  the zone's entry when the name changes. "Turn off and forget" with the token box ticked
+  the zone's entry when the name changes; until the keychain has written the zone's entry and
+  deleted the old one, the name does not change, so no entry is left under a name Zeal no
+  longer looks at. "Turn off and forget" with the token box ticked
   deletes every entry the token may be under and says when the keychain refused, so the token
   may still be there. Without a Secret Service on Linux, a 0600 file, as an explicit choice. No request
   URL is formatted into an error, a log line or the status. `DdnsActor` reports the provider and
@@ -1045,7 +1051,10 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   Unix and under the per-user AppData ACL on Windows, a key others can read is refused, and
   every write is atomic.
 - **Expiry**: the panel shows the days left and the next window; a banner 14 days before expiry
-  if renewal fails; `ChallengeOnly` at expiry; a daily check of the served chain.
+  if renewal fails; `ChallengeOnly` at expiry; a daily check of the served chain. An expired
+  certificate is ordered again under the budget without being asked, and the panel offers
+  "Try again"; one found expired on disk when Zeal starts is never served, but its dates are
+  kept, so it counts as lapsed whatever step of the setup is current.
 
 ### Ports, the router and NAT
 
@@ -1299,9 +1308,11 @@ learns it all. Zeal keeps as little as it can:
   logs no client address for a gRPC call in any case, and Zeal never turns on Zaino's PROXY
   protocol);
 - the limiter is keyed by SipHash-2-4 of the address or /64 under a random key per run, pruned
-  after 2 minutes idle, or an hour after its last `SendTransaction` for an address that sent one
-  (the hourly cap's window), and never written down; "a connection from outside" keeps only a
-  time;
+  once an address without a connection has its whole burst back, after 2 minutes idle at most,
+  or an hour after its last `SendTransaction` for an address that sent one (the hourly cap's
+  window), and never written down; it keeps at most 16 idle addresses per connection slot,
+  forgetting the ones idle longest, so its memory and the work of an admission do not grow with
+  the number of networks that try; "a connection from outside" keeps only a time;
 - zeeder's lines are filtered and redacted ([Configuration](#configuration));
 - diagnostics (`copy_diagnostics`, Copy summary) blank the addresses and the name unless
   "include addresses" is ticked, and never carry tokens or keys. A DuckDNS name keeps its zone,
@@ -1391,7 +1402,8 @@ supervisor and settings watches (later the registry's and the herd's) ──▶ 
   (`SupervisorHandle::restart` is `stop` then `start` with the file as it is, and would start a
   stopped zebrad). `managed_keys` (`src-tauri/src/app_state.rs`) takes the address from the
   stored spec for every caller (launch, `set_settings`, `choose_data_dir`, `reset_config`,
-  `apply_config`), so a Configure save keeps the key. When a permit is busy, turning on fails
+  `apply_config`), so a Configure save keeps the key; the ServiceActor's own applies write the
+  endpoint it decided on, so an off it could not save still removes the key. When a permit is busy, turning on fails
   fast like `set_settings` ("a configuration change is being applied; try again") and the ServiceActor clears `backend_port` again, so no later writer adds the key; turning off
   closes the front door at once and removes the key once the permits are free. Today `ensure`
   runs only at launch and on settings or data-folder changes, and a crash restart inside the

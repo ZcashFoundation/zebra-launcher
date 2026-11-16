@@ -114,7 +114,8 @@ files are brought up to date and its actors started in
   yet, and the registry publishes it as a new handle.
 - **Removing**: refused for the last node, and for the last one not already being
   removed, so two removals at once cannot empty the list; refused for the first node while a
-  light client server, which serves from it, is set up. The removal takes all of the
+  light client server, which serves from it, is set up, including one set up while the node
+  stops for the removal (the settings actor refuses the list without it). The removal takes all of the
   node's start permits and its config permit (no start or apply can begin), stops it,
   and checks the pid file: the supervisor removes it when its own run ends, so a live
   zebrad there is one an earlier launcher run left, and the removal fails naming its pid
@@ -467,7 +468,10 @@ that is the file's only writer: the launcher's own settings (updates, close to t
 Grafana, appearance, the first-run marker) at the top level and the nodes in a `nodes`
 list, which the registry saves through it (`SettingsHandle::save_nodes`; a list that
 breaks the rules of `nodes::check_list`, such as a repeated id, is refused, and a file
-with one counts as corrupt). `set_settings` saves everything the UI sends except
+with one counts as corrupt). The actor also keeps the light client server on the first
+node: it refuses settings that set the service up for another node, and a node list whose
+first node is no longer the service's, so a setup and a removal of that node that race each
+other cannot both be saved. `set_settings` saves everything the UI sends except
 `first_run_done`, which it keeps as stored: only `complete_first_run` sets it. A
 `launcher.json` older than schema version 2 (or without a `schema_version`) predates the
 first-run flow: `SettingsStore::open` sets `first_run_done`, so upgrading users keep
@@ -715,9 +719,10 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   stored section and `get_settings` leaves it out, so only the public-services commands change
   it, through the settings actor. Tokens are in the OS keychain (`keyring`, service
   `org.zfnd.zeal`, account `dns:<provider>:<zone>`: one DuckDNS token is kept as
-  `dns:duckdns:duckdns.org` for every name); the spec holds the account name only. "Turn off
-  and forget" also deletes the per-name entry an older Zeal kept, and says when the keychain
-  refused to delete the token.
+  `dns:duckdns:duckdns.org` for every name); the spec holds the account name only. A per-name
+  entry an older Zeal kept moves to the zone's when the name changes, and the name waits until
+  it moved. "Turn off and forget" also deletes that entry, and says when the keychain refused
+  to delete the token.
 - **`PublicServices`** (`launcher-public/src/service.rs`) is one actor. At every change of
   zebrad's status or statistics, of the settings or of a child, and every 10 s, it gathers the
   facts, runs launcher-herd's `plan`, `pause`, `state` and `gateway_mode`, drives its children
@@ -730,8 +735,11 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
 - **zebrad's endpoint.** While the service is switched on with current consent on zebrad's
   network, the actor puts a loopback port in the spec's `backend_port` and asks the app's
   `EndpointHost` (`src-tauri/src/public.rs`) to apply it to the serving node by its id: the
-  config permit, the start permit while zebrad runs, `config::ensure` with `managed_keys`,
-  which reads the key from the spec, and a restart only if zebrad was running. The serving
+  config permit, the start permit while zebrad runs, `config::ensure` with `managed_keys` and
+  the endpoint the actor gives (the spec's port while it wants one, none otherwise, so an off
+  that `launcher.json` could not save still removes it, and none while the node runs another
+  network than the service's, as it may since the actor decided), and a restart only if
+  zebrad was running. The serving
   node is the first one: the actor reads its spec, status and statistics through
   `RegistryHandle::follow_first`, which follows whichever node is first, and applies to the
   node those come from. A busy permit fails fast and the actor clears the
@@ -746,7 +754,8 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   `UNAVAILABLE`. A wrong or missing name gets no certificate. v1 forwards the decrypted bytes
   (one task owns both streams), with a semaphore for all connections, an actor for the
   per-address caps and token bucket (IPv4 address or IPv6 /64, keyed by SipHash under a
-  random key), a 10 s handshake, a 10 minute idle timer, a 2 hour connection age and an
+  random key; it counts open connections as they change and keeps a bounded number of idle
+  addresses, so an admission's work does not grow with them), a 10 s handshake, a 10 minute idle timer, a 2 hour connection age and an
   upload bucket. A mode change closes the connections opened before it, Stop closes the port
   and every connection at once, and nothing logs a client address.
 - **Certificates** (`launcher-public/src/acme.rs`): instant-acme with ring, TLS-ALPN-01 through

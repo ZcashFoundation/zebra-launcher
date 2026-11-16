@@ -2,11 +2,13 @@
 //! IPv6 /64, and new connections per address through a token bucket. When every slot is
 //! taken, a newcomer from a network holding fewer connections than the largest holder closes
 //! that holder's oldest connection, so a few networks cannot keep everyone else out.
-//! Addresses are keyed by SipHash-2-4 under a random key per run, pruned when idle, and never
-//! written down.
+//! Addresses are keyed by SipHash-2-4 under a random key per run and never written down. A
+//! network without an open connection is forgotten once its bucket is full again, and at most
+//! [`IDLE_PER_SLOT`] of them per connection slot are kept, so neither the table nor the work
+//! of an admission grows with the number of networks that tried.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::Hasher,
     net::IpAddr,
     sync::{
@@ -24,8 +26,18 @@ use tokio::{
 
 use crate::{Limits, Stats};
 
-/// An idle address with no open connection is forgotten after this long.
+/// An idle address with no open connection is forgotten after this long at most.
 const PRUNE_AFTER: Duration = Duration::from_secs(120);
+
+/// The networks without an open connection kept per connection slot, at most: past that, the
+/// ones touched longest ago are forgotten. A forgotten network gets a fresh bucket, as a new
+/// one does, so this gives a client with many networks nothing it does not have already.
+const IDLE_PER_SLOT: usize = 16;
+
+/// The networks without an open connection the table keeps, at most.
+fn idle_cap(limits: &Limits) -> usize {
+    (limits.max_connections as usize).max(1) * IDLE_PER_SLOT
+}
 
 /// The network a client address counts against: an IPv4 address (an IPv4-mapped IPv6
 /// address counts as its IPv4 address), or an IPv6 /64.
@@ -106,57 +118,86 @@ impl Entry {
         self.touched = now;
         self.open.len() < limits.per_address as usize && self.tokens >= 1.0
     }
+
+    /// Whether the bucket is full again at `now`: the network is then no different from a new
+    /// one.
+    fn refilled(&self, limits: &Limits, now: Instant) -> bool {
+        let rate = f64::from(limits.new_per_second);
+        let burst = f64::from(limits.new_burst.max(1));
+        self.tokens + now.duration_since(self.refilled).as_secs_f64() * rate >= burst
+    }
 }
 
 /// Every network with an open connection or a recent one.
 #[derive(Debug, Default)]
 struct Table {
     entries: HashMap<u64, Entry>,
+    /// The networks with an open connection: no more than the open connections.
+    holders: HashSet<u64>,
+    /// The open connections in all.
+    open: usize,
     next_id: u64,
 }
 
 impl Table {
     fn open_connections(&self) -> usize {
-        self.entries.values().map(|entry| entry.open.len()).sum()
+        self.open
+    }
+
+    /// The networks kept without an open connection.
+    fn idle(&self) -> usize {
+        self.entries.len().saturating_sub(self.holders.len())
     }
 
     /// Admits a connection from network `key` at `now`: its id and the receiver that hears
     /// when it is closed for a newcomer, or `None` when it is refused. With every slot taken,
     /// the network holding the most connections loses its oldest one, if it holds more than
-    /// `key`'s network does.
+    /// `key`'s network does. A network that is refused before it held anything is not kept.
     fn admit(
         &mut self,
         key: u64,
         limits: &Limits,
         now: Instant,
     ) -> Option<(u64, oneshot::Receiver<()>)> {
-        let entry = self
-            .entries
-            .entry(key)
-            .or_insert_with(|| Entry::new(limits, now));
-        if !entry.fits(limits, now) {
+        let (fits, mine) = match self.entries.get_mut(&key) {
+            Some(entry) => (entry.fits(limits, now), entry.open.len()),
+            None => (Entry::new(limits, now).fits(limits, now), 0),
+        };
+        if !fits {
             return None;
         }
-        let mine = entry.open.len();
-        if self.open_connections() >= limits.max_connections as usize {
+        if self.open >= limits.max_connections as usize {
             // The largest holder; among equals, the one with the oldest connection.
-            let largest = self
-                .entries
-                .values_mut()
-                .filter(|entry| !entry.open.is_empty())
-                .max_by(|a, b| {
+            let (victim, held) = self
+                .holders
+                .iter()
+                .filter_map(|key| Some((*key, self.entries.get(key)?)))
+                .filter(|(_, entry)| !entry.open.is_empty())
+                .max_by(|(_, a), (_, b)| {
                     a.open
                         .len()
                         .cmp(&b.open.len())
                         .then_with(|| b.open[0].since.cmp(&a.open[0].since))
-                })?;
-            if largest.open.len() <= mine {
+                })
+                .map(|(key, entry)| (key, entry.open.len()))?;
+            if held <= mine {
                 return None;
             }
+            let largest = self.entries.get_mut(&victim)?;
             let oldest = largest.open.remove(0);
             let _ = oldest.evict.send(());
+            self.open -= 1;
+            if largest.open.is_empty() {
+                self.holders.remove(&victim);
+            }
         }
-        let entry = self.entries.get_mut(&key)?;
+        if !self.entries.contains_key(&key) && self.idle() >= idle_cap(limits) {
+            self.prune(limits, now);
+        }
+        let entry = self
+            .entries
+            .entry(key)
+            .or_insert_with(|| Entry::new(limits, now));
         entry.tokens -= 1.0;
         let id = self.next_id;
         self.next_id += 1;
@@ -166,13 +207,49 @@ impl Table {
             since: now,
             evict,
         });
+        self.open += 1;
+        self.holders.insert(key);
         Some((id, evicted))
     }
 
     fn closed(&mut self, key: u64, id: u64, now: Instant) {
         if let Some(entry) = self.entries.get_mut(&key) {
-            entry.open.retain(|open| open.id != id);
+            // A connection closed for a newcomer freed its slot then.
+            if let Some(at) = entry.open.iter().position(|open| open.id == id) {
+                entry.open.remove(at);
+                self.open -= 1;
+                if entry.open.is_empty() {
+                    self.holders.remove(&key);
+                }
+            }
             entry.touched = now;
+        }
+    }
+
+    /// Forgets the networks without an open connection whose bucket is full again or that were
+    /// idle for [`PRUNE_AFTER`]. When that leaves [`idle_cap`] of them or more, the ones touched
+    /// longest ago go too, down to half the cap, so making room again waits for as many
+    /// newcomers and an admission's share of the work stays the same however many networks try.
+    fn prune(&mut self, limits: &Limits, now: Instant) {
+        self.entries.retain(|_, entry| {
+            !entry.open.is_empty()
+                || (!entry.refilled(limits, now) && now.duration_since(entry.touched) < PRUNE_AFTER)
+        });
+        let cap = idle_cap(limits);
+        if self.idle() < cap {
+            return;
+        }
+        let mut touched: Vec<Instant> = self
+            .entries
+            .values()
+            .filter(|entry| entry.open.is_empty())
+            .map(|entry| entry.touched)
+            .collect();
+        if let Some(last) = touched.len().checked_sub(cap / 2 + 1) {
+            let (_, cutoff, _) = touched.select_nth_unstable(last);
+            let cutoff = *cutoff;
+            self.entries
+                .retain(|_, entry| !entry.open.is_empty() || entry.touched > cutoff);
         }
     }
 }
@@ -291,18 +368,11 @@ async fn run(
                 None => break,
             },
             _ = tick.tick() => {
-                let now = Instant::now();
-                table.entries.retain(|_, entry| {
-                    !entry.open.is_empty() || now.duration_since(entry.touched) < PRUNE_AFTER
-                });
+                table.prune(&limits, Instant::now());
                 let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
                 let next = Stats {
                     open_connections: table.open_connections() as u32,
-                    client_networks: table
-                        .entries
-                        .values()
-                        .filter(|entry| !entry.open.is_empty())
-                        .count() as u32,
+                    client_networks: table.holders.len() as u32,
                     handshakes: load(&counters.handshakes),
                     handshakes_failed: load(&counters.handshakes_failed),
                     refused_sni: load(&counters.refused_sni),
@@ -399,7 +469,7 @@ mod tests {
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
         let mut table = Table::default();
-        let (_, mut a1) = table.admit(key(1), &limits, at(0)).unwrap();
+        let (a1_id, mut a1) = table.admit(key(1), &limits, at(0)).unwrap();
         let (_, mut a2) = table.admit(key(1), &limits, at(1)).unwrap();
         let (_, mut b1) = table.admit(key(2), &limits, at(2)).unwrap();
         let (_, mut b2) = table.admit(key(2), &limits, at(3)).unwrap();
@@ -413,6 +483,9 @@ mod tests {
         assert_eq!(a1.try_recv(), Ok(()), "the oldest connection is closed");
         assert!(a2.try_recv().is_err() && b1.try_recv().is_err());
         assert_eq!(table.open_connections(), 4);
+        // Its guard drops later: the slot was freed already.
+        table.closed(key(1), a1_id, at(5));
+        assert_eq!(table.open_connections(), 4);
 
         // Now network 2 holds the most.
         assert!(table.admit(key(1), &limits, at(6)).is_some());
@@ -422,6 +495,53 @@ mod tests {
         assert!(table.admit(key(2), &limits, at(7)).is_some());
         assert_eq!(a2.try_recv(), Ok(()));
         assert_eq!(table.open_connections(), 4);
+    }
+
+    #[test]
+    fn networks_without_a_connection_are_bounded_however_many_try() {
+        let limits = Limits::default();
+        let now = Instant::now();
+        let mut table = Table::default();
+        let cap = limits.max_connections as usize + idle_cap(&limits);
+        // Each closes at once, so the front door never fills.
+        for n in 0..10_000 {
+            let (id, _) = table.admit(1_000 + n, &limits, now).expect("a new network");
+            table.closed(1_000 + n, id, now);
+            assert!(table.entries.len() <= cap, "{}", table.entries.len());
+        }
+        assert_eq!(table.open_connections(), 0);
+        // Each stays, so every newcomer past the 128th closes another network's connection.
+        for n in 0..10_000 {
+            assert!(table.admit(100_000 + n, &limits, now).is_some());
+            assert!(table.entries.len() <= cap, "{}", table.entries.len());
+        }
+        assert_eq!(table.open_connections(), limits.max_connections as usize);
+        assert_eq!(table.holders.len(), limits.max_connections as usize);
+    }
+
+    #[test]
+    fn a_network_is_forgotten_once_its_bucket_is_full_again() {
+        let limits = Limits::default();
+        let start = Instant::now();
+        let mut table = Table::default();
+        for _ in 0..limits.new_burst {
+            let (id, _) = table.admit(key(1), &limits, start).unwrap();
+            table.closed(key(1), id, start);
+        }
+        assert!(table.admit(key(1), &limits, start).is_none(), "burst spent");
+        // Half the burst is back: it still counts.
+        table.prune(&limits, start + Duration::from_secs(4));
+        assert!(table.entries.contains_key(&key(1)));
+        // All of it: no different from a new network.
+        table.prune(&limits, start + Duration::from_secs(8));
+        assert!(!table.entries.contains_key(&key(1)));
+        // A network refused before it held anything is not kept.
+        let closed = Limits {
+            per_address: 0,
+            ..limits
+        };
+        assert!(table.admit(key(2), &closed, start).is_none());
+        assert!(table.entries.is_empty());
     }
 
     #[tokio::test]

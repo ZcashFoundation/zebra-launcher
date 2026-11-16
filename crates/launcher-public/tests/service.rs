@@ -8,7 +8,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -30,10 +30,8 @@ use tokio::sync::watch;
 
 const LIMIT: Duration = Duration::from_secs(10);
 
-/// The app: applying reads the stored spec and "restarts zebrad" by publishing the endpoint
-/// it would open.
+/// The app: applying "restarts zebrad" by publishing the endpoint it was given.
 struct Host {
-    settings: SettingsHandle,
     status: watch::Sender<Status>,
     applied: Arc<AtomicU32>,
 }
@@ -42,6 +40,7 @@ impl EndpointHost for Host {
     fn apply(
         &self,
         node: launcher_types::NodeId,
+        port: Option<u16>,
         _restart: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
         assert_eq!(
@@ -49,12 +48,6 @@ impl EndpointHost for Host {
             "zebrad-mainnet",
             "the node the facts come from"
         );
-        let port = self
-            .settings
-            .current()
-            .public
-            .light_server()
-            .and_then(|spec| spec.backend_port);
         self.status.send_modify(|status| {
             status.lightwalletd_addr =
                 port.map(|port| SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
@@ -98,7 +91,6 @@ async fn setup_with(secrets: impl FnOnce(&std::path::Path) -> Arc<dyn SecretStor
     let applied = Arc::new(AtomicU32::new(0));
     let (node_tx, node) = watch::channel(launcher_core::nodes::NodeSpec::first(Network::Mainnet));
     let host = Host {
-        settings: settings.clone(),
         status: status_tx.clone(),
         applied: applied.clone(),
     };
@@ -420,6 +412,123 @@ async fn forget_says_when_the_keychain_kept_the_token() {
     assert!(!s.settings.current().public.light_server().is_some());
 }
 
+/// A keychain that refuses reads, writes or deletions while told to, as one that is locked for
+/// a moment does.
+#[derive(Clone, Default)]
+struct Refusals {
+    get: Arc<AtomicBool>,
+    set: Arc<AtomicBool>,
+    delete: Arc<AtomicBool>,
+}
+
+struct Flaky(FileStore, Refusals);
+
+fn refused() -> SecretError {
+    SecretError::Unavailable("locked for a moment".into())
+}
+
+impl SecretStore for Flaky {
+    fn set(
+        &self,
+        account: String,
+        token: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SecretError>> + Send>> {
+        if self.1.set.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(refused()) });
+        }
+        self.0.set(account, token)
+    }
+
+    fn get(
+        &self,
+        account: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, SecretError>> + Send>> {
+        if self.1.get.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(refused()) });
+        }
+        self.0.get(account)
+    }
+
+    fn delete(
+        &self,
+        account: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SecretError>> + Send>> {
+        if self.1.delete.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(refused()) });
+        }
+        self.0.delete(account)
+    }
+}
+
+#[tokio::test]
+async fn a_new_name_waits_until_the_old_names_token_moved() {
+    use launcher_types::public::DnsProvider;
+    let refusals = Refusals::default();
+    let s = setup_with({
+        let refusals = refusals.clone();
+        move |dir| Arc::new(Flaky(FileStore::new(dir.join("secrets")), refusals))
+    })
+    .await;
+    s.services.begin_setup(Network::Mainnet).await.unwrap();
+    name(&s, "zec-old", DnsProvider::DuckDns).await;
+    // An older Zeal kept the token under the name.
+    let store = FileStore::new(s.dir.path().join("secrets"));
+    store
+        .set("dns:duckdns:zec-old.duckdns.org".into(), TOKEN.into())
+        .await
+        .unwrap();
+    s.settings
+        .update(|settings| {
+            settings.public.light_server_mut().unwrap().secret =
+                Some(launcher_types::public::SecretRef {
+                    provider: DnsProvider::DuckDns,
+                    account: "dns:duckdns:zec-old.duckdns.org".into(),
+                });
+        })
+        .await
+        .unwrap();
+
+    // The keychain does not answer, cannot write the zone's entry, or cannot delete the old
+    // one: the name stays, with the entry the name's updates and forget look for.
+    for refusal in [&refusals.get, &refusals.set, &refusals.delete] {
+        refusal.store(true, Ordering::SeqCst);
+        let renamed = s
+            .services
+            .answer(StepAnswer::Name {
+                name: "zec-new".into(),
+                provider: DnsProvider::DuckDns,
+            })
+            .await;
+        refusal.store(false, Ordering::SeqCst);
+        assert!(renamed.is_err(), "the token has not moved");
+        let spec = s.settings.current().public.light_server().cloned().unwrap();
+        let name = spec.name.unwrap();
+        assert_eq!(name.as_str(), "zec-old.duckdns.org");
+        assert_eq!(
+            spec.secret.unwrap().account,
+            "dns:duckdns:zec-old.duckdns.org"
+        );
+        assert_eq!(
+            launcher_public::ddns::duckdns_token(&store, &name)
+                .await
+                .unwrap(),
+            TOKEN
+        );
+    }
+
+    // Once the keychain answers, the token moves, and later names keep it.
+    name(&s, "zec-new", DnsProvider::DuckDns).await;
+    name(&s, "zec-third", DnsProvider::DuckDns).await;
+    assert_eq!(tokens_left(s.dir.path()), ["dns_duckdns_duckdns.org"]);
+    // With the token in the zone's entry, a keychain that does not answer holds no rename up.
+    refusals.get.store(true, Ordering::SeqCst);
+    name(&s, "zec.example.com", DnsProvider::Manual).await;
+    refusals.get.store(false, Ordering::SeqCst);
+    let still = s.services.forget(true).await.unwrap();
+    assert!(!still.token_left);
+    assert_eq!(tokens_left(s.dir.path()), Vec::<String>::new());
+}
+
 /// launcher.json cannot be written: the off still holds.
 #[cfg(unix)]
 #[tokio::test]
@@ -451,14 +560,34 @@ async fn an_off_that_cannot_be_saved_still_closes_the_service() {
         std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         return;
     }
+    let applied = s.applied.load(Ordering::SeqCst);
     let off = s.services.set_switch(false).await;
-    // Several looks later, the service is still paused by the user.
+    // Several looks later, the service is still paused by the user, and zebrad's endpoint is
+    // gone although the stored spec still has its port.
     for _ in 0..3 {
         s.services.run_checks(StepId::Consent).await.unwrap();
     }
+    let mut watch = s.services.watch();
+    let removed = tokio::time::timeout(
+        LIMIT,
+        watch.wait_for(|statuses| {
+            statuses.first().is_some_and(|status| {
+                status
+                    .light
+                    .as_ref()
+                    .is_some_and(|light| light.endpoint.is_none())
+            })
+        }),
+    )
+    .await
+    .is_ok();
     let status = s.services.statuses()[0].clone();
+    let stored = backend_port(&s.settings);
     std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(off.is_err(), "the off was not saved");
+    assert!(stored.is_some(), "the port could not be cleared either");
+    assert!(removed, "the endpoint is removed all the same");
+    assert!(s.applied.load(Ordering::SeqCst) > applied);
     assert!(
         matches!(
             status.state,
@@ -477,6 +606,61 @@ async fn an_off_that_cannot_be_saved_still_closes_the_service() {
         !matches!(status.state, PublicState::Paused { .. })
     })
     .await;
+}
+
+/// Zeal starts again with an open service whose certificate expired on disk, while a step
+/// before the certificate's fails: the status still says the certificate expired, which makes
+/// the actor order it again and the panel offer to try again.
+#[tokio::test]
+async fn an_expired_certificate_is_known_after_a_restart_with_an_earlier_step_failing() {
+    use launcher_public::store::{self, PublicPaths};
+    use launcher_types::public::{PublicHostname, PublicServiceSpec, StepState};
+    let s = setup().await;
+    let name = "zec-alice.duckdns.org";
+    let paths = PublicPaths::new(s.dir.path());
+    let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).unwrap();
+    params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+    params.not_after = rcgen::date_time_ymd(2025, 4, 1);
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    store::write_private(&paths.key(name), key.serialize_pem().as_bytes()).unwrap();
+    store::write_public(&paths.cert(name), cert.pem().as_bytes()).unwrap();
+    let (_, expired) = launcher_public::acme::validity(&cert.pem()).unwrap();
+
+    let mut spec = PublicServiceSpec::new_light_server(
+        launcher_types::NodeId::new("zebrad-mainnet").unwrap(),
+        Network::Mainnet,
+    );
+    spec.name = Some(PublicHostname::parse(name).unwrap());
+    spec.consent = Some(launcher_types::public::Consent {
+        version: CONSENT_VERSION,
+        at: std::time::SystemTime::now(),
+        hostname: name.into(),
+    });
+    spec.opened = true;
+    s.settings
+        .update(move |settings| settings.public.services.push(spec))
+        .await
+        .unwrap();
+    let status = wait_for(&s.services, |status| {
+        status
+            .cert
+            .as_ref()
+            .is_some_and(|cert| cert.not_after.is_some())
+    })
+    .await;
+    assert_eq!(status.cert.unwrap().not_after, Some(expired));
+    // No light client server answers: the setup stops before the certificate step, so it never
+    // asks for an order itself.
+    let current = status
+        .steps
+        .iter()
+        .find(|step| step.state != StepState::Done)
+        .map(|step| step.id);
+    assert!(
+        current.is_some_and(|current| current < StepId::Certificate),
+        "{current:?}"
+    );
 }
 
 #[tokio::test]
