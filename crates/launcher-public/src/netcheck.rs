@@ -139,9 +139,11 @@ pub fn vpn_on_route(routes: &[Route], router: Option<&DefaultRoute>) -> Option<S
 
 /// The VPN that policy rules send internet traffic through, if any, which the main table does
 /// not show (wg-quick's own table, a Tailscale exit node): the kernel picks `internet_src`
-/// towards the internet on another interface than the router's. `addresses` names the
-/// interface; without it, a source other than `lan_src`, the one towards the router, is named
-/// by its address. Without `internet_src` there is no route to the internet to judge.
+/// towards the internet on another interface than the router's. `addresses` lists each
+/// address under its label, such as `eth0:1` for a second address on eth0: the interface is
+/// the part before the colon, which no interface name holds. A source none lists is named by
+/// its address when it is not `lan_src`, the one towards the router. Without `internet_src`
+/// there is no route to the internet to judge.
 pub fn vpn_by_source(
     router: &DefaultRoute,
     lan_src: Option<IpAddr>,
@@ -150,7 +152,12 @@ pub fn vpn_by_source(
 ) -> Option<String> {
     let out = internet_src?;
     match addresses.iter().find(|(_, addr)| *addr == out) {
-        Some((interface, _)) => (*interface != router.interface).then(|| interface.clone()),
+        Some((label, _)) => {
+            let interface = label
+                .split_once(':')
+                .map_or(label.as_str(), |(name, _)| name);
+            (interface != router.interface).then(|| interface.to_owned())
+        }
         None => lan_src
             .is_some_and(|lan| lan != out)
             .then(|| out.to_string()),
@@ -473,6 +480,18 @@ eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
         // A second address on the router's interface is no VPN.
         let two = addresses(&[("eth0", "192.168.1.20"), ("eth0", "192.168.1.21")]);
         assert_eq!(vpn_by_source(&router, lan, ip("192.168.1.21"), &two), None);
+        // Nor is a second address with a label, which a default route's `src` can pick.
+        let labelled = addresses(&[("eth0", "192.168.1.20"), ("eth0:1", "192.168.1.21")]);
+        assert_eq!(
+            vpn_by_source(&router, lan, ip("192.168.1.21"), &labelled),
+            None
+        );
+        // A labelled address on a VPN names the VPN's interface.
+        let wg_labelled = addresses(&[("eth0", "192.168.1.20"), ("wg0:a", "10.64.0.2")]);
+        assert_eq!(
+            vpn_by_source(&router, lan, ip("10.64.0.2"), &wg_labelled),
+            Some("wg0".into())
+        );
         // Without the interfaces' addresses, another source is named by itself.
         assert_eq!(
             vpn_by_source(&router, lan, ip("10.64.0.2"), &[]),
