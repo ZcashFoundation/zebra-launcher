@@ -913,9 +913,21 @@ What v1 still can't do:
   Zeal's own checks included, send a header within 5 s or be dropped
   (`packages/zingod-grpc/src/proxy_protocol.rs`).
 - **Hide `/status` and `/readyz`.** Both reach the internet over h2. zingod's docs call `/status`
-  safe for the open internet (`docs/running.md:196-202`): it gives the state, the network, the
-  tips, the validator counts, the alarms, the version and the indexes, and no validator address,
-  peer, disk or mempool.
+  safe for the open internet (`docs/running.md:196-202`): it gives the state and its detail, the
+  network, the tips, the validator counts, the alarms, the version and the indexes, and no
+  validator address, peer, disk or mempool. On a home server two of these say more than they
+  seem to:
+  - while zingod is `serving`, the detail is its gRPC egress over the last closed UTC 10-minute
+    window, `{start, mbps}`: Mbit/s to 3 significant figures, shown as 0 under 0.1 Mbit/s, about
+    7.5 MB a window (`packages/zingod/src/telemetry/egress.rs:1-21`;
+    `packages/zingod/src/health.rs:406-414`). `/readyz` carries the same. On a server used mostly
+    by its owner, anyone who polls `https://<name>/status` learns when and how much it sends: each
+    time the owner's phone syncs, for example;
+  - an alarm can say that the validator's release reaches its end of service within a week
+    (`packages/zingod-grpc-snapshot/src/report.rs:64-67`), which dates the zebrad behind it.
+
+  The consent says so ([zingod in the UI](#zingod-in-the-ui)), and v2's allow-list drops both
+  paths.
 
 **The loopback port.** Unlike zebrad's endpoint, zingod's port answers HTTP/1.1, but only for
 `GET /status` and `/readyz`; any other path gets a 404
@@ -1078,6 +1090,8 @@ once the wallet runs confirm it. With zingod chosen, the consent list reads:
 - "zingod is experimental: Zingo Labs say it is in development and not for production Mainnet
   use. They publish no binaries, so Zeal builds it from their source";
 - "zingod keeps its own index of the chain on /mnt/zebra, about 71 GB on Mainnet";
+- "while it serves, your server's status page is public: its state, its version, its block
+  heights and how much it sent in each 10 minutes";
 - "while the light client server is switched on, programs on this computer can use zingod's
   port without a password. Web pages in a browser can't call it".
 
@@ -1338,6 +1352,8 @@ of "unavailable", measured in Z4. Back to Zebra reverses it; the index stays unt
 
 - Release binaries with signed checksums or attestations, and annotated tags. The image's
   revision label names the release commit's parent.
+- A setting that leaves the egress figure out of `/status` and `/readyz`, or one that answers
+  health only on the admin listener: on a home server the egress tells when the owner syncs.
 - Read the cookie again when a request fails with no HTTP answer: zebrad before 7.1.0 closes the
   connection instead of answering 401.
 - Windows portability: `cfg` gates for `std::os::unix` (`FileExt`, `MetadataExt`), `statvfs`,
@@ -2040,7 +2056,9 @@ ties it to a person, so Zeal suggests a neutral name and WHOIS privacy), and the
 (zebrad's vendor, version and subversion in `GetLightdInfo`; with zingod, its vendor and
 version only;
 `zeeder/<version> (<commit>)` to every peer the crawler contacts; the SOA's
-`hostmaster.<domain>`).
+`hostmaster.<domain>`). With zingod, its status page is public too while it serves: the state,
+the version, the heights, an alarm that dates zebrad's release, and how much the server sent in
+each closed 10-minute window ([The front door for zingod](#the-front-door-for-zingod)).
 
 Wallets show the server their addresses and timing, the blocks they fetch, the transactions
 they ask for, the transparent addresses they look up and where each sent transaction came
@@ -2743,7 +2761,8 @@ before the move to zingod: a release with #1655; fixes for #1665 and #1537; a
   `health.rs`, `error.rs`); `packages/zingod-grpc/src/` (`service.rs`, `limits.rs`, `health.rs`,
   `transport.rs`, `proxy_protocol.rs`, `routes/info.rs`, `routes/transactions.rs`);
   `packages/zingod-source/src/` (`endpoint.rs`, `decode.rs`);
-  `packages/zingod-grpc-snapshot/src/grpc_snapshot.rs`;
+  `packages/zingod-grpc-snapshot/src/grpc_snapshot.rs` and `report.rs`;
+  `packages/zingod/src/telemetry/egress.rs`;
   `packages/zingod-sync/src/follower.rs` and `usage.md`; `packages/zingod-persistence/src/`
   (`error.rs`, `manifest.rs`, `pages.rs`); `packages/zingod-primitives/src/protocol.rs`; `packages/zingod-chainview/src/submit/driver.rs`;
   `docs/running.md`, `docs/architecture.md`, `docs/rpc_api.md` and `docs/client-requirements.md`;
