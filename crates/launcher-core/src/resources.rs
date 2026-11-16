@@ -564,9 +564,11 @@ mod tests {
         }
     }
 
-    /// The root alone, `5 × (call + 1)` seconds into the run with 2 cores' worth of CPU.
+    /// The root alone, `5 × (call + 1)` seconds into the run with 2 cores' worth of CPU. The
+    /// job's totals match it, since the fold takes those on Windows and ignores them elsewhere.
     fn steady(call: u32, probe: &TreeProbe) -> io::Result<TreeReading> {
         let secs = 5 * (u64::from(call) + 1);
+        let cpu = 2.0 * secs as f64;
         Ok(TreeReading {
             at: SystemTime::now(),
             mono: probe.spawned + Duration::from_secs(secs),
@@ -578,7 +580,7 @@ mod tests {
                 ppid: 1,
                 name: "zebrad".into(),
                 started_at: probe.spawned_at,
-                cpu_own: 2.0 * secs as f64,
+                cpu_own: cpu,
                 cpu_rollup: 0.0,
                 memory: Some(1 << 30),
                 peak: Some(1 << 30),
@@ -589,7 +591,11 @@ mod tests {
                 descriptors: Some(412),
             }],
             denied: Denied::default(),
-            job: None,
+            job: Some(JobTotals {
+                cpu,
+                read: 0,
+                written: 0,
+            }),
         })
     }
 
