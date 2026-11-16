@@ -1,9 +1,9 @@
 # Block explorer
 
-> **Status: P0 and P1 built, 2026-11-03; P2 onward is a proposal.** It builds on
-> [MULTI-NODE.md](MULTI-NODE.md). [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of
-> what is built and is updated phase by phase as this lands. [Built so far](#built-so-far)
-> says what P0 and P1 built and where the code differs from this design.
+> **Status: P0 and P1 built, 2026-11-03, for the first node only until P6; P2 onward is a
+> proposal.** It builds on [MULTI-NODE.md](MULTI-NODE.md). [ARCHITECTURE.md](ARCHITECTURE.md)
+> stays the description of what is built and is updated phase by phase as this lands. [Built
+> so far](#built-so-far) says what P0 and P1 built and where the code differs from this design.
 
 The maintainer asked for "a block explorer too, a highly performant one that offers highly
 functional, flexible, and intuitive visualizations, search features, and UX". This document
@@ -797,18 +797,18 @@ No full-chain scan by default. The store is small, public and rebuildable.
 
 ### Several nodes
 
-One explorer per node runtime. Until MULTI-NODE phase 2, `explorer_for` serves the primary under
-the id of the network zebrad runs on, `NodeId::suggest(Zebrad, n, …)`, the form
-`node_state::primary_info` uses with the settings' network. n is `NodeStats.chain` ("main" is Mainnet, "test"
+One explorer per node runtime. Until P6 one explorer serves the registry's first node, under
+the node's own id (`NodeSpec.id`; the first run gives it its network's id, and afterwards it
+keeps it when its network changes); other ids get `UnknownNode`, worded "the Explorer reads the
+first node only for now". The chain it reads is `NodeStats.chain` ("main" is Mainnet, "test"
 Testnet); while zebrad is stopped it is the last chain zebrad reported, and before zebrad first
-reports it is the settings' network (`SettingsStore::watch()`,
-crates/launcher-core/src/settings.rs:132). The UI's id follows the settings, which the first-run
-wizard and Settings change while Zeal runs, but zebrad changes network only at its next start.
-In between, a call for the other id gets `NodeNotRunning` with a message saying zebrad changes
-network at its next start, not `UnknownNode`, so a Testnet page never shows Mainnet data; other ids get
-`UnknownNode`. When n changes, the actor drops its caches and reopens its store at
-`paths.explorer_dir` of the new id, leaving the other network's store in place, so a switch
-opens the other network's store instead of wiping this one. Prefixes, unit and upgrade heights
+reports it is the node's network. The node's network changes at once (the first-run wizard,
+Settings, Node settings), but zebrad changes network only at its next start. In between the
+explorer publishes `LiveState::OtherNetwork` with no tip and answers other calls
+`NodeNotRunning`, saying zebrad changes network at its next start, so a Testnet page never
+shows Mainnet data. When the chain changes, the actor drops its caches and reopens its store at
+`paths.explorer_dir` of the node, leaving the other network's store in place, so a switch opens
+the other network's store instead of wiping this one. Prefixes, unit and upgrade heights
 come from the chain the node reports. Then `NodeRuntime.explorer`, each with its own limits and
 store. Other kinds are probed once per run (`rpc.discover`; −32601 remembered, as monitor.rs
 does for `getdeprecationinfo`). Pruned Zakura (≥ 10,000 blocks kept) answers older lookups with
@@ -1213,7 +1213,7 @@ Each phase is one PR that leaves the app working, with screenshots from the mock
 
 ## Built so far
 
-P0 and P1, for the one node the backend runs (see [Several nodes](#several-nodes)). Where the
+P0 and P1, for the first node only until P6 (see [Several nodes](#several-nodes)). Where the
 code differs from the design above:
 
 - **RPC client.** The typed decode, `OwnedSession`, per-call timeouts (`call_timeout`, with
@@ -1243,9 +1243,9 @@ code differs from the design above:
   answered "a later version".
 - **Tauri.** The explorer's handle is Tauri state of its own, as the updater's is, not an
   `AppState` field, and the node-id rule is the actor's, behind `ExplorerHandle::call(node,
-  call)`: it answers the id of the network zebrad runs on, and calls the other network's id not
-  running until zebrad's next start. Hiding the window to the tray does not send `Interest`
-  yet: the tab and the document's visibility do.
+  call)`: it answers the first node's own id, and while zebrad still runs on the network the
+  node had before, `LiveState::OtherNetwork` until zebrad's next start. Hiding the window to
+  the tray does not send `Interest` yet: the tab and the document's visibility do.
 - **The actor.** Two lanes, interactive and prefetch (the follower); every P1 read weighs one,
   since P1 makes no heavy call, and the background lane comes with the store (P5). Six permits,
   four while the node syncs; no HTTP 429 back-off yet, since six reads never come near zebrad's
@@ -1280,10 +1280,10 @@ code differs from the design above:
   they spend, without values, and shows the fee only for a transaction without transparent
   inputs.
 - **The mock** is one file, `ui/src/mock/explorer.rs`, with the flags `?attip`, `?tip=`,
-  `?explorer=slow|empty|nobi` and `?reorg`; the other flags come with their phases. Every
-  `?herd` zebrad and Zakura node has its own chain (Zakura's pruning is P6). The synthetic
-  chain's subsidy leaves out the slow start; the explorer reads the real one from
-  `getblocksubsidy`.
+  `?explorer=slow|empty|nobi` and `?reorg`; the other flags come with their phases. Like the
+  backend it serves the first node only, so `?herd`'s other nodes show the backend's answer
+  until P6. The synthetic chain's subsidy leaves out the slow start; the explorer reads the
+  real one from `getblocksubsidy`.
 
 ## Open questions for the maintainer
 

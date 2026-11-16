@@ -1,6 +1,7 @@
 //! The block explorer for the window: [`launcher_core::explorer`], started once with the
 //! first node's supervisor, monitor and spec watches, and managed as Tauri state for the
-//! `explorer` command. Other nodes get one in a later phase (docs/EXPLORER.md, P6). Its live state reaches the UI through
+//! `explorer` command. It answers the first node's id only; other nodes get one in a later
+//! phase (docs/EXPLORER.md, P6). Its live state reaches the UI through
 //! [`bridge::forward_explorer_live`](crate::bridge::forward_explorer_live).
 
 use launcher_core::explorer::{self, ExplorerConfig, ExplorerHandle, ExplorerInputs};

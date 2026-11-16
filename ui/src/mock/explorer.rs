@@ -1,7 +1,9 @@
-//! The mock's block explorers: one per zebrad or Zakura node, over a synthetic chain
-//! (explorer-model's `synth`) that follows the node's height, and answered with the backend's
-//! own builders (explorer-model's `views`), so kinds, fees, ledgers and sentences follow its
-//! rules. Nothing is fixture data: every block is computed when asked for.
+//! The mock's block explorer: as in the backend, one for the first node (the mock's own
+//! zebrad), under its own id, over a synthetic chain (explorer-model's `synth`) that follows
+//! the node's height, and answered with the backend's own builders (explorer-model's
+//! `views`), so kinds, fees, ledgers and sentences follow its rules. Nothing is fixture data:
+//! every block is computed when asked for. Other nodes, `?herd`'s too, get the backend's
+//! answer that the Explorer reads the first node only, until P6.
 //!
 //! `?explorer=slow` makes each answer take 300 to 800 ms instead of 20 to 80, `?explorer=nobi`
 //! takes zebrad's value-pool row from every seventh block (so the next one shows the zero-diff
@@ -21,7 +23,7 @@ use explorer_model::{
     views, zec_to_zat,
 };
 use launcher_types::{
-    Network, NetworkUpgrade, NodeId, NodeKind, NodeStats, Phase,
+    Network, NetworkUpgrade, NodeId, NodeStats, Phase,
     explorer::{
         BlockHash, BlockId, ChainPage, ChainView, ExplorerCall, ExplorerError, ExplorerErrorKind,
         ExplorerLive, ExplorerLiveEvent, ExplorerReply, ExplorerRequest, ExplorerResponse,
@@ -64,7 +66,10 @@ thread_local! {
 /// What the explorer reads of a node.
 struct NodeView {
     id: NodeId,
+    /// The network zebrad runs on: the chain the explorer reads.
     network: Network,
+    /// The network zebrad still runs on when the node's own changed meanwhile.
+    elsewhere: Option<Network>,
     running: bool,
     stats: Option<NodeStats>,
 }
@@ -103,58 +108,38 @@ fn now_secs() -> i64 {
         .map_or(0, |since| since.as_secs() as i64)
 }
 
-/// The main node as its explorer sees it: under the id of the network zebrad reports.
+/// The first node as its explorer sees it: under its own id, reading the chain zebrad
+/// reports.
 fn primary_view() -> NodeView {
     let mock = mock();
     let status = mock.status.get_untracked();
     let stats = mock.stats.get_untracked();
-    let network = stats
-        .as_ref()
-        .and_then(|stats| network_of(&stats.chain))
-        .unwrap_or_else(|| mock.info.with_untracked(|info| info.network));
+    let (id, ours) = mock
+        .info
+        .with_untracked(|info| (info.id.clone(), info.network));
+    let reported = stats.as_ref().and_then(|stats| network_of(&stats.chain));
+    let running = status.phase == Phase::Running && status.rpc_addr.is_some();
     NodeView {
-        id: NodeId::suggest(NodeKind::Zebrad, network, &Vec::new()),
-        network,
-        running: status.phase == Phase::Running && status.rpc_addr.is_some(),
+        id,
+        network: reported.unwrap_or(ours),
+        elsewhere: reported.filter(|reported| running && *reported != ours),
+        running,
         stats,
     }
 }
 
-/// The node `node` names, if it has an explorer.
+/// The node `node` names, if the explorer serves it: the first node only, as in the backend.
 fn view_of(node: &NodeId) -> Result<NodeView, ExplorerError> {
     let primary = primary_view();
     if *node == primary.id {
-        return Ok(primary);
+        Ok(primary)
+    } else {
+        Err(ExplorerError::new(
+            ExplorerErrorKind::UnknownNode,
+            "The Explorer reads the first node only for now; a later version gives every node \
+             its own.",
+        ))
     }
-    if let Some((info, running, stats)) = super::herd::explorer_view(node) {
-        if !info.kind.has_explorer() {
-            return Err(unknown_node());
-        }
-        return Ok(NodeView {
-            id: info.id,
-            network: info.network,
-            running,
-            stats,
-        });
-    }
-    let other = match primary.network {
-        Network::Mainnet => Network::Testnet,
-        Network::Testnet => Network::Mainnet,
-    };
-    if *node == NodeId::suggest(NodeKind::Zebrad, other, &Vec::new()) {
-        return Err(ExplorerError::new(
-            ExplorerErrorKind::NodeNotRunning,
-            format!(
-                "zebrad runs on {}; it changes network at its next start",
-                primary.network
-            ),
-        ));
-    }
-    Err(unknown_node())
-}
-
-fn unknown_node() -> ExplorerError {
-    ExplorerError::new(ExplorerErrorKind::UnknownNode, "this node has no explorer")
 }
 
 fn not_running() -> ExplorerError {
@@ -205,6 +190,13 @@ impl Explorer {
     }
 
     fn live(&self, view: &NodeView) -> ExplorerLive {
+        if let Some(network) = view.elsewhere {
+            return ExplorerLive {
+                state: LiveState::OtherNetwork { network },
+                tip: None,
+                reorg: None,
+            };
+        }
         let state = match (view.running, view.heights()) {
             (true, Some(_)) if view.at_tip() => LiveState::AtTip,
             (true, Some((height, estimated))) => LiveState::Syncing { height, estimated },
@@ -272,8 +264,9 @@ impl ChainFacts {
 pub(super) fn primary_facts(stats: &NodeStats) -> Option<ChainFacts> {
     let network = network_of(&stats.chain)?;
     let view = NodeView {
-        id: NodeId::suggest(NodeKind::Zebrad, network, &Vec::new()),
+        id: mock().info.with_untracked(|info| info.id.clone()),
         network,
+        elsewhere: None,
         running: true,
         stats: Some(stats.clone()),
     };
@@ -388,6 +381,12 @@ pub async fn handle(node: &NodeId, call: ExplorerCall) -> Result<ExplorerReply, 
         request => {
             if !view.running {
                 return Err(not_running());
+            }
+            if let Some(network) = view.elsewhere {
+                return Err(ExplorerError::new(
+                    ExplorerErrorKind::NodeNotRunning,
+                    format!("zebrad runs on {network}; it changes network at its next start"),
+                ));
             }
             with_explorer(&view, |explorer| {
                 explorer.known = Some(explorer.chain_view(true));

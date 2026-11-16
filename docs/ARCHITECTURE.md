@@ -769,9 +769,12 @@ design; phases P0 and P1 are built, and its "Built so far" section lists where t
 differs.
 
 - **Backend.** `launcher-core/src/explorer.rs` spawns one actor (`ExplorerHandle`, Tauri
-  state of its own, started in `src-tauri/src/explorer.rs`) for the one zebrad the backend
-  runs. It answers the node id `zebrad-<network>` of the network zebrad runs on; the other
-  network's id is not running until zebrad's next start, and any other id has no explorer.
+  state of its own, started in `src-tauri/src/explorer.rs`) for the registry's first node,
+  and answers that node's own id only; other nodes get explorers in EXPLORER.md's P6, and
+  until then their ids are answered "the Explorer reads the first node only". When the node's
+  network changes while zebrad runs, zebrad keeps the old one until its next start: the
+  actor then publishes `LiveState::OtherNetwork` and reads nothing, so no page shows the
+  other network's chain under the node.
   The actor owns, without locks, the source (`RpcSource` over an `OwnedSession`, rebuilt
   when `rpc_addr` or `started_at` changes), the `ChainIndex`, a byte-weighted LRU (64 MiB;
   8 MiB after 10 minutes hidden), the reads in flight and the scheduler. Reads run as
@@ -795,8 +798,8 @@ differs.
   `--pool-*` colour tokens. The tab is offered for nodes that keep the chain
   (`NodeKind::has_explorer`), and amounts are in ZEC, or TAZ on Testnet.
 - **Mock.** `ui/src/mock/explorer.rs` answers the same requests from explorer-model's
-  synthetic chain, one chain per `?herd` node with an explorer, and the dashboard's
-  details read the same chain.
+  synthetic chain, for the first node only as the backend does (`?herd`'s other nodes get
+  its answer), and the dashboard's details read the same chain.
 
 ## Updater (opt-in)
 

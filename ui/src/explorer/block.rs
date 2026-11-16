@@ -59,12 +59,8 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
         let revision = match id {
             _ if future.get() => u64::from(tip().unwrap_or(0)),
             BlockId::Height(height) => {
-                let reached = past_tip.get()
-                    && syncing_at().is_none_or(|at| at >= height)
-                    && nav.live.with(|live| {
-                        live.as_ref()
-                            .is_some_and(|live| live.state != LiveState::NotRunning)
-                    });
+                let reached =
+                    past_tip.get() && syncing_at().is_none_or(|at| at >= height) && nav.reads();
                 (epoch() << 32) | u64::from(reached)
             }
             BlockId::Hash(_) => 0,

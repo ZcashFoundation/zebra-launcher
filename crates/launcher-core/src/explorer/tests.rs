@@ -16,9 +16,9 @@ use explorer_model::synth::SynthChain;
 use launcher_types::{
     EosInfo, Network, NodeDetails, NodeId, NodeStats, Phase, Status,
     explorer::{
-        BlockId, ExplorerCall, ExplorerErrorKind, ExplorerReply, ExplorerRequest, ExplorerResponse,
-        ExplorerRoute, Hash32, LedgerCheck, LiveState, NotFoundHint, PageKind, Resolution,
-        SecretKind, TxStatus,
+        BlockId, ExplorerCall, ExplorerErrorKind, ExplorerLive, ExplorerReply, ExplorerRequest,
+        ExplorerResponse, ExplorerRoute, Hash32, LedgerCheck, LiveState, NotFoundHint, PageKind,
+        Resolution, SecretKind, TxStatus,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -99,7 +99,7 @@ struct Harness {
     status: watch::Sender<Status>,
     stats: watch::Sender<Option<NodeStats>>,
     _details: watch::Sender<Option<NodeDetails>>,
-    _spec: watch::Sender<NodeSpec>,
+    spec: watch::Sender<NodeSpec>,
 }
 
 fn stats_for(chain: &SynthChain) -> NodeStats {
@@ -180,7 +180,7 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
         status: status_tx,
         stats: stats_tx,
         _details: details_tx,
-        _spec: spec_tx,
+        spec: spec_tx,
     }
 }
 
@@ -469,7 +469,7 @@ async fn search_resolves_heights_hashes_and_refuses_keys() {
 }
 
 #[tokio::test]
-async fn only_a_running_node_on_the_served_network_answers() {
+async fn the_first_node_answers_by_its_own_id_on_its_own_network() {
     let harness = harness();
     let call = |node: &'static str| {
         let explorer = harness.explorer.clone();
@@ -484,11 +484,12 @@ async fn only_a_running_node_on_the_served_network_answers() {
                 .await
         }
     };
-    let other = call("zebrad-testnet").await.expect_err("the other network");
-    assert_eq!(other.kind, ExplorerErrorKind::NodeNotRunning);
-    assert!(other.message.contains("next start"), "{}", other.message);
-    let unknown = call("zakura-mainnet").await.expect_err("another node");
-    assert_eq!(unknown.kind, ExplorerErrorKind::UnknownNode);
+    // Other nodes get their explorers in a later phase.
+    for other in ["zebrad-testnet", "zebrad-mainnet-2", "zakura-mainnet"] {
+        let err = call(other).await.expect_err("another node");
+        assert_eq!(err.kind, ExplorerErrorKind::UnknownNode, "{other}");
+        assert!(err.message.contains("first node"), "{}", err.message);
+    }
 
     harness.status.send_replace(Status::default());
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -502,24 +503,70 @@ async fn only_a_running_node_on_the_served_network_answers() {
     };
     assert_eq!(live.state, LiveState::NotRunning);
     assert_eq!(harness.counts(), [0; 6], "nothing was read");
+    harness.status.send_replace(running());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(harness.ask(ExplorerRequest::Chain).await.is_ok());
 
-    // zebrad comes back on Testnet: the Testnet id answers and the Mainnet id waits.
+    // After its first run a node keeps its id when its network changes, and zebrad keeps
+    // running on the old network until its next start: the node's page reads nothing of it.
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Testnet);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let before = harness.counts();
+    let waiting = harness
+        .ask(ExplorerRequest::Chain)
+        .await
+        .expect_err("zebrad still on Mainnet");
+    assert_eq!(waiting.kind, ExplorerErrorKind::NodeNotRunning);
+    assert!(
+        waiting.message.contains("next start"),
+        "{}",
+        waiting.message
+    );
+    let ExplorerResponse::Status(live) = harness.reply(ExplorerRequest::Status).await else {
+        panic!("a status");
+    };
+    assert_eq!(
+        live,
+        ExplorerLive {
+            state: LiveState::OtherNetwork {
+                network: Network::Mainnet
+            },
+            tip: None,
+            reorg: None,
+        },
+        "no Mainnet tip under a Testnet node"
+    );
+    assert_eq!(delta(harness.counts(), before), [0; 6]);
+
+    // zebrad starts again on Testnet: the same id answers, from the Testnet chain.
     harness
         .chain
         .send_replace(SynthChain::new(Network::Testnet, 4_500_000, NOW));
     harness.stats.send_modify(|stats| {
         if let Some(stats) = stats {
             stats.chain = "test".into();
+            stats.height = 4_500_000;
+            stats.estimated_height = 4_500_000;
         }
     });
-    harness.status.send_replace(running());
+    harness.status.send_replace(running_since(100));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let ExplorerResponse::Chain(page) = harness.reply(ExplorerRequest::Chain).await else {
+        panic!("a chain page");
+    };
+    assert_eq!(page.blocks[0].height, 4_500_000);
+    let event = harness.explorer.live().borrow().clone();
+    assert_eq!(event.node, mainnet(), "the node's own id");
+    assert_eq!(event.live.state, LiveState::AtTip);
+
+    // A first run that renames the node moves the explorer to the new id.
+    harness
+        .spec
+        .send_modify(|spec| spec.id = NodeId::new("zebrad-testnet").unwrap());
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(call("zebrad-testnet").await.is_ok());
-    let mainnet = harness
-        .ask(ExplorerRequest::Chain)
-        .await
-        .expect_err("now Testnet");
-    assert_eq!(mainnet.kind, ExplorerErrorKind::NodeNotRunning);
     assert_eq!(
         harness.explorer.live().borrow().node.as_str(),
         "zebrad-testnet"

@@ -9,7 +9,7 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
-use crate::NodeId;
+use crate::{Network, NodeId};
 
 /// A 32-byte hash as zebrad prints it: 64 hex digits, lowercase on the way out, in zebrad's
 /// display order.
@@ -826,6 +826,17 @@ pub enum LiveState {
     Syncing { height: u32, estimated: u32 },
     /// The node is at the network's tip.
     AtTip,
+    /// zebrad still runs on `network`, not the node's: the node's network changed while it
+    /// ran, and zebrad takes the new one at its next start. Nothing is read meanwhile, so the
+    /// other network's chain never shows under this node.
+    OtherNetwork { network: Network },
+}
+
+impl LiveState {
+    /// Whether the explorer reads the node's chain: it runs, on the node's network.
+    pub fn reads(&self) -> bool {
+        matches!(self, LiveState::Syncing { .. } | LiveState::AtTip)
+    }
 }
 
 /// A reorganisation the explorer followed, as far as its checks of the node showed it: the

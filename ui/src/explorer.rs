@@ -326,8 +326,8 @@ fn in_text_field(event: &web_sys::KeyboardEvent) -> bool {
 }
 
 /// Which node, network and tip the page reads, and the promise that it all stays here. While
-/// the node's explorer would not answer, the zebrad that runs is another network's, so its
-/// version and address are left out.
+/// the explorer does not read this node (another node, or a zebrad still on the other
+/// network), the zebrad's version and address are left out: they are not this page's.
 #[component]
 fn SourceLine(
     nav: Signal<NodeExplorer>,
@@ -338,7 +338,12 @@ fn SourceLine(
     let parts = move || {
         let node = app.node();
         let mut parts = vec![node.info.with(|info| info.name.clone())];
-        if nav.get().unavailable.with(Option::is_some) {
+        let nav = nav.get();
+        let elsewhere = nav.live.with(|live| {
+            live.as_ref()
+                .is_some_and(|live| matches!(live.state, LiveState::OtherNetwork { .. }))
+        });
+        if nav.unavailable.with(Option::is_some) || elsewhere {
             return parts.join(" · ");
         }
         if let Some(version) = node
@@ -428,8 +433,8 @@ fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
             .into_any();
         }
         match live.as_ref().map(|live| live.state.clone()) {
-            // Unless the explorer said why it would not answer: zebrad runs on the other
-            // network until its next start, say.
+            // Unless the explorer said why it would not answer: it serves the first node only,
+            // say.
             None | Some(LiveState::NotRunning) => {
                 let waiting = nav.get().unavailable.get().map_or_else(
                     || "Waiting for the node to open its RPC port.".to_owned(),
@@ -438,6 +443,15 @@ fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
                 view! {
                     <div class="banner banner-warn ex-banner" role="status">
                         <span>{waiting}</span>
+                    </div>
+                }
+                .into_any()
+            }
+            Some(LiveState::OtherNetwork { network }) => {
+                let ours = node.info.with(|info| info.network);
+                view! {
+                    <div class="banner banner-warn ex-banner" role="status">
+                        <span>{text::other_network_text(network, ours)}</span>
                     </div>
                 }
                 .into_any()

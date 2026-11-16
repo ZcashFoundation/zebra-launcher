@@ -15,7 +15,7 @@ use explorer_model::{
     upgrades::UpgradeHeights,
 };
 use launcher_types::{
-    Network, NodeId, NodeKind, Phase,
+    Network, NodeId, Phase,
     explorer::{
         BlockHash, BlockId, ChainView, ExplorerCall, ExplorerError, ExplorerErrorKind,
         ExplorerLive, ExplorerLiveEvent, ExplorerReply, ExplorerRequest, ExplorerResponse,
@@ -306,9 +306,12 @@ pub(super) fn start<S: ChainSource>(
     config: ExplorerConfig,
     new_source: impl Fn(SocketAddr, PathBuf) -> Result<S, RpcError> + Send + 'static,
 ) -> (mpsc::Sender<Command>, watch::Receiver<ExplorerLiveEvent>) {
-    let network = inputs.spec.borrow().network;
+    let (node, network) = {
+        let spec = inputs.spec.borrow();
+        (spec.id.clone(), spec.network)
+    };
     let (live, live_rx) = watch::channel(ExplorerLiveEvent {
-        node: node_id(network),
+        node,
         live: ExplorerLive::default(),
     });
     let (commands_tx, commands) = mpsc::channel(64);
@@ -337,11 +340,6 @@ pub(super) fn start<S: ChainSource>(
     };
     tokio::spawn(actor.run(commands, internal_rx));
     (commands_tx, live_rx)
-}
-
-/// The id the explorer serves while zebrad runs on `network`.
-fn node_id(network: Network) -> NodeId {
-    NodeId::suggest(NodeKind::Zebrad, network, &Vec::new())
 }
 
 fn network_of(chain: &str) -> Option<Network> {
@@ -422,6 +420,23 @@ where
                 stats.verification_progress,
             )
         })
+    }
+
+    /// The node this explorer serves: the first node, under its own id.
+    fn served(&self) -> NodeId {
+        self.inputs.spec.borrow().id.clone()
+    }
+
+    /// The network zebrad runs on, when it is not the node's: the node's network changed
+    /// while zebrad ran, and zebrad takes it at its next start.
+    fn other_network(&self) -> Option<Network> {
+        let reported = self
+            .inputs
+            .stats
+            .borrow()
+            .as_ref()
+            .and_then(|stats| network_of(&stats.chain))?;
+        (self.run.is_some() && reported != self.inputs.spec.borrow().network).then_some(reported)
     }
 
     fn chain_view(&self) -> Option<ChainView> {
@@ -523,8 +538,11 @@ where
     }
 
     fn publish(&mut self) {
+        let other_network = self.other_network();
         let state = if self.run.is_none() {
             LiveState::NotRunning
+        } else if let Some(network) = other_network {
+            LiveState::OtherNetwork { network }
         } else {
             match self.inputs.stats.borrow().as_ref() {
                 None => LiveState::NotRunning,
@@ -543,13 +561,14 @@ where
                 },
             }
         };
+        // The other network's tip and reorganisations are not this node's.
+        let (tip, reorg) = match other_network {
+            Some(_) => (None, None),
+            None => (self.chain_view(), self.reorg),
+        };
         let next = ExplorerLiveEvent {
-            node: node_id(self.network),
-            live: ExplorerLive {
-                state,
-                tip: self.chain_view(),
-                reorg: self.reorg,
-            },
+            node: self.served(),
+            live: ExplorerLive { state, tip, reorg },
         };
         self.live.send_if_modified(|current| {
             let changed = *current != next;
@@ -560,29 +579,18 @@ where
         });
     }
 
-    /// The node ids this explorer answers: the one of the network zebrad runs on. The other
-    /// network's zebrad id is the backend's node too, after its next start.
+    /// The node this explorer answers: the first node, by its own id. Other nodes get their
+    /// explorers in a later phase (docs/EXPLORER.md, P6).
     fn check_node(&self, node: &NodeId) -> Result<(), ExplorerError> {
-        if *node == node_id(self.network) {
-            return Ok(());
+        if *node == self.served() {
+            Ok(())
+        } else {
+            Err(ExplorerError::new(
+                ExplorerErrorKind::UnknownNode,
+                "The Explorer reads the first node only for now; a later version gives every \
+                 node its own.",
+            ))
         }
-        let other = match self.network {
-            Network::Mainnet => Network::Testnet,
-            Network::Testnet => Network::Mainnet,
-        };
-        if *node == node_id(other) {
-            return Err(ExplorerError::new(
-                ExplorerErrorKind::NodeNotRunning,
-                format!(
-                    "zebrad runs on {}; it changes network at its next start",
-                    self.network
-                ),
-            ));
-        }
-        Err(ExplorerError::new(
-            ExplorerErrorKind::UnknownNode,
-            "this node has no explorer",
-        ))
     }
 
     fn on_command(&mut self, command: Command) {
@@ -610,6 +618,13 @@ where
             request => {
                 if self.run.is_none() {
                     let _ = reply.send(Err(not_running()));
+                    return;
+                }
+                if let Some(network) = self.other_network() {
+                    let _ = reply.send(Err(ExplorerError::new(
+                        ExplorerErrorKind::NodeNotRunning,
+                        format!("zebrad runs on {network}; it changes network at its next start"),
+                    )));
                     return;
                 }
                 let stats = self.inputs.stats.borrow().clone();

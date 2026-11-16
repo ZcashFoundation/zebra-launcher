@@ -123,9 +123,10 @@ every node command and event carries a node's id, and the mock's zebrad below is
   started (0.2 cores, 2.4 GiB); a zebrad the dialog adds uses what the mock's zebrad does at
   the tip. With `?herd` the computer has 16 CPUs and 32 GiB, and its figures count every
   node. The real backend has the same API and rules; there every node is a zebrad for now.
-- the Explorer (Ctrl/Cmd+3, or Ctrl/Cmd+K for its search): each zebrad and Zakura node has its
-  own synthetic chain from explorer-model, answered with the backend's own page builders, and
-  the dashboard's best block, pools, supply, difficulty and upgrades read the same chain.
+- the Explorer (Ctrl/Cmd+3, or Ctrl+K, Cmd+K on macOS, for its search): as in the backend it
+  serves the first node, the mock's own zebrad, over a synthetic chain from explorer-model,
+  answered with the backend's own page builders, and the dashboard's best block, pools,
+  supply, difficulty and upgrades read the same chain.
   Amounts are in ZEC, or TAZ on Testnet. The default mock syncs, so the Explorer shows what the
   node has and does not follow the tip. `?attip` puts zebrad at the tip near block 3,551,000
   (past NU7, a block every 25 s), so Ironwood, the burn and the shielded budget show;
@@ -133,8 +134,8 @@ every node command and event carries a node's id, and the mock's zebrad below is
   800 ms, `?explorer=empty` gives a chain of ten blocks, and `?explorer=nobi` takes zebrad's
   value-pool row from every seventh block, so that block and the next show their fees as
   unknown. `?reorg` replaces the main node's top two blocks about every 90 s at the tip (with
-  `?attip`), and the Explorer shows the banner. With `?herd` the Testnet nodes have Testnet
-  chains, and Zakura's chain is complete for now (pruning comes later).
+  `?attip`), and the Explorer shows the banner. With `?herd` the other nodes' Explorer tabs
+  say that the Explorer reads the first node only for now: each node gets its own in P6.
 
 - the light client server (docs/PUBLIC-SERVICES.md), in Settings → Public services, with a card
   on the dashboard and a banner on the node's pages. The mock runs launcher-herd's real rules

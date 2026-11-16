@@ -18,9 +18,9 @@
 //! is on screen and the node is at the network's tip. Logs name a read's method and how long
 //! it took, never what was asked for.
 //!
-//! Until the backend runs several nodes (docs/MULTI-NODE.md), one explorer serves the
-//! launcher's zebrad under the id of the network zebrad reports, `zebrad-mainnet` or
-//! `zebrad-testnet`.
+//! One explorer serves the first node, under the node's own id; the other nodes get theirs in
+//! a later phase (docs/EXPLORER.md, P6). When the node's network changes while zebrad runs,
+//! zebrad keeps the old one until its next start, and the explorer reads nothing meanwhile.
 
 mod actor;
 mod assemble;
@@ -51,7 +51,7 @@ pub struct ExplorerInputs {
     pub stats: watch::Receiver<Option<NodeStats>>,
     /// The monitor's details: the network upgrades' heights.
     pub details: watch::Receiver<Option<NodeDetails>>,
-    /// The node's spec: its network, before zebrad reports one.
+    /// The node's spec: its id, and its network, which zebrad takes at its next start.
     pub spec: watch::Receiver<NodeSpec>,
 }
 

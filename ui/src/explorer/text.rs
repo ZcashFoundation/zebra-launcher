@@ -396,6 +396,14 @@ pub fn not_running_text(phase: &Phase) -> Option<&'static str> {
     })
 }
 
+/// The banner's words while zebrad still runs on `running`, though its node is now on `ours`.
+pub fn other_network_text(running: Network, ours: Network) -> String {
+    format!(
+        "zebrad still runs on {running}, and moves to {ours} at its next start. The Explorer \
+         reads nothing until then; restart the node to explore {ours}."
+    )
+}
+
 /// The hint under the search box, as the query is typed.
 pub fn hint(classified: &Classified, tip: Option<u32>, network: Network) -> String {
     match classified {
@@ -706,6 +714,15 @@ mod tests {
             reorg_text(&bounded, "14:02"),
             "At least 1 block was replaced at 14:02: the node switched to another branch above a \
              height between 3,550,000 and 3,550,999."
+        );
+    }
+
+    #[test]
+    fn a_zebrad_on_the_old_network_is_named() {
+        assert_eq!(
+            other_network_text(Network::Mainnet, Network::Testnet),
+            "zebrad still runs on Mainnet, and moves to Testnet at its next start. The Explorer \
+             reads nothing until then; restart the node to explore Testnet."
         );
     }
 
