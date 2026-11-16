@@ -2756,8 +2756,10 @@ before the move to zingod: a release with #1655; fixes for #1665 and #1537; a
     v2 follows for both backends.
 18. **Bundle `zeal-zingod` on Linux from Z1**, revising MULTI-NODE.md's "Zeal bundles only
     zebrad"? → Yes, as asked: upstream publishes no binaries, and a non-expert can't build
-    zingod. Linux installers grow by about 25 MB, and nothing runs zingod until Z3; if Z3 slips,
-    Z1 can leave out only the `tauri.linux.conf.json` line and still build and attest.
+    zingod. A Linux install grows by about 25 MB, the stripped binary, and each Linux download
+    (`.deb` or AppImage) by roughly 6 to 9 MB, since both compress their payloads (a research
+    build: 6.3 MB with `xz -9`, 6.9 MB with `zstd -19`, 9.2 MB with `gzip -9`). Nothing runs zingod until Z3; if Z3
+    slips, Z1 can leave out only the `tauri.linux.conf.json` line and still build and attest.
 19. **The default backend for new setups** once Mainnet passes Z4's gate? → Zebra's built-in
     server until then; after it, zingod, for Zingo wallets and its own limits, with Zebra's
     offered for small disks. The maintainer's call (`DEFAULT_BACKEND`).
