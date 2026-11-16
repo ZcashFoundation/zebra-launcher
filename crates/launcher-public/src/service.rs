@@ -496,9 +496,10 @@ impl Actor {
                     }
                 },
                 Some(event) = internal.recv() => self.internal(event),
-                _ = status.changed() => {}
-                _ = stats.changed() => {}
-                _ = settings.changed() => {}
+                // A closed watch turns its arm off instead of waking the actor at once forever.
+                Ok(()) = status.changed() => {}
+                Ok(()) = stats.changed() => {}
+                Ok(()) = settings.changed() => {}
                 // A network change holds the service at once.
                 Ok(()) = node.changed() => {}
                 _ = tick.tick() => {}
