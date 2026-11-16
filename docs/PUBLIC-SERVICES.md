@@ -1157,7 +1157,7 @@ Zeal shows each step before the system asks, and never elevates without a click.
 | the name equals the WAN address, at the authoritative servers | 5 min | paused after 15 min | by itself |
 | the LAN address unchanged | 5 min, at start | paused at once | when the forward or address is right again |
 | no VPN on the default route | 5 min | paused | by itself |
-| the certificate | hourly | a banner 14 days out if renewal fails; `ChallengeOnly` at expiry | after issuance |
+| the certificate | hourly | a banner 14 days out if renewal fails, and "Try again" on the panel; `ChallengeOnly` at expiry, with orders going on under the budget | after issuance |
 | the monthly cap | each stats line | paused | next month, or a higher cap |
 | seeder abuse ([limits](#the-seeders-limits)) | 10 s | paused an hour | by itself; after three in 24 h, by the user |
 | the seeder's `/ready` | 10 s | a banner after 10 min (empty answers are cached 10 min, but zebrad asks other seeders too) | by itself |

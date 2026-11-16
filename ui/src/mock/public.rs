@@ -554,8 +554,21 @@ pub async fn answer_public_step(answer: StepAnswer) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn run_public_checks(_step: StepId) -> Result<(), String> {
+pub async fn run_public_checks(step: StepId) -> Result<(), String> {
     let public = public();
+    // "Try again" on the Serving panel: the renewal goes through this time.
+    let failing = public.world.with_untracked(|world| {
+        world.spec.as_ref().is_some_and(|spec| spec.opened)
+            && world
+                .cert
+                .as_ref()
+                .is_some_and(|cert| cert.last_problem.is_some())
+    });
+    if step == StepId::Certificate && failing {
+        public.later(Duration::from_secs(2), |world| {
+            world.cert = Some(World::certificate(90));
+        });
+    }
     public.publish();
     public.advance();
     Ok(())

@@ -19,8 +19,8 @@ use crate::{
     clipboard::copy_to_clipboard,
     public_state::PublicContext,
     public_text::{
-        self, SERVICE_NAME, Tone, cert_text, check_line, consent_lines, finding_text, network_name,
-        reach_text, state_line, step_mark, step_title, use_lines,
+        self, SERVICE_NAME, Tone, cert_needs_retry, cert_text, check_line, consent_lines,
+        finding_text, network_name, reach_text, state_line, step_mark, step_title, use_lines,
     },
 };
 
@@ -655,6 +655,19 @@ fn Serving(status: Memo<Option<PublicStatus>>) -> impl IntoView {
         });
     };
     let share = move || status.with(|s| s.as_ref().and_then(|s| s.share.clone()));
+    let retry_cert = move |_| {
+        act(busy, note, async move {
+            api::public::run_public_checks(StepId::Certificate)
+                .await
+                .map_err(|error| error.to_string())
+        });
+    };
+    let cert_failing = move || {
+        status.with(|s| {
+            s.as_ref()
+                .is_some_and(|s| cert_needs_retry(s, state.now.get()))
+        })
+    };
     let checks = move || {
         status.with(|s| {
             let Some(s) = s else { return String::new() };
@@ -694,6 +707,9 @@ fn Serving(status: Memo<Option<PublicStatus>>) -> impl IntoView {
             <div class="card">
                 <h4>"Certificate"</h4>
                 <p>{with(cert_text)}</p>
+                {move || cert_failing().then(|| view! {
+                    <button type="button" disabled=busy on:click=retry_cert>"Try again"</button>
+                })}
             </div>
             <div class="card">
                 <h4>"Use"</h4>

@@ -519,9 +519,13 @@ impl AcmeHandle {
 }
 
 /// The issuer of the next order for a name whose certificate is `current`, and whether one is
-/// needed at `now`. `wanted` says the setup or the user asked for a certificate.
+/// needed at `now`. `wanted` says the setup or the user asked for a certificate. A certificate
+/// that lapsed, as after renewals that failed until it expired, is needed again without being
+/// asked.
 fn next_order(current: &CertStatus, wanted: bool, now: SystemTime) -> (CertIssuer, bool) {
     let valid = current.not_after.is_some_and(|not_after| not_after > now);
+    let lapsed = !valid && current.not_after.is_some();
+    let wanted = wanted || lapsed;
     let renewal_due = current.renew_at.is_some_and(|at| at <= now);
     let issuer = if current.staging_validated_at.is_none() && !valid {
         CertIssuer::Staging
@@ -716,6 +720,51 @@ mod tests {
         assert_eq!(
             attempts.next_allowed(CertIssuer::Staging, at(8), true),
             None
+        );
+    }
+
+    #[test]
+    fn a_lapsed_certificate_is_ordered_again_unasked() {
+        let cert = CertStatus {
+            not_after: Some(at(90 * 24)),
+            not_before: Some(at(0)),
+            renew_at: Some(at(60 * 24)),
+            staging_validated_at: Some(at(0)),
+            ordering: None,
+            next_try: None,
+            last_problem: None,
+        };
+        let production = CertIssuer::Production;
+        assert_eq!(next_order(&cert, false, at(24)), (production, false));
+        assert_eq!(
+            next_order(&cert, false, at(61 * 24)),
+            (production, true),
+            "renewal"
+        );
+        assert_eq!(
+            next_order(&cert, false, at(91 * 24)),
+            (production, true),
+            "lapsed"
+        );
+        let none = CertStatus {
+            not_after: None,
+            not_before: None,
+            renew_at: None,
+            ..cert
+        };
+        assert_eq!(
+            next_order(&none, false, at(24)),
+            (production, false),
+            "never asked"
+        );
+        assert_eq!(next_order(&none, true, at(24)), (production, true));
+        let fresh = CertStatus {
+            staging_validated_at: None,
+            ..none
+        };
+        assert_eq!(
+            next_order(&fresh, true, at(24)),
+            (CertIssuer::Staging, true)
         );
     }
 
