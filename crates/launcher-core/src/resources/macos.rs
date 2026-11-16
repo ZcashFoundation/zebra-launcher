@@ -99,13 +99,14 @@ impl MacReader {
                 None
             }
         };
-        // A zombie holds no memory, threads or files.
+        // A zombie holds no memory, threads or files. A process that exited since its usage was
+        // read stays a member of this reading, without a count.
         let descriptors = if info.zombie {
             Some(0)
         } else {
             match descriptors(pid) {
                 Ok(count) => Some(count),
-                Err(err) if err.raw_os_error() == Some(libc::ESRCH) => return None,
+                Err(err) if err.raw_os_error() == Some(libc::ESRCH) => None,
                 Err(_) => {
                     denied.descriptors = true;
                     None
