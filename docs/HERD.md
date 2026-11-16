@@ -43,7 +43,9 @@ take from the herd.
   configuration change a launcher exit interrupted is decided at the next launch, from the
   file the rollback restores. Reset config gives a node that kept its value its own folder,
   since the minimal file has none of the user's. The configuration form shows the key as
-  managed, also for a node that kept its value (the text view still edits it there).
+  managed for every node, since the UI is not told which nodes kept their value; its note
+  says that a node that had `false` or a folder keeps it, and that the text editor changes
+  it.
 - `assign_ports` never moves a port onto 8233 or 18233, never gives those to another role,
   and never gives a P2P port one of the ports zebra-network refuses to dial
   (`RESERVED_PORTS`, `REFUSED_P2P_PORTS` in launcher-types). `ports_move_out_of_each_others_way`

@@ -204,7 +204,9 @@ pub const FIELDS: &[Field] = &[
               folder. The cache lets the node reconnect quickly even when the DNS seeders are \
               unavailable.",
         control: Control::Managed {
-            note: "Each node keeps its own, in its folder, so your nodes find different peers.",
+            note: "The launcher points each node at its own folder, so your nodes find \
+                   different peers. A node that had false or a folder of its own before keeps \
+                   that value; change it in the text editor.",
         },
     },
     Field {
