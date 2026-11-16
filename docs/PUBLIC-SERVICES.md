@@ -519,13 +519,15 @@ flag (`?public=<flag>`).
 | --- | --- | --- | --- | --- | --- |
 | The index is being built: the first start, or after Rebuild | `/status` is `syncing` | `IndexBuilding`; the test on this computer and Open wait | "Building zingod's index: block 1,204,331 of 4,612,000 (26 %), about 5 h left" | by itself, once zingod serves within 2 blocks of Zebra | `zingod-building` |
 | zebrad restarts: an update, a configuration change, a crash | zebrad's pid or start time changes | stops zingod; starts it once the new run's RPC is open, its cookie written and zebrad at the tip | "Catching up · zingod restarts with Zebra" | by itself | `zingod-restarting` |
-| zebrad isn't at the tip yet in this run | zebrad's height and its estimate of the tip | doesn't start zingod | "Waiting for Zebra · Testnet to reach the tip: zingod starts then" | by itself | `zingod-waiting` |
+| zebrad isn't at the tip yet in this run | zebrad's height and its estimate of the tip | `IndexerStarting { waiting: ZebradTip }`; doesn't start zingod | "Waiting for Zebra · Testnet to reach the tip: zingod starts then" | by itself | `zingod-waiting` |
+| zingod is starting: it opens and checks its index before it serves | `/status` is `provisioning` | `IndexerStarting { waiting: Boot }`; waits | "Catching up · zingod is starting" | by itself | `zingod-booting` |
 | zebrad stops, fails or halts | zebrad's phase | stops zingod; PS1's `BackingStopped` pause | PS1's line | when zebrad runs again | `zingod-nozebra` |
 | zingod can't reach zebrad | `/status` `chain.validators.answering` is 0 for 30 s | `IndexerDown`; restarts zingod once per zebrad run | "Catching up · zingod can't reach Zebra · Testnet" | by itself | `zingod-unreachable` |
 | zingod reports `down`, or doesn't answer | `/status`, or three reads without an answer | `IndexerDown`, with zingod's reason | "zingod is down: <zingod's message>" | by itself, or as a crash | `zingod-down` |
 | zingod falls behind | its served height against zebrad's | `IndexBehind` | "Catching up · zingod is 12 blocks behind Zebra" | by itself, within 2 | `zingod-behind` |
 | zingod stalls | the stall rule | restarts it once, then `IndexerStuck` | "zingod is stuck at block 4,611,002; Zebra is at 4,611,019. [Open the log]" | by itself, when it moves | `zingod-stuck` |
-| zingod crashes | `Crash` | restarts with backoff; `IndexerFailed` after 5 crashes in 10 minutes | "zingod stopped unexpectedly 5 times in 10 minutes. [Open the log] [Try again]" | the user's Try again | `zingod-crashloop` |
+| zingod crashes | `Crash` | `IndexerStarting { waiting: Backoff }`; starts it again after the supervisor's backoff | "Catching up · zingod stopped unexpectedly, and Zeal is starting it again" | by itself | `zingod-backoff` |
+| zingod keeps crashing | 5 crashes in 10 minutes | `IndexerFailed`; no restart | "zingod stopped unexpectedly 5 times in 10 minutes. [Open the log] [Try again]" | the user's Try again | `zingod-crashloop` |
 | zingod refuses Zeal's configuration | `ConfigError` | no restart | "zingod refused the settings Zeal wrote. This is a bug in Zeal: [Copy diagnostics]" | a Zeal update | `zingod-config` |
 | zingod can't read zebrad's cookie: the path is a folder, or not readable | `ConfigError` with the cookie text | no restart | "zingod can't read Zebra · Testnet's cookie at /mnt/zebra/testnet/rpc/.cookie: Is a directory (os error 21). [Try again]" | the user's Try again | `zingod-cookie` |
 | zingod's port is taken | the check before the spawn, or `PortInUse` | moves to the next free port, once | "Other programs use ports 18137 and 18138. [Try again]" | the user | `zingod-port` |
@@ -799,7 +801,7 @@ answers 503 through a whole first sync, so Zeal doesn't read it.
 
 | zingod says | Zeal |
 | --- | --- |
-| `provisioning` | `IndexerStarting` |
+| `provisioning` | `IndexerStarting { waiting: Boot }` |
 | `syncing`, `detail {height, target, blocks_per_sec}` | `IndexBuilding { served, target, eta_secs }`, with the ETA from `blocks_per_sec` once zingod has a rate (it can be `null`); the panel says "Catching up", with no ETA, once fewer than 1,000 blocks remain (proposal) |
 | `syncing` with a `null` detail: no sync target yet (`packages/zingod/src/health.rs:263-267`) | `IndexBuilding` with no numbers: "Building zingod's index", and "an hour or more"; never `NoAnswer` |
 | `serving`, `degraded` | ready, under the rules below; zingod's `degraded` (a fresh tip no validator vouches for) keeps serving, as zingod intends |
