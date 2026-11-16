@@ -93,7 +93,8 @@ which gate the release on each network.
 
 - `grpc.rs` is in `launcher-public`, not `launcher-core`, and decodes the few protobuf messages
   by hand without prost; its decoder is pinned to `LightdInfo` bytes captured from zebrad.
-- The front door's `Unavailable` answers with h2's server directly, not hyper's.
+- The front door's `Unavailable` answers with h2's server directly, not hyper's, with hyper's
+  limits set by hand: 16 streams a connection and a 16 KiB header list.
 - The network checks read the default route from `/proc/net/route` and send NAT-PMP's
   two-byte external-address request themselves: no netdev or crab_nat in PS1.
 - Consent given at step 1, before a name exists, binds to the first name chosen; another name
@@ -1183,6 +1184,7 @@ limits connections, **v2** (PS2) ends HTTP/2 and limits streams and methods
 | connection age | 2 h, then closed: zebrad's HTTP/2 ping every 30 s keeps a connection from going idle | a timer | v1 |
 | upload | 10 Mbit/s (the preset) | a `Semaphore` of KiB permits refilled by a ticker | v1 |
 | monthly upload | 300 GB, then paused | `AtomicU64`, totals persisted | v1 |
+| header list in `Unavailable` | 16 KiB (hyper's and zebrad's), then the call or the connection ends | h2 server builder | v1 |
 | streams per connection; header list | 16 (never above the backend's own: zebrad's 20); 16 KiB | hyper `http2` builder | v2 |
 | request body | 4 MiB, `SendTransaction` 2.5 MiB | a counting body, then `RESOURCE_EXHAUSTED` | v2 |
 | `GetBlockRange`, `GetBlockRangeNullifiers` in flight | 16 in all; a 10 s wait, then `UNAVAILABLE` | per-method `Semaphore` | v2 |
