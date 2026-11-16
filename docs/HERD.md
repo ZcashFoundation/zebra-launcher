@@ -79,6 +79,14 @@ take from the herd.
   runs against the top of its own branch, so a node first seen on a fork of its own is judged
   forked, not catching up. A change of state waits for the 10 s, two-round debounce, except
   entering or leaving Excluded, entering Unknown, and leaving probation, which apply at once.
+  A round with no node placed forgets the top, so time with every node stopped is no herd
+  stall.
+- Not yet: the stall of one family ("Your Zebra nodes stopped at block H while Zakura moved
+  on", in Support and splits and Example 5; each node stuck there reads as stuck on its
+  own), the herd stall's sentence about peers ("Your nodes stopped hearing from their
+  peers…" or "Your nodes still hear from 58 peers…"; the stall reads "No new block on your
+  Mainnet nodes for 6 min" alone), and the note on a fork within one block of an activation
+  height ("at NU7's activation: this node may not know NU7").
 - S_eff is measured as designed once 30 top blocks arrived; until then it is S (no
   `getblockheader` reads). Wake detection restarts the timers and the herd's grace; the
   nodes' "catching up after sleep" word is not there.
