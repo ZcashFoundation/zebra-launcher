@@ -543,9 +543,21 @@ impl Engine {
                 Lane::Near(tip, progress) => match branch_of(&member.id) {
                     _ if memory.failed_rounds >= 2 => Some(Relation::Unknown),
                     None => None,
-                    Some(_) if !memory.through => Some(Relation::CatchingUp {
+                    Some(index) if !memory.through => Some(Relation::CatchingUp {
                         progress: *progress,
-                        same_chain: Some(branch_of(&member.id) == Some(0)),
+                        // Another chain only on a real fork, with a branch of its own at
+                        // least 2 blocks long: a competing block or one the others replaced
+                        // is no sign of another network.
+                        same_chain: if index == 0 {
+                            Some(true)
+                        } else {
+                            match &splits[index] {
+                                Some(split) if !split.race && tip.height > split.fork.at => {
+                                    Some(false)
+                                }
+                                _ => None,
+                            }
+                        },
                     }),
                     Some(0) => {
                         let main_top = main_top.unwrap_or(tip.height);

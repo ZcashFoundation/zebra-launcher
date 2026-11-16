@@ -373,6 +373,64 @@ fn a_replaced_block_is_a_stall_also_where_no_side_has_a_majority() {
 }
 
 #[test]
+fn a_node_in_probation_with_a_competing_block_is_being_checked() {
+    // First seen 5 blocks behind, the third node is in its 2-minute probation when it takes
+    // the competing block at H + 1.
+    let mut herd = Harness::new(Network::Mainnet, 3, H);
+    herd.chain.put(&id(2), 0, H - 5);
+    herd.run(10);
+    herd.chain.put(&id(2), 0, H);
+    herd.run(10);
+    herd.grow(&[0, 1]);
+    let branch = herd.chain.branch(H + 1);
+    herd.chain.put(&id(2), branch, H + 1);
+    let view = herd.run(30);
+    let node = view.node(&id(2)).unwrap();
+    assert_eq!(
+        node.relation,
+        Relation::CatchingUp {
+            progress: 1.0,
+            same_chain: None
+        }
+    );
+    assert_eq!(node.word, "being checked");
+    assert_eq!(node.level, Level::Neutral);
+    assert_eq!(view.level, Level::Neutral);
+    // A branch of its own, 3 blocks past the fork: another chain while it catches up.
+    let branch = herd.chain.branch(H);
+    herd.chain.put(&id(2), branch, H + 2);
+    let view = herd.run(10);
+    let node = view.node(&id(2)).unwrap();
+    assert_eq!(
+        node.relation,
+        Relation::CatchingUp {
+            progress: 1.0,
+            same_chain: Some(false)
+        }
+    );
+    assert_eq!(node.level, Level::Problem);
+
+    // Testnet races up to 6 blocks: a 4-block one in probation is no other chain either.
+    let mut herd = Harness::new(Network::Testnet, 3, 4_471_230);
+    herd.chain.put(&id(2), 0, 4_471_225);
+    herd.run(10);
+    let branch = herd.chain.branch(4_471_229);
+    herd.chain.put(&id(2), branch, 4_471_232);
+    herd.grow(&[0, 1]);
+    let view = herd.run(30);
+    let node = view.node(&id(2)).unwrap();
+    assert_eq!(
+        node.relation,
+        Relation::CatchingUp {
+            progress: 1.0,
+            same_chain: None
+        }
+    );
+    assert_ne!(node.level, Level::Problem);
+    assert_ne!(view.level, Level::Problem);
+}
+
+#[test]
 fn a_restarting_node_counts_and_comes_back() {
     let mut herd = Harness::new(Network::Mainnet, 3, H);
     herd.run(10);
