@@ -46,7 +46,8 @@ pub enum Glyph {
     Check,
     /// Something wants a look: a node behind or stuck.
     Warning,
-    /// The same mark in the problem tone: a node on another chain, or the herd stalled long.
+    /// A problem: a node on another chain, or the herd stalled long. A cross, as the status
+    /// card's problem icon, so the mark does not rely on its colour.
     Problem,
 }
 
@@ -54,7 +55,8 @@ impl Glyph {
     pub fn symbol(self) -> &'static str {
         match self {
             Glyph::Check => "✓",
-            Glyph::Warning | Glyph::Problem => "!",
+            Glyph::Warning => "!",
+            Glyph::Problem => "✗",
         }
     }
 
@@ -73,7 +75,8 @@ fn shown(view: Option<&HerdView>) -> Option<&HerdView> {
 }
 
 /// The glyph on a network's tab: a check while its nodes agree, a warning once its level asks
-/// for attention, none without a herd or while the herd is checking or catching up.
+/// for attention, a cross for a problem, none without a herd or while the herd is checking or
+/// catching up.
 pub fn glyph(view: Option<&HerdView>) -> Option<Glyph> {
     let view = shown(view)?;
     if view.level >= Level::Problem {
@@ -176,7 +179,8 @@ mod tests {
             glyph(Some(&view(HerdState::Split, Level::Problem))),
             Some(Glyph::Problem)
         );
-        assert_eq!(Glyph::Problem.symbol(), Glyph::Warning.symbol());
+        // The mark, not only its colour, tells a problem from a warning.
+        assert_ne!(Glyph::Problem.symbol(), Glyph::Warning.symbol());
         // Catching up, or one node at the tip: neither mark.
         assert_eq!(
             glyph(Some(&view(HerdState::Degraded, Level::Neutral))),

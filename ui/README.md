@@ -127,11 +127,12 @@ every node command and event carries a node's id, and the mock's zebrad below is
 - the herd's agreement (docs/HERD.md): with several nodes, the overview starts with one
   sentence about the network shown ("Your 3 Mainnet nodes agree on block 3,551,204", or who is
   behind, stuck or on another chain, with the fork's height), each counted node's card says
-  where it stands ("In the herd: agrees"), the network's tab in the sidebar has a check or a
-  warning mark with the sentence in its tooltip, and a node's sidebar item has its state in its
-  title. The mock runs launcher-herd's real engine every 5 s over its nodes' tips, answering
-  the engine's `getblockhash` probes from a scripted chain (`src/mock/agreement.rs`). With
-  `?herd` alone the Testnet nodes agree and the Mainnet nodes are still catching up.
+  where it stands ("In the herd: agrees"), the network's tab in the sidebar has a check, a
+  warning mark or a cross for a problem, with the sentence in its tooltip, and a node's sidebar
+  item has its state in its title. The mock runs launcher-herd's real engine every 5 s over
+  its nodes' tips, answering the engine's `getblockhash` probes from a scripted chain
+  (`src/mock/agreement.rs`). With `?herd` alone the Testnet nodes agree and the Mainnet nodes
+  are still catching up.
   `?herd&agree` adds Zebra · Mainnet 2, puts the mock's zebrad and Zakura · Mainnet at the tip
   (it implies `?attip`), and the three agree; ten minutes of rounds run before the first view,
   so each scenario shows its state at once. `&agree=` picks a scenario:

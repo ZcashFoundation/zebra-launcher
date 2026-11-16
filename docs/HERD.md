@@ -89,8 +89,8 @@ take from the herd.
   the actors with a scripted `TipSource` over the simulated chain; fake-zebrad has no
   `getblockhash` yet, and the Regtest contract test is not written.
 - The UI shows, for the network the window is scoped to, the herd's sentence at the top of the
-  overview, each witness's word on its card ("In the herd: agrees"), a check or warning mark
-  on the network's tab with the sentence in its tooltip, and a node's state in its sidebar
+  overview, each witness's word on its card ("In the herd: agrees"), a check, warning or cross
+  mark on the network's tab with the sentence in its tooltip, and a node's state in its sidebar
   item's title. Not yet: the panel's three checks, the herd page, the alert bar, the sidebar
   word replacing "at tip", the tray line, the node page's card and the health verdict rules.
 - The mock runs the engine every 5 s per network over its nodes and answers from a scripted
@@ -1354,9 +1354,9 @@ A "Herd" item under the network's Overview in the sidebar.
 
 ### Sidebar, tray and node pages
 
-- **Sidebar.** The network's tab gets a check or warning glyph. A witness at the tip shows its
-  herd word instead of "at tip" ("agrees", "6 behind", "stuck", "other chain"), and its dot
-  takes that word's tone.
+- **Sidebar.** The network's tab gets a check, warning or cross glyph. A witness at the tip
+  shows its herd word instead of "at tip" ("agrees", "6 behind", "stuck", "other chain"), and
+  its dot takes that word's tone.
 - **Tray.** The tooltip on macOS and Windows reads "Zeal: 4 running · Mainnet: nodes agree".
   Linux's tray has no tooltip (`src-tauri/src/tray.rs`), so every OS also gets a disabled menu
   line: "Mainnet: 3 of 3 nodes agree", or "Mainnet: nodes disagree — Open…".
