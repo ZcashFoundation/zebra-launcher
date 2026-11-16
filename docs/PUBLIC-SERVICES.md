@@ -101,6 +101,10 @@ which gate the release on each network.
   default route with a gateway and the lowest metric. The VPN check looks up the main table's
   route to an internet address as the kernel does: the longest prefix, so a VPN's 0.0.0.0/1
   and 128.0.0.0/1 win over the default, then the lowest metric, with a gateway or without.
+  Policy rules, which the main table does not show (wg-quick's own table, a Tailscale exit
+  node), are seen from the address the kernel picks towards that internet address, by a UDP
+  `connect` that sends nothing: one on another interface than the router's, named by
+  `getifaddrs` (nix), is the VPN.
 - Consent given at step 1, before a name exists, binds to the first name chosen; another name
   asks again.
 - A network change waits for the user's Resume even after switching back (the pause holds),
@@ -859,8 +863,10 @@ and Next stays disabled until the gates pass.
    - A VPN or exit node on the route to the internet stops the setup: a route on a VPN's
      interface (`tun`, `utun`, `wg`, `ppp`, Tailscale: a heuristic), or on another interface
      than the router's, such as a tunnel's default without a gateway at a lower metric, or the
-     0.0.0.0/1 and 128.0.0.0/1 of OpenVPN's `redirect-gateway def1`. "Turn it off, or set it
-     to leave Zeal out."
+     0.0.0.0/1 and 128.0.0.0/1 of OpenVPN's `redirect-gateway def1`; and policy rules that
+     send internet traffic out of another interface (wg-quick, NetworkManager's WireGuard, a
+     Tailscale exit node), seen from the address the kernel picks towards the internet. "Turn
+     it off, or set it to leave Zeal out."
    - The router's WAN address, read-only: NAT-PMP's external-address request (opcode 0,
      `crab_nat`) and UPnP IGD's `GetExternalIPAddress` (`igd-next`). PCP isn't used here: it
      reports the address only for a MAP or PEER request, which creates a mapping. Public:

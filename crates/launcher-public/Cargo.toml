@@ -35,6 +35,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 tracing = { workspace = true }
 x509-parser = { version = "0.18", default-features = false }
 
+# getifaddrs, to name the interface that carries internet traffic.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true, features = ["net"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

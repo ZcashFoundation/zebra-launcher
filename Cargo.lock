@@ -2655,6 +2655,7 @@ dependencies = [
  "launcher-gateway",
  "launcher-herd",
  "launcher-types",
+ "nix",
  "rcgen",
  "rustls",
  "rustls-platform-verifier",
@@ -3076,6 +3077,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

@@ -3,9 +3,11 @@
 //! NAT-PMP's external-address request (RFC 6886, opcode 0), which creates no mapping. Nothing
 //! here changes the router.
 //!
-//! PS1 reads the routes from `/proc/net/route` (Linux). UPnP IGD's
-//! `GetExternalIPAddress` and the router's model come later; without NAT-PMP the router's
-//! address is unknown and the outside checks decide.
+//! PS1 reads the routes from `/proc/net/route` (Linux), which lists the main table only, and
+//! asks the kernel which address it would send from towards the router and towards the
+//! internet, which policy rules decide too. UPnP IGD's `GetExternalIPAddress` and the router's
+//! model come later; without NAT-PMP the router's address is unknown and the outside checks
+//! decide.
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -135,6 +137,47 @@ pub fn vpn_on_route(routes: &[Route], router: Option<&DefaultRoute>) -> Option<S
     (elsewhere || is_vpn_interface(&preferred.interface)).then(|| preferred.interface.clone())
 }
 
+/// The VPN that policy rules send internet traffic through, if any, which the main table does
+/// not show (wg-quick's own table, a Tailscale exit node): the kernel picks `internet_src`
+/// towards the internet on another interface than the router's. `addresses` names the
+/// interface; without it, a source other than `lan_src`, the one towards the router, is named
+/// by its address. Without `internet_src` there is no route to the internet to judge.
+pub fn vpn_by_source(
+    router: &DefaultRoute,
+    lan_src: Option<IpAddr>,
+    internet_src: Option<IpAddr>,
+    addresses: &[(String, IpAddr)],
+) -> Option<String> {
+    let out = internet_src?;
+    match addresses.iter().find(|(_, addr)| *addr == out) {
+        Some((interface, _)) => (*interface != router.interface).then(|| interface.clone()),
+        None => lan_src
+            .is_some_and(|lan| lan != out)
+            .then(|| out.to_string()),
+    }
+}
+
+/// This computer's IPv4 addresses with their interfaces.
+#[cfg(target_os = "linux")]
+fn local_addresses() -> Vec<(String, IpAddr)> {
+    let Ok(addresses) = nix::ifaddrs::getifaddrs() else {
+        return Vec::new();
+    };
+    addresses
+        .filter_map(|ifaddr| {
+            let addr = ifaddr.address?.as_sockaddr_in()?.ip();
+            Some((ifaddr.interface_name, IpAddr::V4(addr)))
+        })
+        .collect()
+}
+
+/// This computer's IPv4 addresses with their interfaces: none read off Linux, where the routes
+/// are not read either.
+#[cfg(not(target_os = "linux"))]
+fn local_addresses() -> Vec<(String, IpAddr)> {
+    Vec::new()
+}
+
 /// Whether `interface` looks like a VPN's.
 pub fn is_vpn_interface(interface: &str) -> bool {
     let lower = interface.to_ascii_lowercase();
@@ -160,11 +203,11 @@ pub fn classify_wan(addr: Option<IpAddr>) -> WanKind {
     }
 }
 
-/// The address this computer uses towards `gateway`. A UDP `connect` only picks the route:
-/// no packet is sent.
-pub async fn lan_address(gateway: Ipv4Addr) -> Option<IpAddr> {
+/// The address this computer uses towards `to`. A UDP `connect` only picks the route, policy
+/// rules included: no packet is sent.
+pub async fn source_address(to: Ipv4Addr) -> Option<IpAddr> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await.ok()?;
-    socket.connect((gateway, 9)).await.ok()?;
+    socket.connect((to, 9)).await.ok()?;
     let local = socket.local_addr().ok()?.ip();
     (!local.is_unspecified()).then_some(local)
 }
@@ -212,7 +255,16 @@ pub async fn check(now: SystemTime) -> NetFacts {
             checked_at: now,
         };
     };
-    let lan_addr = lan_address(router.gateway).await;
+    let lan_addr = source_address(router.gateway).await;
+    let vpn = match vpn {
+        Some(vpn) => Some(vpn),
+        None => vpn_by_source(
+            &router,
+            lan_addr,
+            source_address(INTERNET).await,
+            &local_addresses(),
+        ),
+    };
     let wan_addr = if vpn.is_some() {
         None
     } else {
@@ -383,6 +435,60 @@ eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
             Some("tun0")
         );
         assert_eq!(vpn.as_deref(), Some("tun0"));
+    }
+
+    #[test]
+    fn a_vpn_that_policy_rules_choose_is_found_by_the_source_address() {
+        let ip = |s: &str| Some(s.parse::<IpAddr>().unwrap());
+        let addresses = |list: &[(&str, &str)]| -> Vec<(String, IpAddr)> {
+            list.iter()
+                .map(|(name, addr)| (name.to_string(), addr.parse().unwrap()))
+                .collect()
+        };
+        // Captured from a kernel with wg-quick up: its table 51820 is not in the main one.
+        let wg_quick = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
+eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
+";
+        let (router, vpn) = router_and_vpn(wg_quick);
+        let router = router.unwrap();
+        assert_eq!((router.interface.as_str(), vpn), ("eth0", None));
+        let home = addresses(&[("lo", "127.0.0.1"), ("eth0", "192.168.1.20")]);
+        let lan = ip("192.168.1.20");
+        assert_eq!(vpn_by_source(&router, lan, lan, &home), None);
+
+        let wg = addresses(&[("eth0", "192.168.1.20"), ("wg0", "10.64.0.2")]);
+        assert_eq!(
+            vpn_by_source(&router, lan, ip("10.64.0.2"), &wg),
+            Some("wg0".into())
+        );
+        // An exit node's rules that take the router's own route too: both sources match.
+        let exit = addresses(&[("eth0", "192.168.1.20"), ("tailscale0", "100.101.1.2")]);
+        let tailnet = ip("100.101.1.2");
+        assert_eq!(
+            vpn_by_source(&router, tailnet, tailnet, &exit),
+            Some("tailscale0".into())
+        );
+        // A second address on the router's interface is no VPN.
+        let two = addresses(&[("eth0", "192.168.1.20"), ("eth0", "192.168.1.21")]);
+        assert_eq!(vpn_by_source(&router, lan, ip("192.168.1.21"), &two), None);
+        // Without the interfaces' addresses, another source is named by itself.
+        assert_eq!(
+            vpn_by_source(&router, lan, ip("10.64.0.2"), &[]),
+            Some("10.64.0.2".into())
+        );
+        assert_eq!(vpn_by_source(&router, lan, lan, &[]), None);
+        // No route to the internet: nothing to judge.
+        assert_eq!(vpn_by_source(&router, lan, None, &wg), None);
+    }
+
+    #[tokio::test]
+    async fn the_source_towards_loopback_is_loopback() {
+        assert_eq!(
+            source_address(Ipv4Addr::LOCALHOST).await,
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
     }
 
     #[test]
