@@ -425,6 +425,26 @@ fn a_split_between_channels_is_two_implementations_disagreeing() {
 }
 
 #[test]
+fn a_split_against_several_implementations_names_both_sides() {
+    let mut herd = Harness::new(Network::Mainnet, 3, H);
+    herd.nodes[1].kind = NodeKind::Zakura;
+    herd.nodes[1].name = "Zakura · Mainnet".into();
+    herd.nodes[2].program = NodeProgram::BundledBeta;
+    herd.run(10);
+    let branch = herd.chain.branch(H - 1);
+    herd.chain.put(&id(2), branch, H + 1);
+    let view = herd.run_with(30, |herd, elapsed| {
+        if elapsed % 10 == 0 {
+            herd.grow(&[0, 1, 2]);
+        }
+    });
+    assert_eq!(
+        view.headline,
+        "Zebra Stable and Zakura disagree with Zebra Beta since block 3,551,203"
+    );
+}
+
+#[test]
 fn two_nodes_that_split_cannot_name_the_odd_one() {
     // The same channel: no majority.
     let mut same = Harness::new(Network::Mainnet, 2, H);

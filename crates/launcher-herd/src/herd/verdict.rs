@@ -296,29 +296,34 @@ fn split_headline(herd: &Herd<'_>, witnesses: &[&NodeInHerd], top: &str) -> Stri
                 block(at)
             );
         }
-        let channels = {
-            let mut zebra: Vec<Family> = witnesses
-                .iter()
-                .map(|node| node.family)
-                .filter(|family| matches!(family, Family::Zebra { .. }))
-                .collect();
-            zebra.dedup();
-            zebra.len() > 1
+        let mut zebra: Vec<Family> = Vec::new();
+        for node in witnesses {
+            if matches!(node.family, Family::Zebra { .. }) && !zebra.contains(&node.family) {
+                zebra.push(node.family);
+            }
+        }
+        let channels = zebra.len() > 1;
+        let labels = |side: &[&NodeInHerd]| {
+            let mut labels: Vec<String> = Vec::new();
+            for node in side {
+                let label = node.family.label(channels);
+                if !labels.contains(&label) {
+                    labels.push(label);
+                }
+            }
+            labels
         };
-        let label = |side: &[&NodeInHerd]| {
-            let mut labels: Vec<String> = side
-                .iter()
-                .map(|node| node.family.label(channels))
-                .collect();
-            labels.dedup();
-            labels.join(" and ")
+        let (ours, theirs) = (labels(&main_side), labels(&other_side));
+        return if ours.len() == 1 && theirs.len() == 1 {
+            format!("{} and {} disagree since {}", ours[0], theirs[0], block(at))
+        } else {
+            format!(
+                "{} disagree with {} since {}",
+                ours.join(" and "),
+                theirs.join(" and "),
+                block(at)
+            )
         };
-        return format!(
-            "{} and {} disagree since {}",
-            label(&main_side),
-            label(&other_side),
-            block(at)
-        );
     }
     if forked
         .iter()
