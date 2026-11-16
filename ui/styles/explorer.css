@@ -614,9 +614,12 @@ button.link.ex-link {
   overflow-wrap: anywhere;
 }
 
+/* Forced colours drop backgrounds, so every mark drawn by one keeps its colour and gains an
+   outline: the strip's interval bars too, the only mark of a block's interval. */
 @media (forced-colors: active) {
   .ex-swatch,
   .ex-notes-part,
+  .ex-gap-bar,
   .ex-flow,
   .ex-stack-part,
   .ex-meter-fill {
