@@ -86,7 +86,8 @@
 }
 
 /* The unit and time toggles: radio groups drawn as segmented buttons, the chosen one in the
-   accent. TAZ keeps Testnet's warning tone. */
+   accent and in bold, so the choice does not rest on colour alone. TAZ's text keeps Testnet's
+   warning tone in both states; its border and weight change as the others' do. */
 .ex-toggle {
   display: inline-flex;
 }
@@ -116,11 +117,12 @@
   border-color: var(--accent);
   background: var(--banner-accent-bg);
   color: var(--accent-text);
+  font-weight: 600;
 }
 
 .ex-toggle button.ex-unit-test,
-.ex-toggle button.ex-unit-test[aria-checked="true"] {
-  border-color: var(--warn);
+.ex-toggle button.ex-unit-test[aria-checked="true"],
+.ex-toggle button.ex-unit-test[aria-checked="true"]:hover:not(:disabled) {
   color: var(--warn);
 }
 
