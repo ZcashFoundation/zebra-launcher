@@ -101,7 +101,7 @@ which gate the release on each network.
 - Consent given at step 1, before a name exists, binds to the first name chosen; another name
   asks again.
 - A network change waits for the user's Resume even after switching back (the pause holds),
-  and removes the key without restarting zebrad (`EndpointHost::apply(restart)`).
+  and removes the key without restarting zebrad (`EndpointHost::apply(node, restart)`).
 - The commands take no node in PS1, which has one light client server; the UI reads the steps
   from the status instead of a `public_plan` command, and the upload preset is a step answer
   instead of `set_public_limits`.

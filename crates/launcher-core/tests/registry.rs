@@ -1188,3 +1188,44 @@ async fn a_network_change_removes_the_light_wallet_endpoint_in_the_same_write() 
     assert!(!toml.contains("lightwalletd_listen_addr"), "{toml}");
     within(fx.registry.shutdown()).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_nodes_watches_follow_the_node_that_is_first() {
+    let fx = fixture().await;
+    let first = fx.registry.first().expect("first");
+    let mut follow = fx.registry.follow_first().expect("a node");
+    assert_eq!(follow.spec.borrow().id, first.id);
+    let other = within(fx.registry.add(draft(Network::Testnet, "Other")))
+        .await
+        .expect("add");
+    let other = fx.registry.node(&other.id).expect("lookup");
+    within(other.start(&done(), StartOptions::default()))
+        .await
+        .expect("start");
+    assert_eq!(
+        follow.status.borrow().phase,
+        Phase::Stopped,
+        "still the first node's"
+    );
+
+    within(fx.registry.remove(&first.id, false))
+        .await
+        .expect("remove the first");
+    within(follow.spec.wait_for(|spec| spec.id == other.id))
+        .await
+        .expect("follows");
+    within(follow.status.wait_for(|status| status.phase.is_active()))
+        .await
+        .expect("the new first node's status");
+    // The removed node's closed watches end nothing: changes of the new first node come
+    // through.
+    within(other.supervisor.stop()).await.expect("stop");
+    within(
+        follow
+            .status
+            .wait_for(|status| status.phase == Phase::Stopped),
+    )
+    .await
+    .expect("its later changes too");
+    within(fx.registry.shutdown()).await;
+}

@@ -39,7 +39,16 @@ struct Host {
 }
 
 impl EndpointHost for Host {
-    fn apply(&self, _restart: bool) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+    fn apply(
+        &self,
+        node: launcher_types::NodeId,
+        _restart: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+        assert_eq!(
+            node.as_str(),
+            "zebrad-mainnet",
+            "the node the facts come from"
+        );
         let port = self
             .settings
             .current()

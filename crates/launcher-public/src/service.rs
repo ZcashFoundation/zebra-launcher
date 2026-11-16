@@ -54,11 +54,16 @@ const NET_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How often the month's upload is written down.
 const SAVE_EVERY: Duration = Duration::from_secs(10 * 60);
 
-/// What the app does for the actor: write the managed keys from the stored settings and, with
-/// `restart`, restart zebrad if it runs, behind the app's permits. Without `restart` the file
-/// changes for zebrad's next start only, as a network change does.
+/// What the app does for the actor: write `node`'s managed keys from the stored settings and,
+/// with `restart`, restart its zebrad if it runs, behind the app's permits. Without `restart`
+/// the file changes for zebrad's next start only, as a network change does. `node` is the node
+/// the actor's facts come from ([`Wiring::node`]), never another.
 pub trait EndpointHost: Send + Sync + 'static {
-    fn apply(&self, restart: bool) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+    fn apply(
+        &self,
+        node: NodeId,
+        restart: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 }
 
 /// Where the actor gets certificates and names, and what it may do here.
@@ -98,7 +103,8 @@ impl Options {
 /// What the actor needs from the rest of the app.
 pub struct Wiring {
     pub settings: SettingsHandle,
-    /// The serving node's spec: the network it runs on.
+    /// The serving node's spec: its id and the network it runs on. With `status` and `stats`,
+    /// it follows the first node (`RegistryHandle::follow_first`).
     pub node: watch::Receiver<launcher_core::nodes::NodeSpec>,
     pub status: watch::Receiver<Status>,
     pub stats: watch::Receiver<Option<NodeStats>>,
@@ -682,9 +688,10 @@ impl Actor {
             // goes from the file before its next start.
             let restart = spec.network == network;
             let host = self.host.clone();
+            let node = self.node_rx.borrow().id.clone();
             let tx = self.internal_tx.clone();
             tokio::spawn(async move {
-                let result = host.apply(restart).await;
+                let result = host.apply(node, restart).await;
                 let _ = tx.send(Internal::Applied { target, result }).await;
             });
         }
@@ -1231,8 +1238,7 @@ impl Actor {
                 "Zeal runs zebrad on the other network; switch to {network} first"
             ));
         }
-        let node = NodeId::new(format!("zebrad-{}", network.as_str().to_ascii_lowercase()))
-            .ok_or("no node id")?;
+        let node = self.node_rx.borrow().id.clone();
         let spec = PublicServiceSpec::new_light_server(node.clone(), network);
         self.settings
             .update(move |settings| settings.public.services.push(spec))
@@ -1431,7 +1437,10 @@ impl Actor {
         })
         .await?;
         // The endpoint must be gone before the spec is: once it is, the key is the user's.
-        self.host.apply(spec.network == self.network()).await?;
+        let node = self.node_rx.borrow().id.clone();
+        self.host
+            .apply(node, spec.network == self.network())
+            .await?;
         self.applied = Some(None);
         // Every entry the token may be under: the zone's, the spec's, and an older Zeal's for
         // the name, whatever the provider is now. A missing entry is no failure.
