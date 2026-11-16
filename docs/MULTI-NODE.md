@@ -28,7 +28,9 @@ adapter. This document proposes how.
 - Nodes on other machines. Every node is a child process of Zeal on this computer.
 - Containers. Docker images exist for some kinds; a container runtime would be a later
   "where it runs" option, not a node kind.
-- Building or downloading binaries other than the bundled zebrad. Other kinds use a binary
+- Building or downloading binaries other than the bundled zebrad and, on Linux, the bundled
+  zingod, which only the light client server runs
+  ([PUBLIC-SERVICES.md](PUBLIC-SERVICES.md#zingod-as-the-backend)). Other kinds use a binary
   the user already has; verified downloads are a later phase (see [Phases](#phases)).
 - Being a wallet. Zeal supervises Zallet; it does not show balances or send funds.
 
@@ -81,7 +83,7 @@ What each kind needs from Zeal, from its project's releases, documentation and s
 | Zakura | Linux x86-64 and arm64 | signed release tarballs | — | from 1.7.0 |
 | zcashd | Linux x86-64 | the Zcash Foundation's compatibility build | a zebrad or Zakura node | the compatibility build only |
 | Zebend | macOS on Apple Silicon | none yet (needs an unpublished Bend fork) | — | unconfirmed |
-| Zaino | Linux (Docker amd64), from source elsewhere | crates.io, Docker | a zebrad node | not in 0.10.2 |
+| Zaino | Linux (Docker amd64), from source elsewhere | crates.io, Docker | a zebrad node | no release follows it (zaino#1731) |
 | Zallet | Linux | tarballs, .deb, Docker | a zebrad built with the `indexer` feature | from beta.4 |
 | Generic | wherever the program runs | the user's | optional | the program's |
 
@@ -181,8 +183,13 @@ zainod.toml` (`zainod generate-config` writes one).
 - Serves the lightwalletd gRPC on 127.0.0.1:8137; its own JSON-RPC is off unless configured.
   It defaults to Testnet, so Zeal always writes the network.
 - No release binaries for 0.10.2 (crates.io and an amd64 Docker image). Releases up to 0.10.2
-  stop syncing at the NU7 activation height; the fix is not released yet. Zeal reads the
-  version and warns while it predates NU7 support.
+  stop syncing at the NU7 activation height, and no release follows NU7 (zaino#1731, as of
+  2026-11-16). Zeal reads the version and warns while it predates NU7 support.
+- Zingo Labs no longer work on Zaino. Their fork, zingod, follows NU7, and Zeal bundles it on
+  Linux for the light client server, which owns and runs it; it is not a node kind
+  ([PUBLIC-SERVICES.md](PUBLIC-SERVICES.md#zingod-as-the-backend)). A zainod the user picks
+  stays possible through this kind. A zingod node kind can follow in phase 5, reusing that
+  design's supervisor reader and `IndexerStatus`.
 
 ### Zallet
 
@@ -438,7 +445,8 @@ Settings → Nodes.
 4. **The generic adapter** and fake-zebrad's mode that behaves like a zcashd-compatible
    binary for tests; Zebend as a preset once it can be built elsewhere.
 5. **Zaino, Zallet and the zcashd sidecar**, with dependencies, Zallet's wallet setup and
-   a zebrad built with the `indexer` feature.
+   a zebrad built with the `indexer` feature. zingod comes through PUBLIC-SERVICES.md's
+   phases Z1 to Z5 instead, and can become a node kind here.
 6. **Later**: verified downloads of other projects' releases, tailored dashboards for kinds
    other than zebrad, containers.
 
@@ -448,7 +456,10 @@ Decided on 2026-11-03, for phase 2:
 
 1. Zeal bundles only zebrad. Every other kind comes through a program the user picks, in
    the phase that adds it; Zakura's signed release sums make it the first candidate for a
-   verified download later.
+   verified download later. Revised on 2026-11-16, at the maintainer's request: on Linux
+   Zeal also bundles `zeal-zingod`, which only the light client server runs
+   ([PUBLIC-SERVICES.md](PUBLIC-SERVICES.md#zingod-as-the-backend),
+   [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)).
 2. Zallet's zebrad with the `indexer` feature: decided with Zaino, Zallet and the zcashd
    sidecar, which come later (phase 5).
 3. zcashd as its own node or zebrad's `[zcashd_compat]` supervision: also phase 5.
