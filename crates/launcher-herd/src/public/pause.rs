@@ -73,11 +73,11 @@ pub fn pause(spec: &PublicServiceSpec, facts: &Facts) -> Option<(PauseReason, Re
     None
 }
 
-/// Whether the name may be pointed at the network `net` describes: the check found the default
-/// route's gateway and this computer's LAN address, as the network step needs, no VPN carries
-/// that route, and for an open service this computer still has the LAN address the forward
-/// targets. A DNS update from a foreign network would publish where the user is, and a route
-/// that could not be read says nothing about a VPN.
+/// Whether the name may be pointed at the network `net` describes: the check found the router's
+/// default route and this computer's LAN address, as the network step needs, no VPN on the
+/// route to the internet, and for an open service this computer still has the LAN address the
+/// forward targets. A DNS update from a foreign network would publish where the user is, and a
+/// route that could not be read says nothing about a VPN.
 pub fn may_point_name_here(
     spec: &PublicServiceSpec,
     net: &launcher_types::public::NetFacts,
@@ -401,7 +401,7 @@ mod tests {
         };
         assert!(may_point_name_here(&setting_up, &cafe));
         assert!(!may_point_name_here(&setting_up, &vpn));
-        // A route that could not be read, as with a VPN's default route without a gateway.
+        // No default route with a gateway, or none that could be read.
         let no_route = NetFacts {
             lan_addr: None,
             gateway: None,
@@ -415,6 +415,39 @@ mod tests {
             ..home
         };
         assert!(!may_point_name_here(&setting_up, &no_gateway));
+    }
+
+    #[test]
+    fn a_tunnels_default_ahead_of_the_routers_points_no_name_here() {
+        // The network check's facts for a default without a gateway on tun0 at a lower metric
+        // than the router's on wlan0, which asks no NAT-PMP question.
+        let net = NetFacts {
+            lan_addr: Some(lan()),
+            gateway: Some("192.168.1.1".parse().unwrap()),
+            interface: Some("wlan0".into()),
+            vpn: Some("tun0".into()),
+            wan: WanKind::Unknown,
+            wan_addr: None,
+            checked_at: at(NOW),
+        };
+        let spec = open_spec();
+        assert!(!may_point_name_here(&spec, &net));
+        let setting_up = PublicServiceSpec {
+            opened: false,
+            ..spec.clone()
+        };
+        assert!(!may_point_name_here(&setting_up, &net));
+        let mut facts = serving_facts();
+        facts.net = Some(net);
+        assert_eq!(
+            pause(&spec, &facts),
+            Some((
+                PauseReason::VpnRoute {
+                    interface: "tun0".into()
+                },
+                Resume::Automatic
+            ))
+        );
     }
 
     #[test]

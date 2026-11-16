@@ -728,8 +728,9 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   facts, runs launcher-herd's `plan`, `pause`, `state` and `gateway_mode`, drives its children
   and publishes a `PublicStatus` on a `watch` (the `public_status` event, `get_public_status`).
   Its children: the `LightMonitor` (`GetLightdInfo` over h2c on loopback at each endpoint
-  change and every 10 minutes, with Zodl's check), the network checks (the default route from
-  `/proc/net/route`, a VPN by interface name, the router's address from NAT-PMP's
+  change and every 10 minutes, with Zodl's check), the network checks (the routes from
+  `/proc/net/route`, a VPN on the route to the internet from the main table and from the
+  address the kernel picks towards the internet, the router's address from NAT-PMP's
   external-address request) every 5 minutes, the `DdnsActor` (DuckDNS updates, the system
   resolver), the `AcmeActor` and the front door.
 - **zebrad's endpoint.** While the service is switched on with current consent on zebrad's
