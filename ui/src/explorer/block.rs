@@ -220,7 +220,7 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
         }
         .into_any();
     };
-    let largest = turnstile_scale(&deltas, &coinbase) as f64;
+    let largest = turnstile_scale(&deltas, &coinbase, &users).max(1) as f64;
     let width = |zat: u64| format!("{:.2}%", zat as f64 / largest * 50.0);
     let rows = Pool::ALL.into_iter().map(|pool| {
         let delta = deltas.get(pool);
@@ -298,14 +298,26 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
     .into_any()
 }
 
-/// The turnstile's scale, in zatoshis.
-fn turnstile_scale(deltas: &PerPool<i64>, coinbase: &PerPool<u64>) -> u64 {
+/// The turnstile's scale, in zatoshis: its longest bar either side of the axis. Into a pool
+/// the coinbase's bar comes first and the users' adds to it; out of a pool the users' bar
+/// stands alone. The lockbox row draws its change in place of the users' flow.
+fn turnstile_scale(deltas: &PerPool<i64>, coinbase: &PerPool<u64>, users: &PerPool<i64>) -> u64 {
     Pool::ALL
-        .iter()
-        .map(|pool| deltas.get(*pool).unsigned_abs().max(coinbase.get(*pool)))
+        .into_iter()
+        .map(|pool| {
+            let moved = if pool == Pool::Lockbox {
+                deltas.get(pool)
+            } else {
+                users.get(pool)
+            };
+            let into = coinbase
+                .get(pool)
+                .saturating_add(u64::try_from(moved).unwrap_or(0));
+            let out = if moved < 0 { moved.unsigned_abs() } else { 0 };
+            into.max(out)
+        })
         .max()
-        .unwrap_or(1)
-        .max(1)
+        .unwrap_or(0)
 }
 
 /// The reward split (V3): one bar of the miner's part, the streams, the fees the miner kept and
@@ -598,5 +610,29 @@ fn Future(future: FutureBlock, nav: NodeExplorer) -> impl IntoView {
             <p class="muted">"The page becomes the block once your node has it."</p>
             <RouteLink nav route=previous>"Go to the tip"</RouteLink>
         </section>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use launcher_types::explorer::PerPool;
+
+    use super::turnstile_scale;
+
+    #[test]
+    fn the_turnstile_scale_holds_every_bar() {
+        // Orchard: the coinbase pays 10 in and users take 15 out; Sapling: 3 in from the
+        // coinbase and 4 more from users; the lockbox gains 2.
+        let coinbase = PerPool([0, 0, 3, 10, 0, 0]);
+        let users = PerPool([0, 0, 4, -15, 0, 0]);
+        let deltas = PerPool([0, 0, 7, -5, 2, 0]);
+        assert_eq!(turnstile_scale(&deltas, &coinbase, &users), 15);
+        let users = PerPool([0, 0, 4, -1, 0, 0]);
+        let deltas = PerPool([0, 0, 7, 9, 2, 0]);
+        assert_eq!(turnstile_scale(&deltas, &coinbase, &users), 10);
+        let users = PerPool([0, 0, 9, -1, 0, 0]);
+        assert_eq!(turnstile_scale(&deltas, &coinbase, &users), 12);
+        let quiet = PerPool([0; 6]);
+        assert_eq!(turnstile_scale(&quiet, &PerPool([0; 6]), &quiet), 0);
     }
 }
