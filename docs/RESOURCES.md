@@ -375,10 +375,10 @@ This differs on purpose from the RPC monitor and the metrics poller. They wait f
 `Phase::Running` and for zebrad's log lines. Resources need neither, so every node kind
 gets them.
 
-**Windows.** The strong `Arc<Job>` lives only in `Run.handle` and drops at the end of
-`finalize`, as the job does today. A read in flight holds the job open to the end of that
-read, so dropping the handle terminates a kill-on-close job itself, and the kill-on-close
-timing does not change.
+**Windows.** The strong `Arc<Job>` lives only in `Run.handle`. `finalize` drops it right
+after it clears the probe, before it answers the run's callers or spawns the next run. A read
+in flight holds the job open to the end of that read, so dropping the handle terminates a
+kill-on-close job itself.
 
 ### The node sampler
 
