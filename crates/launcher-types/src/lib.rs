@@ -16,11 +16,13 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 pub mod explorer;
+mod health;
 mod nodes;
 pub mod public;
 mod resources;
 mod zebrad;
 
+pub use health::{Level, NO_PEERS_FOR, STALE_AFTER, SYNCED_PROGRESS};
 pub use nodes::{
     MAX_NODES, NodeDraft, NodeEvent, NodeId, NodeInfo, NodeKind, NodePort, NodeProgram, NodeRole,
     NodeUpdate, PortRole, REFUSED_P2P_PORTS, RESERVED_PORTS, assign_ports, node_ports,

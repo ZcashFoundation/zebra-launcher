@@ -6,6 +6,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub use launcher_types::SYNCED_PROGRESS;
 use launcher_types::{ExitClass, ExitInfo, Phase, ValuePool};
 
 use crate::charts::compact;
@@ -256,9 +257,6 @@ pub fn shortcut_label(number: usize, mac: bool) -> String {
         format!("Ctrl+{number}")
     }
 }
-
-/// From this verification progress on the chain is at its tip, as far as the bar can show.
-pub const SYNCED_PROGRESS: f64 = 0.9999;
 
 /// A verification progress fraction as a percentage from 0 to 100, for a progress bar's width
 /// and value. Not-a-number counts as nothing done.
