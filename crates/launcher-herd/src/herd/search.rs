@@ -245,7 +245,7 @@ fn sort_largest_first(branches: &mut [Placed]) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fork {
     /// The first height where they differ: one above their last common block. For a deep
-    /// fork, a lower bound.
+    /// fork, an upper bound: the fork is at `at` or below it.
     pub at: u32,
     /// They differ even [`MAX_REORG`] blocks below the lower top.
     pub deep: bool,
