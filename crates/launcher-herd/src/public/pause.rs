@@ -5,7 +5,7 @@
 //! themselves (zebrad restarting or behind, a failed wallet check, an expired certificate)
 //! keep it up and tell wallets to try again, so Let's Encrypt's renewals still get through.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use launcher_types::{
     Phase,
@@ -80,6 +80,24 @@ pub fn may_point_name_here(
     net.vpn.is_none() && lan_kept
 }
 
+/// Since when an open service's name has resolved away from this network without a break,
+/// from the last value in `facts.name_elsewhere_since` and the facts at `facts.now`.
+pub fn name_elsewhere_since(spec: &PublicServiceSpec, facts: &Facts) -> Option<SystemTime> {
+    // Without NAT-PMP's answer, the address DuckDNS saw, as the name step checks.
+    let expected = super::expected_address(facts);
+    let elsewhere = match (&facts.dns, expected) {
+        (Some(dns), Some(expected)) if dns.checked_at.is_some() => {
+            !dns.resolved.contains(&expected)
+        }
+        _ => false,
+    };
+    light::track_since(
+        facts.name_elsewhere_since,
+        elsewhere && spec.opened,
+        facts.now,
+    )
+}
+
 /// Why an open service tells wallets to try again, if it must.
 pub fn degraded(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReason> {
     let expired = facts
@@ -129,7 +147,7 @@ pub fn degraded(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReaso
 
 #[cfg(test)]
 mod tests {
-    use std::{net::IpAddr, time::SystemTime};
+    use std::net::IpAddr;
 
     use launcher_types::{
         ExitClass, Network, NodeId,

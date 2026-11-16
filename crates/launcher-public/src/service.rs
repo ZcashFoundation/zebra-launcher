@@ -627,16 +627,7 @@ impl Actor {
         facts.at_tip_since = self.at_tip_since;
         self.behind_since = track_since(self.behind_since, behind(facts.height, facts.tip), now);
         facts.behind_since = self.behind_since;
-        // Without NAT-PMP's answer, the address DuckDNS saw, as the name step checks.
-        let expected = rules::expected_address(&facts);
-        let elsewhere = match (&facts.dns, expected) {
-            (Some(dns), Some(expected)) if dns.checked_at.is_some() => {
-                !dns.resolved.contains(&expected)
-            }
-            _ => false,
-        };
-        self.name_elsewhere_since =
-            track_since(self.name_elsewhere_since, elsewhere && spec.opened, now);
+        self.name_elsewhere_since = rules::name_elsewhere_since(&spec, &facts);
         facts.name_elsewhere_since = self.name_elsewhere_since;
 
         let steps = rules::plan(&spec, &facts);
