@@ -537,7 +537,8 @@ flag (`?public=<flag>`).
 | zingod serves a block zebrad doesn't have | the tip cross-check | stops zingod | "zingod's chain doesn't match Zebra's at block 4,611,980. [Rebuild]" | the user's Rebuild | `zingod-mismatch` |
 | an upgrade zingod doesn't know is active | zebrad's upgrades against `ZINGOD_KNOWS` | doesn't start zingod; `BuildTooOld` | "zingod 1.1.0 doesn't know NU8, which is active. Wallets that use your server see an error until Zeal updates zingod." | a Zeal update | `zingod-tooold` |
 | an upgrade zingod doesn't know is scheduled (Z4) | the same | no opening within 7 days of it; a countdown from 14 days; `BuildTooOld` at activation minus one | "zingod 1.1.0 doesn't know NU8, which activates at block 4,700,000 in about 5 days. From then until Zeal updates zingod, wallets that use your server see an error." | a Zeal update | `zingod-upgrade` |
-| an untested pair, or Mainnet before Z4 | `TESTED_ZINGOD` | the choice is disabled; a spec that has it is `NotAvailable` | "zingod is being tested on Testnet first" | a Zeal update | `zingod-mainnet` |
+| Mainnet before Z4, or an untested pair at setup | `TESTED_ZINGOD` | the choice is disabled | "zingod is being tested on Testnet first" | a Zeal update | `zingod-mainnet` |
+| a set-up zingod meets an untested pair: the node's channel or zebrad's pin changed | `TESTED_ZINGOD` | `IndexerUntested`; doesn't start zingod | "zingod 1.1.0 isn't tested with Zebra 7.1.0-alpha.0 on Testnet yet. Wallets that use your server are told to try again until Zeal updates zingod, or Zebra · Testnet runs a tested version." | a Zeal update, or a tested zebrad | `zingod-untested` |
 | no `zeal-zingod` on this system | `Options.zingod_binary` is `None` | the choice is disabled | "zingod runs on Linux only for now" | — | `zingod-absent` |
 
 A failed wallet check stays PS1's `WalletCheckFailed`. Two lines close the front door: PS1's
@@ -557,8 +558,12 @@ always writes `cookie_path`, so zingod's own lookup (`<cache dir>/zebra/.cookie`
 
 - **Tested pairs.** `TESTED_ZINGOD` in launcher-herd lists each zingod version with the zebrad
   versions and networks it passed with: in Z3, 1.1.0 with zebrad 7.0.0 on Testnet; Z4 adds
-  Mainnet once its gate passes. Any other pair is `NotAvailable::UntestedZingod`. A
-  launcher-herd test checks that the bundled `ZINGOD_VERSION` is on the list.
+  Mainnet once its gate passes. Any other pair disables the choice at setup. For a light client
+  server already set up with zingod it is `IndexerUntested`, a `Degraded` reason, so the front
+  door stays up in `Unavailable` and renewals go on; PS1's `NotAvailable` would close it. One
+  launcher-herd test checks that the bundled `ZINGOD_VERSION` is on the list, and another that
+  the Stable `ZEBRAD_VERSION` is listed with it for each network zingod is offered on, so a pin
+  bump can't leave the pair untested without a failing test.
 - **One network, one source.** zingod doesn't check its validator's network: in a research run,
   set to `network = "mainnet"` against a Regtest zebrad, it anchored on the Regtest genesis and
   reported `serving` with `chain.network` `mainnet`. So Zeal writes zingod's `network`, the
@@ -1119,13 +1124,13 @@ PublicServiceSpec {
 pub struct ZingodSpec { pub port: u16, pub dir: PathBuf }          // recorded when first chosen
 Consent { #[serde(default)] pub backend: LightBackend }           // a consent covers one backend
 StepAnswer::Backend { backend: LightBackend }
-NotAvailable::UntestedZingod { version: String, network: Network }
 CheckId: ZingodTested, UpgradesKnown, IndexSpace, IndexReady, TipMatches
                                 // beside ZebradTested, AtTip, EndpointOpened and WalletCheck
 DegradedReason: IndexerStarting { waiting: IndexerWait },         // ZebradTip, Boot, Backoff
     IndexBuilding { served: Option<u64>, target: Option<u64>, eta_secs: Option<u64> },
     IndexBehind { blocks: u64 },
     IndexerDown { why: DownReason },                              // Zingod { reason, message }, NoAnswer, NoValidator
+    IndexerUntested { version: String, zebrad: String, network: Network },
     IndexerStuck { at: u64, zebrad_at: u64 }, IndexerFailed { class: ExitClass }, IndexBroken,
     ChainMismatch { at: u64 }, DiskLow { free_bytes: u64 }
 PauseReason::BuildTooOld { upgrade: String, height: u64 }
@@ -1168,9 +1173,9 @@ over.
   turned off alone; one zingod run per zebrad run; the stall rule's two windows and its single
   restart; the disk hysteresis; the cross-check's three in a row; every `/status` state mapped;
   the Service step's checks for both backends; a consent for one backend not covering the other;
-  `DEFAULT_BACKEND`; `TESTED_ZINGOD` holding the bundled `ZINGOD_VERSION`; the upgrade gate;
-  `gateway_mode` keeping the front door up for every zingod problem but `BackingStopped` and
-  `BuildTooOld`.
+  `DEFAULT_BACKEND`; `TESTED_ZINGOD` holding the bundled `ZINGOD_VERSION` with the Stable
+  `ZEBRAD_VERSION`; the upgrade gate; `gateway_mode` keeping the front door up for every zingod
+  problem but `BackingStopped` and `BuildTooOld`, an untested pair included.
 - **The adapter** (launcher-core):
   - the configuration for both networks against a golden file, every key present in
     `tests/fixtures/zingod-1.1.0-generate.toml` or on the list of unprinted keys
