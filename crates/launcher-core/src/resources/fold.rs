@@ -92,7 +92,7 @@ impl ProcEntry {
 ///   after it is orphaned and re-parented to init or a subreaper.
 ///
 /// Kernel threads are in group 0 and are children of pid 2, so they never qualify.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 pub fn select(
     entries: &[ProcEntry],
     group: u32,

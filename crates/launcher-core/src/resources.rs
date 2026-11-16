@@ -10,8 +10,8 @@
 //! The reads are blocking system calls, so each one runs in `spawn_blocking`, taking its inputs
 //! by value and returning an owned reading; each actor keeps its own state, and nothing is
 //! shared. The per-OS readers implement [`Reader`] and [`MachineReader`]: the Linux one reads
-//! `/proc`; on other platforms reading is not supported yet, the samplers publish `None` and
-//! stop.
+//! `/proc`, the macOS one libproc and Mach's host statistics; on other platforms reading is
+//! not supported yet, the samplers publish `None` and stop.
 //!
 //! ```text
 //!   watch<Option<TreeProbe>> ──▶ ResourceSampler ──spawn_blocking──▶ Reader::tree
@@ -35,6 +35,8 @@ use crate::process::TreeProbe;
 mod fold;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod procfs;
 
@@ -170,7 +172,11 @@ pub fn platform_reader() -> Arc<dyn Reader> {
     {
         Arc::new(linux::LinuxReader::new())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        Arc::new(macos::MacReader::new())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Arc::new(Unsupported)
     }
@@ -182,17 +188,21 @@ pub fn platform_machine_reader() -> Arc<dyn MachineReader> {
     {
         Arc::new(linux::LinuxReader::new())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        Arc::new(macos::MacMachineReader::new())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Arc::new(Unsupported)
     }
 }
 
-/// The reader of a platform that has none yet (macOS and Windows come with phase 3).
-#[cfg(not(target_os = "linux"))]
+/// The reader of a platform that has none yet.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 struct Unsupported;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl Unsupported {
     fn error() -> io::Error {
         io::Error::new(
@@ -202,14 +212,14 @@ impl Unsupported {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl Reader for Unsupported {
     fn tree(&self, _probe: &TreeProbe, _sticky: &[Identity]) -> io::Result<TreeReading> {
         Err(Self::error())
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl MachineReader for Unsupported {
     fn machine(&self) -> io::Result<MachineReading> {
         Err(Self::error())
