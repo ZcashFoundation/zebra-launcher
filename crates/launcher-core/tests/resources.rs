@@ -315,8 +315,8 @@ async fn samples_stop_with_the_run_and_start_again_with_the_next() {
     live.stop().await;
 }
 
-/// Windows: the sampler holds the run's job only while it reads, so the job closes when the
-/// supervisor finalizes the run, and what is left in it dies then (`KILL_ON_JOB_CLOSE`).
+/// Windows: the sampler holds the run's job only while it reads, and what is left in the job
+/// dies when the supervisor finalizes the run (`KILL_ON_JOB_CLOSE`, and the handle's drop).
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_job_closes_when_the_run_is_finalized() {

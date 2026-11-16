@@ -60,8 +60,8 @@ pub(super) struct WindowsReader;
 
 impl Reader for WindowsReader {
     fn tree(&self, probe: &TreeProbe, sticky: &[Identity]) -> io::Result<TreeReading> {
-        // Held for this read only: the run's handle keeps the job, which closes when the run is
-        // finalized.
+        // Held for this read only. The run's handle keeps the job; when the run is finalized,
+        // dropping the handle kills what is left in it even while this read holds it.
         let job = probe
             .job
             .upgrade()

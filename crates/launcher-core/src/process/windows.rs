@@ -58,6 +58,7 @@ const MAX_LISTED: usize = 1 << 16;
 #[derive(Debug)]
 pub struct Job {
     handle: OwnedHandle,
+    kill_on_close: bool,
 }
 
 /// What a job counted for every process ever in it, its nested jobs' included.
@@ -100,7 +101,15 @@ impl Job {
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            kill_on_close,
+        })
+    }
+
+    /// Whether closing the job's last handle kills every process in it.
+    pub fn kills_on_close(&self) -> bool {
+        self.kill_on_close
     }
 
     /// Adds a process to the job.

@@ -177,8 +177,8 @@ pub struct TreeProbe {
     /// The same moment on the monotonic clock: the base of every rate.
     pub spawned: Instant,
     /// The run's job, upgraded only for the length of one read. The run's [`ChildHandle`]
-    /// holds the only strong reference, so the job still closes when the supervisor finalizes
-    /// the run, and `KILL_ON_JOB_CLOSE` is not delayed.
+    /// holds the only stored strong reference. A read in flight keeps the job open to its end,
+    /// so dropping the handle kills the job's processes itself (`KILL_ON_JOB_CLOSE`).
     #[cfg(windows)]
     pub(crate) job: Weak<windows::Job>,
 }
@@ -188,9 +188,22 @@ pub struct TreeProbe {
 pub struct ChildHandle {
     pid: u32,
     stdin: Option<ChildStdin>,
-    /// The only strong reference to the job, which closes when the handle is dropped.
+    /// The only stored strong reference to the job: a read holds another while it runs.
     #[cfg(windows)]
     job: Arc<windows::Job>,
+}
+
+/// A job that kills on close ends with the handle, not with the last reference to it: a
+/// sampler's read in flight holds the job open until the read ends.
+#[cfg(windows)]
+impl Drop for ChildHandle {
+    fn drop(&mut self) {
+        if self.job.kills_on_close() {
+            // Nothing is left to report to: a job that cannot be terminated still kills its
+            // processes when the read's reference is dropped.
+            let _ = self.job.terminate();
+        }
+    }
 }
 
 impl ChildHandle {
@@ -415,5 +428,60 @@ mod tests {
         for key in ["ZEBRA", "ZEBRAD_X", "PATH", "MY_ZEBRA_X", ""] {
             assert!(!is_zebra_env_var(OsStr::new(key)), "{key}");
         }
+    }
+
+    /// Windows: dropping the run's handle ends a kill-on-close job although a sampler's read
+    /// still holds it, and leaves a job without the limit running, as closing it would.
+    #[cfg(windows)]
+    #[test]
+    fn dropping_the_handle_ends_the_job_while_a_read_holds_it() {
+        use std::{
+            os::windows::io::AsRawHandle,
+            process::{Child, Command, Stdio},
+            sync::Arc,
+            time::{Duration, Instant, SystemTime},
+        };
+
+        use super::{ChildHandle, windows::Job};
+
+        let in_job = |kill_on_close| {
+            let ping = Command::new("ping")
+                .args(["-n", "30", "127.0.0.1"])
+                .stdout(Stdio::null())
+                .spawn()
+                .expect("ping starts");
+            let job = Job::new(kill_on_close).expect("a job");
+            job.assign(ping.as_raw_handle())
+                .expect("ping joins the job");
+            let handle = ChildHandle {
+                pid: ping.id(),
+                stdin: None,
+                job: Arc::new(job),
+            };
+            (ping, handle)
+        };
+        let exited = |ping: &mut Child| ping.try_wait().expect("ping's status").is_some();
+
+        let (mut ping, handle) = in_job(true);
+        let probe = handle.probe(1, SystemTime::now(), Instant::now());
+        // A read in flight, as the sampler's holds it.
+        let read = probe.job.upgrade().expect("the run's job");
+        drop(handle);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !exited(&mut ping) {
+            assert!(
+                Instant::now() < deadline,
+                "ping outlived the run's handle while a read held the job"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(read);
+
+        let (mut ping, handle) = in_job(false);
+        drop(handle);
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!exited(&mut ping), "a job without the limit kills nothing");
+        ping.kill().expect("ping is killed");
+        ping.wait().expect("ping ends");
     }
 }

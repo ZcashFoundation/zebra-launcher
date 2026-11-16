@@ -210,9 +210,11 @@ Parent pids are not used on Windows: Toolhelp's can be stale ([Raymond Chen,
 2015][chen-ppid]), and the job's list is authoritative.
 
 The job handle never leaves `process/windows.rs`. The probe carries a `Weak<Job>` that is
-upgraded only for one read, so the sampler can never hold the job open after its run.
-Holding it open would delay `KILL_ON_JOB_CLOSE`; a `DuplicateHandle` copy would delay it by
-up to one tick.
+upgraded only for one read, so the sampler holds the job open at most to the end of a read
+in flight; a `DuplicateHandle` copy would hold it for up to one tick. Closing the job is what
+fires `KILL_ON_JOB_CLOSE`, so dropping the run's `ChildHandle` terminates a kill-on-close job
+itself (`TerminateJobObject`): what is left in the job dies when the run is finalized, even
+while a read holds the job.
 
 ### Linux: the group, parent links and sticky members
 
@@ -374,8 +376,9 @@ This differs on purpose from the RPC monitor and the metrics poller. They wait f
 gets them.
 
 **Windows.** The strong `Arc<Job>` lives only in `Run.handle` and drops at the end of
-`finalize`, as the job does today, so the kill-on-close timing does not change. A read in
-flight can delay it by the length of that read (milliseconds), never by a tick.
+`finalize`, as the job does today. A read in flight holds the job open to the end of that
+read, so dropping the handle terminates a kill-on-close job itself, and the kill-on-close
+timing does not change.
 
 ### The node sampler
 
@@ -1561,7 +1564,9 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      - Unit tests: `resources/macos.rs` reads its own process, a child by its parent link and
        then as a zombie, the root check, the timebase and the computer; `resources/windows.rs`
        reads a `ping` in a job of its own until the job closes (which kills it), FILETIME
-       conversions and the computer.
+       conversions and the computer; `process.rs` drops a run's handle while a read holds its
+       job, and checks that the `ping` in a kill-on-close job ends and one in a job without
+       the limit runs on.
    - The unsupported reader stays for other platforms.
 
    Could not be checked where this was built (Linux under WSL2, with clippy for
@@ -1809,7 +1814,8 @@ Both are negligible beside zebrad's five or more busy cores.
 ### Windows job semantics
 
 - **Own readers:** uses the job for both the boundary and the totals. It holds the job only
-  through a `Weak`, so `KILL_ON_JOB_CLOSE` timing does not change; a duplicated handle
+  through a `Weak`, for one read at a time, and dropping the run's handle terminates a
+  kill-on-close job, so `KILL_ON_JOB_CLOSE` timing does not change; a duplicated handle
   would delay it by a tick.
 - **sysinfo:** leaves the job unused. Its own fallback for Windows needs the job handle, and
   that is the supervisor change it set out to avoid.
