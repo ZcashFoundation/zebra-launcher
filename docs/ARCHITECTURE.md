@@ -141,9 +141,10 @@ files are brought up to date and its actors started in
   every node saved without the field (`herd::peers::adopt`): no key or `true` becomes the
   node's own folder, starting from a copy of the shared file in zebrad's default cache
   folder (made once, never over an existing file; the app passes that folder to
-  `SettingsStore::open_with`), and the decision is written back. `reset_config` gives a
-  `kept` node its own folder: the new file has no value of the user's, and the spec is
-  saved as `own`.
+  `SettingsStore::open_with`), and the decision is written back. A node with an
+  interrupted apply waits for the next launch, since its file is the abandoned one until
+  the runtime restores the backup. `reset_config` gives a `kept` node its own folder: the
+  new file has no value of the user's, and the spec is saved as `own`.
 - **Ports at every start.** The supervisor tries binding each of the node's addresses
   (P2P on `0.0.0.0`, RPC and metrics on loopback) before it spawns zebrad: one that
   another program holds fails the start as `PortInUse`, naming the port, before zebrad
