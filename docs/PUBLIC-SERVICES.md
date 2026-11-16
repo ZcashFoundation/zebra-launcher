@@ -1589,7 +1589,8 @@ came first): `public_status` (one changed `PublicStatus`, counters coalesced to 
   (`SettingsHandle::update`), the only writer of `launcher.json`. So neither a stale copy in a
   page nor the webview can set `switch_on`, `resume_on_launch` or `consent`, and
   `apply_from_ui`'s stale-copy test gains a `public` case. `<app data>/public/` holds `acme/`,
-  `certs/<name>/`, `state.json` (mappings, firewall rules added, the latest evidence) and
+  `certs/<name>/`, `state.json` (mappings, firewall rules added, the latest evidence and
+  staging validation per name) and
   `usage.json`, all written atomically.
 - **Crates**, all in `deny.toml`'s allow-list (their trees still to pass `cargo deny`):
   instant-acme 0.8.5 and prost (Apache-2.0); rcgen 0.14, x509-parser 0.18, hickory-resolver

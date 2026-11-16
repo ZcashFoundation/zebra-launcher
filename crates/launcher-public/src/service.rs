@@ -587,7 +587,12 @@ impl Actor {
             .map(|acme| acme.handle.status.borrow().clone());
         facts.local_test = self.local_test.clone();
         facts.hairpin = self.hairpin.clone();
-        facts.evidence = self.state.evidence.clone();
+        facts.evidence = spec
+            .name
+            .as_ref()
+            .and_then(|name| self.state.names.get(name.as_str()))
+            .map(|proven| proven.evidence.clone())
+            .unwrap_or_default();
         facts.name_elsewhere_since = self.name_elsewhere_since;
         let stats = self
             .door
@@ -743,18 +748,26 @@ impl Actor {
                 }
             }
             Internal::Door(launcher_gateway::Event::Outside { at }) => {
-                self.record(Evidence {
-                    source: EvidenceSource::OutsideTlsConnection,
-                    at,
-                });
+                // The front door serves the spec's name.
+                if let Some(name) = self.spec().and_then(|spec| spec.name) {
+                    self.record(
+                        name.as_str(),
+                        Evidence {
+                            source: EvidenceSource::OutsideTlsConnection,
+                            at,
+                        },
+                    );
+                }
             }
             Internal::Door(_) => {}
         }
     }
 
-    fn record(&mut self, new: Evidence) {
-        let before = self.state.evidence.clone();
-        evidence::record(&mut self.state.evidence, new);
+    /// Records evidence for `name`.
+    fn record(&mut self, name: &str, new: Evidence) {
+        let proven = self.state.names.entry(name.to_string()).or_default();
+        let before = proven.evidence.clone();
+        evidence::record(&mut proven.evidence, new);
         // An outside connection is written down at most hourly.
         let worth_saving = before.iter().all(|old| old.source != new.source)
             || before.iter().any(|old| {
@@ -941,7 +954,10 @@ impl Actor {
                         config,
                         self.challenge.clone(),
                         self.can_validate.subscribe(),
-                        self.state.staging_validated_at,
+                        self.state
+                            .names
+                            .get(name.as_str())
+                            .and_then(|proven| proven.staging_validated_at),
                     );
                     let forwards = vec![
                         forward_changes(handle.status.clone(), self.internal_tx.clone()),
@@ -965,16 +981,29 @@ impl Actor {
                     .try_send(AcmeCmd::Order { asked: false });
                 self.acme_asked = true;
             }
+            let name = acme.key.clone();
             let validated = *acme.handle.validated.borrow();
             let staging = acme.handle.status.borrow().staging_validated_at;
             if let Some(at) = validated {
-                self.record(Evidence {
-                    source: EvidenceSource::TlsAlpn01Validation,
-                    at,
-                });
+                self.record(
+                    &name,
+                    Evidence {
+                        source: EvidenceSource::TlsAlpn01Validation,
+                        at,
+                    },
+                );
             }
-            if staging.is_some() && self.state.staging_validated_at != staging {
-                self.state.staging_validated_at = staging;
+            let kept = self
+                .state
+                .names
+                .get(&name)
+                .and_then(|proven| proven.staging_validated_at);
+            if staging.is_some() && kept != staging {
+                self.state
+                    .names
+                    .entry(name)
+                    .or_default()
+                    .staging_validated_at = staging;
                 self.save_state();
             }
         }
@@ -1271,6 +1300,10 @@ impl Actor {
                 // The token is kept for DuckDNS's zone, so it serves the new name too.
                 let secret = match &spec.name {
                     Some(old) if *old != name => {
+                        // What was proven for the old name is not the new one's.
+                        if self.state.names.remove(old.as_str()).is_some() {
+                            self.save_state();
+                        }
                         self.move_legacy_token(old, spec.secret.clone()).await
                     }
                     _ => spec.secret.clone(),
@@ -1468,6 +1501,9 @@ impl Actor {
             .await
             .map_err(|err| err.to_string())?;
         self.held = None;
+        // A new setup proves itself again, whatever its name.
+        self.state.names.clear();
+        self.save_state();
         self.name_changed();
         self.net = None;
         self.port_free = None;

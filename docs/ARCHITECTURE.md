@@ -746,7 +746,9 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   outside), then production with a fresh P-256 key, verified with the platform verifier before
   the front door gets it. Renewal at two thirds of the lifetime, only while the front door is
   up. `attempts.json` keeps the order budget. Files under `<app data>/public/`: `acme/`,
-  `certs/<name>/`, `state.json` (evidence, the month's upload).
+  `certs/<name>/`, `state.json` (per name the evidence and the last staging validation, so a
+  new name starts with staging and nothing proven; the month's upload). A name change drops
+  the old name's entry, and "Turn off and forget" drops them all.
 - **Gates.** "Open to the internet" (`open_public_service`) re-runs every gate in the actor;
   before it the front door serves Let's Encrypt and this computer only. Quitting closes the
   front door before zebrad stops.

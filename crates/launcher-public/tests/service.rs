@@ -478,3 +478,49 @@ async fn an_off_that_cannot_be_saved_still_closes_the_service() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn what_was_proven_belongs_to_its_name() {
+    use launcher_types::public::{DnsProvider, Reachability};
+    // An outside connection a minute ago, for zec-old only.
+    let at = std::time::SystemTime::now() - Duration::from_secs(60);
+    let state = serde_json::json!({
+        "names": {
+            "zec-old.duckdns.org": {
+                "evidence": [{ "source": "outside_tls_connection", "at": at }],
+                "staging_validated_at": at,
+            }
+        }
+    });
+    let s = setup_with(move |dir| {
+        std::fs::create_dir_all(dir.join("public")).unwrap();
+        std::fs::write(dir.join("public/state.json"), state.to_string()).unwrap();
+        Arc::new(FileStore::new(dir.join("secrets")))
+    })
+    .await;
+    s.services.begin_setup(Network::Mainnet).await.unwrap();
+    name(&s, "zec-new", DnsProvider::DuckDns).await;
+    let status = wait_for(&s.services, |status| status.name.is_some()).await;
+    assert_eq!(
+        status.reach,
+        Reachability::NotChecked,
+        "nothing proven for zec-new"
+    );
+    name(&s, "zec-old", DnsProvider::DuckDns).await;
+    let status = wait_for(&s.services, |status| {
+        status
+            .name
+            .as_ref()
+            .is_some_and(|name| name.as_str() == "zec-old.duckdns.org")
+    })
+    .await;
+    assert!(
+        matches!(status.reach, Reachability::Proven { .. }),
+        "{:?}",
+        status.reach
+    );
+    // Forgotten, nothing stays proven.
+    s.services.forget(false).await.unwrap();
+    let saved = std::fs::read_to_string(s.dir.path().join("public/state.json")).unwrap();
+    assert!(!saved.contains("zec-old"), "{saved}");
+}
