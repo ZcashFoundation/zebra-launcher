@@ -586,19 +586,31 @@ to the draft release. `manifest` already needs `draft` and hashes every draft
 asset, so `SHA256SUMS` and the release's attestations cover the archive.
 
 - `ci.yml` runs the workflow on pull requests that change the `ZINGOD_*` pins,
-  `build-zingod.sh` or the workflow.
+  `build-zingod.sh` or the workflow. A job that calls a reusable workflow can't
+  have steps, so a `zingod-gate` job diffs the pull request against its base,
+  as `real-zebrad`'s gate step does, and outputs `run`. The `zingod-sidecars`
+  job has `needs: zingod-gate` and `if: needs.zingod-gate.outputs.run ==
+  'true'`. `ci.yml` grants only `contents: read`, and the called jobs declare
+  `id-token: write` and `attestations: write`, so the calling job grants all
+  three itself.
+- The workflow has an `attest` input, true by default, that both attestation
+  steps follow. `ci.yml` passes false: a fork's pull request gets no OIDC
+  token, and a binary built from an unmerged branch never carries an
+  attestation. `bundle.yml` and `release.yml` always attest.
 - `collect-bundles.sh --raw` includes the binary.
 - `smoke-linux.sh` runs `zeal-zingod --version` with the other sidecars, and
   counts a live `zeal-zingod` as left over.
 - The CI binaries are unsigned, like the zebrad sidecars; a release's
   `SHA256SUMS` and its cosign bundle cover the Linux bundles.
 
-To check that an artifact came from this workflow:
+To check that an artifact came from this workflow, run for a release's tag
+(for a `bundle.yml` build, `--source-ref refs/heads/main`):
 
 ```sh
 gh attestation verify zeal-zingod-x86_64-unknown-linux-gnu \
   --repo ZcashFoundation/zebra-launcher \
-  --signer-workflow ZcashFoundation/zebra-launcher/.github/workflows/zingod-sidecars.yml
+  --signer-workflow ZcashFoundation/zebra-launcher/.github/workflows/zingod-sidecars.yml \
+  --source-ref "refs/tags/v$ZEAL_VERSION"
 ```
 
 ### Bundling zingod per platform
