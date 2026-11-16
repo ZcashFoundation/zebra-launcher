@@ -17,6 +17,7 @@ pub(super) const SAMPLE_CONFIG: &str = r#"# Managed by Zeal. Keys you add are ke
 [network]
 network = "Mainnet"
 listen_addr = "[::]:8233"
+cache_dir = "/home/user/.local/share/org.zfnd.zeal"
 
 [rpc]
 listen_addr = "127.0.0.1:8232"
@@ -33,8 +34,8 @@ use_color = false
 "#;
 
 /// What `reset_config` writes for a node, like the backend's `config::render_minimal`: the
-/// managed keys for its network, ports, cookie and state folder. The P2P port is written only
-/// when it is not the one zebrad uses without it.
+/// managed keys for its network, ports, peer cache, cookie and state folder. The P2P port is
+/// written only when it is not the one zebrad uses without it.
 pub(super) fn minimal_config(info: &NodeInfo, cookie_dir: &str) -> String {
     let port = |role| info.port(role).unwrap_or_default();
     let default_p2p = match info.network {
@@ -49,14 +50,15 @@ pub(super) fn minimal_config(info: &NodeInfo, cookie_dir: &str) -> String {
         r#"# zebrad configuration managed by Zeal.
 #
 # The launcher keeps network.network, the port of network.listen_addr,
-# rpc.listen_addr, rpc.enable_cookie_auth, rpc.cookie_dir,
-# metrics.endpoint_addr and state.cache_dir up to date.
+# network.cache_dir, rpc.listen_addr, rpc.enable_cookie_auth,
+# rpc.cookie_dir, metrics.endpoint_addr and state.cache_dir up to date.
 # Add your own settings below; the reference shows every option with its
 # default. Keys you do not set use zebrad's defaults.
 
 [network]
 network = "{network}"
-{p2p}
+{p2p}cache_dir = "{peers}"
+
 [rpc]
 listen_addr = "127.0.0.1:{rpc}"
 enable_cookie_auth = true
@@ -72,6 +74,7 @@ cache_dir = "{state}"
         rpc = port(PortRole::Rpc),
         metrics = port(PortRole::Metrics),
         state = crate::format::state_dir(&info.data_dir),
+        peers = info.own_folder.as_deref().unwrap_or(DEFAULT_DATA_DIR),
     )
 }
 
@@ -143,7 +146,12 @@ mod tests {
     fn the_minimal_config_carries_the_nodes_own_ports_and_folders() {
         let first = first_node(DEFAULT_DATA_DIR);
         let text = minimal_config(&first, &format!("{DEFAULT_DATA_DIR}/rpc"));
-        assert!(text.contains("network = \"Mainnet\"\n\n[rpc]"), "{text}");
+        assert!(
+            text.contains(&format!(
+                "network = \"Mainnet\"\ncache_dir = \"{DEFAULT_DATA_DIR}\"\n\n[rpc]"
+            )),
+            "{text}"
+        );
         assert!(text.contains("listen_addr = \"127.0.0.1:8232\""), "{text}");
         assert!(
             text.contains("endpoint_addr = \"127.0.0.1:9999\""),

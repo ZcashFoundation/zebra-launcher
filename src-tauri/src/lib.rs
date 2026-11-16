@@ -25,7 +25,7 @@ use std::{sync::Arc, time::Duration};
 
 use launcher_core::{
     config,
-    firstrun::{self, SizeCache},
+    firstrun::{self, LegacyLocations, SizeCache},
     pidfile::StaleProcess,
     registry::{self, NodeHandle, RegistryConfig, StartError},
     resources::MachineSampler,
@@ -273,7 +273,12 @@ async fn start(app: &AppHandle) -> Result<(AppState, bool), StartupError> {
         }
     }
 
-    let settings = SettingsStore::open(&paths)?;
+    // A node saved before Zeal gave each node its own peer cache starts from
+    // a copy of zebrad's shared one.
+    let settings = SettingsStore::open_with(
+        &paths,
+        LegacyLocations::current().zebra_cache_dir.as_deref(),
+    )?;
     launcher_public::install_crypto_provider();
     // A public service that does not resume loses zebrad's endpoint before the first start.
     let mut launch = settings.current();

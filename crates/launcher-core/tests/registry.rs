@@ -364,6 +364,11 @@ async fn two_nodes_run_side_by_side_on_their_own_ports_folders_and_cookies() {
         toml.contains(&*folder.join("state").to_string_lossy()),
         "{toml}"
     );
+    // And a peer cache of its own: zebrad keeps it in <folder>/network/testnet.peers.
+    assert_eq!(
+        launcher_core::config::read_peer_cache(&second.paths).expect("readable"),
+        launcher_core::config::PeerCacheKey::Custom(folder.to_string_lossy().into_owned())
+    );
     assert_eq!(
         first.paths,
         fx.paths.launcher_node(),
