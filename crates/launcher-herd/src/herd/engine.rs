@@ -500,11 +500,13 @@ impl Engine {
         let live_forks: BTreeSet<u32> =
             splits.iter().flatten().map(|split| split.fork.at).collect();
         self.branch_since.retain(|at, _| live_forks.contains(at));
-        // The main branch's nodes on the far side of a split nobody wins.
+        // The main branch's nodes on the far side of a split nobody wins. A branch of one
+        // block is a block the others replaced: its node is stuck on it, and the main
+        // branch's nodes are not on a fork.
         let contested: Vec<&Split> = splits
             .iter()
             .flatten()
-            .filter(|split| !split.race && split.side != Side::Minority)
+            .filter(|split| !split.race && split.side != Side::Minority && split.side_len >= 2)
             .collect();
 
         // Each node's state this round, then debounced.

@@ -326,6 +326,53 @@ fn a_node_still_holding_a_replaced_block_is_stuck_on_it() {
 }
 
 #[test]
+fn a_replaced_block_is_a_stall_also_where_no_side_has_a_majority() {
+    // Two zebrads, a zebrad and a Zakura, and two zebrads beside a Zakura: the odd node keeps
+    // the block the others replaced. It is stuck on it, and the others are not on a fork.
+    for (count, zakura) in [(2, None), (2, Some(1)), (3, Some(2))] {
+        let mut herd = Harness::new(Network::Mainnet, count, H);
+        if let Some(index) = zakura {
+            herd.nodes[index].kind = NodeKind::Zakura;
+            herd.nodes[index].name = "Zakura · Mainnet".into();
+        }
+        herd.run(10);
+        let odd = count - 1;
+        let others: Vec<usize> = (0..odd).collect();
+        let branch = herd.chain.branch(H + 1);
+        herd.chain.put(&id(odd), branch, H + 1);
+        let view = herd.run_with(150, |herd, elapsed| {
+            if elapsed % 25 == 0 {
+                herd.grow(&others);
+            }
+        });
+        let case = format!("{count} nodes, Zakura {zakura:?}");
+        assert_eq!(
+            relation(&view, odd),
+            Relation::Stalled {
+                at: H + 1,
+                replaced_block: true
+            },
+            "{case}"
+        );
+        for &index in &others {
+            assert_eq!(
+                relation(&view, index),
+                Relation::InAgreement { behind: 0 },
+                "{case}"
+            );
+        }
+        assert_eq!(view.state, HerdState::Degraded, "{case}");
+        assert_eq!(view.level, Level::Attention, "{case}");
+        assert!(
+            view.headline
+                .ends_with("is stuck on block 3,551,205, which your other nodes replaced"),
+            "{case}: {}",
+            view.headline
+        );
+    }
+}
+
+#[test]
 fn a_restarting_node_counts_and_comes_back() {
     let mut herd = Harness::new(Network::Mainnet, 3, H);
     herd.run(10);
