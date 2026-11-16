@@ -1519,8 +1519,14 @@ Each phase is one pull request that ships on its own, with screenshots from the 
        the moment its references drain until it is a zombie, while the list calls still name
        it. Such a member misses a reading and is back in the next, so the fold keeps what
        went to `lost` at the last reading by member: a member that is back had not left, its
-       part is taken back, and a departure waiting for it is dropped. Without this its time
-       would count twice. An identity names one process, so nothing changes on Linux.
+       part is taken back, and a departure waiting for it is dropped. The fold also keeps the
+       members that left at the last reading as last seen: a departure that moved up past
+       one that is back (a shell's command whose shell was refused in its exit window)
+       anchors on it again with a fresh grace, and claims what its rollup gained since it
+       was last seen. Without this their time would count twice. Growth a member claimed
+       while it was missing is not handed back; that only matters when the same ancestor
+       reaped another member in that interval. An identity names one process, so nothing
+       changes on Linux.
      - The name is `pbi_name`, or `pbi_comm` where that is empty.
      - The VM statistics are in the kernel's pages, so the page size comes from
        `host_page_size` (libsyscall answers it with `vm_kernel_page_size`): a third local
