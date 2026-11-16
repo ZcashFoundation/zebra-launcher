@@ -98,8 +98,9 @@ which gate the release on each network.
   limits set by hand: 16 streams a connection and a 16 KiB header list.
 - The network checks read the routes from `/proc/net/route` and send NAT-PMP's two-byte
   external-address request themselves: no netdev or crab_nat in PS1. The router is the
-  default route with a gateway and the lowest metric; the VPN check looks at the default the
-  kernel prefers, the lowest metric with a gateway or without.
+  default route with a gateway and the lowest metric. The VPN check looks up the main table's
+  route to an internet address as the kernel does: the longest prefix, so a VPN's 0.0.0.0/1
+  and 128.0.0.0/1 win over the default, then the lowest metric, with a gateway or without.
 - Consent given at step 1, before a name exists, binds to the first name chosen; another name
   asks again.
 - A network change waits for the user's Resume even after switching back (the pause holds),
@@ -855,10 +856,11 @@ and Next stays disabled until the gates pass.
    - The LAN address and gateway come from the default route (`netdev`). The user reserves the
      address in the router's DHCP settings ("a forward targets an address"); Zeal records it
      and re-checks it at every start and every 5 minutes.
-   - A VPN or exit node on the default route the kernel prefers stops the setup: one on a
-     VPN's interface (`tun`, `utun`, `wg`, `ppp`, Tailscale: a heuristic), or a default on
-     another interface than the router's, such as a tunnel's without a gateway at a lower
-     metric. "Turn it off, or set it to leave Zeal out."
+   - A VPN or exit node on the route to the internet stops the setup: a route on a VPN's
+     interface (`tun`, `utun`, `wg`, `ppp`, Tailscale: a heuristic), or on another interface
+     than the router's, such as a tunnel's default without a gateway at a lower metric, or the
+     0.0.0.0/1 and 128.0.0.0/1 of OpenVPN's `redirect-gateway def1`. "Turn it off, or set it
+     to leave Zeal out."
    - The router's WAN address, read-only: NAT-PMP's external-address request (opcode 0,
      `crab_nat`) and UPnP IGD's `GetExternalIPAddress` (`igd-next`). PCP isn't used here: it
      reports the address only for a MAP or PEER request, which creates a mapping. Public:
@@ -963,12 +965,12 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   NAT, a second router), DuckDNS takes the address it sees, which may change unseen, so that
   update goes again every 5 minutes (DuckDNS answers `NOCHANGE`). No update goes out until a
   network check made since the service started, or resumed from a pause only the user ends,
-  finds the router's default route and this computer's LAN address, no VPN on the default
-  route the kernel prefers and, once open, the LAN address the forward targets: a laptop that
-  starts Zeal or resumes on a café's network never points the name there, and neither does
-  one without a default route through a router, as when a VPN replaced it by its own without
-  a gateway (that VPN is found too). A mismatch for 15 minutes, against the router's address
-  or else the one DuckDNS saw, pauses the service. After a change:
+  finds the router's default route and this computer's LAN address, no VPN on the route to
+  the internet and, once open, the LAN address the forward targets: a laptop that starts Zeal
+  or resumes on a café's network never points the name there, and neither does one without a
+  default route through a router, as when a VPN replaced it by its own without a gateway
+  (that VPN is found too). A mismatch for 15 minutes, against the router's address or else
+  the one DuckDNS saw, pauses the service. After a change:
   "Address changed at 14:02. DNS updated; resolvers may use the old one for up to 5 minutes."
 - **Tokens** go to the OS keychain (`keyring` 4.2.0, service `org.zfnd.zeal`, account
   `dns:<provider>:<zone>`: a DuckDNS token covers every name on the user's DuckDNS account,
@@ -1176,7 +1178,7 @@ Zeal shows each step before the system asks, and never elevates without a click.
 | an upgrade the serving software doesn't know, at activation minus one | each block | paused (`BuildTooOld`): zeeder, and Zaino from PS5; on Mainnet zebrad halts at its end of support instead; on Testnet zebrad never halts (`zebrad/src/components/sync/end_of_support.rs:53-60`), so one that doesn't know the upgrade stays at the block before it, and the tip watch keeps the front door `Unavailable` until a Zeal update brings a newer zebrad | after a Zeal update |
 | the name equals the WAN address, at the authoritative servers | 5 min | paused after 15 min | by itself |
 | the LAN address unchanged | 5 min, at start | paused at once | when the forward or address is right again |
-| no VPN on the default route | 5 min | paused | by itself |
+| no VPN on the route to the internet | 5 min | paused | by itself |
 | the certificate | hourly | a banner 14 days out if renewal fails, and "Try again" on the panel; `ChallengeOnly` at expiry, with orders going on under the budget | after issuance |
 | the monthly cap | each stats line | paused | next month, or a higher cap |
 | seeder abuse ([limits](#the-seeders-limits)) | 10 s | paused an hour | by itself; after three in 24 h, by the user |

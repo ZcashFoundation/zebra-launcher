@@ -729,9 +729,9 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   and publishes a `PublicStatus` on a `watch` (the `public_status` event, `get_public_status`).
   Its children: the `LightMonitor` (`GetLightdInfo` over h2c on loopback at each endpoint
   change and every 10 minutes, with Zodl's check), the network checks (the routes from
-  `/proc/net/route`, a VPN on the default route the kernel prefers, the router's address from
-  NAT-PMP's external-address request) every 5 minutes, the `DdnsActor` (DuckDNS updates, the
-  system resolver), the `AcmeActor` and the front door.
+  `/proc/net/route`, a VPN on the main table's route to the internet, the router's address
+  from NAT-PMP's external-address request) every 5 minutes, the `DdnsActor` (DuckDNS updates,
+  the system resolver), the `AcmeActor` and the front door.
 - **zebrad's endpoint.** While the service is switched on with current consent on zebrad's
   network, the actor puts a loopback port in the spec's `backend_port` and asks the app's
   `EndpointHost` (`src-tauri/src/public.rs`) to apply it to the serving node by its id: the

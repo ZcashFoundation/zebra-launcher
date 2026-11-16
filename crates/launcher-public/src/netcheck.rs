@@ -1,5 +1,5 @@
 //! The read-only network checks: this computer's LAN address and gateway from the default
-//! route, a VPN on the route the kernel prefers, and the router's public address from
+//! route, a VPN on the route to the internet, and the router's public address from
 //! NAT-PMP's external-address request (RFC 6886, opcode 0), which creates no mapping. Nothing
 //! here changes the router.
 //!
@@ -24,6 +24,9 @@ const NAT_PMP_WAITS: [Duration; 3] = [
     Duration::from_millis(500),
     Duration::from_millis(1000),
 ];
+
+/// An address on the internet whose route the checks look up. Nothing is sent to it.
+const INTERNET: Ipv4Addr = Ipv4Addr::new(9, 9, 9, 9);
 
 /// Interface names that carry a VPN, a heuristic: WireGuard, OpenVPN and other tunnels, PPP,
 /// Tailscale, ZeroTier, and the names of a few VPN apps.
@@ -53,6 +56,14 @@ pub struct Route {
 impl Route {
     fn is_default(&self) -> bool {
         self.destination.is_unspecified() && self.mask.is_unspecified()
+    }
+
+    fn contains(&self, addr: Ipv4Addr) -> bool {
+        u32::from(addr) & u32::from(self.mask) == u32::from(self.destination)
+    }
+
+    fn prefix_len(&self) -> u32 {
+        u32::from(self.mask).count_ones()
     }
 }
 
@@ -105,20 +116,21 @@ pub fn default_route(routes: &[Route]) -> Option<DefaultRoute> {
         })
 }
 
-/// The default route the kernel prefers, with a gateway or without: the lowest metric, the
-/// first listed of equals.
-fn preferred_default(routes: &[Route]) -> Option<&Route> {
+/// The route the main table gives `to`, with a gateway or without, as the kernel picks it
+/// before policy rules: the longest prefix, then the lowest metric, then the first listed.
+pub fn main_route_to(routes: &[Route], to: Ipv4Addr) -> Option<&Route> {
     routes
         .iter()
-        .filter(|route| route.is_default())
-        .min_by_key(|route| route.metric)
+        .filter(|route| route.contains(to))
+        .min_by_key(|route| (std::cmp::Reverse(route.prefix_len()), route.metric))
 }
 
-/// The VPN on the default route the kernel prefers, if any: its interface when the name looks
-/// like a VPN's, or when it is not the router's, as with a tunnel's default without a gateway
-/// at a lower metric than the router's. Without a router, only a VPN's name counts.
+/// The VPN on the main table's route to the internet, if any: that route's interface when the
+/// name looks like a VPN's, or when it is not the router's, as with a tunnel's default without
+/// a gateway at a lower metric than the router's, or a VPN's 0.0.0.0/1 and 128.0.0.0/1 beside
+/// the router's default. Without a router, only a VPN's name counts.
 pub fn vpn_on_route(routes: &[Route], router: Option<&DefaultRoute>) -> Option<String> {
-    let preferred = preferred_default(routes)?;
+    let preferred = main_route_to(routes, INTERNET)?;
     let elsewhere = router.is_some_and(|router| router.interface != preferred.interface);
     (elsewhere || is_vpn_interface(&preferred.interface)).then(|| preferred.interface.clone())
 }
@@ -303,6 +315,43 @@ eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
 tun0\t00000000\t00000000\t0001\t0\t0\t900\t00000000\t0\t0\t0
 ";
         assert_eq!(router_and_vpn(behind), (router("eth0"), None));
+    }
+
+    /// Captured from a kernel: OpenVPN's `redirect-gateway def1` adds 0.0.0.0/1 and 128.0.0.0/1
+    /// through tun0 and leaves the router's default alone.
+    const DEF1: &str = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+tun0\t00000000\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0
+eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
+tun0\t0000080A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
+tun0\t00000080\t0100080A\t0003\t0\t0\t0\t00000080\t0\t0\t0
+eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
+";
+
+    #[test]
+    fn a_split_default_is_the_vpn() {
+        assert_eq!(router_and_vpn(DEF1), (router("eth0"), Some("tun0".into())));
+        // The same routes without a gateway, as some clients add them.
+        let bare = DEF1.replace("0100080A\t0003", "00000000\t0001");
+        assert_eq!(router_and_vpn(&bare), (router("eth0"), Some("tun0".into())));
+        let routes = parse_routes(DEF1);
+        for (to, interface) in [
+            ("9.9.9.9", "tun0"),
+            ("203.0.113.10", "tun0"),
+            ("192.168.1.7", "eth0"),
+            ("10.8.0.1", "tun0"),
+        ] {
+            let route = main_route_to(&routes, to.parse().unwrap()).unwrap();
+            assert_eq!(route.interface, interface, "{to}");
+        }
+        // A route to the VPN's own server through the router is no VPN.
+        let server = "\
+Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
+eth0\t0A7100CB\t0101A8C0\t0007\t0\t0\t0\tFFFFFFFF\t0\t0\t0
+eth0\t0001A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
+";
+        assert_eq!(router_and_vpn(server), (router("eth0"), None));
     }
 
     #[test]
