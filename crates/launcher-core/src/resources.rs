@@ -10,8 +10,9 @@
 //! The reads are blocking system calls, so each one runs in `spawn_blocking`, taking its inputs
 //! by value and returning an owned reading; each actor keeps its own state, and nothing is
 //! shared. The per-OS readers implement [`Reader`] and [`MachineReader`]: the Linux one reads
-//! `/proc`, the macOS one libproc and Mach's host statistics; on other platforms reading is
-//! not supported yet, the samplers publish `None` and stop.
+//! `/proc`, the macOS one libproc and Mach's host statistics, and the Windows one the node's
+//! job and a few calls per process. On other platforms reading is not supported, and the
+//! samplers publish `None` and stop.
 //!
 //! ```text
 //!   watch<Option<TreeProbe>> ──▶ ResourceSampler ──spawn_blocking──▶ Reader::tree
@@ -39,6 +40,8 @@ mod linux;
 mod macos;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod procfs;
+#[cfg(windows)]
+mod windows;
 
 use fold::Fold;
 
@@ -176,7 +179,11 @@ pub fn platform_reader() -> Arc<dyn Reader> {
     {
         Arc::new(macos::MacReader::new())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        Arc::new(windows::WindowsReader)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         Arc::new(Unsupported)
     }
@@ -192,34 +199,38 @@ pub fn platform_machine_reader() -> Arc<dyn MachineReader> {
     {
         Arc::new(macos::MacMachineReader::new())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(windows)]
+    {
+        Arc::new(windows::WindowsReader)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         Arc::new(Unsupported)
     }
 }
 
-/// The reader of a platform that has none yet.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// The reader of a platform that has none.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 struct Unsupported;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 impl Unsupported {
     fn error() -> io::Error {
         io::Error::new(
             io::ErrorKind::Unsupported,
-            "resource monitoring is not supported on this platform yet",
+            "resource monitoring is not supported on this platform",
         )
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 impl Reader for Unsupported {
     fn tree(&self, _probe: &TreeProbe, _sticky: &[Identity]) -> io::Result<TreeReading> {
         Err(Self::error())
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 impl MachineReader for Unsupported {
     fn machine(&self) -> io::Result<MachineReading> {
         Err(Self::error())
@@ -548,6 +559,8 @@ mod tests {
             pid: 100,
             spawned_at: SystemTime::now(),
             spawned,
+            #[cfg(windows)]
+            job: std::sync::Weak::new(),
         }
     }
 

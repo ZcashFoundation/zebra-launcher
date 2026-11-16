@@ -703,6 +703,8 @@ mod tests {
                 pid: 100,
                 spawned_at: UNIX_EPOCH + Duration::from_secs(SPAWN_SECS),
                 spawned: self.spawned,
+                #[cfg(windows)]
+                job: std::sync::Weak::new(),
             }
         }
 

@@ -11,6 +11,8 @@
 //! All raw OS calls live in the two backends, `unix` and `windows`, which
 //! offer the same functions so they can be read side by side.
 
+#[cfg(windows)]
+use std::sync::{Arc, Weak};
 use std::{
     ffi::OsString,
     io,
@@ -28,7 +30,7 @@ use tokio::{
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 
 /// Returns true when a process with `pid` exists: on Unix also when it
 /// belongs to another user, on Windows only while it has not exited.
@@ -174,6 +176,11 @@ pub struct TreeProbe {
     pub spawned_at: SystemTime,
     /// The same moment on the monotonic clock: the base of every rate.
     pub spawned: Instant,
+    /// The run's job, upgraded only for the length of one read. The run's [`ChildHandle`]
+    /// holds the only strong reference, so the job still closes when the supervisor finalizes
+    /// the run, and `KILL_ON_JOB_CLOSE` is not delayed.
+    #[cfg(windows)]
+    pub(crate) job: Weak<windows::Job>,
 }
 
 /// What the supervisor keeps to stop zebrad.
@@ -181,8 +188,9 @@ pub struct TreeProbe {
 pub struct ChildHandle {
     pid: u32,
     stdin: Option<ChildStdin>,
+    /// The only strong reference to the job, which closes when the handle is dropped.
     #[cfg(windows)]
-    job: windows::Job,
+    job: Arc<windows::Job>,
 }
 
 impl ChildHandle {
@@ -199,6 +207,8 @@ impl ChildHandle {
             pid: self.pid,
             spawned_at,
             spawned,
+            #[cfg(windows)]
+            job: Arc::downgrade(&self.job),
         }
     }
 
@@ -357,7 +367,7 @@ fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
             pid,
             stdin,
             #[cfg(windows)]
-            job,
+            job: Arc::new(job),
         },
         child,
         stdout,
