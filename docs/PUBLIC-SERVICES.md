@@ -1307,9 +1307,20 @@ over.
 
   Its capture mode writes the fixtures. CI runs it on pushes to `main` and on pull requests that
   change `ZINGOD_*`, `ZEBRAD_VERSION`, `ZEBRAD_COMMIT`, zingod's adapter or runner, or the front
-  door, with zingod built by `scripts/build-zingod.sh` on the runner and cached by commit, as a
-  test input only. To settle when it is written (unconfirmed): whether a Regtest chain reaches
-  `serving`, and whether the pinned zebrad's `generate` mines the blocks the test needs.
+  door. Where its binaries come from:
+  - **zingod.** `build-zingod.sh` installs nothing that fails the 2.35 glibc floor, a build on
+    the `ubuntu-24.04` runner itself needs `GLIBC_2.39`, and the runner has no `protoc`. So the
+    test takes zingod from `ci.yml`'s `zingod-sidecars` call (`attest: false`), which builds in
+    `ubuntu:22.04`; `zingod-gate` says run for these changes too. A binary built there runs on
+    the 24.04 host.
+  - **zebrad**, from `fetch-zebrad-linux.sh --target <triple>` on the host, which keeps cosign,
+    gh and its checks there, as `real-zebrad` does.
+  - **Both Linux targets.** The `real-zingod` job needs `zingod-sidecars` and runs on
+    `ubuntu-24.04` and `ubuntu-24.04-arm`, each leg with its target's `zingod-<triple>`. The
+    aarch64 leg is what the Mainnet gate's first item needs.
+
+  To settle when it is written (unconfirmed): whether a Regtest chain reaches `serving`, and
+  whether the pinned zebrad's `generate` mines the blocks the test needs.
 - **Wallet runs** (RELEASING.md), on a real home connection, before zingod is offered on a
   network: Zingo through a scripted `zingo-cli` (a new wallet, an old birthday, a send with a
   memo), which zebrad's endpoint can't serve; Zodl and Zkool by hand, where builds for the network
@@ -1329,11 +1340,12 @@ the spawner, touches shared code. None of them needs front door v2 (PS2) or MULT
 | **Z2 Supervise** | `Launch` and the zingod reader in the supervisor; the configuration writer; `DiskFull` and `IndexBroken`; the pure rules; the runner; `fake-zingod`'s modes and fake-zebrad's stale-cookie mode; `real_zingod.rs` in CI. No UI | Z1 |
 | **Z3 Choose (Linux, Testnet)** | the types; the backend on the consent screen and in the setup; the service actor's and the app's wiring; the disk, stall, cross-check and active-upgrade rules; Rebuild, Delete and Forget's box; the Server card, banners and mock flags; `TESTED_ZINGOD` = 1.1.0 with zebrad 7.0.0 on Testnet. Switching an open service means "unavailable" until the index is built | Z2; the Testnet wallet run before the release |
 | **Z4 Mainnet** | the gate below; `TESTED_ZINGOD` gains Mainnet; the disk and memory numbers from measurements; the scheduled-upgrade countdown and pause; the consent's Mainnet line; Share naming the wallets the runs confirmed; switching while Zebra's endpoint keeps serving; the default for new setups, as the maintainer decides | Z3 and the gate |
-| **Z5 macOS** | `zingod-sidecars.yml` on `macos-15` and `macos-15-intel` (Xcode command line tools for jemalloc's `sh` and `make` and libproc's bindgen, protoc); a `tauri.macos.conf.json` with four `externalBin` entries; the contract test there; `kern.maxfilesperproc` checked against zingod's 1,280 | PS3; the build passing |
+| **Z5 macOS** | `zingod-sidecars.yml` on `macos-15` and `macos-15-intel` (Xcode command line tools for jemalloc's `sh` and `make` and libproc's bindgen, protoc); a `tauri.macos.conf.json` with four `externalBin` entries; the contract test on both macOS runners, in `bundle.yml`, where both binaries are already built: `fetch-zebrad-linux.sh` is Linux only and a macOS zebrad takes 30 to 60 minutes to build uncached, so the job takes that run's `zebrad-stable-<triple>` and `zingod-<triple>` artifacts; `kern.maxfilesperproc` checked against zingod's 1,280 | PS3; the build passing |
 
 **The Mainnet gate (Z4):**
 
-1. `real_zingod.rs` passes on both Linux targets at the pins.
+1. `real_zingod.rs` passes on both Linux targets at the pins: both legs of Z2's `real-zingod`
+   job.
 2. A Testnet light client server ran on zingod for 14 days on a home server, with no pause, crash
    loop or stall caused by zingod, and the Testnet wallet runs passed through the front door.
 3. A Mainnet first build was measured on a desktop (the time, the peak memory, the index's size

@@ -593,6 +593,9 @@ asset, so `SHA256SUMS` and the release's attestations cover the archive.
   'true'`. `ci.yml` grants only `contents: read`, and the called jobs declare
   `id-token: write` and `attestations: write`, so the calling job grants all
   three itself.
+- `zingod-gate` also says run whenever the contract test runs
+  (PUBLIC-SERVICES.md's [Tests for zingod](PUBLIC-SERVICES.md#tests-for-zingod)),
+  whose `real-zingod` job takes its zingod from this call.
 - The workflow has an `attest` input, true by default, that both attestation
   steps follow. `ci.yml` passes false: a fork's pull request gets no OIDC
   token, and a binary built from an unmerged branch never carries an
@@ -714,10 +717,13 @@ installs nothing for zingod. For the real one, run `scripts/build-zingod.sh
 --target x86_64-unknown-linux-gnu --out
 src-tauri/binaries/zeal-zingod-x86_64-unknown-linux-gnu` inside `ubuntu:22.04`,
 or download a CI build with `gh run download <run id> -n
-zingod-x86_64-unknown-linux-gnu`. A build on a newer host fails the glibc
-check: it is fine for trying zingod out, and never shipped. Treat the checkout
-as downloaded code: build it only through cargo, with `CARGO_TARGET_DIR`
-outside the checkout.
+zingod-x86_64-unknown-linux-gnu`. On a newer host `build-zingod.sh` builds
+but installs nothing, since the binary fails the glibc floor. To try zingod
+out there, or to run `real_zingod.rs`, build the checkout with plain cargo
+(`cargo build --locked --release -p zingod --bin zingod`, with `protoc`
+installed) and set `ZINGOD_BIN` to the result; only `build-zingod.sh`'s output
+is ever installed as `zeal-zingod`. Treat the checkout as downloaded code:
+build it only through cargo, with `CARGO_TARGET_DIR` outside the checkout.
 
 ### Bumping ZINGOD_VERSION
 
