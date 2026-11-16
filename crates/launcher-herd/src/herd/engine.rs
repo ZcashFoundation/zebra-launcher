@@ -848,7 +848,11 @@ fn lane_of(fact: &MemberFacts, memory: &Memory, now: Now) -> Lane {
     if tip.height == 0 && memory.tip.as_ref().is_some_and(|known| known.height > 0) {
         return Lane::Genesis;
     }
-    if progress < SYNCED_PROGRESS {
+    // Progress keeps a node in probation catching up. Past it block counts decide: zebrad's
+    // progress is its height over one estimated from the clock, so it also drops for a node
+    // that is stuck or behind, which must stay stalled or lagging. The rule of 1,000 blocks
+    // in `begin` is a node's only way back.
+    if progress < SYNCED_PROGRESS && !memory.through {
         Lane::Catching(tip, progress)
     } else {
         Lane::Near(tip, progress)

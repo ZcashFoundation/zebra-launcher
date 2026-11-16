@@ -232,6 +232,57 @@ fn a_node_whose_tip_stops_while_the_others_move_stalls() {
 }
 
 #[test]
+fn past_probation_a_falling_progress_changes_no_state() {
+    // zebrad's progress is its height over one estimated from the clock: it drops for a node
+    // that is stuck or behind. 0.9998 is about 700 blocks at this height.
+    let low = 0.9998;
+    let grow_two = |herd: &mut Harness, elapsed: u64| {
+        if elapsed.is_multiple_of(25) {
+            herd.grow(&[0, 1]);
+        }
+    };
+
+    // A stalled node stays stalled, and becomes a problem.
+    let mut herd = Harness::new(Network::Mainnet, 3, H);
+    herd.run(10);
+    let view = herd.run_with(150, grow_two);
+    assert!(matches!(relation(&view, 2), Relation::Stalled { .. }));
+    herd.nodes[2].progress = low;
+    let view = herd.run_with(600, grow_two);
+    assert_eq!(
+        relation(&view, 2),
+        Relation::Stalled {
+            at: H,
+            replaced_block: false
+        }
+    );
+    assert_eq!(view.node(&id(2)).unwrap().level, Level::Problem);
+
+    // A node behind and still advancing stays lagging.
+    let mut herd = Harness::new(Network::Mainnet, 3, H);
+    herd.run(10);
+    herd.nodes[2].progress = low;
+    let view = herd.run_with(250, |herd, elapsed| {
+        grow_two(herd, elapsed);
+        if elapsed % 75 == 0 {
+            herd.grow(&[2]);
+        }
+    });
+    let behind = herd.height(0) - herd.height(2);
+    assert_eq!(relation(&view, 2), Relation::Lagging { blocks: behind });
+    assert_eq!(view.level, Level::Attention);
+
+    // A herd whose every node stopped stays stalled.
+    let mut herd = Harness::new(Network::Mainnet, 2, H);
+    herd.run(290);
+    for node in &mut herd.nodes {
+        node.progress = low;
+    }
+    let view = herd.run(20);
+    assert_eq!(view.state, HerdState::Stalled);
+}
+
+#[test]
 fn a_fork_is_found_and_named_with_its_height() {
     let mut herd = Harness::new(Network::Mainnet, 3, H);
     herd.run(10);
