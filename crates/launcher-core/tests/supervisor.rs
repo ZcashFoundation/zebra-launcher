@@ -220,7 +220,10 @@ async fn hanging_child_is_killed_after_the_grace_period() {
     within(handle.start()).await.expect("start");
     let started = std::time::Instant::now();
     within(handle.stop()).await.expect("stop");
-    assert!(started.elapsed() < Duration::from_secs(10));
+    // Measured on the monotonic clock: the report's times are wall-clock times, which can
+    // step back between the request and the exit.
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(10));
     let exit = handle.status().last_exit.expect("exit recorded");
     assert!(exit.requested);
     assert_ne!(exit.code, Some(0), "{exit:?}");
@@ -229,10 +232,6 @@ async fn hanging_child_is_killed_after_the_grace_period() {
     assert_eq!(exit.detail.as_deref(), Some("killed by the launcher"));
     let report = handle.status().last_stop.expect("the stop is reported");
     assert!(report.forced, "{report:?}");
-    let took = report
-        .exited_at
-        .duration_since(report.requested_at)
-        .expect("the exit follows the request");
     // The grace period only runs where the stop is graceful; a Windows job termination is
     // immediate.
     if cfg!(unix) {
