@@ -213,8 +213,7 @@ pub fn tx_sentence(page: &TxPage, unit: &str) -> String {
                 .to_owned()
         }
         TxKind::Coinbase { shielded_to } => format!(
-            "The block's coinbase, paying into {}; shielded coinbase amounts are public by \
-             consensus.",
+            "The block's coinbase, paying into {}.",
             pools_list(shielded_to)
         ),
         TxKind::Transparent => "Moved value between transparent addresses.".to_owned(),
@@ -249,8 +248,9 @@ pub fn tx_sentence(page: &TxPage, unit: &str) -> String {
     let mut sentence = what;
     if !counts.is_empty() {
         sentence.push_str(&format!(
-            " {}; amounts per note hidden.",
-            capitalise(&counts.join(" and "))
+            " {}; {}.",
+            capitalise(&counts.join(" and ")),
+            note_amounts(&page.kind)
         ));
     }
     match page.fee {
@@ -261,6 +261,18 @@ pub fn tx_sentence(page: &TxPage, unit: &str) -> String {
         Some(Shown::Unknown { .. } | Shown::Hidden) | None => {}
     }
     sentence
+}
+
+/// What the page says of each shielded note's amount: hidden, except in a coinbase, whose
+/// shielded outputs anyone can decrypt (consensus makes them use the all-zero outgoing viewing
+/// key), though the Explorer does not.
+pub fn note_amounts(kind: &TxKind) -> &'static str {
+    match kind {
+        TxKind::Coinbase { .. } => {
+            "amounts per note are public by consensus, but the Explorer does not decrypt notes"
+        }
+        _ => "amounts per note hidden",
+    }
 }
 
 fn plural(count: u32) -> &'static str {
@@ -601,6 +613,29 @@ mod tests {
         assert!(tx_sentence(&unknown_fee, "ZEC").starts_with(
             "Moved transparent value into Sapling and Orchard, with transparent change."
         ));
+        // A coinbase's shielded outputs are public by consensus: never "hidden".
+        let coinbase = TxPage {
+            kind: TxKind::Coinbase {
+                shielded_to: vec![Pool::Sapling],
+            },
+            shielded: vec![PoolPart {
+                pool: Pool::Sapling,
+                spends: 0,
+                outputs: 2,
+                actions: 0,
+                joinsplits: 0,
+                net_out: -250_000_000,
+            }],
+            fee: None,
+            ..unknown_fee
+        };
+        let sentence = tx_sentence(&coinbase, "ZEC");
+        assert_eq!(
+            sentence,
+            "The block's coinbase, paying into Sapling. 0 Sapling spends and 2 outputs; amounts \
+             per note are public by consensus, but the Explorer does not decrypt notes."
+        );
+        assert!(!sentence.contains("hidden"));
     }
 
     #[test]

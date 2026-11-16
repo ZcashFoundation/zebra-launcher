@@ -7,7 +7,7 @@ use launcher_types::{
     Network, NodeId,
     explorer::{
         BlockId, ExplorerRequest, ExplorerResponse, ExplorerRoute, Pool, PoolPart, Shown, TxId,
-        TxPage as Page, TxStatus,
+        TxKind, TxPage as Page, TxStatus,
     },
 };
 use leptos::prelude::*;
@@ -70,6 +70,7 @@ pub fn TxPage(
 #[component]
 fn Tx(page: Page, nav: NodeExplorer, unit: &'static str, out: Option<u32>) -> impl IntoView {
     let sentence = text::tx_sentence(&page, unit);
+    let coinbase = matches!(page.kind, TxKind::Coinbase { .. });
     let status = page.status.clone();
     view! {
         <section class="ex-section" aria-labelledby="ex-tx-title">
@@ -89,7 +90,7 @@ fn Tx(page: Page, nav: NodeExplorer, unit: &'static str, out: Option<u32>) -> im
                         .shielded
                         .iter()
                         .cloned()
-                        .map(|part| view! { <PoolCard part unit /> })
+                        .map(|part| view! { <PoolCard part unit coinbase /> })
                         .collect_view()}
                 </div>
             </section>
@@ -200,9 +201,10 @@ fn Status(status: TxStatus, nav: NodeExplorer) -> impl IntoView {
     }
 }
 
-/// One shielded pool's part: counts, the net movement, and the hidden per-note amounts.
+/// One shielded pool's part: counts, the net movement, and the per-note amounts: hidden, or in
+/// a coinbase public by consensus but not decrypted here.
 #[component]
-fn PoolCard(part: PoolPart, unit: &'static str) -> impl IntoView {
+fn PoolCard(part: PoolPart, unit: &'static str, coinbase: bool) -> impl IntoView {
     let counts = match part.pool {
         Pool::Sapling => format!(
             "{} spend{} · {} output{}",
@@ -235,7 +237,16 @@ fn PoolCard(part: PoolPart, unit: &'static str) -> impl IntoView {
             <h3><PoolChip pool=part.pool /></h3>
             <p>{counts}</p>
             <p>{text::movement(part.pool, -part.net_out, unit)}</p>
-            <p class="ex-hidden-row">"Amount per note: " <Hidden /></p>
+            {if coinbase {
+                view! {
+                    <p title="A coinbase's shielded outputs use the all-zero outgoing viewing key, so anyone can decrypt them">
+                        "Amount per note: public by consensus, not decrypted here"
+                    </p>
+                }
+                .into_any()
+            } else {
+                view! { <p class="ex-hidden-row">"Amount per note: " <Hidden /></p> }.into_any()
+            }}
             {rule.map(|rule| view! { <p class="muted ex-caption">{rule}</p> })}
         </div>
     }
@@ -271,7 +282,10 @@ fn Inputs(page: Page, nav: NodeExplorer) -> impl IntoView {
                 })
                 .collect_view()}
         </ol>
-        <p class="muted ex-caption">"Each input spends an earlier output; its value shows on that transaction's page."</p>
+        // A coinbase's one input spends nothing: its line says what it is instead.
+        {(!matches!(page.kind, TxKind::Coinbase { .. })).then(|| view! {
+            <p class="muted ex-caption">"Each input spends an earlier output; its value shows on that transaction's page."</p>
+        })}
     }
     .into_any()
 }
