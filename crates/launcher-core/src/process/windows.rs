@@ -11,7 +11,7 @@ use std::{
     mem::size_of,
     os::windows::{
         ffi::OsStringExt,
-        io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
+        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle},
     },
     path::PathBuf,
 };
@@ -142,6 +142,12 @@ pub(super) fn executable_of(pid: u32) -> Option<PathBuf> {
     }
     // SAFETY: the handle was just returned by OpenProcess and is owned by us.
     let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    image_path(handle.as_handle())
+}
+
+/// The executable of the process behind `handle`, which needs
+/// `PROCESS_QUERY_LIMITED_INFORMATION` access.
+fn image_path(handle: BorrowedHandle<'_>) -> Option<PathBuf> {
     let mut buf = vec![0u16; 32_768];
     let mut size = u32::try_from(buf.len()).ok()?;
     // SAFETY: the handle is valid, `buf` is writable for `size` UTF-16 units and
