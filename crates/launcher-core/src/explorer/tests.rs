@@ -1362,6 +1362,30 @@ async fn the_follower_checks_the_tip_every_two_seconds_while_shown() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn zebrad_on_the_old_network_is_not_followed_while_shown() {
+    let harness = harness();
+    // The node moves to Testnet while zebrad runs on Mainnet, and the Explorer is on screen.
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Testnet);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let before = harness.counts();
+    harness.show(PageKind::Chain).await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0; 6],
+        "nothing of Mainnet is read"
+    );
+    // The node goes back to Mainnet: the follower checks the tip again.
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Mainnet);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(harness.counts()[0] > before[0], "the tip is checked again");
+}
+
+#[tokio::test(start_paused = true)]
 async fn another_network_clears_the_cache() {
     let harness = harness();
     let id = BlockId::Hash(harness.chain.borrow().hash(TIP - 2_000).unwrap());

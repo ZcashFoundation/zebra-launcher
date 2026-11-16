@@ -694,6 +694,13 @@ where
         }
     }
 
+    /// Whether the follower polls the tip while the page is shown: zebrad runs at the tip, on
+    /// the node's network. Nothing of another network is followed; `follow` itself still
+    /// answers a request that asked for the tip before the network changed.
+    fn polls(&self) -> bool {
+        self.run.is_some() && self.at_tip() && self.other_network().is_none()
+    }
+
     fn set_visible(&mut self, visible: bool) {
         if visible == self.visible {
             return;
@@ -702,7 +709,7 @@ where
         if visible {
             self.hidden_since = None;
             self.cache.set_budget(self.config.cache_bytes);
-            if self.at_tip() && self.run.is_some() {
+            if self.polls() {
                 self.follow();
             }
         } else {
@@ -715,10 +722,7 @@ where
         // A check that ended just after the last tick is a little younger than a poll at this
         // one; half a poll keeps that check from skipping it, and still skips the tick after a
         // page's own check.
-        if self.visible
-            && self.run.is_some()
-            && self.at_tip()
-            && !self.index.checked_within(self.config.tip_poll / 2, now)
+        if self.visible && self.polls() && !self.index.checked_within(self.config.tip_poll / 2, now)
         {
             self.follow();
         }

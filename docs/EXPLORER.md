@@ -804,11 +804,11 @@ first node only for now". The chain it reads is `NodeStats.chain` ("main" is Mai
 Testnet); before a run's first report, and once zebrad has stopped and the monitor has cleared
 its statistics, it is the node's network. The node's network changes at once (the first-run
 wizard, Settings, Node settings), but zebrad changes network only at its next start. In between
-the explorer publishes `LiveState::OtherNetwork` and answers other calls `NodeNotRunning`,
-saying zebrad changes network at its next start. Whenever the chain it holds is not the node's
-network, running or not, it publishes no tip, tip time or reorganisation, so a Testnet page
-never shows Mainnet data, also when zebrad stops before its next start. When the chain changes,
-the actor drops its caches and reopens its store at
+the explorer publishes `LiveState::OtherNetwork`, follows nothing, and answers other calls
+`NodeNotRunning`, saying zebrad changes network at its next start. Whenever the chain it holds
+is not the node's network, running or not, it publishes no tip, tip time or reorganisation, so
+a Testnet page never shows Mainnet data, also when zebrad stops before its next start. When the
+chain changes, the actor drops its caches and reopens its store at
 `paths.explorer_dir` of the node, leaving the other network's store in place, so a switch opens
 the other network's store instead of wiping this one. Prefixes, unit and upgrade heights
 come from the chain the node reports. Then `NodeRuntime.explorer`, each with its own limits and
@@ -1259,12 +1259,13 @@ code differs from the design above:
   epoch. Its time limits read Tokio's clock, so the tests run them at their own values on a
   paused clock.
 - **The follower** polls `getbestblockheightandhash` every 2 s while the page is shown and the
-  node is at the tip, and a page that needs the tip checks it when the last check is older than
-  it can use; the monitor's `best_block_hash` is not used. It reads the new tip's block: one on
-  top is a push; otherwise a `getblockhash` at the old tip tells a jump from a reorganisation,
-  whose fork a binary search of the known heights finds in at most ten calls. It does not walk
-  back three parents first. `ChainIndex` is one `BTreeMap` of the heights it knows, and there is
-  no fork log yet: `ExplorerLive` carries the last reorganisation.
+  node is at the tip on its own network (not in `OtherNetwork`), and a page that needs the tip
+  checks it when the last check is older than it can use; the monitor's `best_block_hash` is not
+  used. It reads the new tip's block: one on top is a push; otherwise a `getblockhash` at the
+  old tip tells a jump from a reorganisation, whose fork a binary search of the known heights
+  finds in at most ten calls. It does not walk back three parents first. `ChainIndex` is one
+  `BTreeMap` of the heights it knows, and there is no fork log yet: `ExplorerLive` carries the
+  last reorganisation.
 - **After a reorganisation** the Chain page, Block pages opened by height and Transaction pages
   ask again. A Block page opened by hash keeps its block, without the "no longer in your node's
   best chain" line.
