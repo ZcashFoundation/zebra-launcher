@@ -160,7 +160,8 @@ impl Job {
         let header =
             offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) / size_of::<usize>();
         let mut capacity = 16;
-        for retry in 0..=LIST_RETRIES {
+        let mut retries = 0;
+        loop {
             let mut buf = vec![0usize; header + capacity];
             let bytes = u32::try_from(buf.len() * size_of::<usize>()).map_err(io::Error::other)?;
             // SAFETY: the handle is a valid job and `buf` is writable for `bytes` bytes, aligned
@@ -194,15 +195,17 @@ impl Job {
             let listed = usize::try_from(list.NumberOfProcessIdsInList)
                 .unwrap_or(0)
                 .min(capacity);
-            if !more_data && (listed >= assigned || retry == LIST_RETRIES) {
+            // The last try returns what fitted: `ERROR_MORE_DATA` leaves those pids written, and
+            // a header the OS did not write reads as an empty list, since `buf` starts zeroed.
+            if retries == LIST_RETRIES || (!more_data && listed >= assigned) {
                 return Ok(buf[header..header + listed]
                     .iter()
                     .filter_map(|&pid| u32::try_from(pid).ok())
                     .collect());
             }
+            retries += 1;
             capacity = assigned.saturating_add(8).max(capacity * 2).min(MAX_LISTED);
         }
-        Err(io::Error::other("the job's process list kept growing"))
     }
 
     /// Whether `process` is in this job or one nested in it (`IsProcessInJob`).
