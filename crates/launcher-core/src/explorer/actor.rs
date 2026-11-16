@@ -352,6 +352,13 @@ fn network_of(chain: &str) -> Option<Network> {
     }
 }
 
+/// Now, on Tokio's clock, which tests pause and advance, as the `Instant` the chain index
+/// takes. The explorer's time limits (a check's freshness, the tip poll, the idle cache) all
+/// read it.
+fn now() -> Instant {
+    tokio::time::Instant::now().into_std()
+}
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -642,12 +649,12 @@ where
                 self.follow();
             }
         } else {
-            self.hidden_since = Some(Instant::now());
+            self.hidden_since = Some(now());
         }
     }
 
     fn on_tick(&mut self) {
-        let now = Instant::now();
+        let now = now();
         // A check that ended just after the last tick is a little younger than a poll at this
         // one; half a poll keeps that check from skipping it, and still skips the tick after a
         // page's own check.
@@ -702,7 +709,7 @@ where
             Internal::Tip { max_age, reply } => {
                 if let Some(view) = self
                     .chain_view()
-                    .filter(|_| self.index.checked_within(max_age, Instant::now()))
+                    .filter(|_| self.index.checked_within(max_age, now()))
                 {
                     let _ = reply.send(Ok(view));
                     return;
@@ -758,7 +765,7 @@ where
             let _ = reply.send(Err(not_running()));
             return;
         }
-        let now = Instant::now();
+        let now = now();
         let key = self.cache_key(call, now);
         if let Some(value) = key.and_then(|key| self.cache.get(&key)) {
             let _ = reply.send(Ok(value.clone()));
@@ -810,7 +817,7 @@ where
                 sent: false,
             };
             tokio::spawn(async move {
-                let started = Instant::now();
+                let started = std::time::Instant::now();
                 let result = source.read(call).await;
                 tracing::debug!(
                     method = call.method(),
@@ -867,7 +874,7 @@ where
             ReadResult::Header(header) => {
                 if current
                     && matches!(call, ReadCall::Header(BlockId::Height(_)))
-                    && let Some(key) = self.header_key(header.height, Instant::now())
+                    && let Some(key) = self.header_key(header.height, now())
                 {
                     self.cache.insert(key, value.clone(), 120);
                 }
@@ -907,7 +914,7 @@ where
     /// Applies a checked tip. When it undid blocks, the cache drops the transactions above the
     /// highest height the check proved still in the chain; a reorganisation is published.
     fn apply(&mut self, update: TipUpdate) -> ChainView {
-        if let Some(undone) = self.index.apply(update, Instant::now()) {
+        if let Some(undone) = self.index.apply(update, now()) {
             let above = i64::from(undone.above);
             self.cache.retain(|_, value| match value {
                 ReadResult::Tx(tx) => tx.height.is_none_or(|height| height <= above),
