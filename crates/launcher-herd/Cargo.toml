@@ -1,14 +1,19 @@
 [package]
 name = "launcher-herd"
-description = "Pure rules for the nodes Zeal runs together, starting with the public services: native and wasm, no I/O"
+description = "Pure rules for the nodes Zeal runs together: the public services and the herd's agreement; native and wasm, no I/O"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# A simulated chain for the browser mock (`herd::sim`); the tests have it anyway.
+sim = []
+
 [dependencies]
 launcher-types = { workspace = true }
+explorer-model = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

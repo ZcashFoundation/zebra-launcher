@@ -139,7 +139,7 @@ pub enum Relation {
     Stalled { at: u32, replaced_block: bool },
     /// On a branch of its own since `at`: `own` blocks long, against `main` on the main
     /// branch. `deep`: the branches differ for more than 1,000 blocks, past zebrad's rollback
-    /// window, so `at` is a lower bound and the node can't rejoin by itself.
+    /// window, so the fork is at `at` or below it and the node can't rejoin by itself.
     Forked {
         at: u32,
         own: u32,

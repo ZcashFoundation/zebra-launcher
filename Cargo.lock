@@ -2634,6 +2634,7 @@ dependencies = [
 name = "launcher-herd"
 version = "0.1.0"
 dependencies = [
+ "explorer-model",
  "launcher-types",
  "serde_json",
 ]
