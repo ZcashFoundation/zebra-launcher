@@ -518,6 +518,21 @@ impl AcmeHandle {
     }
 }
 
+/// The issuer of the next order for a name whose certificate is `current`, and whether one is
+/// needed at `now`. `wanted` says the setup or the user asked for a certificate.
+fn next_order(current: &CertStatus, wanted: bool, now: SystemTime) -> (CertIssuer, bool) {
+    let valid = current.not_after.is_some_and(|not_after| not_after > now);
+    let renewal_due = current.renew_at.is_some_and(|at| at <= now);
+    let issuer = if current.staging_validated_at.is_none() && !valid {
+        CertIssuer::Staging
+    } else {
+        CertIssuer::Production
+    };
+    let needed =
+        (wanted && !valid) || (valid && renewal_due) || (wanted && issuer == CertIssuer::Staging);
+    (issuer, needed)
+}
+
 async fn run(
     config: AcmeConfig,
     challenge: watch::Sender<Option<Arc<Challenge>>>,
@@ -535,15 +550,7 @@ async fn run(
         let now = SystemTime::now();
         let current = status.borrow().clone();
         let valid = current.not_after.is_some_and(|not_after| not_after > now);
-        let renewal_due = current.renew_at.is_some_and(|at| at <= now);
-        let issuer = if current.staging_validated_at.is_none() && !valid {
-            CertIssuer::Staging
-        } else {
-            CertIssuer::Production
-        };
-        let needed = (wanted && !valid)
-            || (valid && renewal_due)
-            || (wanted && issuer == CertIssuer::Staging);
+        let (issuer, needed) = next_order(&current, wanted, now);
         let blocked = attempts.next_allowed(issuer, now, asked);
         if needed && *can_validate.borrow() && blocked.is_none() {
             status.send_modify(|s| {
