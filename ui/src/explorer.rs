@@ -347,8 +347,34 @@ fn in_text_field(event: &web_sys::KeyboardEvent) -> bool {
     else {
         return false;
     };
-    matches!(element.tag_name().as_str(), "INPUT" | "TEXTAREA" | "SELECT")
-        || element.is_content_editable()
+    takes_text(
+        &element.tag_name(),
+        element.get_attribute("type").as_deref(),
+    ) || element.is_content_editable()
+}
+
+/// Whether an element named `tag`, with the `type` attribute `kind`, takes text: a text area,
+/// a select, or an input that is typed into. A checkbox, a radio button, a slider, a colour or
+/// file picker and a button do not.
+fn takes_text(tag: &str, kind: Option<&str>) -> bool {
+    match tag {
+        "TEXTAREA" | "SELECT" => true,
+        "INPUT" => !kind.is_some_and(|kind| {
+            matches!(
+                kind.to_ascii_lowercase().as_str(),
+                "checkbox"
+                    | "radio"
+                    | "range"
+                    | "button"
+                    | "submit"
+                    | "reset"
+                    | "color"
+                    | "file"
+                    | "image"
+            )
+        }),
+        _ => false,
+    }
 }
 
 /// Which node, network and tip the page reads, and the promise that it all stays here. While
@@ -569,7 +595,29 @@ fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Modifiers, search_shortcut};
+    use super::{Modifiers, search_shortcut, takes_text};
+
+    #[test]
+    fn only_fields_typed_into_keep_the_search_shortcut() {
+        for kind in [
+            None,
+            Some("text"),
+            Some("search"),
+            Some("number"),
+            Some("Password"),
+        ] {
+            assert!(takes_text("INPUT", kind), "{kind:?}");
+        }
+        for kind in [
+            "checkbox", "radio", "RANGE", "button", "submit", "color", "file",
+        ] {
+            assert!(!takes_text("INPUT", Some(kind)), "{kind}");
+        }
+        assert!(takes_text("TEXTAREA", None));
+        assert!(takes_text("SELECT", None));
+        assert!(!takes_text("BUTTON", Some("button")));
+        assert!(!takes_text("DIV", None));
+    }
 
     #[test]
     fn the_search_shortcut_is_the_platforms() {
