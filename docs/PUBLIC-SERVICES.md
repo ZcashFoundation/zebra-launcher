@@ -527,6 +527,7 @@ flag (`?public=<flag>`).
 | zingod stalls | the stall rule | restarts it once, then `IndexerStuck` | "zingod is stuck at block 4,611,002; Zebra is at 4,611,019. [Open the log]" | by itself, when it moves | `zingod-stuck` |
 | zingod crashes | `Crash` | restarts with backoff; `IndexerFailed` after 5 crashes in 10 minutes | "zingod stopped unexpectedly 5 times in 10 minutes. [Open the log] [Try again]" | the user's Try again | `zingod-crashloop` |
 | zingod refuses Zeal's configuration | `ConfigError` | no restart | "zingod refused the settings Zeal wrote. This is a bug in Zeal: [Copy diagnostics]" | a Zeal update | `zingod-config` |
+| zingod can't read zebrad's cookie: the path is a folder, or not readable | `ConfigError` with the cookie text | no restart | "zingod can't read Zebra · Testnet's cookie at /mnt/zebra/testnet/rpc/.cookie: Is a directory (os error 21). [Try again]" | the user's Try again | `zingod-cookie` |
 | zingod's port is taken | the check before the spawn, or `PortInUse` | moves to the next free port, once | "Other programs use ports 18137 and 18138. [Try again]" | the user | `zingod-port` |
 | another program holds the index | `DbLocked`, after the pid file ended Zeal's own leftover | waits | "Another program holds zingod's index in /mnt/zebra/zingod/testnet. [Try again]" | the user | `zingod-locked` |
 | the disk fills | free space every 60 s; `DiskFull` | stops zingod below 10 GB free, starts it above 20 GB | "Waiting for disk space: 6 GB free on /mnt/zebra. zingod starts again above 20 GB." | by itself | `zingod-disk` |
@@ -575,8 +576,8 @@ these hold:
    (`Status.rpc_addr`).
 3. zebrad's cookie exists, isn't empty, and was written at or after this run's `started_at`.
 4. zebrad has been at the tip, within 2 blocks, once in this run.
-5. No zingod failure waits for the user: a refused configuration, a damaged index, a chain
-   mismatch, a crash loop, a taken port or a held lock.
+5. No zingod failure waits for the user: a refused configuration, an unreadable cookie, a
+   damaged index, a chain mismatch, a crash loop, a taken port or a held lock.
 6. The index's disk has more than the low mark free, and the upgrade gate allows it.
 
 **One zingod run per zebrad run.** zebrad writes a new cookie at every start. zingod reads its
@@ -757,20 +758,29 @@ malformed `RUST_LOG` or a runtime that couldn't start, and aborts (SIGABRT) on a
 (`packages/zingod/src/main.rs:33-56`). Its reader (`launcher-core/src/zingod/logs.rs`)
 classifies the last lines:
 
+An index that fails to open has no prefix of its own: `OpenIndex` prints its `StoreError`
+through transparent variants (`packages/zingod/src/error.rs:25-26`), and the held lock comes as
+`Error: manifest io: <dir>/LOCK is held by another process`. So the reader matches whole texts,
+in this order, and a rule never matches "an index that refuses to open" by prefix: that would
+class a held lock, or a refused permission at open, as `IndexBroken` and offer a Rebuild that
+deletes hours of index.
+
 | zingod's output | Class | Then |
 | --- | --- | --- |
 | `Error: configuration error: …` (exit 1); `Error: RUST_LOG: …` or `Error: tokio runtime: …` (exit 2) | `ConfigError` | no restart: zingod refused what Zeal wrote, a bug in Zeal |
 | `… grpc.max_connections = 256 needs 1280 open files … and the limit is …` | `ConfigError` | no restart; the panel names the limit to raise |
+| `Error: cannot read validator cookie <path>: <error>` | `ConfigError` | no restart; the panel names the path and the error. zingod starts with a missing or empty cookie and retries each request (`packages/zingod-source/src/endpoint.rs:154-160`; `CHANGELOG.md:35-38`), so this means the path exists and can't be read: a folder, or a permission. Restarting can't fix it |
 | `Error: binding the gRPC listener: Address already in use (os error 98)` | `PortInUse` | the next free port, once; then the user |
-| `… <dir>/LOCK is held by another process` | `DbLocked` | the user: the pid file already ended Zeal's own leftover |
-| `<index> index commit failed: disk <dir> full`, a panic, then an abort | `DiskFull` (new, deterministic) | waits for space ([Disk](#disk-memory-and-the-first-build)) |
-| an index that refuses to open (another network or format, a bad tail page or `.crc`), a page checksum mismatch, or `… (resync required)` (`FollowError::Diverged`, `packages/zingod-sync/src/follower.rs:33-36`) | `IndexBroken` (new, deterministic) | the user's Rebuild |
-| `Error: cannot read validator cookie …` | `Crash` | backoff: the cookie may be mid-write |
+| `… <dir>/LOCK is held by another process`, matched before every index text below | `DbLocked` | the user: the pid file already ended Zeal's own leftover |
+| `<index> index commit failed: disk <dir> full`, a panic, then an abort; or `No space left on device (os error 28)` or `Disk quota exceeded (os error 122)` after `index io:`, `manifest io:`, `page io:` or `segment io:` | `DiskFull` (new, deterministic) | waits for space ([Disk](#disk-memory-and-the-first-build)) |
+| `ManifestError`'s texts (`packages/zingod-persistence/src/manifest.rs:58-79`): `MANIFEST slot does not start with the zingod manifest magic`, `MANIFEST checksum mismatch`, `MANIFEST is … bytes, not this build's two-slot layout`, `MANIFEST body claims … bytes, … present`, ``directory holds `…`, expected `…` ``, `directory holds format …, this build reads format …`, ``directory was built for `…`, opened for `…` `` and `… holds data but the directory has no MANIFEST`; `PageError`'s (`pages.rs:171-177`): `… is … bytes, the durable state needs …`, `…: tail page fails its checksum` and `…: page checksums differ from the digest the manifest committed`; the panic `… page …: checksum mismatch (on-disk corruption: …)` (`pages.rs:540`); and `(resync required)` (`FollowError::Diverged`, `packages/zingod-sync/src/follower.rs:33-36`) | `IndexBroken` (new, deterministic) | the user's Rebuild |
+| any other `index io:`, `manifest io:`, `page io:` or `segment io:` text, such as a refused permission or an I/O error | `Crash` | backoff; never Rebuild |
 | anything else: exit 1 or 2, a signal, another panic | `Crash` | backoff |
 
 - The configuration, port, lock and cookie texts were captured from the binary in research runs.
-- The disk-full text comes from the code (`packages/zingod-persistence/src/error.rs:51`;
-  `packages/zingod-sync/usage.md:117`) and stays unconfirmed until captured.
+- The disk-full commit text comes from the code (`packages/zingod-persistence/src/error.rs:50-52`;
+  `packages/zingod-sync/usage.md:117`), and the one at open is the system's error after the
+  prefix; both stay unconfirmed until captured.
 - How `Diverged` reaches stderr wasn't reproduced, so the rule matches `(resync required)`
   anywhere in the last lines.
 - The contract test captures the corruption texts by flipping a byte in a tail page.
@@ -1155,7 +1165,8 @@ over.
     `ZINGOD_CONFIG_SYNC__CONCURRENCY`, `zingod_config_x`, `NOTIFY_SOCKET` and a bad `RUST_LOG`
     never reach the child;
   - the logfmt reader; `Running` at `Listening` with `component=Grpc`, not `Admin`;
-  - each exit class, from captured lines;
+  - each exit class, from captured lines, with the held lock classed `DbLocked` and a refused
+    permission at open `Crash`, never `IndexBroken`;
   - the txid redaction, before the ring and the file.
 - **The runner against fakes** (launcher-public, under `tokio::time::pause`). `fake-zingod`, a
   launcher-core bin beside `fake-zebrad`:
@@ -2652,11 +2663,11 @@ before the move to zingod: a release with #1655; fixes for #1665 and #1537; a
   `clippy.toml`, `.github/dependabot.yml`.
 - **zingod** at tag `v1.1.0` (`bfce8b2b`), read and built in research runs on 2026-11-16:
   `packages/zingod/src/` (`main.rs`, `cli.rs`, `daemon.rs`, `daemon/fd_limit.rs`, `config.rs`,
-  `health.rs`); `packages/zingod-grpc/src/` (`service.rs`, `limits.rs`, `health.rs`,
+  `health.rs`, `error.rs`); `packages/zingod-grpc/src/` (`service.rs`, `limits.rs`, `health.rs`,
   `transport.rs`, `proxy_protocol.rs`, `routes/info.rs`, `routes/transactions.rs`);
   `packages/zingod-source/src/` (`endpoint.rs`, `decode.rs`);
-  `packages/zingod-sync/src/follower.rs` and `usage.md`; `packages/zingod-persistence/src/error.rs`;
-  `packages/zingod-primitives/src/protocol.rs`; `packages/zingod-chainview/src/submit/driver.rs`;
+  `packages/zingod-sync/src/follower.rs` and `usage.md`; `packages/zingod-persistence/src/`
+  (`error.rs`, `manifest.rs`, `pages.rs`); `packages/zingod-primitives/src/protocol.rs`; `packages/zingod-chainview/src/submit/driver.rs`;
   `docs/running.md`, `docs/architecture.md`, `docs/rpc_api.md` and `docs/client-requirements.md`;
   `README.md`, `CHANGELOG.md`, `Cargo.lock`, `LICENSE`, `rust-toolchain.toml`; the release and
   the tag through the GitHub API; Zingo Labs' Mainnet index snapshot manifest
