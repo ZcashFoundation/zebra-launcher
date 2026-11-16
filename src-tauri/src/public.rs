@@ -19,8 +19,9 @@ const ZEBRAD_VERSION: &str = include_str!("../../ZEBRAD_VERSION");
 const RESTART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Applies the managed keys the way `apply_config` does around a restart: the config permit,
-/// the start permit while zebrad runs, `config::ensure`, and a restart only if zebrad was
-/// running. A busy permit fails fast, so the service actor clears the port again.
+/// the start permit while zebrad runs, `config::ensure` with the endpoint the service actor
+/// gives, and a restart only if zebrad was running. A busy permit fails fast, so the service
+/// actor clears the port again.
 struct Host<R: Runtime> {
     app: AppHandle<R>,
 }
@@ -29,6 +30,7 @@ impl<R: Runtime> EndpointHost for Host<R> {
     fn apply(
         &self,
         node: NodeId,
+        port: Option<u16>,
         restart: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
         let state = try_state(&self.app);
@@ -46,8 +48,9 @@ impl<R: Runtime> EndpointHost for Host<R> {
             };
             let paths = node.paths.clone();
             let mut keys = node.managed_keys();
-            keys.lightwalletd =
-                LightwalletdKey::for_public(&state.settings.current().public, node.spec().network);
+            // The actor's endpoint, not the stored one: an off it could not save still removes
+            // the key.
+            keys.lightwalletd = port.map_or(LightwalletdKey::Absent, LightwalletdKey::Listen);
             tauri::async_runtime::spawn_blocking(move || config::ensure(&paths, &keys))
                 .await
                 .map_err(|err| err.to_string())?

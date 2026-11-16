@@ -101,7 +101,7 @@ which gate the release on each network.
 - Consent given at step 1, before a name exists, binds to the first name chosen; another name
   asks again.
 - A network change waits for the user's Resume even after switching back (the pause holds),
-  and removes the key without restarting zebrad (`EndpointHost::apply(node, restart)`).
+  and removes the key without restarting zebrad (`EndpointHost::apply(node, port, restart)`).
 - The commands take no node in PS1, which has one light client server; the UI reads the steps
   from the status instead of a `public_plan` command, and the upload preset is a step answer
   instead of `set_public_limits`.
@@ -347,8 +347,10 @@ listener; it has neither (an upstream ask, [Phases](#phases)).
   Automatic pauses close only the front door and keep the endpoint, except a network change
   (below); the switch off, "Turn off and forget" and a launch that doesn't resume remove it.
   The off also holds in the service actor's memory, so if `launcher.json` cannot be written the
-  front door stays closed and the reply says the off was not saved; a launch writes the key
-  from the settings it prepared, saved or not.
+  front door stays closed, the endpoint key is removed all the same (the actor gives the app
+  the endpoint it decided on, not the stored port) and the reply says the off was not saved;
+  the actor clears the stored port once it can, and a launch writes the key from the settings
+  it prepared, saved or not.
 - **A network change.** In PS1 a light client server belongs to the network it was set up on,
   and the endpoint key is written only while `Settings.network` is that network. Saving the
   other network in Settings → Node pauses the service (`PauseReason::NetworkChanged`) and
@@ -1393,7 +1395,8 @@ supervisor and settings watches (later the registry's and the herd's) ──▶ 
   (`SupervisorHandle::restart` is `stop` then `start` with the file as it is, and would start a
   stopped zebrad). `managed_keys` (`src-tauri/src/app_state.rs`) takes the address from the
   stored spec for every caller (launch, `set_settings`, `choose_data_dir`, `reset_config`,
-  `apply_config`), so a Configure save keeps the key. When a permit is busy, turning on fails
+  `apply_config`), so a Configure save keeps the key; the ServiceActor's own applies write the
+  endpoint it decided on, so an off it could not save still removes the key. When a permit is busy, turning on fails
   fast like `set_settings` ("a configuration change is being applied; try again") and the ServiceActor clears `backend_port` again, so no later writer adds the key; turning off
   closes the front door at once and removes the key once the permits are free. Today `ensure`
   runs only at launch and on settings or data-folder changes, and a crash restart inside the

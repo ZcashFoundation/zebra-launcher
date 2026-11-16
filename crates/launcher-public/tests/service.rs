@@ -30,10 +30,8 @@ use tokio::sync::watch;
 
 const LIMIT: Duration = Duration::from_secs(10);
 
-/// The app: applying reads the stored spec and "restarts zebrad" by publishing the endpoint
-/// it would open.
+/// The app: applying "restarts zebrad" by publishing the endpoint it was given.
 struct Host {
-    settings: SettingsHandle,
     status: watch::Sender<Status>,
     applied: Arc<AtomicU32>,
 }
@@ -42,6 +40,7 @@ impl EndpointHost for Host {
     fn apply(
         &self,
         node: launcher_types::NodeId,
+        port: Option<u16>,
         _restart: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
         assert_eq!(
@@ -49,12 +48,6 @@ impl EndpointHost for Host {
             "zebrad-mainnet",
             "the node the facts come from"
         );
-        let port = self
-            .settings
-            .current()
-            .public
-            .light_server()
-            .and_then(|spec| spec.backend_port);
         self.status.send_modify(|status| {
             status.lightwalletd_addr =
                 port.map(|port| SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
@@ -98,7 +91,6 @@ async fn setup_with(secrets: impl FnOnce(&std::path::Path) -> Arc<dyn SecretStor
     let applied = Arc::new(AtomicU32::new(0));
     let (node_tx, node) = watch::channel(launcher_core::nodes::NodeSpec::first(Network::Mainnet));
     let host = Host {
-        settings: settings.clone(),
         status: status_tx.clone(),
         applied: applied.clone(),
     };
@@ -451,14 +443,34 @@ async fn an_off_that_cannot_be_saved_still_closes_the_service() {
         std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         return;
     }
+    let applied = s.applied.load(Ordering::SeqCst);
     let off = s.services.set_switch(false).await;
-    // Several looks later, the service is still paused by the user.
+    // Several looks later, the service is still paused by the user, and zebrad's endpoint is
+    // gone although the stored spec still has its port.
     for _ in 0..3 {
         s.services.run_checks(StepId::Consent).await.unwrap();
     }
+    let mut watch = s.services.watch();
+    let removed = tokio::time::timeout(
+        LIMIT,
+        watch.wait_for(|statuses| {
+            statuses.first().is_some_and(|status| {
+                status
+                    .light
+                    .as_ref()
+                    .is_some_and(|light| light.endpoint.is_none())
+            })
+        }),
+    )
+    .await
+    .is_ok();
     let status = s.services.statuses()[0].clone();
+    let stored = backend_port(&s.settings);
     std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(off.is_err(), "the off was not saved");
+    assert!(stored.is_some(), "the port could not be cleared either");
+    assert!(removed, "the endpoint is removed all the same");
+    assert!(s.applied.load(Ordering::SeqCst) > applied);
     assert!(
         matches!(
             status.state,

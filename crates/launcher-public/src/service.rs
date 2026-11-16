@@ -54,14 +54,17 @@ const NET_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How often the month's upload is written down.
 const SAVE_EVERY: Duration = Duration::from_secs(10 * 60);
 
-/// What the app does for the actor: write `node`'s managed keys from the stored settings and,
-/// with `restart`, restart its zebrad if it runs, behind the app's permits. Without `restart`
-/// the file changes for zebrad's next start only, as a network change does. `node` is the node
-/// the actor's facts come from ([`Wiring::node`]), never another.
+/// What the app does for the actor: write `node`'s managed keys with the light wallet endpoint
+/// on loopback at `port`, or without the endpoint for `None`, and, with `restart`, restart its
+/// zebrad if it runs, behind the app's permits. Without `restart` the file changes for zebrad's
+/// next start only, as a network change does. `node` is the node the actor's facts come from
+/// ([`Wiring::node`]), never another. `port` is the actor's decision, not the stored spec's,
+/// so an off that `launcher.json` could not save still removes the endpoint.
 pub trait EndpointHost: Send + Sync + 'static {
     fn apply(
         &self,
         node: NodeId,
+        port: Option<u16>,
         restart: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 }
@@ -335,7 +338,7 @@ struct Actor {
     hairpin: Option<Checked<bool>>,
     hairpin_running: bool,
     keychain_unavailable: bool,
-    /// The `backend_port` the app last applied to `zebrad.toml`.
+    /// The endpoint port the app last applied to `zebrad.toml`.
     applied: Option<Option<u16>>,
     applying: bool,
     endpoint_error: Option<String>,
@@ -685,9 +688,16 @@ impl Actor {
                     .await;
             }
         } else if !wanted && spec.backend_port.is_some() {
+            // Retried at every look while launcher.json cannot be written.
             let _ = self.update_spec(|spec| spec.backend_port = None).await;
         }
-        let target = self.spec().and_then(|spec| spec.backend_port);
+        // What zebrad should have, saved or not: an unwanted endpoint goes even while the
+        // stored spec still has its port.
+        let target = if wanted {
+            self.spec().and_then(|spec| spec.backend_port)
+        } else {
+            None
+        };
         if !self.applying && self.applied != Some(target) {
             self.applying = true;
             // zebrad on another network than the service's keeps running as it is: the key
@@ -697,7 +707,7 @@ impl Actor {
             let node = self.node_rx.borrow().id.clone();
             let tx = self.internal_tx.clone();
             tokio::spawn(async move {
-                let result = host.apply(node, restart).await;
+                let result = host.apply(node, target, restart).await;
                 let _ = tx.send(Internal::Applied { target, result }).await;
             });
         }
@@ -1473,7 +1483,7 @@ impl Actor {
         // The endpoint must be gone before the spec is: once it is, the key is the user's.
         let node = self.node_rx.borrow().id.clone();
         self.host
-            .apply(node, spec.network == self.network())
+            .apply(node, None, spec.network == self.network())
             .await?;
         self.applied = Some(None);
         // Every entry the token may be under: the zone's, the spec's, and an older Zeal's for
