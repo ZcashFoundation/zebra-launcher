@@ -1,10 +1,12 @@
 # Resource monitoring
 
-> **Status, 2026-11-03: phases 1 and 2 are built (the Resources card, live on Linux), and of
-> phase 7 the parts the node registry of MULTI-NODE phase 2a makes possible (a sampler per
-> node, the node-scoped event and command, the herd's figures in the mock); phases 3 to 6 and
-> the rest of phase 7 are the design.** [Phases](#phases) says what each built phase changed
-> from this design. [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built
+> **Status, 2026-11-16: phases 1 to 3 are built (the Resources card, live on Linux, macOS and
+> Windows), and of phase 7 the parts the node registry of MULTI-NODE phase 2a makes possible
+> (a sampler per node, the node-scoped event and command, the herd's figures in the mock);
+> phases 4 to 6 and the rest of phase 7 are the design.** Phase 3 was built on Linux, where the
+> macOS and Windows code is only type-checked; its tests run on CI's macos-15 and windows-2025
+> runners, and what neither could check is listed under [Phases](#phases), which says what
+> each built phase changed from this design. [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built
 > and is updated phase by phase as this lands. [MULTI-NODE.md](MULTI-NODE.md) is the plan it
 > fits into.
 
@@ -140,9 +142,9 @@ Gauges (memory, counts, free space) are the value at the sample.
 | Unit | Busy logical CPUs (cores) and the CPU count; bytes; a pressure level. |
 | Linux | CPU: the first line of `/proc/stat` (busy = user + nice + system + irq + softirq + steal; idle = idle + iowait). CPU count: `sysconf(_NPROCESSORS_ONLN)`. Memory: MemTotal, MemAvailable, SwapTotal and SwapFree from `/proc/meminfo`. |
 | macOS | CPU: `host_statistics(HOST_CPU_LOAD_INFO)`. CPU count: `sysconf(_SC_NPROCESSORS_ONLN)` through libc; nix 0.31.3 defines `SysconfVar::_NPROCESSORS_ONLN` only for Linux and Android. Memory: `hw.memsize` and `vm.swapusage`. Pressure: `kern.memorystatus_vm_pressure_level` (1 normal, 2 warning, 4 critical), which XNU lets any process read on macOS. Available memory is estimated from `host_statistics64(HOST_VM_INFO64)` as total − (internal − purgeable + wired + compressor) pages. |
-| Windows | CPU: `GetSystemTimes` (busy = kernel − idle + user). CPU count: `GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)`. Memory: `K32GetPerformanceInfo` gives PhysicalTotal, PhysicalAvailable, CommitTotal and CommitLimit, in pages × PageSize. |
+| Windows | CPU: `GetSystemTimes` (busy = kernel − idle + user), only while `GetActiveProcessorGroupCount` is 1. CPU count: `GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)`. Memory: `K32GetPerformanceInfo` gives PhysicalTotal, PhysicalAvailable, CommitTotal and CommitLimit, in pages × PageSize. |
 | Cost | One read, or two calls, per tick. |
-| Caveats | `std::thread::available_parallelism` is not used: it follows cgroup quotas and CPU affinity, and on Windows it can undercount above 64 CPUs. `GlobalMemoryStatusEx` is not used for commit: its page-file fields are "the system or the current process, whichever is smaller". The macOS estimate is assumed to match Activity Monitor's "Memory Used" (unconfirmed), so verdicts there use the pressure level instead. |
+| Caveats | `std::thread::available_parallelism` is not used: it follows cgroup quotas and CPU affinity, and on Windows it can undercount above 64 CPUs. On a computer with more than one processor group (above 64 logical CPUs), `GetSystemTimes` sums only the calling thread's group, so its busy share would describe one group's CPUs scaled to all of them; the computer's busy figure is then not read: the dashboard shows the CPU count without a busy share, and the diagnostics read "unknown". A node's share of the computer is still read, since its job's times cover every group, as the count does. `GlobalMemoryStatusEx` is not used for commit: its page-file fields are "the system or the current process, whichever is smaller". The macOS estimate is assumed to match Activity Monitor's "Memory Used" (unconfirmed), so verdicts there use the pressure level instead. |
 
 ### Free space on data volumes
 
@@ -208,9 +210,11 @@ Parent pids are not used on Windows: Toolhelp's can be stale ([Raymond Chen,
 2015][chen-ppid]), and the job's list is authoritative.
 
 The job handle never leaves `process/windows.rs`. The probe carries a `Weak<Job>` that is
-upgraded only for one read, so the sampler can never hold the job open after its run.
-Holding it open would delay `KILL_ON_JOB_CLOSE`; a `DuplicateHandle` copy would delay it by
-up to one tick.
+upgraded only for one read, so the sampler holds the job open at most to the end of a read
+in flight; a `DuplicateHandle` copy would hold it for up to one tick. Closing the job is what
+fires `KILL_ON_JOB_CLOSE`, so dropping the run's `ChildHandle` terminates a kill-on-close job
+itself (`TerminateJobObject`): what is left in the job dies when the run is finalized, even
+while a read holds the job.
 
 ### Linux: the group, parent links and sticky members
 
@@ -371,9 +375,10 @@ This differs on purpose from the RPC monitor and the metrics poller. They wait f
 `Phase::Running` and for zebrad's log lines. Resources need neither, so every node kind
 gets them.
 
-**Windows.** The strong `Arc<Job>` lives only in `Run.handle` and drops at the end of
-`finalize`, as the job does today, so the kill-on-close timing does not change. A read in
-flight can delay it by the length of that read (milliseconds), never by a tick.
+**Windows.** The strong `Arc<Job>` lives only in `Run.handle`. `finalize` drops it right
+after it clears the probe, before it answers the run's callers or spawns the next run. A read
+in flight holds the job open to the end of that read, so dropping the handle terminates a
+kill-on-close job itself.
 
 ### The node sampler
 
@@ -614,7 +619,7 @@ pub struct MachineResources {
     pub at: SystemTime,
     pub logical_cpus: u32,
     /// Busy over the last interval, in logical CPUs (0 to `logical_cpus`); `None` on the
-    /// first sample.
+    /// first sample, and on Windows with more than one processor group.
     #[serde(default)]
     pub cpu_busy_cores: Option<f64>,
     pub memory_total_bytes: u64,
@@ -1166,6 +1171,8 @@ timebase path runs) and windows-2025 (`ci.yml`).
   - An orphan reaped outside the tree keeps its seen part in `lost`.
   - A Linux auto-reap is held for one tick and then moved to `lost`.
   - On macOS, a member's I/O goes to `lost` when it exits.
+  - A member missing from readings and back within a minute had not left: what it lost,
+    what it claimed, and what went to `lost` beneath it while it was missing are given back.
   - Windows job totals pass through.
   - A new run resets the counters.
   - An unreadable field keeps its last value in the totals.
@@ -1272,7 +1279,8 @@ windows-sys = { workspace = true, features = [
   - Everything else is in features already on:
     - JobObjects: `QueryInformationJobObject`, `IsProcessInJob`, both information classes;
     - Threading: `GetProcessTimes`, `GetProcessIoCounters`, `GetProcessHandleCount`,
-      `GetSystemTimes`, `GetActiveProcessorCount`, `WaitForSingleObject`,
+      `GetSystemTimes`, `GetActiveProcessorCount`, `GetActiveProcessorGroupCount`,
+      `WaitForSingleObject`,
       `PROCESS_SYNCHRONIZE`, and `JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION`, which is
       gated on Threading;
     - Storage_FileSystem: `GetVolumePathNameW`, `GetDiskFreeSpaceExW`.
@@ -1292,9 +1300,9 @@ windows-sys = { workspace = true, features = [
 | File | Calls | Why |
 | --- | --- | --- |
 | `resources/linux.rs` | none | `std::fs` reads and nix's safe `sysconf`; `firstrun.rs` already uses nix's safe `statvfs`. |
-| `resources/macos.rs` | `proc_listpgrppids`, `proc_listchildpids`, `proc_pidinfo` (`PROC_PIDTASKALLINFO`, `PROC_PIDTBSDINFO`, `PROC_PIDLISTFDS`), `proc_pid_rusage`, `sysctlbyname` (`hw.memsize`, `vm.swapusage`, `kern.memorystatus_vm_pressure_level`, `sysctl.proc_translated`), `sysconf` (`_SC_NPROCESSORS_ONLN`), `host_statistics`, `host_statistics64`, and two local declarations (below) | libproc and Mach have no safe binding in the tree, and nix's safe `sysconf` has no `_NPROCESSORS_ONLN` on macOS. |
-| `resources/windows.rs` | `OpenProcess`, `WaitForSingleObject`, `GetProcessTimes`, `K32GetProcessMemoryInfo`, `GetProcessIoCounters`, `GetProcessHandleCount`, `QueryFullProcessImageNameW` (the existing pattern), `GetSystemTimes`, `GetActiveProcessorCount`, `K32GetPerformanceInfo` | Win32. |
-| `process/windows.rs` | `QueryInformationJobObject` (two classes), `IsProcessInJob` | The job handle stays in this file. |
+| `resources/macos.rs` | `proc_listpgrppids`, `proc_listchildpids`, `proc_pidinfo` (`PROC_PIDTASKALLINFO`, `PROC_PIDTBSDINFO`, `PROC_PIDLISTFDS`), `proc_pid_rusage`, `sysctlbyname` (`hw.memsize`, `vm.swapusage`, `kern.memorystatus_vm_pressure_level`, `sysctl.proc_translated`), `sysconf` (`_SC_NPROCESSORS_ONLN`), `host_statistics`, `host_statistics64`, and three local declarations (below) | libproc and Mach have no safe binding in the tree, and nix's safe `sysconf` has no `_NPROCESSORS_ONLN` on macOS. |
+| `resources/windows.rs` | `OpenProcess`, `WaitForSingleObject`, `GetProcessTimes`, `K32GetProcessMemoryInfo`, `GetProcessIoCounters`, `GetProcessHandleCount`, `GetSystemTimes`, `GetActiveProcessorCount`, `GetActiveProcessorGroupCount`, `K32GetPerformanceInfo` | Win32. |
+| `process/windows.rs` | `QueryInformationJobObject` (two classes), `IsProcessInJob`, `QueryFullProcessImageNameW` (existing; `image_path`, now shared with the reader) | The job handle stays in this file. |
 | `firstrun.rs` | `GetDiskFreeSpaceExW` (existing, now with its total), `GetVolumePathNameW` | Win32. |
 
 Each call follows the house pattern:
@@ -1305,7 +1313,8 @@ Each call follows the house pattern:
 - handles wrapped in `OwnedHandle` at once;
 - variable-length lists grown and retried at most three times.
 
-The two local declarations in `resources/macos.rs`:
+The local declarations in `resources/macos.rs` (the third, `host_page_size`, came with the
+build; see phase 3):
 
 ```rust
 #[repr(C)]
@@ -1315,16 +1324,18 @@ struct MachTimebaseInfo {
 }
 
 unsafe extern "C" {
-    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
+    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::kern_return_t;
     safe fn mach_host_self() -> libc::mach_port_t;
+    fn host_page_size(host: libc::mach_port_t, out_page_size: *mut libc::vm_size_t)
+    -> libc::kern_return_t;
 }
 ```
 
-libc 0.2.191 binds both but marks them deprecated
+libc 0.2.191 binds the first two but marks them deprecated
 (``#[deprecated(since = "0.2.55", note = "Use the `mach2` crate instead")]``,
 `src/unix/bsd/apple/mod.rs:4755-4760`), and CI builds with `RUSTFLAGS: -D warnings`
-(`ci.yml:17`). Declaring them locally avoids both an `#[allow(deprecated)]` and the mach2
-crate for two symbols.
+(`ci.yml:17`); it does not bind `host_page_size`. Declaring them locally avoids both an
+`#[allow(deprecated)]` and the mach2 crate for three symbols.
 
 ### No mutexes
 
@@ -1343,7 +1354,7 @@ crate for two symbols.
   keeps no child rollups, it cannot use the job, and it lists every process on each
   refresh ([Alternatives considered](#alternatives-considered)). The `Reader` trait keeps a
   sysinfo-backed reader possible later, for an OS without a reader of its own.
-- the `mach2` crate, for two symbols;
+- the `mach2` crate, for three symbols;
 - the `procfs` and `libproc` crates, which have more surface than the parsers they would
   replace;
 - a cgroup v2 boundary, because delegation varies across desktop sessions and AppImage
@@ -1484,6 +1495,114 @@ Each phase is one pull request that ships on its own, with screenshots from the 
 
    Before release, test a notarized, hardened-runtime build by hand. Report CPU as "not
    available" under Rosetta until its timebase is checked. Screenshots from both OSes.
+
+   **Built.** As planned, with these differences:
+
+   - `Fold::new` still takes the platform and derives the `Rollup` rules from it: Linux rolls
+     CPU and I/O into the parent, macOS CPU only (a member's bytes move to `lost` as it
+     leaves, also when its CPU waits on a torn read), and Windows takes the job's totals and
+     tracks no departures.
+   - `TreeReading.job` is a `JobTotals` of seconds and bytes, defined in `resources.rs`, since
+     the reading is built on every OS; `process::windows::JobAccounting` keeps the raw units
+     and has no `total_processes`, which nothing reads. A reading without the job's totals
+     keeps the last ones.
+   - `MemberReading` gains `committed` (Windows' `PrivateUsage`, summed into
+     `committed_bytes`), and `MachineReading` gains the commit charge, its limit and the
+     pressure level, which the machine sampler now passes on.
+   - Under Rosetta the reader reads no CPU times and sets `Denied::cpu`: the sample's
+     `cpu_cores` is `None` and `cpu_secs` stays 0, so the CPU tile reads "not available", while
+     memory, I/O and the counts are read. The OS refuses nothing there, so the sampler's debug
+     line says CPU is not read under Rosetta; the fields the OS refused are named with the
+     platform's labels ("I/O" and "handles" on Windows).
+   - macOS:
+     - The walk down `proc_listchildpids` skips the children of a process that started
+       before the process that listed it, since that link is to a reused pid.
+     - A zombie, read through `PROC_PIDTBSDINFO`, counts 0 memory, threads and open files,
+       with its final times and peak from `proc_pid_rusage`.
+     - A member whose `proc_pid_rusage` is refused counts no CPU, since a member's CPU is not
+       optional, and marks memory and I/O as refused.
+     - In XNU's source, `proc_pidinfo` and `proc_pid_rusage` refuse a process with ESRCH from
+       the moment its references drain until it is a zombie, while the list calls still name
+       it. Such a member misses a reading, or more when the teardown is slow (closing many
+       files on a network volume, say), and is back. So for 12 readings (a minute) the fold
+       keeps what went to `lost` by member and reading: a member that is back had not left,
+       its part is taken back, and a departure waiting for it is dropped. The fold also keeps
+       the members that left in that minute as last seen, and passes them to the reader as
+       sticky ids, so one found only by its identity is looked for again. A departure that
+       moved up past one that is back (a shell's command whose shell was refused in its exit
+       window) anchors on it again with a fresh grace, and claims what its rollup gained
+       since it was last seen. So does a departure beneath it that went to `lost` while it
+       was missing: the command, when the shell was refused for two readings, or the root's
+       child, lost at once while the root was refused. Without this their time would count
+       twice. Growth a member claimed while it was missing was another member's, such as a
+       sibling's that the same ancestor reaped in that interval. The fold keeps each claim by
+       member for the same minute, and gives it back to the ancestor when the member is
+       back, so a departure still waiting there claims it; otherwise the sibling's whole time
+       would count twice. A sibling that went to `lost` before the member was back stays
+       there, which takes the member missing from two readings or more. An identity names
+       one process, so what is kept is matched only by that process, and nothing changes on
+       Linux.
+     - The name is `pbi_name`, or `pbi_comm` where that is empty.
+     - The VM statistics are in the kernel's pages, so the page size comes from
+       `host_page_size` (libsyscall answers it with `vm_kernel_page_size`): a third local
+       declaration, since libc does not bind it.
+     - The 32-bit tick counters of `HOST_CPU_LOAD_INFO` wrap after weeks; the sampler then
+       gives no busy figure for one interval.
+   - Windows:
+     - A pid that cannot be opened is skipped; the job's totals count it. So is a process
+       that exits during its reads, while a failure of a running one fails the reading. A
+       member whose image name cannot be read is named "unknown".
+     - The job's accounting is read after the members, so its totals hold at least what they
+       read. `Job::process_ids` grows to at most 65,536 pids, and after its last try returns
+       what fitted.
+     - Members have no parent links (`ppid` 0): the table lists the root and then the others
+       by start time, and the mock's `?os=windows` does the same.
+     - A process that has exited is not listed, so a child's last interval before its exit
+       may go unseen in the table; the job's totals hold it.
+     - zebrad starts with `CREATE_NO_WINDOW`, whose hidden console may put a console host
+       (`conhost.exe`) in the job (unconfirmed). It is then listed and counted, as Task
+       Manager shows it under the program; the live tests leave it out of their counts.
+     - A read after the job closed fails with `NotFound`, which the sampler never logs: the
+       supervisor clears the probe before it drops the job.
+     - With more than one processor group the computer's CPU times are not read
+       (`MachineReading.cpu` is `None`), since `GetSystemTimes` covers only the calling
+       thread's group while the CPU count covers all of them.
+   - Tests:
+     - `tests/resources.rs` runs on all three OSes, with each platform's names, thread counts
+       and parent links, and so does the registry's test of a sampler per node.
+     - The kill-on-close check lives there rather than in `tests/supervisor.rs`, since it
+       needs the sampler: a 50 ms sampler runs through the exit drain of a graceful stop
+       that leaves a `FAKE_ZEBRAD_LINGER_MS` grandchild, which must die within seconds of the
+       finalize instead of after its 30 s. That the `Weak` no longer upgrades is checked
+       through the reader, which then fails with `NotFound`, since the field is
+       crate-private.
+     - Unit tests: `resources/macos.rs` reads its own process, a child by its parent link and
+       then as a zombie, the root check, the timebase and the computer; `resources/windows.rs`
+       reads a `ping` in a job of its own until the job closes (which kills it), FILETIME
+       conversions and the computer; `process.rs` drops a run's handle while a read holds its
+       job, and checks that the `ping` in a kill-on-close job ends and one in a job without
+       the limit runs on.
+   - The unsupported reader stays for other platforms.
+
+   Could not be checked where this was built (Linux under WSL2, with clippy for
+   `aarch64-apple-darwin`, `x86_64-apple-darwin` and `x86_64-pc-windows-msvc`). CI's macos-15 and
+   windows-2025 runners run the readers' unit tests and the live tests, which check, among
+   other things, that libproc's list calls return zombies, that `ri_diskio_byteswritten` counts
+   fake-zebrad's `sync_all` writes, that any process may read
+   `kern.memorystatus_vm_pressure_level`, and that the job keeps exited processes' CPU.
+   Neither checks:
+
+   - a notarized, hardened-runtime build (by hand, before release);
+   - the timebase under Rosetta, and `host_page_size` there; CPU reads "not available" until
+     then;
+   - the macOS available-memory estimate against Activity Monitor;
+   - how much network traffic the Windows job's I/O counts;
+   - whether `QueryInformationJobObject` fails with `ERROR_MORE_DATA` on a short list (the loop
+     handles both answers);
+   - whether zebrad's console host is in its job (the tests pass either way);
+   - a computer with more than one processor group, whose CPU should read "unknown";
+   - the window in which XNU refuses an exiting process, which the fold absorbs;
+   - screenshots from both OSes.
 4. **History charts.**
    - `Unit` and gap support in the chart code; the existing charts are byte-identical.
    - The three charts.
@@ -1596,15 +1715,16 @@ Through every phase:
 
 Unconfirmed, to be checked in the phase named:
 
-- **Phase 3:**
+- **Phase 3** (built; still unchecked, see phase 3):
   - libproc calls in a notarized, hardened-runtime build. No hardened-runtime entitlement
     concerns process information, and Zeal is not sandboxed, so they are expected to work.
   - The Mach timebase a Rosetta-translated process sees, and whether `hw.tbfrequency` gives
-    the native rate instead.
+    the native rate instead; also the page size `host_page_size` gives there.
   - The macOS available-memory formula, against Activity Monitor.
   - How much network traffic the Windows job's I/O counters include.
   - Whether `QueryInformationJobObject` fails with `ERROR_MORE_DATA` on a short process
     list (the loop handles both cases).
+  - Whether a console host (`conhost.exe`) shares zebrad's job on Windows.
 - **Phase 2:** the cost of the `/proc` scan with thousands of processes. Measured: 11 ms
   for 2,600 processes on one computer (see phase 2); the per-tick debug log shows it
   elsewhere.
@@ -1710,7 +1830,8 @@ Both are negligible beside zebrad's five or more busy cores.
 ### Windows job semantics
 
 - **Own readers:** uses the job for both the boundary and the totals. It holds the job only
-  through a `Weak`, so `KILL_ON_JOB_CLOSE` timing does not change; a duplicated handle
+  through a `Weak`, for one read at a time, and dropping the run's handle terminates a
+  kill-on-close job, so `KILL_ON_JOB_CLOSE` timing does not change; a duplicated handle
   would delay it by a tick.
 - **sysinfo:** leaves the job unused. Its own fallback for Windows needs the job handle, and
   that is the supervisor change it set out to avoid.

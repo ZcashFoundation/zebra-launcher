@@ -700,6 +700,9 @@ impl Actor {
             return;
         };
         self.probe.send_replace(None);
+        // Before the callers are answered and a next run is spawned: on Windows the drop ends
+        // the run's job, and with it what zebrad left running.
+        drop(run.handle);
         for task in &run.tasks {
             task.abort();
         }

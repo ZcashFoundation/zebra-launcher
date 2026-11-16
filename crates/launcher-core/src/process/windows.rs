@@ -5,27 +5,34 @@
 //! so nothing it starts can escape the job. Terminating the job kills the
 //! whole tree. The launcher itself is never put in a job: that would also kill
 //! the installer the updater runs and any browser the launcher opens.
+//!
+//! The resource reader asks the job for its processes and its accounting
+//! ([`Job::process_ids`], [`Job::accounting`], [`Job::contains`]); the job's
+//! handle never leaves this file.
 
 use std::{
     io,
-    mem::size_of,
+    mem::{offset_of, size_of},
     os::windows::{
         ffi::OsStringExt,
-        io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
+        io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle},
     },
     path::PathBuf,
 };
 
 use windows_sys::Win32::{
-    Foundation::{ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE, STILL_ACTIVE},
+    Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE, STILL_ACTIVE},
     System::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
         },
         JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, TerminateJobObject,
+            AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION,
+            JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JobObjectBasicAndIoAccountingInformation, JobObjectBasicProcessIdList,
+            JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+            TerminateJobObject,
         },
         Threading::{
             CREATE_NO_WINDOW, CREATE_SUSPENDED, GetExitCodeProcess, OpenProcess, OpenThread,
@@ -41,10 +48,27 @@ pub(super) fn prepare(cmd: &mut tokio::process::Command) {
     cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
 }
 
+/// How many more times a process list that did not fit is grown and asked for again.
+const LIST_RETRIES: usize = 3;
+
+/// The most pids one process list holds.
+const MAX_LISTED: usize = 1 << 16;
+
 /// A job object that owns zebrad and its descendants.
 #[derive(Debug)]
 pub struct Job {
     handle: OwnedHandle,
+    kill_on_close: bool,
+}
+
+/// What a job counted for every process ever in it, its nested jobs' included.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JobAccounting {
+    /// User plus kernel time, in 100 ns units.
+    pub cpu_100ns: u64,
+    /// `ReadTransferCount` and `WriteTransferCount`: all I/O, files, network and devices.
+    pub read_bytes: u64,
+    pub written_bytes: u64,
 }
 
 impl Job {
@@ -77,7 +101,15 @@ impl Job {
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            kill_on_close,
+        })
+    }
+
+    /// Whether closing the job's last handle kills every process in it.
+    pub fn kills_on_close(&self) -> bool {
+        self.kill_on_close
     }
 
     /// Adds a process to the job.
@@ -96,6 +128,110 @@ impl Job {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    /// The CPU and I/O of every process ever in the job: "all terminated processes no longer
+    /// associated with the job" are included (`JobObjectBasicAndIoAccountingInformation`).
+    pub fn accounting(&self) -> io::Result<JobAccounting> {
+        let mut info = JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION::default();
+        let size = u32::try_from(size_of::<JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION>())
+            .expect("the accounting struct is a few dozen bytes");
+        // SAFETY: the handle is a valid job and `info` is the struct the information class
+        // fills, with its exact size; the returned length may be null.
+        let ok = unsafe {
+            QueryInformationJobObject(
+                self.handle.as_raw_handle(),
+                JobObjectBasicAndIoAccountingInformation,
+                (&raw mut info).cast(),
+                size,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let basic = info.BasicInfo;
+        let user = u64::try_from(basic.TotalUserTime).unwrap_or(0);
+        let kernel = u64::try_from(basic.TotalKernelTime).unwrap_or(0);
+        Ok(JobAccounting {
+            cpu_100ns: user.saturating_add(kernel),
+            read_bytes: info.IoInfo.ReadTransferCount,
+            written_bytes: info.IoInfo.WriteTransferCount,
+        })
+    }
+
+    /// The pids of the job's processes, its nested jobs' included
+    /// (`JobObjectBasicProcessIdList`). The list is grown and asked for again while it holds
+    /// fewer pids than the job has, or the call fails with `ERROR_MORE_DATA`, which the
+    /// documentation does not mention; after the last try it is what fitted.
+    pub fn process_ids(&self) -> io::Result<Vec<u32>> {
+        // The list is a header of two counts, then one pointer-sized pid per process.
+        let header =
+            offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList) / size_of::<usize>();
+        let mut capacity = 16;
+        let mut retries = 0;
+        loop {
+            let mut buf = vec![0usize; header + capacity];
+            let bytes = u32::try_from(buf.len() * size_of::<usize>()).map_err(io::Error::other)?;
+            // SAFETY: the handle is a valid job and `buf` is writable for `bytes` bytes, aligned
+            // for the list, which needs a pointer's alignment; the returned length may be null.
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.handle.as_raw_handle(),
+                    JobObjectBasicProcessIdList,
+                    buf.as_mut_ptr().cast(),
+                    bytes,
+                    std::ptr::null_mut(),
+                )
+            };
+            let more_data = if ok == 0 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() != i32::try_from(ERROR_MORE_DATA).ok() {
+                    return Err(err);
+                }
+                true
+            } else {
+                false
+            };
+            // SAFETY: `buf` is aligned for the list and longer than it, and the list holds only
+            // integers, so any bytes are valid.
+            let list = unsafe {
+                buf.as_ptr()
+                    .cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>()
+                    .read()
+            };
+            let assigned = usize::try_from(list.NumberOfAssignedProcesses).unwrap_or(usize::MAX);
+            let listed = usize::try_from(list.NumberOfProcessIdsInList)
+                .unwrap_or(0)
+                .min(capacity);
+            // The last try returns what fitted: `ERROR_MORE_DATA` leaves those pids written, and
+            // a header the OS did not write reads as an empty list, since `buf` starts zeroed.
+            if retries == LIST_RETRIES || (!more_data && listed >= assigned) {
+                return Ok(buf[header..header + listed]
+                    .iter()
+                    .filter_map(|&pid| u32::try_from(pid).ok())
+                    .collect());
+            }
+            retries += 1;
+            capacity = assigned.saturating_add(8).max(capacity * 2).min(MAX_LISTED);
+        }
+    }
+
+    /// Whether `process` is in this job or one nested in it (`IsProcessInJob`).
+    pub fn contains(&self, process: BorrowedHandle<'_>) -> io::Result<bool> {
+        let mut result = 0;
+        // SAFETY: both handles are valid for the duration of the call and `result` is writable.
+        let ok = unsafe {
+            IsProcessInJob(
+                process.as_raw_handle(),
+                self.handle.as_raw_handle(),
+                &raw mut result,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(result != 0)
     }
 }
 
@@ -142,6 +278,12 @@ pub(super) fn executable_of(pid: u32) -> Option<PathBuf> {
     }
     // SAFETY: the handle was just returned by OpenProcess and is owned by us.
     let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
+    image_path(handle.as_handle())
+}
+
+/// The executable of the process behind `handle`, which needs
+/// `PROCESS_QUERY_LIMITED_INFORMATION` access.
+pub(crate) fn image_path(handle: BorrowedHandle<'_>) -> Option<PathBuf> {
     let mut buf = vec![0u16; 32_768];
     let mut size = u32::try_from(buf.len()).ok()?;
     // SAFETY: the handle is valid, `buf` is writable for `size` UTF-16 units and

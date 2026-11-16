@@ -10,8 +10,9 @@
 //! The reads are blocking system calls, so each one runs in `spawn_blocking`, taking its inputs
 //! by value and returning an owned reading; each actor keeps its own state, and nothing is
 //! shared. The per-OS readers implement [`Reader`] and [`MachineReader`]: the Linux one reads
-//! `/proc`; on other platforms reading is not supported yet, the samplers publish `None` and
-//! stop.
+//! `/proc`, the macOS one libproc and Mach's host statistics, and the Windows one the node's
+//! job and a few calls per process. On other platforms reading is not supported, and the
+//! samplers publish `None` and stop.
 //!
 //! ```text
 //!   watch<Option<TreeProbe>> ──▶ ResourceSampler ──spawn_blocking──▶ Reader::tree
@@ -26,7 +27,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use launcher_types::{MachineResources, NodeResources, Platform};
+use launcher_types::{MachineResources, MemoryPressure, NodeResources, Platform};
 use tokio::{sync::watch, time::MissedTickBehavior};
 use tracing::Instrument;
 
@@ -35,8 +36,12 @@ use crate::process::TreeProbe;
 mod fold;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod procfs;
+#[cfg(windows)]
+mod windows;
 
 use fold::Fold;
 
@@ -44,7 +49,8 @@ use fold::Fold;
 pub const INTERVAL: Duration = Duration::from_secs(5);
 
 /// A process as the OS has it: its pid and its start time in the OS's unit (clock ticks since
-/// boot on Linux), which tells it apart from a later process with the same pid.
+/// boot on Linux, microseconds since 1970 on macOS, 100 ns since 1601 on Windows), which tells
+/// it apart from a later process with the same pid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Identity {
     pub pid: u32,
@@ -55,32 +61,53 @@ pub struct Identity {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemberReading {
     pub id: Identity,
+    /// 0 on Windows, where parent pids are not read.
     pub ppid: u32,
     /// Cleaned to one line of plain text ([`clean_name`]).
     pub name: String,
     pub started_at: SystemTime,
-    /// Its own user and system time, its threads' included.
+    /// Its own user and system time, its threads' included; 0 when [`Denied::cpu`] is set.
     pub cpu_own: f64,
-    /// The time of the children it reaped (Linux `cutime` + `cstime`).
+    /// The time of the children it reaped (Linux `cutime` + `cstime`, macOS `ri_child_*`); 0 on
+    /// Windows.
     pub cpu_rollup: f64,
-    /// Resident memory; 0 for a zombie.
+    /// Its memory as the OS's monitor shows it (resident memory, the physical footprint or the
+    /// working set); 0 for a zombie.
     pub memory: Option<u64>,
-    /// The highest resident memory it reached.
+    /// The highest memory it reached.
     pub peak: Option<u64>,
-    /// Bytes read from and written to storage, the children it reaped included.
+    /// Windows only: its commit charge (`PrivateUsage`).
+    pub committed: Option<u64>,
+    /// Bytes read and written: from storage on Linux, the children it reaped included; from
+    /// storage on macOS; all I/O on Windows.
     pub read: Option<u64>,
     pub written: Option<u64>,
+    /// `None` on Windows.
     pub threads: Option<u32>,
-    /// Open files.
+    /// Open files, or handles on Windows.
     pub descriptors: Option<u32>,
 }
 
-/// The fields the OS refused for at least one member of a reading.
+/// The fields not read for at least one member of a reading: refused by the OS, or for `cpu`,
+/// not read under Rosetta.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Denied {
+    /// CPU times are not read for any member: an x86-64 build under Rosetta, whose Mach
+    /// timebase is unchecked (docs/RESOURCES.md). The OS refuses nothing there.
+    pub cpu: bool,
     pub memory: bool,
     pub io: bool,
     pub descriptors: bool,
+}
+
+/// Windows: what the job counted for every process ever in it, the exited ones included.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct JobTotals {
+    /// User plus kernel time, in seconds.
+    pub cpu: f64,
+    /// Bytes of all I/O: files, network and devices.
+    pub read: u64,
+    pub written: u64,
 }
 
 /// One reading of a tree, before the fold.
@@ -89,9 +116,12 @@ pub struct TreeReading {
     pub at: SystemTime,
     /// When the members were read, on the monotonic clock.
     pub mono: Instant,
-    /// In tree order: each member before its children.
+    /// In tree order: each member before its children. On Windows, where parents are not
+    /// read, the root and then the others by start time.
     pub members: Vec<MemberReading>,
     pub denied: Denied,
+    /// Windows: the job's totals, which replace the sum over the members.
+    pub job: Option<JobTotals>,
 }
 
 /// Reads a node's process tree.
@@ -102,18 +132,31 @@ pub trait Reader: Send + Sync + 'static {
     fn tree(&self, probe: &TreeProbe, sticky: &[Identity]) -> io::Result<TreeReading>;
 }
 
+/// The computer's cumulative CPU time spent busy and idle, in the OS's unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MachineCpu {
+    pub busy: u64,
+    pub idle: u64,
+}
+
 /// One reading of the computer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MachineReading {
     pub at: SystemTime,
     pub logical_cpus: u32,
-    /// Cumulative CPU time spent busy and idle across the computer, in the OS's unit.
-    pub cpu_busy: u64,
-    pub cpu_idle: u64,
+    /// `None` where the OS gives no times for all `logical_cpus`: Windows with more than one
+    /// processor group.
+    pub cpu: Option<MachineCpu>,
     pub memory_total: u64,
     pub memory_available: Option<u64>,
+    /// Linux and macOS.
     pub swap_total: Option<u64>,
     pub swap_used: Option<u64>,
+    /// Windows: the commit charge and its limit.
+    pub commit: Option<u64>,
+    pub commit_limit: Option<u64>,
+    /// macOS: the kernel's memory pressure level.
+    pub pressure: Option<MemoryPressure>,
 }
 
 /// Reads the computer's CPU and memory.
@@ -133,14 +176,22 @@ pub fn platform() -> Platform {
     }
 }
 
-/// This platform's tree reader. On platforms without one yet, every read fails with
-/// [`io::ErrorKind::Unsupported`].
+/// This platform's tree reader: Linux, macOS and Windows have one. On other platforms every
+/// read fails with [`io::ErrorKind::Unsupported`].
 pub fn platform_reader() -> Arc<dyn Reader> {
     #[cfg(target_os = "linux")]
     {
         Arc::new(linux::LinuxReader::new())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        Arc::new(macos::MacReader::new())
+    }
+    #[cfg(windows)]
+    {
+        Arc::new(windows::WindowsReader)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         Arc::new(Unsupported)
     }
@@ -152,34 +203,42 @@ pub fn platform_machine_reader() -> Arc<dyn MachineReader> {
     {
         Arc::new(linux::LinuxReader::new())
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        Arc::new(macos::MacMachineReader::new())
+    }
+    #[cfg(windows)]
+    {
+        Arc::new(windows::WindowsReader)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         Arc::new(Unsupported)
     }
 }
 
-/// The reader of a platform that has none yet (macOS and Windows come with phase 3).
-#[cfg(not(target_os = "linux"))]
+/// The reader of a platform that has none.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 struct Unsupported;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 impl Unsupported {
     fn error() -> io::Error {
         io::Error::new(
             io::ErrorKind::Unsupported,
-            "resource monitoring is not supported on this platform yet",
+            "resource monitoring is not supported on this platform",
         )
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 impl Reader for Unsupported {
     fn tree(&self, _probe: &TreeProbe, _sticky: &[Identity]) -> io::Result<TreeReading> {
         Err(Self::error())
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 impl MachineReader for Unsupported {
     fn machine(&self) -> io::Result<MachineReading> {
         Err(Self::error())
@@ -359,12 +418,21 @@ async fn sample_run(
     }
 }
 
-/// Logs each field the OS refused, once per sampler.
+/// Logs each field the OS refused, and CPU not read under Rosetta, once per sampler.
 fn log_denied(logged: &mut Denied, denied: Denied) {
+    if denied.cpu && !logged.cpu {
+        logged.cpu = true;
+        tracing::debug!("CPU is not read under Rosetta until its timebase is checked");
+    }
+    let platform = platform();
     for (now, before, field) in [
         (denied.memory, &mut logged.memory, "memory"),
-        (denied.io, &mut logged.io, "disk I/O"),
-        (denied.descriptors, &mut logged.descriptors, "open files"),
+        (denied.io, &mut logged.io, platform.io_label()),
+        (
+            denied.descriptors,
+            &mut logged.descriptors,
+            platform.descriptors_label(),
+        ),
     ] {
         if now && !*before {
             *before = true;
@@ -395,10 +463,11 @@ impl MachineSampler {
 }
 
 /// The busy logical CPUs between two readings: the busy share of the CPU time that passed,
-/// times the CPUs. `None` when no time passed.
+/// times the CPUs. `None` when no time passed or a reading has no CPU times.
 fn busy_cores(before: &MachineReading, now: &MachineReading) -> Option<f64> {
-    let busy = now.cpu_busy.checked_sub(before.cpu_busy)?;
-    let idle = now.cpu_idle.checked_sub(before.cpu_idle)?;
+    let (before_cpu, now_cpu) = (before.cpu?, now.cpu?);
+    let busy = now_cpu.busy.checked_sub(before_cpu.busy)?;
+    let idle = now_cpu.idle.checked_sub(before_cpu.idle)?;
     let total = busy + idle;
     (total > 0).then(|| busy as f64 / total as f64 * f64::from(now.logical_cpus))
 }
@@ -434,9 +503,9 @@ async fn sample_machine(
                     memory_available_bytes: reading.memory_available,
                     swap_total_bytes: reading.swap_total,
                     swap_used_bytes: reading.swap_used,
-                    commit_bytes: None,
-                    commit_limit_bytes: None,
-                    pressure: None,
+                    commit_bytes: reading.commit,
+                    commit_limit_bytes: reading.commit_limit,
+                    pressure: reading.pressure,
                 }));
             }
             Ok(Err(err)) if err.kind() == io::ErrorKind::Unsupported => {
@@ -507,12 +576,16 @@ mod tests {
             pid: 100,
             spawned_at: SystemTime::now(),
             spawned,
+            #[cfg(windows)]
+            job: std::sync::Weak::new(),
         }
     }
 
-    /// The root alone, `5 × (call + 1)` seconds into the run with 2 cores' worth of CPU.
+    /// The root alone, `5 × (call + 1)` seconds into the run with 2 cores' worth of CPU. The
+    /// job's totals match it, since the fold takes those on Windows and ignores them elsewhere.
     fn steady(call: u32, probe: &TreeProbe) -> io::Result<TreeReading> {
         let secs = 5 * (u64::from(call) + 1);
+        let cpu = 2.0 * secs as f64;
         Ok(TreeReading {
             at: SystemTime::now(),
             mono: probe.spawned + Duration::from_secs(secs),
@@ -524,16 +597,22 @@ mod tests {
                 ppid: 1,
                 name: "zebrad".into(),
                 started_at: probe.spawned_at,
-                cpu_own: 2.0 * secs as f64,
+                cpu_own: cpu,
                 cpu_rollup: 0.0,
                 memory: Some(1 << 30),
                 peak: Some(1 << 30),
+                committed: None,
                 read: Some(0),
                 written: Some(0),
                 threads: Some(68),
                 descriptors: Some(412),
             }],
             denied: Denied::default(),
+            job: Some(JobTotals {
+                cpu,
+                read: 0,
+                written: 0,
+            }),
         })
     }
 
@@ -695,16 +774,22 @@ mod tests {
     impl MachineReader for Machine {
         fn machine(&self) -> io::Result<MachineReading> {
             let call = u64::from(self.calls.fetch_add(1, Ordering::SeqCst));
-            // 8 CPUs, a quarter busy.
+            // 8 CPUs, a quarter busy; Windows' commit and macOS's pressure, as one reader
+            // gives none of both.
             Ok(MachineReading {
                 at: SystemTime::now(),
                 logical_cpus: 8,
-                cpu_busy: 100 * call,
-                cpu_idle: 300 * call,
+                cpu: Some(MachineCpu {
+                    busy: 100 * call,
+                    idle: 300 * call,
+                }),
                 memory_total: 16 << 30,
                 memory_available: Some(4 << 30),
                 swap_total: Some(2 << 30),
                 swap_used: Some(0),
+                commit: Some(9 << 30),
+                commit_limit: Some(24 << 30),
+                pressure: Some(MemoryPressure::Warning),
             })
         }
     }
@@ -733,7 +818,9 @@ mod tests {
             .unwrap();
         let second = rx.borrow_and_update().clone().unwrap();
         assert_eq!(second.cpu_busy_cores, Some(2.0));
-        assert_eq!(second.pressure, None);
+        assert_eq!(second.commit_bytes, Some(9 << 30));
+        assert_eq!(second.commit_limit_bytes, Some(24 << 30));
+        assert_eq!(second.pressure, Some(MemoryPressure::Warning));
     }
 
     #[test]
@@ -741,16 +828,25 @@ mod tests {
         let reading = |busy, idle| MachineReading {
             at: SystemTime::UNIX_EPOCH,
             logical_cpus: 4,
-            cpu_busy: busy,
-            cpu_idle: idle,
+            cpu: Some(MachineCpu { busy, idle }),
             memory_total: 0,
             memory_available: None,
             swap_total: None,
             swap_used: None,
+            commit: None,
+            commit_limit: None,
+            pressure: None,
         };
         assert_eq!(busy_cores(&reading(10, 10), &reading(10, 10)), None);
         assert_eq!(busy_cores(&reading(10, 10), &reading(30, 10)), Some(4.0));
         // Counters that went backwards (a CPU taken offline) give no figure.
         assert_eq!(busy_cores(&reading(10, 10), &reading(5, 20)), None);
+        // Nor does a reading without times for every CPU (Windows above one processor group).
+        let blind = MachineReading {
+            cpu: None,
+            ..reading(30, 10)
+        };
+        assert_eq!(busy_cores(&reading(10, 10), &blind), None);
+        assert_eq!(busy_cores(&blind, &reading(50, 10)), None);
     }
 }

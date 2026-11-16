@@ -85,11 +85,12 @@ every node command and event carries a node's id, and the mock's zebrad below is
   `?nopeers` keep it at 0.1 cores, and `?crashloop` restarts the counters with every run. Stop
   the node to see the card's last-run line. The computer has 8 CPUs and 16 GiB, of which other
   programs use 0.6 to 0.9 cores and 5.2 GiB. `?os=macos` and `?os=windows` show those
-  platforms' figures and labels (memory pressure on macOS; commit, handles and no thread
-  counts on Windows); Linux is the default. `?children` gives zebrad a `block_notify_command`
-  that runs in cycles of three samples: an `sh` with `notify-block` under it, indented under
-  their parents; then 40 `curl`s as well, more than a sample lists, so the table ends with
-  "and 11 more"; then `notify-block` alone, orphaned, on a line of its own. `?unreadable`
+  platforms' figures and labels (memory pressure on macOS; commit, handles, and no thread
+  counts or parent links on Windows, which takes the tree from the job); Linux is the default.
+  `?children` gives zebrad a `block_notify_command` that runs in cycles of three samples: an
+  `sh` with `notify-block` under it, indented under their parents; then 40 `curl`s as well,
+  more than a sample lists, so the table ends with "and 11 more"; then `notify-block` alone,
+  orphaned, on a line of its own. With `?os=windows` every process has a line of its own. `?unreadable`
   reports CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk
   tile "—" with "the system does not report them". `?readerpanic` makes the resource reader
   panic 30 s into the first run, as the backend's can: the samples stop while zebrad keeps

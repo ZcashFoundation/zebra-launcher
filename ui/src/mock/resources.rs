@@ -16,7 +16,8 @@
 //! zebrad always has 68 threads and 412 open files (1,204 handles on Windows). The computer
 //! has 8 logical CPUs and 16 GiB; other programs use 0.6 to 0.9 cores and 5.2 GiB, and swap
 //! holds 0.3 of 2 GiB. `?os=macos` and `?os=windows` switch the figures to those platforms'
-//! (memory pressure on macOS; commit, handles and no thread counts on Windows).
+//! (memory pressure on macOS; commit, handles, and no thread counts or parent links on
+//! Windows, whose reader takes the tree from the job).
 //! `?children` gives zebrad a `block_notify_command` that runs in cycles of three samples
 //! ([`block_notify`]), `?unreadable` reports CPU and I/O as refused by the OS, and
 //! `?readerpanic` stops the samples 30 s into the first run while zebrad runs on, as the
@@ -435,7 +436,8 @@ impl MockTree {
                 let age = at.duration_since(child.started_at).unwrap_or_default();
                 ProcessUsage {
                     pid: child.pid,
-                    parent: child.parent,
+                    // Windows reads no parent pids: the job's list is the tree.
+                    parent: child.parent.filter(|_| !windows),
                     name: child.name.to_owned(),
                     started_at: child.started_at,
                     cpu_secs: child.cores * age.as_secs_f64(),
@@ -849,6 +851,29 @@ mod tests {
         assert_eq!(windows.descriptors, Some(HANDLES));
         assert_eq!(windows.members[0].name, "zebrad.exe");
         assert!(windows.committed_bytes.unwrap() > windows.memory_bytes);
+
+        // Windows lists the job's processes without parent links, by start time.
+        let mut tree = MockTree::new(1, 4242, start);
+        let flags = Flags {
+            os: OsFlag::Windows,
+            children: true,
+            ..Flags::default()
+        };
+        tree.sample(start, 0.0, &syncing, flags);
+        let children = tree.sample(start + Duration::from_secs(5), 5.0, &syncing, flags);
+        let rows: Vec<(&str, Option<u32>)> = children
+            .members
+            .iter()
+            .map(|member| (member.name.as_str(), member.parent))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("zebrad.exe", None),
+                ("cmd.exe", None),
+                ("notify-block.exe", None)
+            ]
+        );
     }
 
     #[test]
