@@ -33,8 +33,10 @@
 //! outlast a reading. What it lost is taken back, and a departure waiting for it is dropped. A
 //! departure that moved up past it while it was missing anchors on it again, with a fresh
 //! grace, and claims what its rollup gained since it was last seen: its final total holds the
-//! departure's. Until then the reader looks for it by its identity, which names one process,
-//! so what is kept can only be matched by that process and costs only memory.
+//! departure's. What it claimed of an ancestor's growth while it was missing was another
+//! member's, and is given back to that ancestor for the departures waiting there. Until then
+//! the reader looks for it by its identity, which names one process, so what is kept can only
+//! be matched by that process and costs only memory.
 //!
 //! Members that waited claim an ancestor's growth before those that just left, since their
 //! reap may be what the reading shows. A member that could not claim although its parent's
@@ -251,6 +253,16 @@ struct Loss {
     counters: Counters,
 }
 
+/// CPU time a departure claimed of its anchor's rollup growth, at which reading, in case the
+/// member is back: then it was not reaped, and the growth was another member's.
+#[derive(Clone, Debug, PartialEq)]
+struct Claim {
+    id: Identity,
+    anchor: Identity,
+    at: u64,
+    cpu: f64,
+}
+
 /// One run's measurement: the members last seen, the counters of the departed, and the
 /// published totals.
 #[derive(Debug)]
@@ -273,6 +285,8 @@ pub(crate) struct Fold {
     readings: u64,
     /// What went to `lost` in the last [`RETURN_READINGS`] readings, by member.
     losses: Vec<Loss>,
+    /// What departures claimed in the last [`RETURN_READINGS`] readings, by member.
+    claims: Vec<Claim>,
     /// The members that left in the last [`RETURN_READINGS`] readings, with the reading they
     /// left at and as last seen.
     absent: HashMap<Identity, (u64, Seen)>,
@@ -302,6 +316,7 @@ impl Fold {
             lost: Counters::default(),
             readings: 0,
             losses: Vec::new(),
+            claims: Vec::new(),
             absent: HashMap::new(),
             published: Counters::default(),
             io_seen: false,
@@ -493,6 +508,16 @@ impl Fold {
             lost.written = lost.written.saturating_sub(loss.counters.written);
             false
         });
+        // What it claimed was another member's growth: the departures waiting on that anchor
+        // may claim it.
+        let leftover = &mut self.leftover;
+        self.claims.retain(|claim| {
+            if !live(&claim.id) {
+                return kept(claim.at);
+            }
+            *leftover.entry(claim.anchor).or_insert(0.0) += claim.cpu;
+            false
+        });
         let mut pending = std::mem::take(&mut self.pending);
         pending.retain(|departure| !live(&departure.id));
         // A waiting departure whose anchor has left since: its time is in the anchor's final
@@ -636,8 +661,15 @@ impl Fold {
             let anchored = live(&departure.anchor);
             let credit = credit.entry(departure.anchor).or_insert(0.0);
             if anchored && departure.cpu <= *credit + EPSILON {
-                *credit = (*credit - departure.cpu).max(0.0);
+                let cpu = departure.cpu.min(*credit);
+                *credit -= cpu;
                 claimed.insert(departure.id);
+                self.claims.push(Claim {
+                    id: departure.id,
+                    anchor: departure.anchor,
+                    at: now,
+                    cpu,
+                });
             } else if anchored && !departure.waited {
                 // The parent's total reached the anchor and left too little for this one: the
                 // parent did not reap it. A suspect stays one after a move up the tree.
@@ -1356,6 +1388,57 @@ mod tests {
             assert_eq!(settled.read_bytes, Some(10), "{platform:?}");
             assert!(close(fold.lost.cpu, 0.0), "{platform:?}");
         }
+    }
+
+    #[test]
+    fn a_member_that_is_back_gives_back_what_it_claimed() {
+        // zebrad reaps 102 while XNU refuses 101 in its exit window: both leave, and 101, the
+        // lower pid, claims 1 s of the 10 s that are 102's, so 102 waits. 101 is back as a
+        // zombie: what it claimed is given back, 102 claims its 10 s, and zebrad reaps 101.
+        let readings = |missing: u32, other: u32, cpu: f64| {
+            vec![
+                vec![
+                    member(100, 1, 100.0, 0.0, 0),
+                    member(missing, 100, 1.0, 0.0, 0),
+                    member(other, 100, cpu, 0.0, 0),
+                ],
+                vec![member(100, 1, 100.0, cpu, 0)],
+                vec![
+                    member(100, 1, 100.0, cpu, 0),
+                    member(missing, 100, 1.0, 0.0, 0),
+                ],
+                vec![member(100, 1, 100.0, cpu + 1.0, 0)],
+                vec![member(100, 1, 100.0, cpu + 1.0, 0)],
+            ]
+        };
+        for platform in [Platform::Linux, Platform::Macos] {
+            let (settled, fold) = fold_on(platform, readings(101, 102, 10.0));
+            assert!(
+                close(settled.cpu_secs, 111.0),
+                "{platform:?}: {}",
+                settled.cpu_secs
+            );
+            assert!(close(fold.lost.cpu, 0.0), "{platform:?}: {}", fold.lost.cpu);
+            // 101's claim from its missing reading was given back; the ones after the reaps stay.
+            let kept: Vec<(u32, u64)> = fold
+                .claims
+                .iter()
+                .map(|claim| (claim.id.pid, claim.at))
+                .collect();
+            assert_eq!(kept, vec![(102, 3), (101, 4)], "{platform:?}");
+            // With the reaped one first by pid, it claims its own growth.
+            let (settled, fold) = fold_on(platform, readings(102, 101, 10.0));
+            assert!(
+                close(settled.cpu_secs, 111.0),
+                "{platform:?}: {}",
+                settled.cpu_secs
+            );
+            assert!(close(fold.lost.cpu, 0.0), "{platform:?}: {}", fold.lost.cpu);
+        }
+        // A reaped sibling's whole time was at stake: 3,600 s against the refused one's 1 s.
+        let (settled, fold) = fold_on(Platform::Macos, readings(101, 102, 3600.0));
+        assert!(close(settled.cpu_secs, 3701.0), "{}", settled.cpu_secs);
+        assert!(close(fold.lost.cpu, 0.0), "{}", fold.lost.cpu);
     }
 
     #[test]
