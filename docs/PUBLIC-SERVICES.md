@@ -2761,9 +2761,11 @@ before the move to zingod: a release with #1655; fixes for #1665 and #1537; a
 24. **Advisories in zingod's `Cargo.lock`**: report them in the build's summary and triage them
     at each bump, or fail the build? → Report: Zeal can't patch zingod's dependencies, and a
     failing build would block unrelated releases.
-25. **Licence notices**: zingod's, lightwallet-protocol's and the four C libraries' texts,
-    without a list of every Rust crate, the gap zebrad's bundle already has? → Yes for Z1; a
-    Zeal-wide inventory is a follow-up.
+25. **Licence notices**: zingod's, lightwallet-protocol's, Zebra's and the four C libraries'
+    texts, without a list of every Rust crate, the gap zebrad's bundle already has? Two of the
+    files (jemalloc's and AWS-LC's) carry personal contact addresses, so the build copies them
+    into the bundle instead of the repository holding them. → Yes for Z1; a Zeal-wide inventory
+    is a follow-up.
 
 ## Sources
 

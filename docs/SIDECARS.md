@@ -494,9 +494,10 @@ the Raspberry Pi 5's. This is unchecked on hardware.
    - `ldd` names only libc, libm, libgcc_s, the loader and the vdso;
    - no string in the binary contains `/home/`, `/root/`, `/runner/`,
      `/github/` or `/__w/`;
-   - the committed copies of zingod's, lightwallet-protocol's and the four C
-     libraries' licence files equal the ones in the checkout and its sources
-     ([below](#licences-of-zingod)).
+   - the committed licence files equal the ones in the checkout and its
+     sources, and the two that aren't committed, jemalloc's `COPYING` and
+     AWS-LC's `LICENSE`, are copied from the build's own sources into the
+     output ([below](#licences-of-zingod)).
 
    The build never runs `start`, which would contact a validator.
 6. With `--vendor-archive <file>`, run `cargo vendor --locked` into a copy of
@@ -505,8 +506,10 @@ the Raspberry Pi 5's. This is unchecked on hardware.
 
 The build needs:
 
-- a C compiler, plus `sh` and `make` for jemalloc's configure: aws-lc 0.47.0,
-  jemalloc 5.3.1, zstd 1.5.7 and secp256k1 are vendored and linked statically;
+- a C compiler, plus `sh` and `make` for jemalloc's configure: AWS-LC 5.12.0
+  (through aws-lc-sys 0.47.0), jemalloc 5.3.1 (tikv-jemalloc-sys 0.7.1), zstd
+  1.5.7 (zstd-sys 2.1.0) and libsecp256k1 (secp256k1-sys 0.14.1) are vendored
+  and linked statically;
 - `protoc` with the well-known types: Ubuntu 22.04's `protobuf-compiler` 3.12.4
   and `libprotobuf-dev` built it;
 - git and rustup.
@@ -549,15 +552,19 @@ workflow takes a `targets` input:
   (PUBLIC-SERVICES.md's open question 24);
 - it attests provenance with `actions/attest-build-provenance`, for the binary
   and, on x86-64, the source archive;
-- it uploads `zingod-<target triple>`, holding `zeal-zingod-<target triple>`
-  and `zingod-build-info.txt` (the version, commit, toolchain, protoc version,
-  container, target, `SOURCE_DATE_EPOCH`, sha256 and run), and
-  `zingod-src-<ver>`.
+- it uploads `zingod-<target triple>`, holding `zeal-zingod-<target triple>`,
+  `licenses/` with the two copied licence files, and `zingod-build-info.txt`
+  (the version, commit, toolchain, protoc version, container, target,
+  `SOURCE_DATE_EPOCH`, the binary's and the licence files' sha256, and the
+  run), and `zingod-src-<ver>`.
 
 `bundle.yml` and `release.yml` call it once each, as `sidecars-zingod`. Only
 the Linux bundle jobs need it. They download it, run `chmod +x` (artifacts lose
 the executable bit), check `--version` against `ZINGOD_VERSION`, add it to the
 glibc check and install it as `src-tauri/binaries/zeal-zingod-<target triple>`.
+They also install the artifact's two licence files into
+`src-tauri/resources/licenses/zingod/` and check them against the sha256 in
+`zingod-build-info.txt`.
 The macOS and Windows jobs don't download it. `release.yml` attaches the source
 archive and its sha256 to the draft release.
 
@@ -622,20 +629,47 @@ merge in beside `zebra-docs`:
 
 zingod is Apache-2.0, and Zeal is MIT. zingod's `LICENSE` is only the 13-line
 Apache notice ("Copyright 2024 ZingoLabs"), and its tree has no `NOTICE` file.
-Its vendored lightwallet-protocol, whose `.proto` files are compiled in, is MIT
-("Copyright (c) 2019 Electric Coin Company"). Four C libraries are linked
-statically: aws-lc (aws-lc-sys's licence field is `ISC AND (Apache-2.0 OR ISC)
-AND Apache-2.0 AND MIT AND BSD-3-Clause AND …`), jemalloc (BSD-2-Clause,
-unchecked), zstd (BSD-3-Clause) and libsecp256k1 (its crate is CC0-1.0).
+Three `.proto` files are compiled in (`packages/zingod-proto/build.rs`):
+
+- lightwallet-protocol's `compact_formats.proto`, vendored, MIT ("Copyright (c)
+  2019 Electric Coin Company");
+- zingod-proto's `service.proto`, a modified copy of lightwallet-protocol's,
+  under the Zcash developers' MIT header
+  (`packages/zingod-proto/proto/service.proto:1-3`);
+- `zebra_indexer.proto`, taken from Zebra's `zebra-rpc/proto/indexer.proto`
+  through the `elicbarbieri/zebra` fork, MIT OR Apache-2.0
+  (`packages/zingod-proto/proto/zebra_indexer.proto:1-2`).
+
+Four C libraries are linked statically:
+
+| Library | Through | Licence | Its file |
+| --- | --- | --- | --- |
+| AWS-LC 5.12.0 (`AWSLC_VERSION_NUMBER_STRING`, `aws-lc/include/openssl/base.h:68`) | aws-lc-sys 0.47.0 | the crate's field: `ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND …` | `aws-lc/LICENSE`, copied at build time |
+| jemalloc 5.3.1 | tikv-jemalloc-sys 0.7.1 | BSD-2-Clause | `jemalloc/COPYING`, copied at build time |
+| zstd 1.5.7 | zstd-sys 2.1.0 | BSD-3-Clause (zstd is BSD-3-Clause OR GPL-2.0; Zeal ships the BSD text) | `zstd/LICENSE`, committed |
+| libsecp256k1 | secp256k1-sys 0.14.1 | MIT. The crate's own `LICENSE` is CC0-1.0 and covers only its Rust wrapper | `depend/secp256k1/COPYING`, committed |
 
 `src-tauri/resources/licenses/zingod/` is committed and refreshed by
 `bump-zingod.sh`. It holds:
 
 - zingod's notice, with the full Apache-2.0 text;
 - lightwallet-protocol's `LICENSE`;
-- the four C libraries' licence files, from the build's sources;
+- Zebra's `LICENSE-MIT`, from the `elicbarbieri/zebra` revision the build pins
+  (`ebabeee5`), for `zebra_indexer.proto` and the zebra crates linked in;
+- zstd's `LICENSE` and libsecp256k1's `COPYING`;
 - a `README.txt` that Zeal writes: zingod's name, version and copyright line,
-  the source URL and commit, and where the release's source archive is.
+  the source URL and commit, where the release's source archive is, and where
+  each `.proto` file comes from.
+
+jemalloc's `COPYING` and AWS-LC's `LICENSE` aren't committed: their copyright
+lines carry personal contact addresses, which Zeal keeps out of its
+repository. `build-zingod.sh` copies both from the build's own sources into its
+output, and every Linux job that compiles Zeal installs them into the folder,
+where `.gitignore` names them, and checks their sha256. `smoke-linux.sh` checks
+that an installed bundle holds every file. A local build has only the committed
+files, which is fine for a build that is never shipped. `bump-zingod.sh` refuses
+to commit a licence file that holds an email address, and names it, so a file
+that gains one moves to the copied list.
 
 Zeal's bundles carry no third-party licences for zebrad today, nor a list of
 the Rust crates linked into either binary; that is a Zeal-wide follow-up
