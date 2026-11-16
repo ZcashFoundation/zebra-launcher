@@ -20,7 +20,7 @@ use launcher_core::{
 use launcher_public::{
     EndpointHost, Options, PublicServices, Wiring,
     ddns::{Fetch, Fetched},
-    secrets::FileStore,
+    secrets::{FileStore, SecretError, SecretStore},
 };
 use launcher_types::{
     Network, NodeStats, Phase, Status,
@@ -64,7 +64,7 @@ impl Fetch for NoNetwork {
 }
 
 struct Setup {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     settings: SettingsHandle,
     services: PublicServices,
     applied: Arc<AtomicU32>,
@@ -74,6 +74,10 @@ struct Setup {
 }
 
 async fn setup() -> Setup {
+    setup_with(|dir| Arc::new(FileStore::new(dir.join("secrets")))).await
+}
+
+async fn setup_with(secrets: impl FnOnce(&std::path::Path) -> Arc<dyn SecretStore>) -> Setup {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::under(dir.path());
     let settings = SettingsStore::open(&paths).unwrap();
@@ -103,13 +107,13 @@ async fn setup() -> Setup {
             status,
             stats,
             host: Arc::new(host),
-            secrets: Arc::new(FileStore::new(dir.path().join("secrets"))),
+            secrets: secrets(dir.path()),
             fetch: Arc::new(NoNetwork),
         },
         false,
     );
     Setup {
-        _dir: dir,
+        dir,
         settings,
         services,
         applied,
@@ -274,7 +278,135 @@ async fn answers_shape_the_spec_and_tokens_stay_out_of_it() {
         .unwrap();
     let settings = serde_json::to_string(&s.settings.current()).unwrap();
     assert!(!settings.contains(token), "{settings}");
-    assert!(settings.contains("dns:duckdns:zeal-test.duckdns.org"));
+    assert!(settings.contains("dns:duckdns:duckdns.org"));
     let statuses = serde_json::to_string(&s.services.statuses()).unwrap();
     assert!(!statuses.contains(token));
+}
+
+const TOKEN: &str = "a7c4d0ad-114e-40ef-ba1d-d217904a50f2";
+
+/// The token files left in the setup's store.
+fn tokens_left(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir.join("secrets"))
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+async fn name(s: &Setup, name: &str, provider: launcher_types::public::DnsProvider) {
+    s.services
+        .answer(StepAnswer::Name {
+            name: name.into(),
+            provider,
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn forget_deletes_the_token_after_a_new_name_and_provider() {
+    use launcher_types::public::DnsProvider;
+    let s = setup().await;
+    s.services.begin_setup(Network::Mainnet).await.unwrap();
+    name(&s, "zec-alyce", DnsProvider::DuckDns).await;
+    s.services
+        .answer(StepAnswer::Token {
+            token: TOKEN.into(),
+        })
+        .await
+        .unwrap();
+    // The token serves every name of the DuckDNS account: one entry, kept across names.
+    name(&s, "zec-alice", DnsProvider::DuckDns).await;
+    assert_eq!(tokens_left(s.dir.path()), ["dns_duckdns_duckdns.org"]);
+    let spec = s.settings.current().public.light_server().cloned().unwrap();
+    assert_eq!(spec.secret.unwrap().account, "dns:duckdns:duckdns.org");
+    name(&s, "zec.example.com", DnsProvider::Manual).await;
+
+    let still = s.services.forget(true).await.unwrap();
+    assert!(!still.token_left);
+    assert_eq!(tokens_left(s.dir.path()), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn a_token_kept_for_an_old_name_moves_to_the_zone() {
+    use launcher_types::public::DnsProvider;
+    let s = setup().await;
+    s.services.begin_setup(Network::Mainnet).await.unwrap();
+    name(&s, "zec-old", DnsProvider::DuckDns).await;
+    // An older Zeal kept the token under the name.
+    let store = FileStore::new(s.dir.path().join("secrets"));
+    store
+        .set("dns:duckdns:zec-old.duckdns.org".into(), TOKEN.into())
+        .await
+        .unwrap();
+    s.settings
+        .update(|settings| {
+            settings.public.light_server_mut().unwrap().secret =
+                Some(launcher_types::public::SecretRef {
+                    provider: DnsProvider::DuckDns,
+                    account: "dns:duckdns:zec-old.duckdns.org".into(),
+                });
+        })
+        .await
+        .unwrap();
+    name(&s, "zec-new", DnsProvider::DuckDns).await;
+    assert_eq!(tokens_left(s.dir.path()), ["dns_duckdns_duckdns.org"]);
+    assert_eq!(
+        store.get("dns:duckdns:duckdns.org".into()).await.unwrap(),
+        TOKEN
+    );
+    s.services.forget(true).await.unwrap();
+    assert_eq!(tokens_left(s.dir.path()), Vec::<String>::new());
+}
+
+/// A keychain that keeps tokens and refuses to delete them, as a locked one does.
+struct Locked(FileStore);
+
+impl SecretStore for Locked {
+    fn set(
+        &self,
+        account: String,
+        token: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SecretError>> + Send>> {
+        self.0.set(account, token)
+    }
+
+    fn get(
+        &self,
+        account: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, SecretError>> + Send>> {
+        self.0.get(account)
+    }
+
+    fn delete(
+        &self,
+        _account: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SecretError>> + Send>> {
+        Box::pin(async { Err(SecretError::Unavailable("locked".into())) })
+    }
+}
+
+#[tokio::test]
+async fn forget_says_when_the_keychain_kept_the_token() {
+    let s = setup_with(|dir| Arc::new(Locked(FileStore::new(dir.join("secrets"))))).await;
+    s.services.begin_setup(Network::Mainnet).await.unwrap();
+    name(
+        &s,
+        "zec-alice",
+        launcher_types::public::DnsProvider::DuckDns,
+    )
+    .await;
+    s.services
+        .answer(StepAnswer::Token {
+            token: TOKEN.into(),
+        })
+        .await
+        .unwrap();
+    assert!(s.services.forget(true).await.unwrap().token_left);
+    assert!(!s.settings.current().public.light_server().is_some());
 }

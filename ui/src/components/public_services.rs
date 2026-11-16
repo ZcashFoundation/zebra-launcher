@@ -788,6 +788,12 @@ fn Forget() -> impl IntoView {
                             "{name} stays in DNS history services, and in public certificate logs."
                         ));
                     }
+                    if still.token_left {
+                        lines.push(
+                            "The DuckDNS token is still in the keychain: Zeal could not delete it. Delete it in your keychain app, or make a new token on DuckDNS."
+                                .to_owned(),
+                        );
+                    }
                     result.set(Some(lines));
                     public.refresh();
                 }

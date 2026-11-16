@@ -17,7 +17,7 @@ use std::{
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty};
-use launcher_herd::public::names::{duckdns_subdomain, keychain_account};
+use launcher_herd::public::names::{DUCKDNS_ACCOUNT, duckdns_subdomain, legacy_duckdns_account};
 use launcher_types::public::{DdnsProblem, DnsProvider, DnsStatus, PublicHostname};
 use tokio::sync::{mpsc, watch};
 
@@ -190,7 +190,6 @@ async fn run(
     status: watch::Sender<DnsStatus>,
     mut commands: mpsc::Receiver<DdnsCmd>,
 ) {
-    let account = keychain_account(config.provider, &config.name);
     let subdomain = duckdns_subdomain(&config.name).map(str::to_string);
     let mut last_sent: Option<Option<IpAddr>> = None;
     let mut backoff = FIRST_BACKOFF;
@@ -200,7 +199,7 @@ async fn run(
         let wanted = *config.wanted.borrow_and_update();
         // The address update, for DuckDNS.
         if let (DnsProvider::DuckDns, Some(subdomain)) = (config.provider, &subdomain) {
-            let token = config.secrets.get(account.clone()).await;
+            let token = duckdns_token(config.secrets.as_ref(), &config.name).await;
             let has_token = token.is_ok();
             status.send_modify(|s| s.has_token = has_token);
             let due = retry_at.is_none_or(|at| tokio::time::Instant::now() >= at);
@@ -279,6 +278,17 @@ async fn run(
     }
 }
 
+/// The DuckDNS token: kept for the zone, or for `name` by an older Zeal.
+pub async fn duckdns_token(
+    secrets: &dyn SecretStore,
+    name: &PublicHostname,
+) -> Result<String, SecretError> {
+    match secrets.get(DUCKDNS_ACCOUNT.to_string()).await {
+        Err(SecretError::Missing) => secrets.get(legacy_duckdns_account(name)).await,
+        found => found,
+    }
+}
+
 fn resolved_empty(status: &watch::Sender<DnsStatus>) -> bool {
     status.borrow().resolved.is_empty()
 }
@@ -321,7 +331,7 @@ mod tests {
         let secrets = Arc::new(crate::secrets::FileStore::new(dir.path()));
         let name = PublicHostname::parse("zeal-test.duckdns.org").unwrap();
         secrets
-            .set(keychain_account(DnsProvider::DuckDns, &name), token.into())
+            .set(DUCKDNS_ACCOUNT.into(), token.into())
             .await
             .unwrap();
         let (urls_tx, mut urls) = mpsc::unbounded_channel();

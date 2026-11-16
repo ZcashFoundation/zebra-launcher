@@ -188,7 +188,8 @@ impl DnsProvider {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SecretRef {
     pub provider: DnsProvider,
-    /// The keychain account, `dns:<provider>:<zone>`.
+    /// The keychain account, `dns:<provider>:<zone>` (`dns:duckdns:duckdns.org`), or the name
+    /// instead of the zone for a token an older Zeal kept.
     pub account: String,
 }
 
@@ -1126,6 +1127,9 @@ pub struct StillPublic {
     pub firewall_remove: Vec<String>,
     /// The name, which stays in DNS history services and in certificate logs.
     pub name: Option<PublicHostname>,
+    /// The DuckDNS token was to be deleted, and the keychain kept it.
+    #[serde(default)]
+    pub token_left: bool,
 }
 
 #[cfg(test)]

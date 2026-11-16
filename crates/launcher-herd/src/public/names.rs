@@ -44,13 +44,14 @@ pub fn duckdns_subdomain(name: &PublicHostname) -> Option<&str> {
     (!sub.is_empty() && !sub.contains('.')).then_some(sub)
 }
 
-/// The keychain account for `provider`'s token for `name`: `dns:<provider>:<zone>`.
-pub fn keychain_account(provider: DnsProvider, name: &PublicHostname) -> String {
-    let provider = match provider {
-        DnsProvider::DuckDns => "duckdns",
-        DnsProvider::Manual => "manual",
-    };
-    format!("dns:{provider}:{name}")
+/// The keychain account for the DuckDNS token, `dns:<provider>:<zone>`. One token covers every
+/// name of the user's DuckDNS account, so Zeal keeps it once, whatever the name.
+pub const DUCKDNS_ACCOUNT: &str = "dns:duckdns:duckdns.org";
+
+/// The account Zeal kept a DuckDNS token for `name` under before it kept one per zone. Turn off
+/// and forget deletes it too.
+pub fn legacy_duckdns_account(name: &PublicHostname) -> String {
+    format!("dns:duckdns:{name}")
 }
 
 /// Whether `token` looks like a DuckDNS token: a UUID, 36 characters of hex digits and
@@ -101,9 +102,10 @@ mod tests {
 
     #[test]
     fn keychain_accounts_name_the_provider_and_zone() {
+        assert_eq!(DUCKDNS_ACCOUNT, format!("dns:duckdns:{DUCKDNS_ZONE}"));
         let name = PublicHostname::parse("zec-alice.duckdns.org").unwrap();
         assert_eq!(
-            keychain_account(DnsProvider::DuckDns, &name),
+            legacy_duckdns_account(&name),
             "dns:duckdns:zec-alice.duckdns.org"
         );
     }

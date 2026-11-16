@@ -11,6 +11,7 @@
 //! | `unconfirmed` | open, with no evidence from outside yet |
 //! | `cgnat` | the setup stopped at the network step: carrier-grade NAT |
 //! | `expiring` | open, with a certificate that expires in 10 days and a renewal that failed |
+//! | `keychain` | open, with a keychain that will not delete the token: "Turn off and forget" says it is still there |
 
 use std::{
     net::{IpAddr, Ipv4Addr},
@@ -46,6 +47,7 @@ pub(crate) enum PublicFlag {
     Unconfirmed,
     Cgnat,
     Expiring,
+    Keychain,
 }
 
 impl PublicFlag {
@@ -56,6 +58,7 @@ impl PublicFlag {
             "unconfirmed" => Some(PublicFlag::Unconfirmed),
             "cgnat" => Some(PublicFlag::Cgnat),
             "expiring" => Some(PublicFlag::Expiring),
+            "keychain" => Some(PublicFlag::Keychain),
             _ => None,
         }
     }
@@ -88,6 +91,8 @@ struct World {
     at_tip_since: Option<SystemTime>,
     gateway: GatewayStats,
     month_bytes_up: u64,
+    /// The keychain refuses to delete the token.
+    keychain_locked: bool,
 }
 
 impl World {
@@ -106,6 +111,7 @@ impl World {
             at_tip_since: Some(clock::now() - Duration::from_secs(3 * 3600)),
             gateway: GatewayStats::default(),
             month_bytes_up: 0,
+            keychain_locked: false,
         }
     }
 
@@ -211,6 +217,10 @@ impl World {
                 world.cert = Some(cert);
                 world
             }
+            Some(PublicFlag::Keychain) => World {
+                keychain_locked: true,
+                ..World::serving(network)
+            },
         }
     }
 
@@ -572,11 +582,11 @@ pub async fn open_public_service() -> Result<(), OpenError> {
     Ok(())
 }
 
-pub async fn forget_public_service(_remove_token: bool) -> Result<StillPublic, String> {
+pub async fn forget_public_service(remove_token: bool) -> Result<StillPublic, String> {
     let public = public();
-    let spec = public
+    let (spec, locked) = public
         .world
-        .with_untracked(|world| world.spec.clone())
+        .with_untracked(|world| world.spec.clone().map(|spec| (spec, world.keychain_locked)))
         .ok_or("no light client server is set up")?;
     public.update(|world| *world = World::empty());
     Ok(StillPublic {
@@ -589,6 +599,7 @@ pub async fn forget_public_service(_remove_token: bool) -> Result<StillPublic, S
             Vec::new()
         },
         name: spec.name,
+        token_left: remove_token && locked,
     })
 }
 
@@ -607,6 +618,10 @@ mod tests {
             Some(PublicFlag::Serving)
         );
         assert_eq!(PublicFlag::parse(Some("cgnat")), Some(PublicFlag::Cgnat));
+        assert_eq!(
+            PublicFlag::parse(Some("keychain")),
+            Some(PublicFlag::Keychain)
+        );
         assert_eq!(PublicFlag::parse(Some("nonsense")), None);
         assert_eq!(PublicFlag::parse(None), None);
     }

@@ -20,15 +20,15 @@ use launcher_herd::public::{
     self as rules, Checked, Facts, evidence,
     firewall::firewall_info,
     light::{at_tip, behind, pick_endpoint_port, track_since, wants_endpoint},
-    names::{keychain_account, parse_name, plausible_duckdns_token},
+    names::{DUCKDNS_ACCOUNT, legacy_duckdns_account, parse_name, plausible_duckdns_token},
 };
 use launcher_types::{
     ExitClass, Network, NodeId, NodeStats, Phase, Settings, Status,
     public::{
         CONSENT_VERSION, CheckId, ConnectionReport, Consent, DnsProvider, Evidence, EvidenceSource,
         FirewallInfo, GatewayMode, GatewayStats, LightdInfo, LocalTestProblem, NetFacts, OpenError,
-        PublicHostname, PublicService, PublicServiceSpec, PublicState, PublicStatus, StepAnswer,
-        StepId, StillPublic, WanKind,
+        PublicHostname, PublicService, PublicServiceSpec, PublicState, PublicStatus, SecretRef,
+        StepAnswer, StepId, StillPublic, WanKind,
     },
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -40,7 +40,7 @@ use crate::{
     gateway::FrontDoor,
     light::LightMonitor,
     netcheck,
-    secrets::SecretStore,
+    secrets::{SecretError, SecretStore},
     selftest,
     store::{self, PublicPaths, State},
 };
@@ -382,6 +382,14 @@ impl Upload {
     fn new_month(&mut self, door: Option<u64>) {
         self.stopped = 0;
         self.offset = door.unwrap_or(0);
+    }
+}
+
+/// Where the DuckDNS token is kept.
+fn duckdns_secret() -> SecretRef {
+    SecretRef {
+        provider: DnsProvider::DuckDns,
+        account: DUCKDNS_ACCOUNT.to_string(),
     }
 }
 
@@ -1227,6 +1235,13 @@ impl Actor {
             }
             StepAnswer::Name { name, provider } => {
                 let name = parse_name(&name, provider).map_err(|err| err.to_string())?;
+                // The token is kept for DuckDNS's zone, so it serves the new name too.
+                let secret = match &spec.name {
+                    Some(old) if *old != name => {
+                        self.move_legacy_token(old, spec.secret.clone()).await
+                    }
+                    _ => spec.secret.clone(),
+                };
                 self.name_changed();
                 self.update_spec(move |spec| {
                     // Consent given before a name binds to the first one; another name asks again.
@@ -1237,7 +1252,7 @@ impl Actor {
                     }
                     spec.name = Some(name);
                     spec.provider = provider;
-                    spec.secret = None;
+                    spec.secret = secret;
                 })
                 .await
             }
@@ -1251,20 +1266,17 @@ impl Actor {
                         "a DuckDNS token looks like a7c4d0ad-114e-40ef-ba1d-d217904a50f2".into(),
                     );
                 }
-                let account = keychain_account(spec.provider, &name);
                 match self
                     .secrets
-                    .set(account.clone(), token.trim().to_string())
+                    .set(DUCKDNS_ACCOUNT.into(), token.trim().to_string())
                     .await
                 {
                     Ok(()) => {
                         self.keychain_unavailable = false;
-                        let provider = spec.provider;
-                        self.update_spec(move |spec| {
-                            spec.secret =
-                                Some(launcher_types::public::SecretRef { provider, account })
-                        })
-                        .await?;
+                        // An older Zeal's entry for this name would only be left behind.
+                        let _ = self.secrets.delete(legacy_duckdns_account(&name)).await;
+                        self.update_spec(move |spec| spec.secret = Some(duckdns_secret()))
+                            .await?;
                         if let Some(ddns) = &self.ddns {
                             let _ = ddns.handle.commands.try_send(DdnsCmd::Now);
                         }
@@ -1392,11 +1404,21 @@ impl Actor {
         // The endpoint must be gone before the spec is: once it is, the key is the user's.
         self.host.apply(spec.network == self.network()).await?;
         self.applied = Some(None);
-        if remove_token && let Some(name) = &spec.name {
-            let _ = self
-                .secrets
-                .delete(keychain_account(spec.provider, name))
-                .await;
+        // Every entry the token may be under: the zone's, the spec's, and an older Zeal's for
+        // the name, whatever the provider is now. A missing entry is no failure.
+        let mut token_left = false;
+        if remove_token {
+            let mut accounts = vec![DUCKDNS_ACCOUNT.to_string()];
+            accounts.extend(spec.secret.as_ref().map(|secret| secret.account.clone()));
+            accounts.extend(spec.name.as_ref().map(legacy_duckdns_account));
+            accounts.sort();
+            accounts.dedup();
+            for account in accounts {
+                if let Err(err) = self.secrets.delete(account).await {
+                    tracing::warn!(target: "zeal::public", %err, "the DuckDNS token was not deleted");
+                    token_left = true;
+                }
+            }
         }
         self.settings
             .update(|settings| {
@@ -1424,7 +1446,39 @@ impl Actor {
                 Vec::new()
             },
             name: spec.name,
+            token_left,
         })
+    }
+
+    /// Moves a token an older Zeal kept for the name `old` to the zone's entry, before the name
+    /// or provider changes. Returns where the token is kept now.
+    async fn move_legacy_token(
+        &self,
+        old: &PublicHostname,
+        secret: Option<SecretRef>,
+    ) -> Option<SecretRef> {
+        let legacy = legacy_duckdns_account(old);
+        match self.secrets.get(legacy.clone()).await {
+            Ok(token) => {
+                let kept = self.secrets.get(DUCKDNS_ACCOUNT.into()).await.is_ok()
+                    || self
+                        .secrets
+                        .set(DUCKDNS_ACCOUNT.into(), token)
+                        .await
+                        .is_ok();
+                if kept && self.secrets.delete(legacy.clone()).await.is_ok() {
+                    Some(duckdns_secret())
+                } else {
+                    Some(SecretRef {
+                        provider: DnsProvider::DuckDns,
+                        account: legacy,
+                    })
+                }
+            }
+            Err(SecretError::Missing) => secret.map(|_| duckdns_secret()),
+            // The keychain did not answer: keep the entry for "Turn off and forget".
+            Err(_) => secret,
+        }
     }
 
     async fn check_connection(&mut self) -> ConnectionReport {

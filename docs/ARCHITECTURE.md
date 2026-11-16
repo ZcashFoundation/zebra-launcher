@@ -705,7 +705,10 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
 - **The spec** is `launcher.json`'s `public.services` (no secrets). `set_settings` keeps the
   stored section and `get_settings` leaves it out, so only the public-services commands change
   it, through the settings actor. Tokens are in the OS keychain (`keyring`, service
-  `org.zfnd.zeal`, account `dns:<provider>:<name>`); the spec holds the account name only.
+  `org.zfnd.zeal`, account `dns:<provider>:<zone>`: one DuckDNS token is kept as
+  `dns:duckdns:duckdns.org` for every name); the spec holds the account name only. "Turn off
+  and forget" also deletes the per-name entry an older Zeal kept, and says when the keychain
+  kept the token.
 - **`PublicServices`** (`launcher-public/src/service.rs`) is one actor. At every change of
   zebrad's status or statistics, of the settings or of a child, and every 10 s, it gathers the
   facts, runs launcher-herd's `plan`, `pause`, `state` and `gateway_mode`, drives its children
@@ -749,7 +752,7 @@ The commands are `get_public_status`, `check_connection`, `begin_public_setup`,
 `forget_public_service` and `open_signup`. The UI's screens are in Settings → Public services,
 with a card on the dashboard and a header banner on the node's pages; every sentence comes
 from `ui/src/public_text.rs`, and the mock's `?public=setup`, `serving`, `unconfirmed`,
-`cgnat` and `expiring` run launcher-herd's rules over fake facts. What PS1 left for later is
+`cgnat`, `expiring` and `keychain` run launcher-herd's rules over fake facts. What PS1 left for later is
 listed in PUBLIC-SERVICES.md ("PS1 as built").
 
 ## Block explorer
