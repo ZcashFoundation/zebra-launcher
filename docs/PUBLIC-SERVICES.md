@@ -957,8 +957,10 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   NAT, a second router), DuckDNS takes the address it sees, which may change unseen, so that
   update goes again every 5 minutes (DuckDNS answers `NOCHANGE`). No update goes out until a
   network check made since the service started, or resumed from a pause only the user ends,
-  finds no VPN on the default route and, once open, the LAN address the forward targets: a
-  laptop that starts Zeal or resumes on a café's network never points the name there. A
+  finds the default route's gateway and this computer's LAN address, no VPN on that route
+  and, once open, the LAN address the forward targets: a laptop that starts Zeal or resumes on
+  a café's network never points the name there, and neither does one whose default route
+  could not be read (a VPN's route without a gateway is skipped, so no VPN is seen). A
   mismatch for 15 minutes, against the router's address or else the one DuckDNS saw, pauses
   the service. After a change:
   "Address changed at 14:02. DNS updated; resolvers may use the old one for up to 5 minutes."

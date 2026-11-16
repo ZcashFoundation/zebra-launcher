@@ -137,7 +137,8 @@ pub fn parse_duckdns(body: &str) -> Result<Updated, DdnsProblem> {
 pub struct Wanted {
     /// Updates may go out: a network check made since the service last started watching its
     /// surroundings (at launch, or after a pause only the user ends) found this network fit to
-    /// expose (no VPN, the LAN address the forward targets).
+    /// expose (a default route it could read, no VPN on it, the LAN address the forward
+    /// targets).
     pub update: bool,
     /// The router's public address, when known; DuckDNS takes the address it sees without.
     pub address: Option<IpAddr>,

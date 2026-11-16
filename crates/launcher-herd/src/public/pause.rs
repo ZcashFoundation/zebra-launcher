@@ -73,15 +73,18 @@ pub fn pause(spec: &PublicServiceSpec, facts: &Facts) -> Option<(PauseReason, Re
     None
 }
 
-/// Whether the name may be pointed at the network `net` describes: no VPN carries the default
-/// route, and for an open service this computer still has the LAN address the forward targets.
-/// A DNS update from a foreign network would publish where the user is.
+/// Whether the name may be pointed at the network `net` describes: the check found the default
+/// route's gateway and this computer's LAN address, as the network step needs, no VPN carries
+/// that route, and for an open service this computer still has the LAN address the forward
+/// targets. A DNS update from a foreign network would publish where the user is, and a route
+/// that could not be read says nothing about a VPN.
 pub fn may_point_name_here(
     spec: &PublicServiceSpec,
     net: &launcher_types::public::NetFacts,
 ) -> bool {
+    let route_known = net.gateway.is_some() && net.lan_addr.is_some();
     let lan_kept = !spec.opened || spec.lan_addr.is_none() || net.lan_addr == spec.lan_addr;
-    net.vpn.is_none() && lan_kept
+    route_known && net.vpn.is_none() && lan_kept
 }
 
 /// Since when an open service's name has resolved away from this network without a break,
@@ -398,6 +401,20 @@ mod tests {
         };
         assert!(may_point_name_here(&setting_up, &cafe));
         assert!(!may_point_name_here(&setting_up, &vpn));
+        // A route that could not be read, as with a VPN's default route without a gateway.
+        let no_route = NetFacts {
+            lan_addr: None,
+            gateway: None,
+            interface: None,
+            vpn: None,
+            ..home.clone()
+        };
+        assert!(!may_point_name_here(&setting_up, &no_route));
+        let no_gateway = NetFacts {
+            gateway: None,
+            ..home
+        };
+        assert!(!may_point_name_here(&setting_up, &no_gateway));
     }
 
     #[test]
