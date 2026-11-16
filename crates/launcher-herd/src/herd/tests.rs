@@ -702,6 +702,27 @@ fn a_fork_past_the_rollback_window_is_deep() {
 }
 
 #[test]
+fn a_deep_fork_keeps_its_height_as_the_chains_grow() {
+    let mut herd = Harness::new(Network::Mainnet, 3, H);
+    herd.run(10);
+    let branch = herd.chain.branch(H - 1_500);
+    herd.chain.put(&id(2), branch, H);
+    let view = herd.run(20);
+    assert_eq!(view.branches[1].fork_at, Some(H - 1_000));
+    let view = herd.run_with(250, |herd, elapsed| {
+        if elapsed % 25 == 0 {
+            herd.grow(&[0, 1, 2]);
+        }
+    });
+    assert!(herd.height(2) >= H + 10);
+    assert_eq!(view.branches[1].fork_at, Some(H - 1_000));
+    assert_eq!(
+        view.node(&id(2)).unwrap().word,
+        "on a different chain since block 3,550,204 or earlier"
+    );
+}
+
+#[test]
 fn a_deep_fork_names_its_height_as_a_bound() {
     // The last node's chain splits 1,500 blocks back. The search stops 1,000 blocks below the
     // lower top, at block 3,550,204, so the fork is there or earlier.

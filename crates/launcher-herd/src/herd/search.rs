@@ -283,7 +283,8 @@ fn search_heights(hi: u32, floor: u32) -> Vec<u32> {
 
 /// Finds where the chains of `a` and `b` split, given that they differ at `hi` (the lower of
 /// their tops, where placement found them apart). `hint` is the pair's last fork, tried
-/// first. Two chains that agree at a height agree at every height below it, since each block
+/// first; a deep fork's bound stays while the pair still differs there and one block below.
+/// Two chains that agree at a height agree at every height below it, since each block
 /// commits to its parent, so the bisection is exact. At most about 20 steps of two probes.
 pub fn fork_search(
     answers: &Answers,
@@ -308,6 +309,11 @@ pub fn fork_search(
                         at,
                         deep: at <= floor,
                     });
+                }
+                // They differ at every height from the hint up, and the search would stop
+                // above it: the hint stays the bound, so it does not rise with every block.
+                Outcome::Done(false) if at <= floor => {
+                    return Outcome::Done(Fork { at, deep: true });
                 }
                 Outcome::Done(false) => {}
                 other => return map_pending(other),
@@ -455,6 +461,35 @@ mod tests {
                 assert!(asked.len() <= 4, "{asked:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_deep_fork_keeps_the_bound_it_was_found_with() {
+        let (a, b) = (id("a"), id("b"));
+        let mut chain = SimChain::new(3);
+        chain.put(&a, 0, 10_000);
+        let branch = chain.fork(&b, 8_000, 10_000);
+        let tips = |chain: &SimChain| [(a.clone(), chain.tip(&a)), (b.clone(), chain.tip(&b))];
+        let mut answers = Answers::default();
+        answers.begin(tips(&chain));
+        let (first, _) = drive(&chain, &mut answers, |answers| {
+            fork_search(answers, &a, &b, 10_000, None)
+        });
+        let bound = Fork {
+            at: 9_000,
+            deep: true,
+        };
+        assert_eq!(first, Outcome::Done(bound));
+        // 50 blocks later the pair still differs there and below it: the same bound, from
+        // the hint's two heights alone.
+        chain.put(&a, 0, 10_050);
+        chain.put(&b, branch, 10_050);
+        answers.begin(tips(&chain));
+        let (again, asked) = drive(&chain, &mut answers, |answers| {
+            fork_search(answers, &a, &b, 10_050, Some(bound.at))
+        });
+        assert_eq!(again, Outcome::Done(bound));
+        assert!(asked.len() <= 4, "{asked:?}");
     }
 
     #[test]
