@@ -512,7 +512,7 @@ The build needs:
   and linked statically;
 - `protoc` with the well-known types: Ubuntu 22.04's `protobuf-compiler` 3.12.4
   and `libprotobuf-dev` built it;
-- git and rustup.
+- git and rustup, and `zstd` to pack the source archive.
 
 On Linux it needs no cmake, libclang (bindgen comes only through a macOS-only
 dependency), OpenSSL or RocksDB.
@@ -544,12 +544,18 @@ workflow takes a `targets` input:
 - its first job builds the matrix with `scripts/select-targets.sh --family
   linux`, and an empty matrix skips the build;
 - each target builds in `ubuntu:22.04` on `ubuntu-24.04` or `ubuntu-24.04-arm`,
-  with `build-essential`, `protobuf-compiler`, `libprotobuf-dev`, git and
-  rustup installed, and caches cargo's registry and git checkouts by commit and
-  target;
-- it runs the checks above, then `cargo deny check advisories` over zingod's
-  `Cargo.lock`; the findings go in the job's summary and don't fail it
-  (PUBLIC-SERVICES.md's open question 24);
+  and caches cargo's registry and git checkouts by commit and target. The bare
+  image has no curl, no CA certificates and no `zstd` command, so the job
+  installs `ca-certificates curl git zstd binutils build-essential
+  protobuf-compiler libprotobuf-dev` with `--no-install-recommends`, then
+  rustup through `zebrad-sidecars.yml`'s pinned, checksummed `rustup-init`
+  step;
+- it runs the checks above. Once, on the x86-64 leg, it runs `cargo deny check
+  advisories` over zingod's `Cargo.lock`, with cargo-deny's release binary
+  pinned by version and sha256 in `.github/tool-versions.env`
+  (`CARGO_DENY_VERSION`), as shellcheck and actionlint are; Zeal's own `deny`
+  job uses a Docker action instead. The findings go in the job's summary and
+  don't fail it (PUBLIC-SERVICES.md's open question 24);
 - it attests provenance with `actions/attest-build-provenance`, for the binary
   and, on x86-64, the source archive;
 - it uploads `zingod-<target triple>`, holding `zeal-zingod-<target triple>`,
