@@ -729,8 +729,9 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   `EndpointHost` (`src-tauri/src/public.rs`) to apply it to the serving node by its id: the
   config permit, the start permit while zebrad runs, `config::ensure` with `managed_keys` and
   the endpoint the actor gives (the spec's port while it wants one, none otherwise, so an off
-  that `launcher.json` could not save still removes it), and a restart only if zebrad was
-  running. The serving
+  that `launcher.json` could not save still removes it, and none while the node runs another
+  network than the service's, as it may since the actor decided), and a restart only if
+  zebrad was running. The serving
   node is the first one: the actor reads its spec, status and statistics through
   `RegistryHandle::follow_first`, which follows whichever node is first, and applies to the
   node those come from. A busy permit fails fast and the actor clears the

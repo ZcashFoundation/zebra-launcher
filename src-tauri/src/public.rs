@@ -49,8 +49,13 @@ impl<R: Runtime> EndpointHost for Host<R> {
             let paths = node.paths.clone();
             let mut keys = node.managed_keys();
             // The actor's endpoint, not the stored one: an off it could not save still removes
-            // the key.
-            keys.lightwalletd = port.map_or(LightwalletdKey::Absent, LightwalletdKey::Listen);
+            // the key. The node's network is read under the config permit, which a network
+            // change holds while it writes the file.
+            keys.lightwalletd = LightwalletdKey::for_endpoint(
+                &state.settings.current().public,
+                port,
+                node.spec().network,
+            );
             tauri::async_runtime::spawn_blocking(move || config::ensure(&paths, &keys))
                 .await
                 .map_err(|err| err.to_string())?

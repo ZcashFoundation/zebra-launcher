@@ -59,7 +59,8 @@ const SAVE_EVERY: Duration = Duration::from_secs(10 * 60);
 /// zebrad if it runs, behind the app's permits. Without `restart` the file changes for zebrad's
 /// next start only, as a network change does. `node` is the node the actor's facts come from
 /// ([`Wiring::node`]), never another. `port` is the actor's decision, not the stored spec's,
-/// so an off that `launcher.json` could not save still removes the endpoint.
+/// so an off that `launcher.json` could not save still removes the endpoint. A node that runs
+/// another network than the service's by the time the app holds its permit gets none.
 pub trait EndpointHost: Send + Sync + 'static {
     fn apply(
         &self,
