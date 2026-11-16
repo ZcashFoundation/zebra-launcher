@@ -123,10 +123,20 @@ fn read_member(job: &Job, pid: u32, denied: &mut Denied) -> io::Result<Option<Me
     if exited(&process) {
         return Ok(None);
     }
-    let (created, cpu) = times(&process)?;
-    let memory = optional(memory(&process), &mut denied.memory)?;
-    let io = optional(io_counters(&process), &mut denied.io)?;
-    let handles = optional(handle_count(&process), &mut denied.descriptors)?;
+    let fields = (|| {
+        Ok((
+            times(&process)?,
+            optional(memory(&process), &mut denied.memory)?,
+            optional(io_counters(&process), &mut denied.io)?,
+            optional(handle_count(&process), &mut denied.descriptors)?,
+        ))
+    })();
+    let ((created, cpu), memory, io, handles) = match fields {
+        Ok(fields) => fields,
+        // It exited during the reads.
+        Err(_) if exited(&process) => return Ok(None),
+        Err(err) => return Err(err),
+    };
     let name = image_path(process.as_handle())
         .and_then(|path| {
             path.file_name()
