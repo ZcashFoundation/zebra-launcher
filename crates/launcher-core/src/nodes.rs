@@ -270,6 +270,11 @@ pub enum NodeError {
     /// The node is the only one.
     #[error("Zeal needs a node: add another before removing {0}")]
     LastNode(String),
+    /// The node serves the light client server.
+    #[error(
+        "{0} serves the light client server: turn it off and forget it in Settings → Public services before removing the node"
+    )]
+    ServesPublic(String),
     /// The node left the list, but some of its files could not be deleted:
     /// not a refusal, so the message says what happened.
     #[error("{name} was removed, but {path} could not be deleted: {why}")]

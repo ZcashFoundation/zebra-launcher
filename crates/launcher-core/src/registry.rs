@@ -1167,6 +1167,12 @@ impl Actor {
             let _ = reply.send(Err(NodeError::LastNode(name)));
             return;
         }
+        // The first node serves the light client server, which was set up for it alone.
+        if index == 0 && self.settings.current().public.light_server().is_some() {
+            let name = self.nodes[index].spec.borrow().name.clone();
+            let _ = reply.send(Err(NodeError::ServesPublic(name)));
+            return;
+        }
         let runtime = &mut self.nodes[index];
         // No start may begin from here on and no configuration change be
         // applied: the permits go with the removal.

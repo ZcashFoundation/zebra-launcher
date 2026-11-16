@@ -320,6 +320,11 @@ fn public() -> MockPublic {
     PUBLIC.with(MockPublic::clone)
 }
 
+/// Whether a light client server is set up: it serves from the mock's first node.
+pub(crate) fn light_server_set_up() -> bool {
+    public().world.with_untracked(|world| world.spec.is_some())
+}
+
 /// The network the mock's zebrad runs on.
 fn network() -> Network {
     mock().info.with_untracked(|info| info.network)

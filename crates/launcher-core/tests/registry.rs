@@ -1229,3 +1229,32 @@ async fn the_first_nodes_watches_follow_the_node_that_is_first() {
     .expect("its later changes too");
     within(fx.registry.shutdown()).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_node_a_light_client_server_serves_from_stays() {
+    let fx = fixture().await;
+    let first = fx.registry.first().expect("first");
+    within(fx.registry.add(draft(Network::Testnet, "Other")))
+        .await
+        .expect("add");
+    let spec = launcher_types::public::PublicServiceSpec::new_light_server(
+        first.id.clone(),
+        Network::Mainnet,
+    );
+    within(fx.settings.update(move |s| s.public.services.push(spec)))
+        .await
+        .expect("a light client server");
+    assert!(matches!(
+        within(fx.registry.remove(&first.id, false)).await,
+        Err(NodeError::ServesPublic(_))
+    ));
+    assert!(fx.registry.node(&first.id).is_ok(), "still listed");
+    // Forgotten, it may go.
+    within(fx.settings.update(|s| s.public.services.clear()))
+        .await
+        .expect("forgotten");
+    within(fx.registry.remove(&first.id, false))
+        .await
+        .expect("removed");
+    within(fx.registry.shutdown()).await;
+}

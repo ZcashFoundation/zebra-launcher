@@ -113,7 +113,8 @@ files are brought up to date and its actors started in
   first node takes its network's id (`zebrad-testnet`), as nothing ran or depends on it
   yet, and the registry publishes it as a new handle.
 - **Removing**: refused for the last node, and for the last one not already being
-  removed, so two removals at once cannot empty the list. The removal takes all of the
+  removed, so two removals at once cannot empty the list; refused for the first node while a
+  light client server, which serves from it, is set up. The removal takes all of the
   node's start permits and its config permit (no start or apply can begin), stops it,
   and checks the pid file: the supervisor removes it when its own run ends, so a live
   zebrad there is one an earlier launcher run left, and the removal fails naming its pid
