@@ -299,22 +299,44 @@ fn focus_lost() -> bool {
         .is_none_or(|element| element.tag_name() == "BODY")
 }
 
-/// Focuses the page's first heading, made focusable for this, or the page itself while it has
-/// none.
+/// How many frames, about two seconds, a page that is still loading gets to draw its heading
+/// before focus stays on the page itself.
+const HEADING_FRAMES: u32 = 120;
+
+/// Focuses the page's first heading, made focusable for this. A page still loading has none
+/// yet: the page itself takes focus, and hands it to the heading once the heading is drawn,
+/// unless focus has moved on meanwhile.
 fn focus_page(page: &web_sys::HtmlElement) {
-    let heading = page
+    if !focus_heading(page) {
+        let _ = page.focus();
+        focus_heading_once_drawn(page.clone(), HEADING_FRAMES);
+    }
+}
+
+fn focus_heading_once_drawn(page: web_sys::HtmlElement, frames: u32) {
+    let still_on_page = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.active_element())
+        .is_some_and(|active| active.is_same_node(Some(&page)));
+    if !still_on_page || focus_heading(&page) || frames == 0 {
+        return;
+    }
+    request_animation_frame(move || focus_heading_once_drawn(page, frames - 1));
+}
+
+/// Focuses the page's first heading, if it has one.
+fn focus_heading(page: &web_sys::HtmlElement) -> bool {
+    let Some(heading) = page
         .query_selector("h2")
         .ok()
         .flatten()
-        .and_then(|heading| heading.dyn_into::<web_sys::HtmlElement>().ok());
-    let target = match heading {
-        Some(heading) => {
-            let _ = heading.set_attribute("tabindex", "-1");
-            heading
-        }
-        None => page.clone(),
+        .and_then(|heading| heading.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+        return false;
     };
-    let _ = target.focus();
+    let _ = heading.set_attribute("tabindex", "-1");
+    let _ = heading.focus();
+    true
 }
 
 /// Whether a key went to a field that takes text.
