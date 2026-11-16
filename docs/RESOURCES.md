@@ -1527,6 +1527,11 @@ Each phase is one pull request that ships on its own, with screenshots from the 
        what fitted.
      - Members have no parent links (`ppid` 0): the table lists the root and then the others
        by start time, and the mock's `?os=windows` does the same.
+     - A process that has exited is not listed, so a child's last interval before its exit
+       may go unseen in the table; the job's totals hold it.
+     - zebrad starts with `CREATE_NO_WINDOW`, whose hidden console may put a console host
+       (`conhost.exe`) in the job (unconfirmed). It is then listed and counted, as Task
+       Manager shows it under the program; the live tests leave it out of their counts.
      - A read after the job closed fails with `NotFound`, which the sampler never logs: the
        supervisor clears the probe before it drops the job.
    - Tests:
@@ -1559,6 +1564,7 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - how much network traffic the Windows job's I/O counts;
    - whether `QueryInformationJobObject` fails with `ERROR_MORE_DATA` on a short list (the loop
      handles both answers);
+   - whether zebrad's console host is in its job (the tests pass either way);
    - screenshots from both OSes.
 4. **History charts.**
    - `Unit` and gap support in the chart code; the existing charts are byte-identical.
@@ -1681,6 +1687,7 @@ Unconfirmed, to be checked in the phase named:
   - How much network traffic the Windows job's I/O counters include.
   - Whether `QueryInformationJobObject` fails with `ERROR_MORE_DATA` on a short process
     list (the loop handles both cases).
+  - Whether a console host (`conhost.exe`) shares zebrad's job on Windows.
 - **Phase 2:** the cost of the `/proc` scan with thousands of processes. Measured: 11 ms
   for 2,600 processes on one computer (see phase 2); the per-tick debug log shows it
   elsewhere.
