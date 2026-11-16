@@ -72,6 +72,8 @@ struct NodeView {
     id: NodeId,
     /// The network zebrad runs on: the chain the explorer reads.
     network: Network,
+    /// The node's own network, which zebrad takes at its next start.
+    ours: Network,
     /// The network zebrad still runs on when the node's own changed meanwhile.
     elsewhere: Option<Network>,
     running: bool,
@@ -126,6 +128,7 @@ fn primary_view() -> NodeView {
     NodeView {
         id,
         network: reported.unwrap_or(ours),
+        ours,
         elsewhere: reported.filter(|reported| running && *reported != ours),
         running,
         stats,
@@ -208,6 +211,13 @@ impl Explorer {
             (true, Some((height, estimated))) => LiveState::Syncing { height, estimated },
             _ => LiveState::NotRunning,
         };
+        // Another network's chain is not this node's, whether zebrad runs or has stopped.
+        if self.chain.network() != view.ours {
+            return ExplorerLive {
+                state,
+                ..ExplorerLive::default()
+            };
+        }
         ExplorerLive {
             state,
             tip: self.known.map(|known| ChainView {
@@ -272,9 +282,13 @@ impl ChainFacts {
 /// The facts of the main node with the statistics `stats`, about to be published.
 pub(super) fn primary_facts(stats: &NodeStats) -> Option<ChainFacts> {
     let network = network_of(&stats.chain)?;
+    let (id, ours) = mock()
+        .info
+        .with_untracked(|info| (info.id.clone(), info.network));
     let view = NodeView {
-        id: mock().info.with_untracked(|info| info.id.clone()),
+        id,
         network,
+        ours,
         elsewhere: None,
         running: true,
         stats: Some(stats.clone()),
@@ -671,6 +685,41 @@ mod tests {
                     id: BlockId::Height(4_500_000)
                 }
             }
+        );
+    }
+
+    #[test]
+    fn a_stopped_node_shows_nothing_of_another_networks_chain() {
+        let mut explorer = Explorer {
+            node: NodeId::new("zebrad-mainnet").unwrap(),
+            chain: SynthChain::new(Network::Mainnet, 3_551_000, NOW),
+            epoch: 0,
+            reorg: None,
+            known: None,
+            sent: None,
+            coinbases_read: HashSet::new(),
+        };
+        explorer.known = Some(explorer.chain_view(true));
+        let stopped = |ours| NodeView {
+            id: explorer.node.clone(),
+            network: ours,
+            ours,
+            elsewhere: None,
+            running: false,
+            stats: None,
+        };
+        let live = explorer.live(&stopped(Network::Mainnet));
+        assert!(
+            live.tip
+                .is_some_and(|tip| tip.stale && tip.height == 3_551_000),
+            "a stopped node keeps its last tip: {live:?}"
+        );
+        assert!(live.tip_time.is_some());
+        // The node moved to Testnet while zebrad was stopped.
+        assert_eq!(
+            explorer.live(&stopped(Network::Testnet)),
+            ExplorerLive::default(),
+            "no Mainnet tip under a Testnet node"
         );
     }
 
