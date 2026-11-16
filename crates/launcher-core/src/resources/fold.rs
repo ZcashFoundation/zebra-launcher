@@ -28,11 +28,13 @@
 //!   live ancestor, and settles after the parent's own departure, waiting one more reading if
 //!   it must: the parent's final total holds the member's.
 //!
-//! A member missing from one reading and back in the next had not left: XNU may refuse to
-//! answer for a process while it tears it down, before it is a zombie. What it lost is taken
-//! back, and a departure waiting for it is dropped. A departure that moved up past it while it
-//! was missing anchors on it again, with a fresh grace, and claims what its rollup gained since
-//! it was last seen: its final total holds the departure's.
+//! A member missing from readings and back within [`RETURN_READINGS`] had not left: XNU may
+//! refuse to answer for a process while it tears it down, before it is a zombie, and that can
+//! outlast a reading. What it lost is taken back, and a departure waiting for it is dropped. A
+//! departure that moved up past it while it was missing anchors on it again, with a fresh
+//! grace, and claims what its rollup gained since it was last seen: its final total holds the
+//! departure's. Until then the reader looks for it by its identity, which names one process,
+//! so what is kept can only be matched by that process and costs only memory.
 //!
 //! Members that waited claim an ancestor's growth before those that just left, since their
 //! reap may be what the reading shows. A member that could not claim although its parent's
@@ -67,6 +69,10 @@ const MIN_FIRST_RATE_SECS: f64 = 1.0;
 
 /// How far up a chain of departed members the fold looks for a live ancestor.
 const MAX_CHAIN: u32 = 64;
+
+/// For how many readings what the fold did with a member that left is kept, in case the member
+/// is back: a minute at the 5 s interval.
+const RETURN_READINGS: u64 = 12;
 
 /// One process of a scan of the computer, as membership needs it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,6 +243,14 @@ struct Departed {
     suspect: bool,
 }
 
+/// What went to `lost` for a member, at which reading, in case the member is back.
+#[derive(Clone, Debug, PartialEq)]
+struct Loss {
+    id: Identity,
+    at: u64,
+    counters: Counters,
+}
+
 /// One run's measurement: the members last seen, the counters of the departed, and the
 /// published totals.
 #[derive(Debug)]
@@ -255,10 +269,13 @@ pub(crate) struct Fold {
     /// Rollup growth of an anchor that its waiting departures may still claim.
     leftover: HashMap<Identity, f64>,
     lost: Counters,
-    /// What went to `lost` at the last reading, by member, in case the member is back.
-    lost_last: Vec<(Identity, Counters)>,
-    /// The members that left at the last reading, as last seen, in case one is back.
-    absent: HashMap<Identity, Seen>,
+    /// The readings folded, which date what is kept for a member that may be back.
+    readings: u64,
+    /// What went to `lost` in the last [`RETURN_READINGS`] readings, by member.
+    losses: Vec<Loss>,
+    /// The members that left in the last [`RETURN_READINGS`] readings, with the reading they
+    /// left at and as last seen.
+    absent: HashMap<Identity, (u64, Seen)>,
     published: Counters,
     /// Whether any member's I/O was readable this run.
     io_seen: bool,
@@ -283,7 +300,8 @@ impl Fold {
             pending: Vec::new(),
             leftover: HashMap::new(),
             lost: Counters::default(),
-            lost_last: Vec::new(),
+            readings: 0,
+            losses: Vec::new(),
             absent: HashMap::new(),
             published: Counters::default(),
             io_seen: false,
@@ -293,14 +311,19 @@ impl Fold {
         }
     }
 
-    /// The identities seen as members before, for the reader: the last reading's members and
-    /// the root, which stays known by its identity after it exits.
+    /// The identities seen as members before, for the reader: the last reading's members, those
+    /// that left in the last [`RETURN_READINGS`] readings, and the root, which stays known by
+    /// its identity after it exits.
     pub(crate) fn sticky(&self) -> Vec<Identity> {
-        let mut sticky: Vec<Identity> = self.last.keys().copied().collect();
-        if let Some(root) = self.root.filter(|root| !self.last.contains_key(root)) {
-            sticky.push(root);
-        }
+        let mut sticky: Vec<Identity> = self
+            .last
+            .keys()
+            .chain(self.absent.keys())
+            .chain(&self.root)
+            .copied()
+            .collect();
         sticky.sort_by_key(|id| (id.pid, id.start));
+        sticky.dedup();
         sticky
     }
 
@@ -328,6 +351,7 @@ impl Fold {
             .iter()
             .map(|member| parent_of(&members, member))
             .collect();
+        self.readings += 1;
         if self.cpu_rollup != Rollup::JobTotal {
             self.settle_departures(&members, &index);
         }
@@ -456,14 +480,19 @@ impl Fold {
     /// waited a reading, to `lost` unless a live ancestor's rollup holds them.
     fn settle_departures(&mut self, members: &[MemberReading], index: &HashMap<Identity, usize>) {
         let live = |id: &Identity| index.contains_key(id);
-        // A member that left at the last reading and is back had not left.
-        for (id, counters) in std::mem::take(&mut self.lost_last) {
-            if live(&id) {
-                self.lost.cpu = (self.lost.cpu - counters.cpu).max(0.0);
-                self.lost.read = self.lost.read.saturating_sub(counters.read);
-                self.lost.written = self.lost.written.saturating_sub(counters.written);
+        let now = self.readings;
+        let kept = |at: u64| now - at < RETURN_READINGS;
+        // A member that left and is back had not left.
+        let lost = &mut self.lost;
+        self.losses.retain(|loss| {
+            if !live(&loss.id) {
+                return kept(loss.at);
             }
-        }
+            lost.cpu = (lost.cpu - loss.counters.cpu).max(0.0);
+            lost.read = lost.read.saturating_sub(loss.counters.read);
+            lost.written = lost.written.saturating_sub(loss.counters.written);
+            false
+        });
         let mut pending = std::mem::take(&mut self.pending);
         pending.retain(|departure| !live(&departure.id));
         // A waiting departure whose anchor has left since: its time is in the anchor's final
@@ -487,7 +516,7 @@ impl Fold {
         }
         // A waiting departure that moved up past a member that is back: that member's final
         // total holds its time, so it anchors there again, with a fresh grace.
-        let absent = std::mem::take(&mut self.absent);
+        let mut absent = std::mem::take(&mut self.absent);
         for departure in &mut pending {
             let mut up = departure.parent;
             let mut depth = 1;
@@ -501,7 +530,7 @@ impl Fold {
                 up = self
                     .last
                     .get(&id)
-                    .or_else(|| absent.get(&id))
+                    .or_else(|| absent.get(&id).map(|(_, seen)| seen))
                     .and_then(|seen| seen.parent);
                 depth += 1;
             }
@@ -509,9 +538,9 @@ impl Fold {
         let mut departed: Vec<(&Identity, &Seen)> =
             self.last.iter().filter(|(id, _)| !live(id)).collect();
         departed.sort_by_key(|(id, _)| (id.pid, id.start));
-        let gone: HashMap<Identity, Seen> = departed
+        let gone: Vec<(Identity, (u64, Seen))> = departed
             .iter()
-            .map(|&(id, seen)| (*id, seen.clone()))
+            .map(|&(id, seen)| (*id, (now, seen.clone())))
             .collect();
         let mut orphans = Vec::new();
         for (id, seen) in departed {
@@ -580,7 +609,7 @@ impl Fold {
                 let before = self
                     .last
                     .get(&departure.anchor)
-                    .or_else(|| absent.get(&departure.anchor))
+                    .or_else(|| absent.get(&departure.anchor).map(|(_, seen)| seen))
                     .map(|seen| seen.rollup);
                 let grown = match (now, before) {
                     (Some(now), Some(before)) => (now - before).max(0.0),
@@ -642,14 +671,20 @@ impl Fold {
             })
             .collect();
         self.pending = waiting;
-        self.absent = gone;
+        absent.retain(|id, (at, _)| !live(id) && kept(*at));
+        absent.extend(gone);
+        self.absent = absent;
     }
 
     fn lose(&mut self, id: Identity, counters: Counters) {
         self.lost.cpu += counters.cpu;
         self.lost.read = self.lost.read.saturating_add(counters.read);
         self.lost.written = self.lost.written.saturating_add(counters.written);
-        self.lost_last.push((id, counters));
+        self.losses.push(Loss {
+            id,
+            at: self.readings,
+            counters,
+        });
     }
 }
 
@@ -1245,6 +1280,104 @@ mod tests {
         assert!(close(settled.cpu_secs, 101.0), "{}", settled.cpu_secs);
         assert_eq!(settled.read_bytes, Some(10));
         assert!(close(fold.lost.cpu, 0.0));
+    }
+
+    #[test]
+    fn a_member_missing_from_several_readings_had_not_left() {
+        // XNU's teardown of a process can outlast a reading: the child misses two readings,
+        // is back as a zombie with the same counters, and then its parent reaps it.
+        for platform in [Platform::Linux, Platform::Macos] {
+            let clock = clock();
+            let mut fold = Fold::new(&clock.probe(1), platform);
+            let root = |rollup| member(100, 1, 100.0, rollup, 10);
+            let child = member(101, 100, 10.0, 0.0, 20);
+            fold.fold(clock.reading(1, vec![root(0.0), child.clone()]));
+            fold.fold(clock.reading(2, vec![root(0.0)]));
+            fold.fold(clock.reading(3, vec![root(0.0)]));
+            let back = fold.fold(clock.reading(4, vec![root(0.0), child]));
+            assert!(
+                close(back.cpu_secs, 110.0),
+                "{platform:?}: {}",
+                back.cpu_secs
+            );
+            assert_eq!(back.read_bytes, Some(30), "{platform:?}");
+            assert_eq!(fold.lost.read, 0, "{platform:?}");
+            assert!(close(fold.lost.cpu, 0.0), "{platform:?}: {}", fold.lost.cpu);
+            let reaped = fold.fold(clock.reading(5, vec![root(10.0)]));
+            assert!(
+                close(reaped.cpu_secs, 110.0),
+                "{platform:?}: {}",
+                reaped.cpu_secs
+            );
+            assert_eq!(reaped.read_bytes, Some(30), "{platform:?}");
+        }
+        // Three readings: by then its CPU was lost too, and is taken back as well.
+        for platform in [Platform::Linux, Platform::Macos] {
+            let (settled, fold) = fold_on(
+                platform,
+                vec![
+                    vec![
+                        member(100, 1, 100.0, 0.0, 10),
+                        member(101, 100, 10.0, 0.0, 20),
+                    ],
+                    vec![member(100, 1, 100.0, 0.0, 10)],
+                    vec![member(100, 1, 100.0, 0.0, 10)],
+                    vec![member(100, 1, 100.0, 0.0, 10)],
+                    vec![
+                        member(100, 1, 100.0, 0.0, 10),
+                        member(101, 100, 10.0, 0.0, 20),
+                    ],
+                ],
+            );
+            assert!(
+                close(settled.cpu_secs, 110.0),
+                "{platform:?}: {}",
+                settled.cpu_secs
+            );
+            assert_eq!(settled.read_bytes, Some(30), "{platform:?}");
+            assert!(close(fold.lost.cpu, 0.0), "{platform:?}");
+        }
+        // The root, missing from two readings.
+        for platform in [Platform::Linux, Platform::Macos] {
+            let (settled, fold) = fold_on(
+                platform,
+                vec![
+                    vec![member(100, 1, 100.0, 0.0, 10)],
+                    Vec::new(),
+                    Vec::new(),
+                    vec![member(100, 1, 101.0, 0.0, 10)],
+                ],
+            );
+            assert!(
+                close(settled.cpu_secs, 101.0),
+                "{platform:?}: {}",
+                settled.cpu_secs
+            );
+            assert_eq!(settled.read_bytes, Some(10), "{platform:?}");
+            assert!(close(fold.lost.cpu, 0.0), "{platform:?}");
+        }
+    }
+
+    #[test]
+    fn what_is_kept_for_a_member_that_may_be_back_expires() {
+        let clock = clock();
+        let mut fold = Fold::new(&clock.probe(1), Platform::Macos);
+        fold.fold(clock.reading(
+            1,
+            vec![member(100, 1, 100.0, 0.0, 10), member(104, 1, 2.0, 0.0, 5)],
+        ));
+        // The orphan is missing: the reader looks for it again by its identity.
+        fold.fold(clock.reading(2, vec![member(100, 1, 100.0, 0.0, 10)]));
+        assert_eq!(fold.sticky(), vec![id(100, 1000), id(104, 1040)]);
+        assert!(!fold.losses.is_empty());
+        for tick in 3..3 + RETURN_READINGS {
+            fold.fold(clock.reading(tick, vec![member(100, 1, 100.0, 0.0, 10)]));
+        }
+        assert_eq!(fold.sticky(), vec![id(100, 1000)]);
+        assert!(fold.losses.is_empty(), "{:?}", fold.losses);
+        assert!(fold.absent.is_empty(), "{:?}", fold.absent);
+        assert!(close(fold.lost.cpu, 2.0));
+        assert_eq!(fold.lost.read, 5);
     }
 
     #[test]
