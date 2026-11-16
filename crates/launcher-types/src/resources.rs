@@ -128,7 +128,7 @@ pub struct MachineResources {
     pub at: SystemTime,
     pub logical_cpus: u32,
     /// Busy over the last interval, in logical CPUs (0 to `logical_cpus`); `None` on the
-    /// first sample.
+    /// first sample, and on Windows with more than one processor group.
     #[serde(default)]
     pub cpu_busy_cores: Option<f64>,
     pub memory_total_bytes: u64,

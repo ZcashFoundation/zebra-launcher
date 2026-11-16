@@ -142,9 +142,9 @@ Gauges (memory, counts, free space) are the value at the sample.
 | Unit | Busy logical CPUs (cores) and the CPU count; bytes; a pressure level. |
 | Linux | CPU: the first line of `/proc/stat` (busy = user + nice + system + irq + softirq + steal; idle = idle + iowait). CPU count: `sysconf(_NPROCESSORS_ONLN)`. Memory: MemTotal, MemAvailable, SwapTotal and SwapFree from `/proc/meminfo`. |
 | macOS | CPU: `host_statistics(HOST_CPU_LOAD_INFO)`. CPU count: `sysconf(_SC_NPROCESSORS_ONLN)` through libc; nix 0.31.3 defines `SysconfVar::_NPROCESSORS_ONLN` only for Linux and Android. Memory: `hw.memsize` and `vm.swapusage`. Pressure: `kern.memorystatus_vm_pressure_level` (1 normal, 2 warning, 4 critical), which XNU lets any process read on macOS. Available memory is estimated from `host_statistics64(HOST_VM_INFO64)` as total − (internal − purgeable + wired + compressor) pages. |
-| Windows | CPU: `GetSystemTimes` (busy = kernel − idle + user). CPU count: `GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)`. Memory: `K32GetPerformanceInfo` gives PhysicalTotal, PhysicalAvailable, CommitTotal and CommitLimit, in pages × PageSize. |
+| Windows | CPU: `GetSystemTimes` (busy = kernel − idle + user), only while `GetActiveProcessorGroupCount` is 1. CPU count: `GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)`. Memory: `K32GetPerformanceInfo` gives PhysicalTotal, PhysicalAvailable, CommitTotal and CommitLimit, in pages × PageSize. |
 | Cost | One read, or two calls, per tick. |
-| Caveats | `std::thread::available_parallelism` is not used: it follows cgroup quotas and CPU affinity, and on Windows it can undercount above 64 CPUs. `GlobalMemoryStatusEx` is not used for commit: its page-file fields are "the system or the current process, whichever is smaller". The macOS estimate is assumed to match Activity Monitor's "Memory Used" (unconfirmed), so verdicts there use the pressure level instead. |
+| Caveats | `std::thread::available_parallelism` is not used: it follows cgroup quotas and CPU affinity, and on Windows it can undercount above 64 CPUs. On a computer with more than one processor group (above 64 logical CPUs), `GetSystemTimes` sums only the calling thread's group, so its busy share would describe one group's CPUs scaled to all of them; the computer's busy figure is then not read: the dashboard shows the CPU count without a busy share, and the diagnostics read "unknown". A node's share of the computer is still read, since its job's times cover every group, as the count does. `GlobalMemoryStatusEx` is not used for commit: its page-file fields are "the system or the current process, whichever is smaller". The macOS estimate is assumed to match Activity Monitor's "Memory Used" (unconfirmed), so verdicts there use the pressure level instead. |
 
 ### Free space on data volumes
 
@@ -619,7 +619,7 @@ pub struct MachineResources {
     pub at: SystemTime,
     pub logical_cpus: u32,
     /// Busy over the last interval, in logical CPUs (0 to `logical_cpus`); `None` on the
-    /// first sample.
+    /// first sample, and on Windows with more than one processor group.
     #[serde(default)]
     pub cpu_busy_cores: Option<f64>,
     pub memory_total_bytes: u64,
@@ -1277,7 +1277,8 @@ windows-sys = { workspace = true, features = [
   - Everything else is in features already on:
     - JobObjects: `QueryInformationJobObject`, `IsProcessInJob`, both information classes;
     - Threading: `GetProcessTimes`, `GetProcessIoCounters`, `GetProcessHandleCount`,
-      `GetSystemTimes`, `GetActiveProcessorCount`, `WaitForSingleObject`,
+      `GetSystemTimes`, `GetActiveProcessorCount`, `GetActiveProcessorGroupCount`,
+      `WaitForSingleObject`,
       `PROCESS_SYNCHRONIZE`, and `JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION`, which is
       gated on Threading;
     - Storage_FileSystem: `GetVolumePathNameW`, `GetDiskFreeSpaceExW`.
@@ -1298,7 +1299,7 @@ windows-sys = { workspace = true, features = [
 | --- | --- | --- |
 | `resources/linux.rs` | none | `std::fs` reads and nix's safe `sysconf`; `firstrun.rs` already uses nix's safe `statvfs`. |
 | `resources/macos.rs` | `proc_listpgrppids`, `proc_listchildpids`, `proc_pidinfo` (`PROC_PIDTASKALLINFO`, `PROC_PIDTBSDINFO`, `PROC_PIDLISTFDS`), `proc_pid_rusage`, `sysctlbyname` (`hw.memsize`, `vm.swapusage`, `kern.memorystatus_vm_pressure_level`, `sysctl.proc_translated`), `sysconf` (`_SC_NPROCESSORS_ONLN`), `host_statistics`, `host_statistics64`, and three local declarations (below) | libproc and Mach have no safe binding in the tree, and nix's safe `sysconf` has no `_NPROCESSORS_ONLN` on macOS. |
-| `resources/windows.rs` | `OpenProcess`, `WaitForSingleObject`, `GetProcessTimes`, `K32GetProcessMemoryInfo`, `GetProcessIoCounters`, `GetProcessHandleCount`, `GetSystemTimes`, `GetActiveProcessorCount`, `K32GetPerformanceInfo` | Win32. |
+| `resources/windows.rs` | `OpenProcess`, `WaitForSingleObject`, `GetProcessTimes`, `K32GetProcessMemoryInfo`, `GetProcessIoCounters`, `GetProcessHandleCount`, `GetSystemTimes`, `GetActiveProcessorCount`, `GetActiveProcessorGroupCount`, `K32GetPerformanceInfo` | Win32. |
 | `process/windows.rs` | `QueryInformationJobObject` (two classes), `IsProcessInJob`, `QueryFullProcessImageNameW` (existing; `image_path`, now shared with the reader) | The job handle stays in this file. |
 | `firstrun.rs` | `GetDiskFreeSpaceExW` (existing, now with its total), `GetVolumePathNameW` | Win32. |
 
@@ -1558,6 +1559,9 @@ Each phase is one pull request that ships on its own, with screenshots from the 
        Manager shows it under the program; the live tests leave it out of their counts.
      - A read after the job closed fails with `NotFound`, which the sampler never logs: the
        supervisor clears the probe before it drops the job.
+     - With more than one processor group the computer's CPU times are not read
+       (`MachineReading.cpu` is `None`), since `GetSystemTimes` covers only the calling
+       thread's group while the CPU count covers all of them.
    - Tests:
      - `tests/resources.rs` runs on all three OSes, with each platform's names, thread counts
        and parent links, and so does the registry's test of a sampler per node.
@@ -1591,6 +1595,7 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - whether `QueryInformationJobObject` fails with `ERROR_MORE_DATA` on a short list (the loop
      handles both answers);
    - whether zebrad's console host is in its job (the tests pass either way);
+   - a computer with more than one processor group, whose CPU should read "unknown";
    - the window in which XNU refuses an exiting process, which the fold absorbs;
    - screenshots from both OSes.
 4. **History charts.**

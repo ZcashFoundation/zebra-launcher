@@ -11,8 +11,9 @@
 //! needs a snapshot of the whole computer.
 //!
 //! The computer comes from `GetSystemTimes`, `GetActiveProcessorCount` and
-//! `K32GetPerformanceInfo`. `unsafe` is only around the Win32 calls; the job's handle stays in
-//! `process/windows.rs`.
+//! `K32GetPerformanceInfo`. `GetSystemTimes` sums only the calling thread's processor group, so
+//! with more than one group (`GetActiveProcessorGroupCount`) the computer's CPU is not read.
+//! `unsafe` is only around the Win32 calls; the job's handle stays in `process/windows.rs`.
 
 use std::{
     io,
@@ -29,16 +30,17 @@ use windows_sys::Win32::{
             PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
         },
         Threading::{
-            ALL_PROCESSOR_GROUPS, GetActiveProcessorCount, GetProcessHandleCount,
-            GetProcessIoCounters, GetProcessTimes, GetSystemTimes, IO_COUNTERS, OpenProcess,
-            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+            ALL_PROCESSOR_GROUPS, GetActiveProcessorCount, GetActiveProcessorGroupCount,
+            GetProcessHandleCount, GetProcessIoCounters, GetProcessTimes, GetSystemTimes,
+            IO_COUNTERS, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            WaitForSingleObject,
         },
     },
 };
 
 use super::{
-    Denied, Identity, JobTotals, MachineReader, MachineReading, MemberReading, Reader, TreeReading,
-    clean_name,
+    Denied, Identity, JobTotals, MachineCpu, MachineReader, MachineReading, MemberReading, Reader,
+    TreeReading, clean_name,
 };
 use crate::process::{
     TreeProbe,
@@ -273,21 +275,32 @@ fn bytes(count: usize) -> u64 {
     u64::try_from(count).unwrap_or(u64::MAX)
 }
 
+/// The computer's busy and idle time, or `None` with more than one processor group, where
+/// `GetSystemTimes` covers only the calling thread's group and the count covers them all.
+fn system_times() -> io::Result<Option<MachineCpu>> {
+    // SAFETY: GetActiveProcessorGroupCount takes no arguments.
+    if unsafe { GetActiveProcessorGroupCount() } > 1 {
+        return Ok(None);
+    }
+    let mut idle = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: the three FILETIMEs are writable for the duration of the call.
+    if unsafe { GetSystemTimes(&raw mut idle, &raw mut kernel, &raw mut user) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let idle = units(idle);
+    // The kernel time includes the idle time.
+    let busy = units(kernel)
+        .saturating_sub(idle)
+        .saturating_add(units(user));
+    Ok(Some(MachineCpu { busy, idle }))
+}
+
 impl MachineReader for WindowsReader {
     fn machine(&self) -> io::Result<MachineReading> {
         let at = SystemTime::now();
-        let mut idle = FILETIME::default();
-        let mut kernel = FILETIME::default();
-        let mut user = FILETIME::default();
-        // SAFETY: the three FILETIMEs are writable for the duration of the call.
-        if unsafe { GetSystemTimes(&raw mut idle, &raw mut kernel, &raw mut user) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let idle = units(idle);
-        // The kernel time includes the idle time.
-        let busy = units(kernel)
-            .saturating_sub(idle)
-            .saturating_add(units(user));
+        let cpu = system_times()?;
         // SAFETY: GetActiveProcessorCount takes no pointers.
         let cpus = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) };
         let size = u32::try_from(size_of::<PERFORMANCE_INFORMATION>())
@@ -305,8 +318,7 @@ impl MachineReader for WindowsReader {
         Ok(MachineReading {
             at,
             logical_cpus: cpus.max(1),
-            cpu_busy: busy,
-            cpu_idle: idle,
+            cpu,
             memory_total: pages(perf.PhysicalTotal),
             memory_available: Some(pages(perf.PhysicalAvailable)),
             swap_total: None,
@@ -394,7 +406,15 @@ mod tests {
         assert!(machine.logical_cpus >= 1);
         assert!(machine.memory_total > 0);
         assert!(machine.memory_available.unwrap_or(0) <= machine.memory_total);
-        assert!(machine.cpu_busy + machine.cpu_idle > 0);
+        // SAFETY: GetActiveProcessorGroupCount takes no arguments.
+        let groups = unsafe { GetActiveProcessorGroupCount() };
+        match machine.cpu {
+            Some(cpu) => {
+                assert_eq!(groups, 1);
+                assert!(cpu.busy + cpu.idle > 0);
+            }
+            None => assert!(groups > 1, "{groups} processor groups"),
+        }
         let (commit, limit) = (machine.commit.unwrap(), machine.commit_limit.unwrap());
         assert!(commit > 0 && commit <= limit, "{commit} of {limit}");
         assert_eq!((machine.swap_total, machine.pressure), (None, None));

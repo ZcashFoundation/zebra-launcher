@@ -24,8 +24,8 @@ use std::{
 use launcher_types::MemoryPressure;
 
 use super::{
-    Denied, Identity, MachineReader, MachineReading, MemberReading, Reader, TreeReading,
-    clean_name,
+    Denied, Identity, MachineCpu, MachineReader, MachineReading, MemberReading, Reader,
+    TreeReading, clean_name,
     fold::{self, ProcEntry},
 };
 use crate::process::TreeProbe;
@@ -471,8 +471,10 @@ impl MachineReader for MacMachineReader {
                 .ok()
                 .filter(|&cpus| cpus > 0)
                 .unwrap_or(1),
-            cpu_busy: user + system + nice,
-            cpu_idle: idle,
+            cpu: Some(MachineCpu {
+                busy: user + system + nice,
+                idle,
+            }),
             memory_total,
             memory_available,
             swap_total: swap.map(|swap| swap.xsu_total),
@@ -656,7 +658,8 @@ mod tests {
         assert!(machine.memory_total > 0);
         let available = machine.memory_available.expect("an estimate");
         assert!(available <= machine.memory_total);
-        assert!(machine.cpu_busy + machine.cpu_idle > 0);
+        let cpu = machine.cpu.expect("the CPU times");
+        assert!(cpu.busy + cpu.idle > 0);
         assert!(machine.swap_total.is_some());
         assert!(machine.pressure.is_some(), "any process may read the level");
         assert_eq!((machine.commit, machine.commit_limit), (None, None));

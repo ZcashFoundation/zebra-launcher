@@ -132,14 +132,21 @@ pub trait Reader: Send + Sync + 'static {
     fn tree(&self, probe: &TreeProbe, sticky: &[Identity]) -> io::Result<TreeReading>;
 }
 
+/// The computer's cumulative CPU time spent busy and idle, in the OS's unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MachineCpu {
+    pub busy: u64,
+    pub idle: u64,
+}
+
 /// One reading of the computer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MachineReading {
     pub at: SystemTime,
     pub logical_cpus: u32,
-    /// Cumulative CPU time spent busy and idle across the computer, in the OS's unit.
-    pub cpu_busy: u64,
-    pub cpu_idle: u64,
+    /// `None` where the OS gives no times for all `logical_cpus`: Windows with more than one
+    /// processor group.
+    pub cpu: Option<MachineCpu>,
     pub memory_total: u64,
     pub memory_available: Option<u64>,
     /// Linux and macOS.
@@ -456,10 +463,11 @@ impl MachineSampler {
 }
 
 /// The busy logical CPUs between two readings: the busy share of the CPU time that passed,
-/// times the CPUs. `None` when no time passed.
+/// times the CPUs. `None` when no time passed or a reading has no CPU times.
 fn busy_cores(before: &MachineReading, now: &MachineReading) -> Option<f64> {
-    let busy = now.cpu_busy.checked_sub(before.cpu_busy)?;
-    let idle = now.cpu_idle.checked_sub(before.cpu_idle)?;
+    let (before_cpu, now_cpu) = (before.cpu?, now.cpu?);
+    let busy = now_cpu.busy.checked_sub(before_cpu.busy)?;
+    let idle = now_cpu.idle.checked_sub(before_cpu.idle)?;
     let total = busy + idle;
     (total > 0).then(|| busy as f64 / total as f64 * f64::from(now.logical_cpus))
 }
@@ -771,8 +779,10 @@ mod tests {
             Ok(MachineReading {
                 at: SystemTime::now(),
                 logical_cpus: 8,
-                cpu_busy: 100 * call,
-                cpu_idle: 300 * call,
+                cpu: Some(MachineCpu {
+                    busy: 100 * call,
+                    idle: 300 * call,
+                }),
                 memory_total: 16 << 30,
                 memory_available: Some(4 << 30),
                 swap_total: Some(2 << 30),
@@ -818,8 +828,7 @@ mod tests {
         let reading = |busy, idle| MachineReading {
             at: SystemTime::UNIX_EPOCH,
             logical_cpus: 4,
-            cpu_busy: busy,
-            cpu_idle: idle,
+            cpu: Some(MachineCpu { busy, idle }),
             memory_total: 0,
             memory_available: None,
             swap_total: None,
@@ -832,5 +841,12 @@ mod tests {
         assert_eq!(busy_cores(&reading(10, 10), &reading(30, 10)), Some(4.0));
         // Counters that went backwards (a CPU taken offline) give no figure.
         assert_eq!(busy_cores(&reading(10, 10), &reading(5, 20)), None);
+        // Nor does a reading without times for every CPU (Windows above one processor group).
+        let blind = MachineReading {
+            cpu: None,
+            ..reading(30, 10)
+        };
+        assert_eq!(busy_cores(&reading(10, 10), &blind), None);
+        assert_eq!(busy_cores(&blind, &reading(50, 10)), None);
     }
 }

@@ -20,8 +20,8 @@ use nix::{
 };
 
 use super::{
-    Denied, Identity, MachineReader, MachineReading, MemberReading, Reader, TreeReading,
-    clean_name,
+    Denied, Identity, MachineCpu, MachineReader, MachineReading, MemberReading, Reader,
+    TreeReading, clean_name,
     fold::{self, ProcEntry},
     procfs,
 };
@@ -252,8 +252,10 @@ impl MachineReader for LinuxReader {
         Ok(MachineReading {
             at: SystemTime::now(),
             logical_cpus,
-            cpu_busy: cpu.busy,
-            cpu_idle: cpu.idle,
+            cpu: Some(MachineCpu {
+                busy: cpu.busy,
+                idle: cpu.idle,
+            }),
             memory_total: memory.total,
             memory_available: memory.available,
             swap_total: memory.swap_total,
@@ -352,6 +354,7 @@ mod tests {
         assert!(machine.logical_cpus >= 1);
         assert!(machine.memory_total > 0);
         assert!(machine.memory_available.unwrap_or(0) <= machine.memory_total);
-        assert!(machine.cpu_busy + machine.cpu_idle > 0);
+        let cpu = machine.cpu.expect("the CPU times");
+        assert!(cpu.busy + cpu.idle > 0);
     }
 }
