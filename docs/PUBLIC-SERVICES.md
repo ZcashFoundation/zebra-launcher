@@ -466,9 +466,10 @@ computer only. The Zaino facts used here were checked at tag `zainod-0.10.2` (`5
 > run of zingod 1.1.0, built from that tag, during this design. "Unconfirmed" marks what the
 > phase that relies on it checks first; "proposal" marks a starting value.
 
-Zingo Labs forked Zaino as [zingod](https://github.com/zingolabs/zingod), "the Zingo Labs
-lightclient indexer" (its README; Apache-2.0), announced on the Zcash forum on 2026-11-06.
-zingod 1.1.0 (2026-11-10) follows NU7. Zeal bundles it on Linux as `zeal-zingod`
+Zingo Labs forked Zaino as [zingod](https://github.com/zingolabs/zingod), "a Zcash indexer
+written in Rust" (its README; Apache-2.0), announced on the Zcash forum on 2026-11-06.
+zingod 1.1.0 follows NU7; its tag's commit is dated 2026-11-10 in UTC, which `ZINGOD_DATE`
+records, while its CHANGELOG heads the release 2026-11-09. Zeal bundles it on Linux as `zeal-zingod`
 ([SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)) and offers it as the light client
 server's second backend, beside zebrad's endpoint. The user picks one on the consent screen; the
 front door, the name, the port and the certificate are the same for both.
@@ -589,9 +590,9 @@ these hold:
 
 **One zingod run per zebrad run.** zebrad writes a new cookie at every start. zingod reads its
 cookie at the first request and again only after a 401 or 403
-(`packages/zingod-source/src/endpoint.rs:98-160`). zebrad 7.0.0, and Zeal's Beta (`9889683`)
-and Nightly (`7ae1a82`) pins, close the connection on a wrong cookie without an HTTP answer
-(`zebra-rpc/src/server/http_request_compatibility.rs:225-227` at `v7.0.0`). In a research run
+(`packages/zingod-source/src/rpc/client.rs:175-195, 238-243`). zebrad 7.0.0, and Zeal's Beta
+(`9889683`) and Nightly (`7ae1a82`) pins, close the connection on a wrong cookie without an HTTP
+answer (`zebra-rpc/src/server/http_request_compatibility.rs:225-227` at `v7.0.0`). In a research run
 against 7.0.0, zingod's polls failed for the rest of the run once zebrad came back; against a
 zebrad that answers 401, zingod recovered in 7 s. The 401 is Zebra commit `a1bf8a7e89`, first
 released in 7.1.0. So when zebrad's pid or start time changes, Zeal stops zingod and starts it
@@ -845,11 +846,14 @@ answers 503 through a whole first sync, so Zeal doesn't read it.
 - **Can't reach zebrad**: `chain.validators.answering` is 0 for 30 s. zingod's own state can't
   say this in time: a booted zingod stays `serving` until its tip is stale, 24 target spacings,
   about 10 minutes at NU7's 25 s, and only then reports `tip_unvouched`
-  (`docs/architecture.md:327-336`). `no_validator_reachable` appears only while zingod starts and
-  waits for a validator (`readiness` in `packages/zingod/src/health.rs`), which it doesn't do on
-  Mainnet or Testnet. The documented reason `tip_stale` doesn't exist in the code, so the panel
-  shows zingod's own message for any reason it doesn't know. Zeal restarts zingod once per zebrad
-  run on this, since a missed cookie change looks the same.
+  (`docs/running.md:170-171`; `STALE_TIP_BLOCKS = 24` at
+  `packages/zingod-chainview/src/alarm_thresholds.rs:9`, used by
+  `packages/zingod-grpc-snapshot/src/grpc_snapshot.rs:154-163`). `no_validator_reachable` appears
+  only while zingod starts and waits for a validator (`readiness` in
+  `packages/zingod/src/health.rs`), which it doesn't do on Mainnet or Testnet. The documented
+  reason `tip_stale` doesn't exist in the code, so the panel shows zingod's own message for any
+  reason it doesn't know. Zeal restarts zingod once per zebrad run on this, since a missed cookie
+  change looks the same.
 - **Behind**: once ready, zingod is behind under `BackingBehind`'s constants. `served` 10 or more
   blocks below zebrad's height at once, or more than 2 for 10 minutes, is `IndexBehind`. zingod
   polls every second, so at the tip it should trail by about a block (unmeasured; the wallet runs
@@ -2774,11 +2778,13 @@ before the move to zingod: a release with #1655; fixes for #1665 and #1537; a
   `packages/zingod/src/` (`main.rs`, `cli.rs`, `daemon.rs`, `daemon/fd_limit.rs`, `config.rs`,
   `health.rs`, `error.rs`); `packages/zingod-grpc/src/` (`service.rs`, `limits.rs`, `health.rs`,
   `transport.rs`, `proxy_protocol.rs`, `routes/info.rs`, `routes/transactions.rs`);
-  `packages/zingod-source/src/` (`endpoint.rs`, `decode.rs`);
+  `packages/zingod-source/src/` (`endpoint.rs`, `rpc/client.rs`, `decode.rs`);
+  `packages/zingod-chainview/src/alarm_thresholds.rs`;
   `packages/zingod-grpc-snapshot/src/grpc_snapshot.rs` and `report.rs`;
   `packages/zingod/src/telemetry/egress.rs`;
   `packages/zingod-sync/src/follower.rs` and `usage.md`; `packages/zingod-persistence/src/`
-  (`error.rs`, `manifest.rs`, `pages.rs`); `packages/zingod-primitives/src/protocol.rs`; `packages/zingod-chainview/src/submit/driver.rs`;
+  (`error.rs`, `manifest.rs`, `pages.rs`); `packages/zingod-primitives/src/protocol.rs`;
+  `packages/zingod-chainview/src/submit/driver.rs`;
   `docs/running.md`, `docs/architecture.md`, `docs/rpc_api.md` and `docs/client-requirements.md`;
   `README.md`, `CHANGELOG.md`, `Cargo.lock`, `LICENSE`, `rust-toolchain.toml`; the release and
   the tag through the GitHub API; Zingo Labs' Mainnet index snapshot manifest

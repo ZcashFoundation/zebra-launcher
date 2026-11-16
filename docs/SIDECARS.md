@@ -430,6 +430,8 @@ on Linux only. Only the light client server runs it
   checks that the version is on `TESTED_ZINGOD`.
 - **The name.** The `zeal-` prefix keeps the `.deb`'s `/usr/bin/zeal-zingod`
   from shadowing a system `zingod`.
+- **The date** is the tag commit's date in UTC; zingod's CHANGELOG heads the
+  release 2026-11-09.
 - **The tag** `v1.1.0` is lightweight, so `git ls-remote
   https://github.com/zingolabs/zingod refs/tags/v1.1.0` prints the commit
   itself. The build also takes a peeled `^{}` line, in case a later tag is
