@@ -92,6 +92,9 @@ fn Switch(
 pub fn PublicServices() -> impl IntoView {
     let status = light_status();
     let has_service = Memo::new(move |_| status.with(Option::is_some));
+    // What "Turn off and forget" could not undo. It lives here, not in the panel it came from,
+    // because forgetting ends the setup and so removes that panel.
+    let left = RwSignal::new(None::<Vec<String>>);
     view! {
         <section class="settings public" aria-labelledby="public-heading">
             <h2 id="public-heading">"Public services"</h2>
@@ -102,10 +105,20 @@ pub fn PublicServices() -> impl IntoView {
             </p>
             {move || {
                 if has_service.get() {
-                    view! { <LightServer status /> }.into_any()
+                    view! { <LightServer status left /> }.into_any()
                 } else {
                     view! { <NotSetUp /> }.into_any()
                 }
+            }}
+            {move || {
+                left.get().filter(|lines| !lines.is_empty()).map(|lines| view! {
+                    <div class="public-forgotten" role="status">
+                        <p>"Zeal forgot the light client server. Still to do:"</p>
+                        <ul class="public-still">
+                            {lines.into_iter().map(|line| view! { <li>{line}</li> }).collect_view()}
+                        </ul>
+                    </div>
+                })
             }}
         </section>
     }
@@ -207,7 +220,10 @@ fn outcome_class(outcome: &CheckOutcome) -> &'static str {
 
 /// A set-up light client server: the header, the state line, then the setup or the panel.
 #[component]
-fn LightServer(status: Memo<Option<PublicStatus>>) -> impl IntoView {
+fn LightServer(
+    status: Memo<Option<PublicStatus>>,
+    left: RwSignal<Option<Vec<String>>>,
+) -> impl IntoView {
     let state = AppState::get();
     let busy = RwSignal::new(false);
     let note = RwSignal::new(None::<String>);
@@ -294,7 +310,7 @@ fn LightServer(status: Memo<Option<PublicStatus>>) -> impl IntoView {
                         view! { <Checklist status /> }.into_any()
                     }
                 }}
-                <Forget />
+                <Forget left />
             </Show>
         </div>
     }
@@ -807,14 +823,16 @@ fn Serving(status: Memo<Option<PublicStatus>>) -> impl IntoView {
 
 /// "Turn off and forget", with what stays public afterwards.
 #[component]
-fn Forget() -> impl IntoView {
+fn Forget(left: RwSignal<Option<Vec<String>>>) -> impl IntoView {
     let public = PublicContext::get();
     let asking = RwSignal::new(false);
     let remove_token = RwSignal::new(true);
     let busy = RwSignal::new(false);
-    let result = RwSignal::new(None::<Vec<String>>);
+    let failed = RwSignal::new(None::<String>);
     let forget = move |_| {
         busy.set(true);
+        failed.set(None);
+        left.set(None);
         spawn_local(async move {
             match api::public::forget_public_service(remove_token.get_untracked()).await {
                 Ok(still) => {
@@ -843,10 +861,10 @@ fn Forget() -> impl IntoView {
                                 .to_owned(),
                         );
                     }
-                    result.set(Some(lines));
+                    left.set(Some(lines));
                     public.refresh();
                 }
-                Err(error) => result.set(Some(vec![error.to_string()])),
+                Err(error) => failed.set(Some(error.to_string())),
             }
             busy.set(false);
             asking.set(false);
@@ -876,9 +894,7 @@ fn Forget() -> impl IntoView {
                     <button type="button" on:click=move |_| asking.set(false)>"Cancel"</button>
                 </div>
             </Show>
-            {move || result.get().map(|lines| view! {
-                <ul class="public-still">{lines.into_iter().map(|line| view! { <li>{line}</li> }).collect_view()}</ul>
-            })}
+            {move || failed.get().map(|error| view! { <p class="error">{error}</p> })}
         </div>
     }
 }

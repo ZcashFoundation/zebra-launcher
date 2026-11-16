@@ -123,6 +123,10 @@
 .public-consent ul,
 .public-howto,
 .public-use,
+.public-forgotten {
+  margin-top: 12px;
+}
+
 .public-still,
 .public-checks {
   margin: 4px 0;
