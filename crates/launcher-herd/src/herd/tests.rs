@@ -591,6 +591,39 @@ fn a_split_between_channels_is_two_implementations_disagreeing() {
 }
 
 #[test]
+fn a_split_whose_other_side_stops_still_reads_as_a_sentence() {
+    let mut herd = Harness::new(Network::Mainnet, 3, H);
+    herd.nodes[2].program = NodeProgram::BundledBeta;
+    herd.run(10);
+    let branch = herd.chain.branch(H - 1);
+    herd.chain.put(&id(2), branch, H + 1);
+    let view = herd.run_with(30, |herd, elapsed| {
+        if elapsed % 10 == 0 {
+            herd.grow(&[0, 1, 2]);
+        }
+    });
+    assert_eq!(view.state, HerdState::Split);
+    // The Beta node stops: the Stable nodes show the split for the debounce, with no other
+    // side to name.
+    herd.nodes[2].phase = Phase::Stopped;
+    let view = herd.run(5);
+    assert_eq!(view.state, HerdState::Split);
+    assert_eq!(
+        view.headline,
+        "Your Mainnet nodes disagree since block 3,551,203, and Zeal can't tell which is right"
+    );
+    let view = herd.run(15);
+    assert_eq!(view.state, HerdState::Agreed);
+    assert_eq!(
+        view.headline,
+        format!(
+            "Your 2 Mainnet nodes agree on block {}; Zebra · Mainnet 3 is stopped",
+            super::verdict::thousands(herd.height(0))
+        )
+    );
+}
+
+#[test]
 fn a_split_against_several_implementations_names_both_sides() {
     let mut herd = Harness::new(Network::Mainnet, 3, H);
     herd.nodes[1].kind = NodeKind::Zakura;

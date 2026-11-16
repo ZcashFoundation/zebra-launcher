@@ -283,6 +283,12 @@ fn split_headline(herd: &Herd<'_>, witnesses: &[&NodeInHerd], top: &str) -> Stri
         Relation::Forked { side, .. } => Some(side),
         _ => None,
     };
+    let no_majority = || {
+        format!(
+            "Your {net} nodes disagree since {}, and Zeal can't tell which is right",
+            block(at)
+        )
+    };
     if forked
         .iter()
         .any(|node| side_of(node) == Some(Side::Implementations))
@@ -324,25 +330,24 @@ fn split_headline(herd: &Herd<'_>, witnesses: &[&NodeInHerd], top: &str) -> Stri
             labels
         };
         let (ours, theirs) = (labels(&main_side), labels(&other_side));
-        return if ours.len() == 1 && theirs.len() == 1 {
-            format!("{} and {} disagree since {}", ours[0], theirs[0], block(at))
-        } else {
-            format!(
+        return match (ours.as_slice(), theirs.as_slice()) {
+            // One side left the split (stopped, or not answering) while the other still shows
+            // it for the debounce: there is no family to name it against.
+            ([], _) | (_, []) => no_majority(),
+            ([ours], [theirs]) => format!("{ours} and {theirs} disagree since {}", block(at)),
+            _ => format!(
                 "{} disagree with {} since {}",
                 ours.join(" and "),
                 theirs.join(" and "),
                 block(at)
-            )
+            ),
         };
     }
     if forked
         .iter()
         .any(|node| side_of(node) == Some(Side::NoMajority))
     {
-        return format!(
-            "Your {net} nodes disagree since {}, and Zeal can't tell which is right",
-            block(at)
-        );
+        return no_majority();
     }
     let agreeing = witnesses.iter().filter(|node| agrees(node)).count();
     let mut clauses: Vec<String> = forked.iter().map(|node| node.sentence.clone()).collect();
