@@ -1084,7 +1084,10 @@ Which server answers wallets?
 
 On Mainnet before Z4 the second choice is disabled, with "zingod is being tested on Testnet
 first"; without `zeal-zingod`, "zingod runs on Linux only for now". The Zingo sentence ships only
-once the wallet runs confirm it. With zingod chosen, the consent list reads:
+once the wallet runs confirm it. With zingod chosen, the first, second and last lines below take
+the place of PS1's software line, its "experimental" line and its port line, and the index and
+status lines join the list. PS1's Zebra port line also shows, but only during Z4's switch, when
+both ports are open:
 
 - "every wallet that connects is told it is zingod 1.1.0";
 - "zingod is experimental: Zingo Labs say it is in development and not for production Mainnet
@@ -1092,8 +1095,9 @@ once the wallet runs confirm it. With zingod chosen, the consent list reads:
 - "zingod keeps its own index of the chain on /mnt/zebra, about 71 GB on Mainnet";
 - "while it serves, your server's status page is public: its state, its version, its block
   heights and how much it sent in each 10 minutes";
-- "while the light client server is switched on, programs on this computer can use zingod's
-  port without a password. Web pages in a browser can't call it".
+- "while the light client server is switched on, including during setup and automatic pauses,
+  programs on this computer can use zingod's port without a password. Web pages in a browser
+  can't use its wallet methods, but they can read its public status".
 
 The consent records the backend (`Consent.backend`), so choosing the other one later asks again;
 a "Server software…" button beside "Turn off and forget…" does that. The panel has no menu as
@@ -2479,8 +2483,12 @@ What you take on:
  [ ] I understand what becomes public
 ```
 
-With zingod the software line reads "zingod 1.1.0, reading Zebra 7.0.0", and the lines in
-[zingod in the UI](#zingod-in-the-ui) join the list.
+With zingod the software line reads "every wallet that connects is told it is zingod 1.1.0",
+with no Zebra version: zingod sends none (`packages/zingod-grpc/src/routes/info.rs:52-69`
+leaves `zcashdBuild` and `zcashdSubversion` empty). The lines in
+[zingod in the UI](#zingod-in-the-ui) replace PS1's "experimental" and port lines rather than
+join them. A `public_text.rs` test checks that the zingod consent names no Zebra version, and no
+Zebra port outside Z4's switch.
 The seeder's version names the zone and the NS target, `zeeder/1.8.0 (<commit>)` as every peer
 sees it, taken from the bundled binary (its `--version` prints `1.8.0 (<commit>)`, and zeeder
 logs `User-Agent: …` at start), the public resolver it will ask, the operator's duties and "not
