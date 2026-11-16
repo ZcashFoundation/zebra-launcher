@@ -8,7 +8,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -410,6 +410,123 @@ async fn forget_says_when_the_keychain_kept_the_token() {
         .unwrap();
     assert!(s.services.forget(true).await.unwrap().token_left);
     assert!(!s.settings.current().public.light_server().is_some());
+}
+
+/// A keychain that refuses reads, writes or deletions while told to, as one that is locked for
+/// a moment does.
+#[derive(Clone, Default)]
+struct Refusals {
+    get: Arc<AtomicBool>,
+    set: Arc<AtomicBool>,
+    delete: Arc<AtomicBool>,
+}
+
+struct Flaky(FileStore, Refusals);
+
+fn refused() -> SecretError {
+    SecretError::Unavailable("locked for a moment".into())
+}
+
+impl SecretStore for Flaky {
+    fn set(
+        &self,
+        account: String,
+        token: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SecretError>> + Send>> {
+        if self.1.set.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(refused()) });
+        }
+        self.0.set(account, token)
+    }
+
+    fn get(
+        &self,
+        account: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, SecretError>> + Send>> {
+        if self.1.get.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(refused()) });
+        }
+        self.0.get(account)
+    }
+
+    fn delete(
+        &self,
+        account: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SecretError>> + Send>> {
+        if self.1.delete.load(Ordering::SeqCst) {
+            return Box::pin(async { Err(refused()) });
+        }
+        self.0.delete(account)
+    }
+}
+
+#[tokio::test]
+async fn a_new_name_waits_until_the_old_names_token_moved() {
+    use launcher_types::public::DnsProvider;
+    let refusals = Refusals::default();
+    let s = setup_with({
+        let refusals = refusals.clone();
+        move |dir| Arc::new(Flaky(FileStore::new(dir.join("secrets")), refusals))
+    })
+    .await;
+    s.services.begin_setup(Network::Mainnet).await.unwrap();
+    name(&s, "zec-old", DnsProvider::DuckDns).await;
+    // An older Zeal kept the token under the name.
+    let store = FileStore::new(s.dir.path().join("secrets"));
+    store
+        .set("dns:duckdns:zec-old.duckdns.org".into(), TOKEN.into())
+        .await
+        .unwrap();
+    s.settings
+        .update(|settings| {
+            settings.public.light_server_mut().unwrap().secret =
+                Some(launcher_types::public::SecretRef {
+                    provider: DnsProvider::DuckDns,
+                    account: "dns:duckdns:zec-old.duckdns.org".into(),
+                });
+        })
+        .await
+        .unwrap();
+
+    // The keychain does not answer, cannot write the zone's entry, or cannot delete the old
+    // one: the name stays, with the entry the name's updates and forget look for.
+    for refusal in [&refusals.get, &refusals.set, &refusals.delete] {
+        refusal.store(true, Ordering::SeqCst);
+        let renamed = s
+            .services
+            .answer(StepAnswer::Name {
+                name: "zec-new".into(),
+                provider: DnsProvider::DuckDns,
+            })
+            .await;
+        refusal.store(false, Ordering::SeqCst);
+        assert!(renamed.is_err(), "the token has not moved");
+        let spec = s.settings.current().public.light_server().cloned().unwrap();
+        let name = spec.name.unwrap();
+        assert_eq!(name.as_str(), "zec-old.duckdns.org");
+        assert_eq!(
+            spec.secret.unwrap().account,
+            "dns:duckdns:zec-old.duckdns.org"
+        );
+        assert_eq!(
+            launcher_public::ddns::duckdns_token(&store, &name)
+                .await
+                .unwrap(),
+            TOKEN
+        );
+    }
+
+    // Once the keychain answers, the token moves, and later names keep it.
+    name(&s, "zec-new", DnsProvider::DuckDns).await;
+    name(&s, "zec-third", DnsProvider::DuckDns).await;
+    assert_eq!(tokens_left(s.dir.path()), ["dns_duckdns_duckdns.org"]);
+    // With the token in the zone's entry, a keychain that does not answer holds no rename up.
+    refusals.get.store(true, Ordering::SeqCst);
+    name(&s, "zec.example.com", DnsProvider::Manual).await;
+    refusals.get.store(false, Ordering::SeqCst);
+    let still = s.services.forget(true).await.unwrap();
+    assert!(!still.token_left);
+    assert_eq!(tokens_left(s.dir.path()), Vec::<String>::new());
 }
 
 /// launcher.json cannot be written: the off still holds.

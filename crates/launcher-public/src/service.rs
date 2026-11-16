@@ -1311,11 +1311,12 @@ impl Actor {
                 // The token is kept for DuckDNS's zone, so it serves the new name too.
                 let secret = match &spec.name {
                     Some(old) if *old != name => {
+                        let secret = self.move_legacy_token(old, spec.secret.clone()).await?;
                         // What was proven for the old name is not the new one's.
                         if self.state.names.remove(old.as_str()).is_some() {
                             self.save_state();
                         }
-                        self.move_legacy_token(old, spec.secret.clone()).await
+                        secret
                     }
                     _ => spec.secret.clone(),
                 };
@@ -1537,12 +1538,19 @@ impl Actor {
     }
 
     /// Moves a token an older Zeal kept for the name `old` to the zone's entry, before the name
-    /// or provider changes. Returns where the token is kept now.
+    /// or provider changes. Returns where the token is kept now, or why the name must stay:
+    /// the token could not move, and an entry for a name Zeal no longer has would be lost to
+    /// the name's updates and to "Turn off and forget". With the name kept, both still find it,
+    /// and the next change tries again.
     async fn move_legacy_token(
         &self,
         old: &PublicHostname,
         secret: Option<SecretRef>,
-    ) -> Option<SecretRef> {
+    ) -> Result<Option<SecretRef>, String> {
+        let refused = || {
+            "the keychain did not move the DuckDNS token kept for the old name; try again"
+                .to_string()
+        };
         let legacy = legacy_duckdns_account(old);
         match self.secrets.get(legacy.clone()).await {
             Ok(token) => {
@@ -1552,18 +1560,23 @@ impl Actor {
                         .set(DUCKDNS_ACCOUNT.into(), token)
                         .await
                         .is_ok();
-                if kept && self.secrets.delete(legacy.clone()).await.is_ok() {
-                    Some(duckdns_secret())
+                if kept && self.secrets.delete(legacy).await.is_ok() {
+                    Ok(Some(duckdns_secret()))
                 } else {
-                    Some(SecretRef {
-                        provider: DnsProvider::DuckDns,
-                        account: legacy,
-                    })
+                    Err(refused())
                 }
             }
-            Err(SecretError::Missing) => secret.map(|_| duckdns_secret()),
-            // The keychain did not answer: keep the entry for "Turn off and forget".
-            Err(_) => secret,
+            Err(SecretError::Missing) => Ok(secret.map(|_| duckdns_secret())),
+            // The keychain did not answer, and the spec keeps the token under the old name.
+            Err(_)
+                if secret
+                    .as_ref()
+                    .is_some_and(|secret| secret.account != DUCKDNS_ACCOUNT) =>
+            {
+                Err(refused())
+            }
+            // Nothing says a token is under the old name: a name kept by hand, or no token.
+            Err(_) => Ok(secret),
         }
     }
 

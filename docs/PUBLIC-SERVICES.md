@@ -971,7 +971,9 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   so it is kept once as `dns:duckdns:duckdns.org` and a new name or provider leaves no other
   entry); `launcher.json` holds a `SecretRef`, and the UI only learns `has_token`. A token an
   older Zeal kept under the name (`dns:duckdns:<name>`) is read as a fallback and moves to
-  the zone's entry when the name changes. "Turn off and forget" with the token box ticked
+  the zone's entry when the name changes; until the keychain has written the zone's entry and
+  deleted the old one, the name does not change, so no entry is left under a name Zeal no
+  longer looks at. "Turn off and forget" with the token box ticked
   deletes every entry the token may be under and says when the keychain refused, so the token
   may still be there. Without a Secret Service on Linux, a 0600 file, as an explicit choice. No request
   URL is formatted into an error, a log line or the status. `DdnsActor` reports the provider and

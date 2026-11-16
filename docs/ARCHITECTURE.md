@@ -711,9 +711,10 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   stored section and `get_settings` leaves it out, so only the public-services commands change
   it, through the settings actor. Tokens are in the OS keychain (`keyring`, service
   `org.zfnd.zeal`, account `dns:<provider>:<zone>`: one DuckDNS token is kept as
-  `dns:duckdns:duckdns.org` for every name); the spec holds the account name only. "Turn off
-  and forget" also deletes the per-name entry an older Zeal kept, and says when the keychain
-  refused to delete the token.
+  `dns:duckdns:duckdns.org` for every name); the spec holds the account name only. A per-name
+  entry an older Zeal kept moves to the zone's when the name changes, and the name waits until
+  it moved. "Turn off and forget" also deletes that entry, and says when the keychain refused
+  to delete the token.
 - **`PublicServices`** (`launcher-public/src/service.rs`) is one actor. At every change of
   zebrad's status or statistics, of the settings or of a child, and every 10 s, it gathers the
   facts, runs launcher-herd's `plan`, `pause`, `state` and `gateway_mode`, drives its children
