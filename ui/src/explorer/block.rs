@@ -9,7 +9,8 @@ use launcher_types::{
     Network, NodeId,
     explorer::{
         BlockId, BlockLedger, BlockPage as Page, Budget, ExplorerErrorKind, ExplorerRequest,
-        ExplorerResponse, ExplorerRoute, FutureBlock, LiveState, Pool, RewardSplit, TxidPage,
+        ExplorerResponse, ExplorerRoute, FutureBlock, LiveState, PerPool, Pool, RewardSplit,
+        TxidPage,
     },
 };
 use leptos::prelude::*;
@@ -219,12 +220,7 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
         }
         .into_any();
     };
-    let largest = Pool::ALL
-        .iter()
-        .map(|pool| deltas.get(*pool).unsigned_abs().max(coinbase.get(*pool)))
-        .max()
-        .unwrap_or(1)
-        .max(1) as f64;
+    let largest = turnstile_scale(&deltas, &coinbase) as f64;
     let width = |zat: u64| format!("{:.2}%", zat as f64 / largest * 50.0);
     let rows = Pool::ALL.into_iter().map(|pool| {
         let delta = deltas.get(pool);
@@ -300,6 +296,16 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
         </p>
     }
     .into_any()
+}
+
+/// The turnstile's scale, in zatoshis.
+fn turnstile_scale(deltas: &PerPool<i64>, coinbase: &PerPool<u64>) -> u64 {
+    Pool::ALL
+        .iter()
+        .map(|pool| deltas.get(*pool).unsigned_abs().max(coinbase.get(*pool)))
+        .max()
+        .unwrap_or(1)
+        .max(1)
 }
 
 /// The reward split (V3): one bar of the miner's part, the streams, the fees the miner kept and
