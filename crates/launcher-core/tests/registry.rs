@@ -417,8 +417,8 @@ async fn two_nodes_run_side_by_side_on_their_own_ports_folders_and_cookies() {
 /// Each node's process tree is sampled on its own: the second node's fake
 /// zebrad holds 128 MiB, which shows in its samples only, and each node's
 /// samples name its own zebrad. A node that stops has no sample while the
-/// other's go on. Linux only, like the resource readers.
-#[cfg(target_os = "linux")]
+/// other's go on. On the platforms with resource readers.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn each_node_samples_its_own_process_tree() {
     let fx = fixture_from(true, |paths| {
