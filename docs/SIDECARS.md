@@ -679,7 +679,9 @@ opens these pull requests yet: upstream's release cadence is unknown. Then:
 4. Capture the fixtures again with `real_zingod.rs`'s capture mode:
    `zingod-<ver>-generate.toml`, the log lines, `/status` for each state and
    the `LightdInfo` bytes. `cargo test` fails until the writer and the reader
-   agree with them.
+   agree with them. `generate-config` leaves out keys that default to unset, so
+   also check the writer's list of such keys (only `cookie_path` at 1.1.0)
+   against `packages/zingod/src/config.rs`.
 5. Update `TESTED_ZINGOD` and `ZINGOD_KNOWS`.
 6. Run `real_zingod.rs` against the Stable zebrad pin (CI does this on the pull
    request), with `PREV_ZINGOD_BIN` set to the previous pin's build, so an

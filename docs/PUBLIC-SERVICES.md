@@ -674,8 +674,15 @@ to open on another.
 
 Every table of zingod's configuration refuses unknown keys (`deny_unknown_fields`), and one
 unknown key fails the load. So Zeal writes only keys the pinned version has, sets every path,
-and rewrites the file before every start. A test checks every key against `generate-config`
-output captured from the pin. Two keys whose values are today's defaults, `validator_client` and
+and rewrites the file before every start. A test checks that every key Zeal writes is in
+`generate-config` output captured from the pin, or on a short list of keys that the pin reads
+but doesn't print, because they default to unset. At 1.1.0 that list holds only
+`[[trusted_validators]] cookie_path` (`packages/zingod/src/config.rs:89`, default `None` at
+`:114`); each bump checks the list again. Another test checks that the Mainnet and Testnet files
+always set `cookie_path` to `NodePaths::rpc_cookie_file()`. Without it, a loopback validator gets
+zingod's default lookup (`config.rs:145-148`), `<cache dir>/zebra/.cookie`, which under Zeal's
+`XDG_CACHE_HOME` doesn't exist, so zingod would send no credentials and log no error that names
+the cause. Two keys whose values are today's defaults, `validator_client` and
 `[p2p] enabled`, are written anyway, so a changed default can't turn their features on. In
 research runs this file without those two, `max_streams_per_connection` and `[grpc.overload]`
 loaded, booted and stopped with exit 0, with Mainnet and with Testnet values; all four are keys
@@ -1136,8 +1143,9 @@ over.
   `BuildTooOld`.
 - **The adapter** (launcher-core):
   - the configuration for both networks against a golden file, every key present in
-    `tests/fixtures/zingod-1.1.0-generate.toml`, every path absolute, and no Regtest-only value
-    on Mainnet or Testnet;
+    `tests/fixtures/zingod-1.1.0-generate.toml` or on the list of unprinted keys
+    (`cookie_path`), `cookie_path` always set to the node's cookie, every path absolute, and no
+    Regtest-only value on Mainnet or Testnet;
   - the environment: a fake that prints its own sees only the five variables, so
     `ZINGOD_CONFIG_SYNC__CONCURRENCY`, `zingod_config_x`, `NOTIFY_SOCKET` and a bad `RUST_LOG`
     never reach the child;
