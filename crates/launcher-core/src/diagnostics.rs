@@ -30,11 +30,25 @@ use crate::{
 /// The launcher version.
 pub const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// A public name as diagnostics show it: the first letter of its first label
-/// and the rest of the zone, `z**.example.com`.
+/// A public name as diagnostics show it: the first letter of each label but
+/// the last. A DuckDNS name keeps its zone, which thousands of names share:
+/// `z**.duckdns.org`. Any other zone is the user's own domain, which
+/// certificate logs list by name, so it goes too: `z**.a**.net`.
 pub fn mask_name(name: &str) -> String {
-    match name.split_once('.') {
-        Some((label, zone)) => format!("{}**.{zone}", label.chars().next().unwrap_or('?')),
+    const SHARED: &str = ".duckdns.org";
+    let masked = |label: &str| format!("{}**", label.chars().next().unwrap_or('?'));
+    if let Some(sub) = name.strip_suffix(SHARED)
+        && !sub.is_empty()
+        && !sub.contains('.')
+    {
+        return format!("{}{SHARED}", masked(sub));
+    }
+    match name.rsplit_once('.') {
+        Some((labels, last)) => {
+            let mut out: Vec<String> = labels.split('.').map(masked).collect();
+            out.push(last.to_owned());
+            out.join(".")
+        }
         None => "**".to_owned(),
     }
 }
@@ -922,7 +936,7 @@ mod tests {
             provider: launcher_types::public::DnsProvider::DuckDns,
             account: "dns:duckdns:zec-alice.duckdns.org".into(),
         });
-        let public = PublicConfig {
+        let mut public = PublicConfig {
             services: vec![spec],
         };
         let text = redact_public(&public).to_string();
@@ -930,6 +944,18 @@ mod tests {
         assert!(!text.contains("192.168.1.20"), "{text}");
         assert!(text.contains("z**.duckdns.org"), "{text}");
         assert!(text.contains("\"switch_on\":true"), "{text}");
-        assert_eq!(mask_name("zec.example.com"), "z**.example.com");
+
+        // A name kept by hand loses its domain too: certificate logs are
+        // searched by domain.
+        let spec = &mut public.services[0];
+        spec.provider = launcher_types::public::DnsProvider::Manual;
+        spec.name = Some(PublicHostname::parse("zec.alicesmith.net").unwrap());
+        spec.consent.as_mut().unwrap().hostname = "zec.alicesmith.net".into();
+        let text = redact_public(&public).to_string();
+        assert!(!text.contains("alicesmith"), "{text}");
+        assert!(text.contains("z**.a**.net"), "{text}");
+        assert_eq!(mask_name("zec.example.co.uk"), "z**.e**.c**.uk");
+        assert_eq!(mask_name("a.b.duckdns.org"), "a**.b**.d**.org");
+        assert_eq!(mask_name("localhost"), "**");
     }
 }

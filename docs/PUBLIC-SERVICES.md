@@ -1283,8 +1283,11 @@ learns it all. Zeal keeps as little as it can:
   (the hourly cap's window), and never written down; "a connection from outside" keeps only a
   time;
 - zeeder's lines are filtered and redacted ([Configuration](#configuration));
-- diagnostics (`copy_diagnostics`, Copy summary) blank the addresses, the name and the zone
-  (`z**.example.com`) unless "include addresses" is ticked, and never carry tokens or keys.
+- diagnostics (`copy_diagnostics`, Copy summary) blank the addresses and the name unless
+  "include addresses" is ticked, and never carry tokens or keys. A DuckDNS name keeps its zone,
+  which thousands of names share (`z**.duckdns.org`); any other name keeps only its last label
+  (`z**.a**.net`), since its zone is the user's own domain and certificate logs are searched by
+  domain.
 
 Third parties, each named at consent: Let's Encrypt (the name, and the address of Zeal's ACME
 client), the DNS provider (the name, the address, the token), the public resolver the user
