@@ -234,21 +234,26 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
         view! {
             <tr>
                 <th scope="row"><PoolChip pool /></th>
-                <td class="ex-bar-cell" aria-hidden="true">
-                    <span class="ex-axis"></span>
-                    {(paid > 0).then(|| view! {
-                        <span class=format!("ex-flow ex-flow-coinbase ex-fill-{}", pool.id()) style:width=width(paid)></span>
-                    })}
-                    {(moved != 0 || lockbox && delta != 0).then(|| {
-                        let amount = if lockbox { delta } else { moved };
-                        view! {
-                            <span
-                                class=format!("ex-flow ex-fill-{}", pool.id())
-                                class:ex-flow-out=amount < 0
-                                style:width=width(amount.unsigned_abs())
-                            ></span>
-                        }
-                    })}
+                // The cell stays in the table for assistive technology, so every row has the
+                // header's five cells; only the bars in it are hidden, and the numbers beside
+                // them say the same.
+                <td class="ex-bar-cell">
+                    <span aria-hidden="true">
+                        <span class="ex-axis"></span>
+                        {(paid > 0).then(|| view! {
+                            <span class=format!("ex-flow ex-flow-coinbase ex-fill-{}", pool.id()) style:width=width(paid)></span>
+                        })}
+                        {(moved != 0 || lockbox && delta != 0).then(|| {
+                            let amount = if lockbox { delta } else { moved };
+                            view! {
+                                <span
+                                    class=format!("ex-flow ex-fill-{}", pool.id())
+                                    class:ex-flow-out=amount < 0
+                                    style:width=width(amount.unsigned_abs())
+                                ></span>
+                            }
+                        })}
+                    </span>
                 </td>
                 <td class="ex-num">{text::coins(paid as i64)}</td>
                 <td class="ex-num">{(!lockbox).then(|| text::coins(moved))}</td>
@@ -264,7 +269,7 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
                 <thead>
                     <tr>
                         <th scope="col">"Pool"</th>
-                        <th scope="col" class="ex-bar-cell"><span class="visually-hidden">"Change"</span></th>
+                        <th scope="col" class="ex-bar-cell"><span class="visually-hidden">"Bars"</span></th>
                         <th scope="col" class="ex-num" title="Coinbase outputs: the subsidy and the claimed fees">"Coinbase"</th>
                         <th scope="col" class="ex-num" title="The block's other transactions, fees included">"Users"</th>
                         <th scope="col" class="ex-num">{format!("Change ({unit})")}</th>
