@@ -99,49 +99,22 @@ fn Strip(
             }
         });
     });
-    let keydown = move |event: ev::KeyboardEvent| {
-        let step: i32 = match event.key().as_str() {
-            "ArrowRight" => 1,
-            "ArrowLeft" => -1,
-            "Home" => i32::MIN,
-            "End" => i32::MAX,
-            _ => return,
-        };
-        let Some(target) = event
-            .target()
-            .and_then(|target| target.dyn_into::<web_sys::HtmlElement>().ok())
-        else {
-            return;
-        };
-        let Some(list) = target.closest(".ex-strip").ok().flatten() else {
-            return;
-        };
-        let tiles = list.query_selector_all(".ex-tile-link").ok();
-        let Some(tiles) = tiles else { return };
-        let len = tiles.length() as i32;
-        let current = (0..len)
-            .find(|index| {
-                tiles
-                    .item(*index as u32)
-                    .is_some_and(|tile| tile.is_same_node(Some(&target)))
-            })
-            .unwrap_or(0);
-        let next = match step {
-            i32::MIN => 0,
-            i32::MAX => len - 1,
-            step => (current + step).clamp(0, len - 1),
-        };
-        event.prevent_default();
-        if let Some(tile) = tiles
-            .item(next as u32)
-            .and_then(|tile| tile.dyn_into::<web_sys::HtmlElement>().ok())
-        {
+    // A roving tabindex: Tab reaches one tile, the newest until another takes focus; ←, →,
+    // Home and End move focus, and the tabindex with it.
+    let active = RwSignal::new(count.saturating_sub(1));
+    let focus_tile = move |index: usize| {
+        let tile = list
+            .get_untracked()
+            .and_then(|list| list.query_selector_all(".ex-tile-link").ok())
+            .and_then(|tiles| tiles.item(u32::try_from(index).ok()?))
+            .and_then(|tile| tile.dyn_into::<web_sys::HtmlElement>().ok());
+        if let Some(tile) = tile {
             let _ = tile.focus();
         }
     };
     let tallest = f64::from(target) * INTERVAL_CAP;
     view! {
-        <ol class="ex-strip" aria-label="The newest blocks, oldest first" node_ref=list on:keydown=keydown>
+        <ol class="ex-strip" aria-label="The newest blocks, oldest first" node_ref=list>
             {blocks
                 .into_iter()
                 .enumerate()
@@ -157,12 +130,21 @@ fn Strip(
                     let interval = block.interval;
                     let bar = interval.map(|secs| (secs.max(0) as f64).min(tallest) / tallest * 100.0);
                     let newest = index + 1 == count;
+                    let keydown = move |event: ev::KeyboardEvent| {
+                        if let Some(next) = strip_step(index, count, &event.key()) {
+                            event.prevent_default();
+                            active.set(next);
+                            focus_tile(next);
+                        }
+                    };
                     view! {
                         <li class="ex-tile" class:ex-tile-newest=newest>
                             <button
                                 type="button"
                                 class="ex-tile-link"
-                                tabindex=if newest { "0" } else { "-1" }
+                                tabindex=move || if active.get() == index { "0" } else { "-1" }
+                                on:focus=move |_| active.set(index)
+                                on:keydown=keydown
                                 on:click=move |_| nav.go(route.clone())
                             >
                                 <span class="ex-tile-height">{thousands(u64::from(height))}</span>
@@ -208,6 +190,19 @@ fn Strip(
                  Notes: commitments created in Sapling, Orchard and Ironwood."
             )}
         </p>
+    }
+}
+
+/// Where a key moves focus in a strip of `count` tiles from tile `at`: ← and → one tile, Home
+/// and End to either end; `None` for any other key, or a strip without tiles.
+fn strip_step(at: usize, count: usize, key: &str) -> Option<usize> {
+    let last = count.checked_sub(1)?;
+    match key {
+        "ArrowRight" => Some((at + 1).min(last)),
+        "ArrowLeft" => Some(at.saturating_sub(1).min(last)),
+        "Home" => Some(0),
+        "End" => Some(last),
+        _ => None,
     }
 }
 
@@ -354,5 +349,25 @@ fn RecentBlocks(blocks: Vec<BlockSummary>, nav: NodeExplorer, unit: &'static str
                 </tbody>
             </table>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_step;
+
+    #[test]
+    fn the_strip_keys_move_within_its_tiles() {
+        assert_eq!(strip_step(11, 12, "ArrowLeft"), Some(10));
+        assert_eq!(
+            strip_step(11, 12, "ArrowRight"),
+            Some(11),
+            "the newest is the last"
+        );
+        assert_eq!(strip_step(0, 12, "ArrowLeft"), Some(0));
+        assert_eq!(strip_step(4, 12, "Home"), Some(0));
+        assert_eq!(strip_step(4, 12, "End"), Some(11));
+        assert_eq!(strip_step(4, 12, "Enter"), None, "Enter follows the link");
+        assert_eq!(strip_step(0, 0, "End"), None);
     }
 }
