@@ -2598,6 +2598,7 @@ dependencies = [
  "base64 0.23.1",
  "dirs",
  "explorer-model",
+ "launcher-herd",
  "launcher-types",
  "libc",
  "nix",
