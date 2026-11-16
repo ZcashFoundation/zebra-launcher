@@ -276,7 +276,8 @@ fn NodeCard(node: NodeState) -> impl IntoView {
                     .map(|(word, sentence, tone)| {
                         view! {
                             <p class=format!("node-card-herd {}", tone.class()) title=sentence>
-                                <span class="node-card-herd-label">"In the herd"</span>
+                                <span class="node-card-herd-label">"In the herd:"</span>
+                                " "
                                 <span class="herd-word">{word}</span>
                             </p>
                         }
