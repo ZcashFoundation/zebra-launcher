@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod explorer;
 mod health;
+pub mod herd;
 mod nodes;
 pub mod public;
 mod resources;
@@ -81,6 +82,9 @@ pub mod events {
     /// memory, read every 5 s. Not about one node: the value alone, without a
     /// `NodeEvent`.
     pub const MACHINE_RESOURCES: &str = "machine_resources";
+    /// One network's [`HerdView`](crate::herd::HerdView), whenever it changes and at most
+    /// once a second per network. Not about one node: the value alone.
+    pub const HERD: &str = "herd";
 }
 
 /// A location the `open_path` command opens with the system's default
@@ -627,6 +631,11 @@ pub struct NodeStats {
     pub height: u64,
     /// zebrad's estimate of the network chain tip height.
     pub estimated_height: u64,
+    /// The best verified block: `height` with its hash, from the same state read
+    /// (`getblockchaininfo`), so a new height never pairs with an old hash. `None` when
+    /// zebrad reports no hash.
+    #[serde(default)]
+    pub best: Option<herd::BlockRef>,
     /// Sync progress from 0.0 to 1.0.
     pub verification_progress: f64,
     /// Connected peers.

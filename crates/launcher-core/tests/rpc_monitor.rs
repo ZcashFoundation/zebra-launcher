@@ -372,6 +372,10 @@ async fn monitor_follows_the_supervisor_status() {
         Some(UNIX_EPOCH + Duration::from_secs(1_799_999_930))
     );
     assert_eq!(detail.best_block_hash.as_deref().map(str::len), Some(64));
+    // The statistics carry the same best block, with its height.
+    let best = first.best.clone().expect("the best block");
+    assert_eq!(u64::from(best.height), first.height);
+    assert_eq!(Some(best.hash), detail.best_block_hash);
     assert_eq!(detail.headers, Some(2_500_001));
     assert_eq!(detail.difficulty, Some(123_456_789.5));
     assert_eq!(detail.size_on_disk, Some(321_000_000_000));

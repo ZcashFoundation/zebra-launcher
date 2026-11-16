@@ -136,6 +136,7 @@ mod tests {
 
     fn stats(progress: f64) -> NodeStats {
         NodeStats {
+            best: None,
             height: 100,
             estimated_height: 120,
             verification_progress: progress,

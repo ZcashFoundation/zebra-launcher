@@ -730,6 +730,7 @@ impl Mock {
         // A run starts on the node's network and keeps it until zebrad stops, as zebrad does.
         let network = self.info.with_untracked(|info| info.network);
         let mut stats = self.stats.get_untracked().unwrap_or_else(|| NodeStats {
+            best: None,
             height: height_base,
             estimated_height: if at_tip.is_some() {
                 height_base

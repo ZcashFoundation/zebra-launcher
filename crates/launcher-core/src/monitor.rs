@@ -15,6 +15,7 @@ use std::{
 
 use launcher_types::{
     ConsensusBranches, EosInfo, NodeDetails, NodeStats, PeerInfo, Phase, Status, ValuePool,
+    herd::BlockRef,
 };
 use tokio::sync::watch;
 
@@ -256,6 +257,7 @@ async fn poll(run: &mut Run, eos_interval: Duration) -> Result<(NodeStats, NodeD
     let stats = NodeStats {
         height: chain.blocks,
         estimated_height: chain.estimated_height,
+        best: best_block(chain.blocks, chain.best_block_hash.as_deref()),
         verification_progress: chain.verification_progress,
         peers: u32::try_from(peers.len()).unwrap_or(u32::MAX),
         mempool_transactions: mempool.size,
@@ -300,6 +302,17 @@ async fn poll(run: &mut Run, eos_interval: Duration) -> Result<(NodeStats, NodeD
     Ok((stats, details))
 }
 
+/// The best block of one `getblockchaininfo` answer: `blocks` and `bestblockhash` come from
+/// one state read, so they always belong together. `None` without a hash, or for a height
+/// that does not fit zebrad's own `u32`.
+fn best_block(height: u64, hash: Option<&str>) -> Option<BlockRef> {
+    let hash = hash.filter(|hash| !hash.is_empty())?;
+    Some(BlockRef {
+        height: u32::try_from(height).ok()?,
+        hash: hash.to_owned(),
+    })
+}
+
 fn unix_time(secs: i64) -> SystemTime {
     match u64::try_from(secs) {
         Ok(secs) => UNIX_EPOCH + Duration::from_secs(secs),
@@ -318,6 +331,20 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn the_best_block_pairs_the_height_with_its_hash() {
+        assert_eq!(
+            best_block(3_551_204, Some("00ab")),
+            Some(BlockRef {
+                height: 3_551_204,
+                hash: "00ab".into()
+            })
+        );
+        assert_eq!(best_block(7, None), None);
+        assert_eq!(best_block(7, Some("")), None);
+        assert_eq!(best_block(u64::MAX, Some("00ab")), None);
+    }
 
     #[tokio::test]
     async fn a_failing_client_is_retried_and_the_outputs_stay_open() {

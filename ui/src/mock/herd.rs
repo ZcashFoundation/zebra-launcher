@@ -333,6 +333,7 @@ impl HerdNode {
         self.height.store(height, Ordering::Relaxed);
         let indexer = self.kind() == NodeKind::Zaino;
         let stats = NodeStats {
+            best: None,
             height,
             estimated_height: tip,
             verification_progress: if tip == 0 {
