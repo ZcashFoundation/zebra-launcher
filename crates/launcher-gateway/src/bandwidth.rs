@@ -1,15 +1,12 @@
 //! The upload budget: one bucket of KiB permits for every connection together, refilled by a
 //! ticker at the configured rate and holding at most one second of it.
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
-use tokio::{sync::Semaphore, task::JoinHandle};
+use tokio::{
+    sync::{Semaphore, watch},
+    task::JoinHandle,
+};
 
 /// How often the bucket is refilled.
 const TICK: Duration = Duration::from_millis(100);
@@ -27,7 +24,7 @@ fn capacity_kib(kbit: u32) -> u32 {
 pub(crate) struct Bucket {
     permits: Arc<Semaphore>,
     /// The rate in kbit/s; 0 means no limit.
-    kbit: Arc<AtomicU32>,
+    kbit: watch::Sender<u32>,
     ticker: JoinHandle<()>,
 }
 
@@ -42,8 +39,8 @@ impl Bucket {
     pub(crate) fn new(kbit: Option<u32>) -> Arc<Self> {
         let rate = kbit.unwrap_or(0);
         let permits = Arc::new(Semaphore::new(capacity_kib(rate) as usize));
-        let kbit = Arc::new(AtomicU32::new(rate));
-        let ticker = tokio::spawn(refill(permits.clone(), kbit.clone()));
+        let kbit = watch::Sender::new(rate);
+        let ticker = tokio::spawn(refill(permits.clone(), kbit.subscribe()));
         Arc::new(Bucket {
             permits,
             kbit,
@@ -53,39 +50,39 @@ impl Bucket {
 
     /// Changes the rate. Lifting the limit releases every waiting writer.
     pub(crate) fn set(&self, kbit: Option<u32>) {
-        let rate = kbit.unwrap_or(0);
-        self.kbit.store(rate, Ordering::Relaxed);
-        if rate == 0 {
-            self.permits.add_permits(capacity_kib(0) as usize);
-        }
+        self.kbit.send_replace(kbit.unwrap_or(0));
     }
 
     /// Waits until `bytes` more may be sent. `debt` carries the bytes under a whole KiB from
     /// one call to the next, per connection.
     pub(crate) async fn spend(&self, bytes: usize, debt: &mut usize) {
-        let rate = self.kbit.load(Ordering::Relaxed);
-        if rate == 0 {
+        let mut rate = self.kbit.subscribe();
+        if *rate.borrow() == 0 {
             return;
         }
         *debt += bytes;
         let mut kib = *debt / 1024;
         *debt %= 1024;
-        let capacity = capacity_kib(rate) as usize;
         while kib > 0 {
-            if self.kbit.load(Ordering::Relaxed) == 0 {
+            let now = *rate.borrow_and_update();
+            if now == 0 {
                 return;
             }
-            let take = kib.min(capacity);
-            match self.permits.acquire_many(take as u32).await {
-                Ok(permits) => permits.forget(),
-                Err(_) => return,
+            let take = kib.min(capacity_kib(now) as usize);
+            tokio::select! {
+                acquired = self.permits.acquire_many(take as u32) => match acquired {
+                    Ok(permits) => permits.forget(),
+                    Err(_) => return,
+                },
+                // No permits come once the limit is lifted: every waiter goes on.
+                _ = rate.wait_for(|rate| *rate == 0) => return,
             }
             kib -= take;
         }
     }
 }
 
-async fn refill(permits: Arc<Semaphore>, kbit: Arc<AtomicU32>) {
+async fn refill(permits: Arc<Semaphore>, kbit: watch::Receiver<u32>) {
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The first tick is immediate, and the bucket starts full.
@@ -94,7 +91,7 @@ async fn refill(permits: Arc<Semaphore>, kbit: Arc<AtomicU32>) {
     let mut carry: u64 = 0;
     loop {
         tick.tick().await;
-        let rate = kbit.load(Ordering::Relaxed);
+        let rate = *kbit.borrow();
         if rate == 0 {
             continue;
         }
@@ -147,5 +144,28 @@ mod tests {
         let start = Instant::now();
         bucket.spend(100 * 1024 * 1024, &mut debt).await;
         assert!(start.elapsed() < Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn lifting_the_limit_releases_every_waiting_writer() {
+        // 100 kbit/s: a bucket of 64 KiB, refilled at 12.5 KiB a second.
+        let bucket = Bucket::new(Some(100));
+        bucket.spend(64 * 1024, &mut 0).await;
+        let writers: Vec<_> = (0..20)
+            .map(|_| {
+                let bucket = bucket.clone();
+                tokio::spawn(async move { bucket.spend(16 * 1024, &mut 0).await })
+            })
+            .collect();
+        // Let them queue for permits: 320 KiB, more than 20 s at this rate.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        bucket.set(None);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for writer in writers {
+                writer.await.unwrap();
+            }
+        })
+        .await
+        .expect("every writer goes on");
     }
 }
