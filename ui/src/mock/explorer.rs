@@ -1,7 +1,9 @@
-//! The mock's block explorers: one per zebrad or Zakura node, over a synthetic chain
-//! (explorer-model's `synth`) that follows the node's height, and answered with the backend's
-//! own builders (explorer-model's `views`), so kinds, fees, ledgers and sentences follow its
-//! rules. Nothing is fixture data: every block is computed when asked for.
+//! The mock's block explorer: as in the backend, one for the first node (the mock's own
+//! zebrad), under its own id, over a synthetic chain (explorer-model's `synth`) that follows
+//! the node's height, and answered with the backend's own builders (explorer-model's
+//! `views`), so kinds, fees, ledgers and sentences follow its rules. Nothing is fixture data:
+//! every block is computed when asked for. Other nodes, `?herd`'s too, get the backend's
+//! answer that the Explorer reads only the node that was first when Zeal started, until P6.
 //!
 //! `?explorer=slow` makes each answer take 300 to 800 ms instead of 20 to 80, `?explorer=nobi`
 //! takes zebrad's value-pool row from every seventh block (so the next one shows the zero-diff
@@ -10,6 +12,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -21,7 +24,7 @@ use explorer_model::{
     views, zec_to_zat,
 };
 use launcher_types::{
-    Network, NetworkUpgrade, NodeId, NodeKind, NodeStats, Phase,
+    Network, NetworkUpgrade, NodeId, NodeStats, Phase,
     explorer::{
         BlockHash, BlockId, ChainPage, ChainView, ExplorerCall, ExplorerError, ExplorerErrorKind,
         ExplorerLive, ExplorerLiveEvent, ExplorerReply, ExplorerRequest, ExplorerResponse,
@@ -49,6 +52,9 @@ struct Explorer {
     known: Option<ChainView>,
     /// The last event sent, so only changes go out.
     sent: Option<ExplorerLive>,
+    /// The blocks whose coinbases the Chain page has read, as the backend's cache would keep
+    /// them: a first Chain page answers without the others' fees.
+    coinbases_read: HashSet<BlockHash>,
 }
 
 /// Who hears the `explorer_live` events.
@@ -64,7 +70,12 @@ thread_local! {
 /// What the explorer reads of a node.
 struct NodeView {
     id: NodeId,
+    /// The network zebrad runs on: the chain the explorer reads.
     network: Network,
+    /// The node's own network, which zebrad takes at its next start.
+    ours: Network,
+    /// The network zebrad still runs on when the node's own changed meanwhile.
+    elsewhere: Option<Network>,
     running: bool,
     stats: Option<NodeStats>,
 }
@@ -89,7 +100,8 @@ impl NodeView {
     }
 }
 
-fn network_of(chain: &str) -> Option<Network> {
+/// The network zebrad's `chain` names.
+pub(super) fn network_of(chain: &str) -> Option<Network> {
     match chain {
         "main" => Some(Network::Mainnet),
         "test" => Some(Network::Testnet),
@@ -103,58 +115,39 @@ fn now_secs() -> i64 {
         .map_or(0, |since| since.as_secs() as i64)
 }
 
-/// The main node as its explorer sees it: under the id of the network zebrad reports.
+/// The first node as its explorer sees it: under its own id, reading the chain zebrad
+/// reports.
 fn primary_view() -> NodeView {
     let mock = mock();
     let status = mock.status.get_untracked();
     let stats = mock.stats.get_untracked();
-    let network = stats
-        .as_ref()
-        .and_then(|stats| network_of(&stats.chain))
-        .unwrap_or_else(|| mock.info.with_untracked(|info| info.network));
+    let (id, ours) = mock
+        .info
+        .with_untracked(|info| (info.id.clone(), info.network));
+    let reported = stats.as_ref().and_then(|stats| network_of(&stats.chain));
+    let running = status.phase == Phase::Running && status.rpc_addr.is_some();
     NodeView {
-        id: NodeId::suggest(NodeKind::Zebrad, network, &Vec::new()),
-        network,
-        running: status.phase == Phase::Running && status.rpc_addr.is_some(),
+        id,
+        network: reported.unwrap_or(ours),
+        ours,
+        elsewhere: reported.filter(|reported| running && *reported != ours),
+        running,
         stats,
     }
 }
 
-/// The node `node` names, if it has an explorer.
+/// The node `node` names, if the explorer serves it: the first node only, as in the backend.
 fn view_of(node: &NodeId) -> Result<NodeView, ExplorerError> {
     let primary = primary_view();
     if *node == primary.id {
-        return Ok(primary);
+        Ok(primary)
+    } else {
+        Err(ExplorerError::new(
+            ExplorerErrorKind::UnknownNode,
+            "The Explorer reads only the node that was first when Zeal started; a later \
+             version gives every node its own.",
+        ))
     }
-    if let Some((info, running, stats)) = super::herd::explorer_view(node) {
-        if !info.kind.has_explorer() {
-            return Err(unknown_node());
-        }
-        return Ok(NodeView {
-            id: info.id,
-            network: info.network,
-            running,
-            stats,
-        });
-    }
-    let other = match primary.network {
-        Network::Mainnet => Network::Testnet,
-        Network::Testnet => Network::Mainnet,
-    };
-    if *node == NodeId::suggest(NodeKind::Zebrad, other, &Vec::new()) {
-        return Err(ExplorerError::new(
-            ExplorerErrorKind::NodeNotRunning,
-            format!(
-                "zebrad runs on {}; it changes network at its next start",
-                primary.network
-            ),
-        ));
-    }
-    Err(unknown_node())
-}
-
-fn unknown_node() -> ExplorerError {
-    ExplorerError::new(ExplorerErrorKind::UnknownNode, "this node has no explorer")
 }
 
 fn not_running() -> ExplorerError {
@@ -184,6 +177,7 @@ impl Explorer {
             reorg: None,
             known: None,
             sent: None,
+            coinbases_read: HashSet::new(),
         }
     }
 
@@ -205,17 +199,35 @@ impl Explorer {
     }
 
     fn live(&self, view: &NodeView) -> ExplorerLive {
+        if let Some(network) = view.elsewhere {
+            return ExplorerLive {
+                state: LiveState::OtherNetwork { network },
+                tip: None,
+                tip_time: None,
+                reorg: None,
+            };
+        }
         let state = match (view.running, view.heights()) {
             (true, Some(_)) if view.at_tip() => LiveState::AtTip,
             (true, Some((height, estimated))) => LiveState::Syncing { height, estimated },
             _ => LiveState::NotRunning,
         };
+        // Another network's chain is not this node's, whether zebrad runs or has stopped.
+        if self.chain.network() != view.ours {
+            return ExplorerLive {
+                state,
+                ..ExplorerLive::default()
+            };
+        }
         ExplorerLive {
             state,
             tip: self.known.map(|known| ChainView {
                 stale: !view.running,
                 ..known
             }),
+            tip_time: self
+                .known
+                .and_then(|known| u64::try_from(self.chain.time_at(known.height)).ok()),
             reorg: self.reorg,
         }
     }
@@ -232,6 +244,12 @@ fn with_explorer<T>(
             .iter()
             .position(|explorer| explorer.node == view.id)
         {
+            // zebrad came back on another network: nothing known of the old chain applies, as
+            // the backend clears its cache and its index.
+            Some(index) if explorers[index].chain.network() != view.network => {
+                explorers[index] = Explorer::new(view, height, estimated);
+                index
+            }
             Some(index) => index,
             None => {
                 explorers.push(Explorer::new(view, height, estimated));
@@ -271,9 +289,14 @@ impl ChainFacts {
 /// The facts of the main node with the statistics `stats`, about to be published.
 pub(super) fn primary_facts(stats: &NodeStats) -> Option<ChainFacts> {
     let network = network_of(&stats.chain)?;
+    let (id, ours) = mock()
+        .info
+        .with_untracked(|info| (info.id.clone(), info.network));
     let view = NodeView {
-        id: NodeId::suggest(NodeKind::Zebrad, network, &Vec::new()),
+        id,
         network,
+        ours,
+        elsewhere: None,
         running: true,
         stats: Some(stats.clone()),
     };
@@ -389,11 +412,22 @@ pub async fn handle(node: &NodeId, call: ExplorerCall) -> Result<ExplorerReply, 
             if !view.running {
                 return Err(not_running());
             }
+            if let Some(network) = view.elsewhere {
+                return Err(ExplorerError::new(
+                    ExplorerErrorKind::NodeNotRunning,
+                    format!("zebrad runs on {network}; it changes network at its next start"),
+                ));
+            }
             with_explorer(&view, |explorer| {
                 explorer.known = Some(explorer.chain_view(true));
                 let chain = explorer.known;
-                answer(&explorer.chain, &view, request)
-                    .map(|response| ExplorerReply { chain, response })
+                let response = match request {
+                    ExplorerRequest::Chain { with_fees } => Ok(ExplorerResponse::Chain(
+                        chain_page(&explorer.chain, with_fees, &mut explorer.coinbases_read),
+                    )),
+                    request => answer(&explorer.chain, &view, request),
+                };
+                response.map(|response| ExplorerReply { chain, response })
             })?
         }
     }
@@ -406,7 +440,11 @@ fn answer(
 ) -> Result<ExplorerResponse, ExplorerError> {
     let heights = chain.heights();
     match request {
-        ExplorerRequest::Chain => Ok(ExplorerResponse::Chain(chain_page(chain))),
+        // With the explorer's cache of coinbases: `handle` answers it.
+        ExplorerRequest::Chain { .. } => Err(ExplorerError::new(
+            ExplorerErrorKind::Internal,
+            "the Chain page needs the explorer's state",
+        )),
         ExplorerRequest::Block { id } => match chain.block(id) {
             Some(block) => {
                 let height = block.height.unwrap_or(0);
@@ -497,8 +535,9 @@ fn future(
     )))
 }
 
-/// The Chain page, read as the backend reads it.
-fn chain_page(chain: &SynthChain) -> ChainPage {
+/// The Chain page, read as the backend reads it: without `with_fees`, the rows whose coinbases
+/// were not read yet have no fees, and their coinbases count as read for the next ask.
+fn chain_page(chain: &SynthChain, with_fees: bool, read: &mut HashSet<BlockHash>) -> ChainPage {
     let heights = chain.heights();
     let tip = chain.tip();
     let rows = RECENT_BLOCKS.min(tip + 1);
@@ -508,10 +547,18 @@ fn chain_page(chain: &SynthChain) -> ChainPage {
         .rev()
         .filter_map(|height| Some((block(height)?, height.checked_sub(1).and_then(block))))
         .collect();
+    let mut fees_pending = false;
     let summaries = blocks
         .iter()
         .map(|(block, parent)| {
-            let coinbase = block.tx.first().and_then(|txid| chain.tx(txid));
+            let cached = with_fees || read.contains(&block.hash);
+            fees_pending |= !cached;
+            read.insert(block.hash);
+            let coinbase = block
+                .tx
+                .first()
+                .filter(|_| cached)
+                .and_then(|txid| chain.tx(txid));
             views::block_summary(block, parent.as_ref(), coinbase.as_ref(), heights)
         })
         .collect();
@@ -540,6 +587,7 @@ fn chain_page(chain: &SynthChain) -> ChainPage {
         burned_since_nu7,
         next_upgrade: views::next_upgrade(tip, heights),
         difficulty: tip_block.and_then(|block| block.difficulty),
+        fees_pending,
     }
 }
 
@@ -597,14 +645,21 @@ mod tests {
     #[test]
     fn the_chain_page_reads_newest_first() {
         let chain = SynthChain::new(Network::Mainnet, 3_551_000, NOW);
-        let page = chain_page(&chain);
+        let mut read = HashSet::new();
+        // As in the backend: the first answer waits for no coinbase, the next has them all.
+        let first = chain_page(&chain, false, &mut read);
+        assert!(first.fees_pending);
+        assert!(first.blocks.iter().all(|block| block.ledger.fees.is_none()));
+        let page = chain_page(&chain, false, &mut read);
+        assert!(!page.fees_pending);
+        assert_eq!(page, chain_page(&chain, true, &mut HashSet::new()));
         assert_eq!(page.blocks.len(), 25);
         assert_eq!(page.blocks[0].height, 3_551_000);
         assert!(page.blocks.iter().all(|block| block.ledger.fees.is_some()));
         assert!(page.burned_since_nu7.is_some());
         assert_eq!(page.target_spacing, 25);
         // A ten-block chain has ten rows.
-        let short = chain_page(&SynthChain::new(Network::Mainnet, 9, NOW));
+        let short = chain_page(&SynthChain::new(Network::Mainnet, 9, NOW), true, &mut read);
         assert_eq!(short.blocks.len(), 10);
         assert_eq!(short.blocks[9].height, 0);
     }
@@ -637,6 +692,41 @@ mod tests {
                     id: BlockId::Height(4_500_000)
                 }
             }
+        );
+    }
+
+    #[test]
+    fn a_stopped_node_shows_nothing_of_another_networks_chain() {
+        let mut explorer = Explorer {
+            node: NodeId::new("zebrad-mainnet").unwrap(),
+            chain: SynthChain::new(Network::Mainnet, 3_551_000, NOW),
+            epoch: 0,
+            reorg: None,
+            known: None,
+            sent: None,
+            coinbases_read: HashSet::new(),
+        };
+        explorer.known = Some(explorer.chain_view(true));
+        let stopped = |ours| NodeView {
+            id: explorer.node.clone(),
+            network: ours,
+            ours,
+            elsewhere: None,
+            running: false,
+            stats: None,
+        };
+        let live = explorer.live(&stopped(Network::Mainnet));
+        assert!(
+            live.tip
+                .is_some_and(|tip| tip.stale && tip.height == 3_551_000),
+            "a stopped node keeps its last tip: {live:?}"
+        );
+        assert!(live.tip_time.is_some());
+        // The node moved to Testnet while zebrad was stopped.
+        assert_eq!(
+            explorer.live(&stopped(Network::Testnet)),
+            ExplorerLive::default(),
+            "no Mainnet tip under a Testnet node"
         );
     }
 

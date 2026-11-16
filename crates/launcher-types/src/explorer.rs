@@ -9,7 +9,7 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
-use crate::NodeId;
+use crate::{Network, NodeId};
 
 /// A 32-byte hash as zebrad prints it: 64 hex digits, lowercase on the way out, in zebrad's
 /// display order.
@@ -332,6 +332,9 @@ pub struct ChainPage {
     pub next_upgrade: Option<UpgradeCountdown>,
     /// The network difficulty at the tip.
     pub difficulty: Option<f64>,
+    /// Some rows' coinbases are still being read, so their fees, burn and net shielding are
+    /// missing for now: asked again `with_fees`, the page has them.
+    pub fees_pending: bool,
 }
 
 /// An upgrade that has not activated yet.
@@ -711,8 +714,11 @@ pub enum ExplorerRequest {
     /// Whether the Explorer is on screen, and which page: the explorer follows the tip only
     /// while it is.
     Interest { visible: bool, page: PageKind },
-    /// The Chain page.
-    Chain,
+    /// The Chain page. Each row's fees, burn and net shielding need its coinbase. Without
+    /// `with_fees` the page answers once it has the blocks, with the coinbases already read,
+    /// and the others are read in the background ([`ChainPage::fees_pending`]); with it, the
+    /// page waits for every one.
+    Chain { with_fees: bool },
     /// The Block page; a height above the tip answers [`ExplorerResponse::Future`].
     Block { id: BlockId },
     /// A page of a block's transaction ids.
@@ -809,8 +815,13 @@ pub enum ExplorerErrorKind {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExplorerLive {
     pub state: LiveState,
-    /// The tip the explorer follows, once it has read one.
+    /// The tip the explorer follows, once it has read one. None while the chain it holds is
+    /// another network's than the node's, whether zebrad runs or has stopped: so are
+    /// `tip_time` and `reorg`.
     pub tip: Option<ChainView>,
+    /// The tip block's time, in seconds since the Unix epoch, once the explorer has read that
+    /// block.
+    pub tip_time: Option<u64>,
     /// The last reorganisation the explorer followed.
     pub reorg: Option<ReorgNotice>,
 }
@@ -826,6 +837,17 @@ pub enum LiveState {
     Syncing { height: u32, estimated: u32 },
     /// The node is at the network's tip.
     AtTip,
+    /// zebrad still runs on `network`, not the node's: the node's network changed while it
+    /// ran, and zebrad takes the new one at its next start. Nothing is read meanwhile, so the
+    /// other network's chain never shows under this node.
+    OtherNetwork { network: Network },
+}
+
+impl LiveState {
+    /// Whether the explorer reads the node's chain: it runs, on the node's network.
+    pub fn reads(&self) -> bool {
+        matches!(self, LiveState::Syncing { .. } | LiveState::AtTip)
+    }
 }
 
 /// A reorganisation the explorer followed, as far as its checks of the node showed it: the
@@ -938,11 +960,19 @@ mod tests {
                 estimated: 2,
             },
             tip: None,
+            tip_time: Some(1_800_000_000),
             reorg: None,
         };
         let back: ExplorerLive =
             serde_json::from_value(serde_json::to_value(&live).unwrap()).unwrap();
         assert_eq!(back, live);
+        assert_eq!(
+            serde_json::to_value(LiveState::OtherNetwork {
+                network: Network::Testnet
+            })
+            .unwrap(),
+            json!({"state": "other_network", "network": "testnet"})
+        );
     }
 
     #[test]

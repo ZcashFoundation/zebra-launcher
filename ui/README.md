@@ -124,18 +124,26 @@ every node command and event carries a node's id, and the mock's zebrad below is
   started (0.2 cores, 2.4 GiB); a zebrad the dialog adds uses what the mock's zebrad does at
   the tip. With `?herd` the computer has 16 CPUs and 32 GiB, and its figures count every
   node. The real backend has the same API and rules; there every node is a zebrad for now.
-- the Explorer (Ctrl/Cmd+3, or Ctrl/Cmd+K for its search): each zebrad and Zakura node has its
-  own synthetic chain from explorer-model, answered with the backend's own page builders, and
-  the dashboard's best block, pools, supply, difficulty and upgrades read the same chain.
-  Amounts are in ZEC, or TAZ on Testnet. The default mock syncs, so the Explorer shows what the
+- the Explorer (Ctrl/Cmd+3, or Ctrl+K, Cmd+K on macOS, for its search): as in the backend it
+  serves the first node, the mock's own zebrad, over a synthetic chain from explorer-model,
+  answered with the backend's own page builders, and the dashboard's best block, pools,
+  supply, difficulty and upgrades read the same chain.
+  Amounts are in ZEC, or TAZ on Testnet; the source line's toggles switch amounts to zatoshis
+  and times to UTC or Unix seconds, and the browser's localStorage keeps the choice
+  (`explorer.unit`, `explorer.time`). The default mock syncs, so the Explorer shows what the
   node has and does not follow the tip. `?attip` puts zebrad at the tip near block 3,551,000
   (past NU7, a block every 25 s), so Ironwood, the burn and the shielded budget show;
   `?tip=<h>` does the same at height `h`. `?explorer=slow` makes every answer take 300 to
   800 ms, `?explorer=empty` gives a chain of ten blocks, and `?explorer=nobi` takes zebrad's
   value-pool row from every seventh block, so that block and the next show their fees as
   unknown. `?reorg` replaces the main node's top two blocks about every 90 s at the tip (with
-  `?attip`), and the Explorer shows the banner. With `?herd` the Testnet nodes have Testnet
-  chains, and Zakura's chain is complete for now (pruning comes later).
+  `?attip`), and the Explorer shows the banner. With `?herd` the other nodes' Explorer tabs
+  say that the Explorer reads only the node that was first when Zeal started: each node gets
+  its own in P6. The mock's zebrad runs on its node's network as it was when it started, as
+  zebrad does: change the network in Settings or Node settings while it runs and the Explorer
+  shows the "zebrad still runs on Mainnet" banner with no tip; restart the node and it shows a
+  Testnet chain, in TAZ with the unit toggle in the warning tone. `?firstrun` with Testnet
+  starts there.
 
 - the light client server (docs/PUBLIC-SERVICES.md), in Settings → Public services, with a card
   on the dashboard and a banner on the node's pages. The mock runs launcher-herd's real rules
@@ -253,7 +261,7 @@ to the CSP when it serves the bundled assets.
 | `src/config_view.rs` | Helpers for the Configure page's file pane: changed lines, where a key is written, how far to scroll. Pure, tested natively |
 | `src/components/` | `nav.rs` (header and tabs), `sidebar.rs` and `herd_header.rs` (the shell for several nodes), `add_node.rs` (the add-node dialog), `status_strip.rs` (phase, progress, Start/Stop/Restart), `stale_banner.rs`, `updates.rs` (update banner, buttons, "Check for updates", recovery panel), `update_mode_choice.rs` (radio buttons shared by the wizard and Settings), `config_form.rs` (the two-view configuration editor), `log_insights.rs` (analysis cards), `reset_config.rs`, `tooltip.rs` |
 | `src/pages/` | The pages (`overview.rs` with several nodes, `dashboard.rs`, `logs.rs`, `docs.rs` with the Book/Config/Changes sections and sandboxed themed iframe, `grafana.rs`, `configure.rs`, `node_settings.rs` with several nodes, `settings.rs`) and the first-run wizard (`first_run.rs`) |
-| `src/explorer.rs`, `src/explorer/` | The Explorer tab: the shell (back and forward, the search box, the source line, the banner) and the Chain, Block, Transaction and Search pages, with their shared parts, text (pure, tested natively), navigation history and per-node state |
+| `src/explorer.rs`, `src/explorer/` | The Explorer tab: the shell (back and forward, the search box, the source line, the banner) and the Chain, Block, Transaction and Search pages, with their shared parts, text (pure, tested natively), navigation history, per-node state and the unit and time choices (`prefs.rs`, kept in localStorage) |
 | `styles/explorer.css` | The Explorer's styles, with the `--pool-*` colour tokens from `styles.css` |
 
 The crate also compiles natively so `cargo clippy --workspace --all-targets` and

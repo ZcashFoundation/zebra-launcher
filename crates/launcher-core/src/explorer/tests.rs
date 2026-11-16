@@ -1,6 +1,6 @@
 //! The explorer actor over a synthetic chain: what each page costs the node, merging and the
-//! cache, the node and network rules, a reorganisation followed at the tip, and logs that
-//! never carry what was asked for.
+//! cache, the node and network rules, a reorganisation followed at the tip, the time limits at
+//! their own values on Tokio's paused clock, and logs that never carry what was asked for.
 
 use std::{
     net::{Ipv4Addr, SocketAddr},
@@ -12,13 +12,13 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use explorer_model::synth::SynthChain;
+use explorer_model::{synth::SynthChain, zec_to_zat};
 use launcher_types::{
     EosInfo, Network, NodeDetails, NodeId, NodeStats, Phase, Status,
     explorer::{
-        BlockId, ExplorerCall, ExplorerErrorKind, ExplorerReply, ExplorerRequest, ExplorerResponse,
-        ExplorerRoute, Hash32, LedgerCheck, LiveState, NotFoundHint, PageKind, Resolution,
-        SecretKind, TxStatus,
+        BlockId, ChainPage, ExplorerCall, ExplorerErrorKind, ExplorerLive, ExplorerReply,
+        ExplorerRequest, ExplorerResponse, ExplorerRoute, Hash32, LedgerCheck, LiveState,
+        NotFoundHint, PageKind, Resolution, SecretKind, TxStatus,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -57,6 +57,10 @@ fn slot(call: ReadCall) -> usize {
 struct Synth {
     chain: watch::Receiver<SynthChain>,
     gate: watch::Receiver<bool>,
+    /// Holds transaction reads only.
+    tx_gate: watch::Receiver<bool>,
+    /// Holds subsidy reads only.
+    subsidy_gate: watch::Receiver<bool>,
     counts: Counts,
 }
 
@@ -70,6 +74,14 @@ impl ChainSource for Synth {
         self.counts[slot(call)].fetch_add(1, Ordering::SeqCst);
         let mut gate = self.gate.clone();
         let _ = gate.wait_for(|open| *open).await;
+        let held = match call {
+            ReadCall::Tx(_) => Some(&self.tx_gate),
+            ReadCall::Subsidy(_) => Some(&self.subsidy_gate),
+            _ => None,
+        };
+        if let Some(gate) = held {
+            let _ = gate.clone().wait_for(|open| *open).await;
+        }
         let chain = self.chain.borrow().clone();
         let found = match call {
             ReadCall::Best => Some(ReadResult::Best(through_json(chain.best()))),
@@ -95,11 +107,13 @@ struct Harness {
     explorer: ExplorerHandle,
     chain: watch::Sender<SynthChain>,
     gate: watch::Sender<bool>,
+    tx_gate: watch::Sender<bool>,
+    subsidy_gate: watch::Sender<bool>,
     counts: Counts,
     status: watch::Sender<Status>,
     stats: watch::Sender<Option<NodeStats>>,
-    _details: watch::Sender<Option<NodeDetails>>,
-    _spec: watch::Sender<NodeSpec>,
+    details: watch::Sender<Option<NodeDetails>>,
+    spec: watch::Sender<NodeSpec>,
 }
 
 fn stats_for(chain: &SynthChain) -> NodeStats {
@@ -150,6 +164,8 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
     };
     let (chain_tx, chain_rx) = watch::channel(chain);
     let (gate_tx, gate_rx) = watch::channel(true);
+    let (tx_gate_tx, tx_gate_rx) = watch::channel(true);
+    let (subsidy_gate_tx, subsidy_gate_rx) = watch::channel(true);
     let counts: Counts = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
     let (status_tx, status) = watch::channel(running());
     let (stats_tx, stats) = watch::channel(Some(stats));
@@ -158,6 +174,8 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
     let source = Synth {
         chain: chain_rx,
         gate: gate_rx,
+        tx_gate: tx_gate_rx,
+        subsidy_gate: subsidy_gate_rx,
         counts: counts.clone(),
     };
     let mut explorer_config = ExplorerConfig::new(PathBuf::from("/nonexistent/.cookie"));
@@ -176,11 +194,13 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
         explorer,
         chain: chain_tx,
         gate: gate_tx,
+        tx_gate: tx_gate_tx,
+        subsidy_gate: subsidy_gate_tx,
         counts,
         status: status_tx,
         stats: stats_tx,
-        _details: details_tx,
-        _spec: spec_tx,
+        details: details_tx,
+        spec: spec_tx,
     }
 }
 
@@ -219,12 +239,43 @@ fn delta(after: [u64; 6], before: [u64; 6]) -> [u64; 6] {
     std::array::from_fn(|index| after[index] - before[index])
 }
 
+/// The Chain page asked for as the UI asks: first without waiting for the coinbases, then
+/// with them.
+async fn chain_pages(harness: &Harness) -> (ChainPage, ChainPage) {
+    let ExplorerResponse::Chain(first) = harness
+        .reply(ExplorerRequest::Chain { with_fees: false })
+        .await
+    else {
+        panic!("a chain page");
+    };
+    let ExplorerResponse::Chain(full) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
+        panic!("a chain page");
+    };
+    (first, full)
+}
+
 #[tokio::test]
 async fn the_chain_page_stays_within_its_budget_and_a_revisit_is_free() {
     let harness = harness();
-    let ExplorerResponse::Chain(page) = harness.reply(ExplorerRequest::Chain).await else {
-        panic!("a chain page");
-    };
+    // The first answer has the blocks; their coinbases are on their way.
+    let (first, page) = chain_pages(&harness).await;
+    assert!(first.fees_pending);
+    assert!(first.blocks.iter().all(|block| block.ledger.fees.is_none()));
+    assert_eq!(
+        first
+            .blocks
+            .iter()
+            .map(|block| block.height)
+            .collect::<Vec<_>>(),
+        page.blocks
+            .iter()
+            .map(|block| block.height)
+            .collect::<Vec<_>>()
+    );
+    assert!(!page.fees_pending);
     assert_eq!(page.blocks.len(), 25);
     assert_eq!(page.blocks[0].height, TIP, "newest first");
     assert_eq!(page.blocks[24].height, TIP - 24);
@@ -233,19 +284,135 @@ async fn the_chain_page_stays_within_its_budget_and_a_revisit_is_free() {
     assert!(page.burned_since_nu7.is_some(), "the tip is past NU7");
     assert_eq!(page.target_spacing, 25);
     let [best, blocks, hashes, headers, txs, subsidies] = harness.counts();
-    assert_eq!(best, 1, "one tip");
+    assert!(
+        best <= 2,
+        "a tip check, and one more if the first is 2 s old: {best}"
+    );
     assert!(blocks <= 27, "26 blocks and the one before NU7: {blocks}");
     assert_eq!(hashes, 0);
     assert_eq!(headers, 1);
-    assert_eq!(txs, 25, "one coinbase per row");
+    assert_eq!(txs, 25, "one coinbase per row, read once");
     assert!(subsidies <= 2);
-    // Again, a moment later: everything from the cache.
+    // Again, a moment later: everything from the cache, the fees too, at once.
     let before = harness.counts();
-    let ExplorerResponse::Chain(again) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(again) = harness
+        .reply(ExplorerRequest::Chain { with_fees: false })
+        .await
+    else {
         panic!("a chain page");
     };
     assert_eq!(again, page);
     assert_eq!(delta(harness.counts(), before), [0; 6]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_page_goes_before_the_chain_pages_coinbases() {
+    let harness = harness();
+    let txid = {
+        let chain = harness.chain.borrow();
+        chain.block(BlockId::Height(TIP - 3_000)).unwrap().tx[1]
+    };
+    // The Chain page answers; its 25 coinbases wait, two of them read, the rest queued.
+    harness.tx_gate.send_replace(false);
+    let ExplorerResponse::Chain(first) = harness
+        .reply(ExplorerRequest::Chain { with_fees: false })
+        .await
+    else {
+        panic!("a chain page");
+    };
+    assert!(first.fees_pending);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(harness.counts()[4], 2, "two prefetches at a time");
+    // A Transaction page's read starts at once, ahead of the 23 queued coinbases.
+    let explorer = harness.explorer.clone();
+    let page = tokio::spawn(async move {
+        explorer
+            .call(
+                &mainnet(),
+                ExplorerCall {
+                    request: ExplorerRequest::Tx { txid },
+                },
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(harness.counts()[4], 3, "the page's read is under way");
+    // Once the Chain page's check of the tip is too old for a page, the pages that need the
+    // tip check it again ahead of the coinbases too.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let before = harness.counts();
+    let ExplorerResponse::Future(future) = harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Height(TIP + 100),
+        })
+        .await
+    else {
+        panic!("a countdown");
+    };
+    assert_eq!(future.blocks_left, 100);
+    assert_eq!(delta(harness.counts(), before)[0], 1, "the tip was checked");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        harness
+            .reply(ExplorerRequest::Resolve {
+                query: "tip-5".into()
+            })
+            .await,
+        ExplorerResponse::Resolve(Resolution::Go {
+            route: ExplorerRoute::Block {
+                id: BlockId::Height(TIP - 5)
+            }
+        })
+    );
+    // And so does the follower, once the Chain page is shown.
+    harness.change_chain(|chain| chain.mine(1));
+    harness.show(PageKind::Chain).await;
+    let mut live = harness.explorer.live();
+    tokio::time::timeout(
+        LIMIT,
+        live.wait_for(|event| event.live.tip.is_some_and(|tip| tip.height == TIP + 1)),
+    )
+    .await
+    .expect("the follower moved on")
+    .expect("the explorer runs");
+    assert_eq!(harness.counts()[4], 3, "the coinbases are still held");
+    harness.tx_gate.send_replace(true);
+    assert!(matches!(
+        page.await.expect("no panic").expect("a page").response,
+        ExplorerResponse::Tx(_)
+    ));
+    let ExplorerResponse::Chain(full) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
+        panic!("a chain page");
+    };
+    assert_eq!(full.blocks[0].height, TIP + 1);
+    assert!(full.blocks.iter().all(|block| block.ledger.fees.is_some()));
+    assert_eq!(
+        harness.counts()[4],
+        27,
+        "the first page's 25 coinbases, the new tip's and the page's transaction"
+    );
+}
+
+#[tokio::test]
+async fn the_tip_goes_out_with_its_time() {
+    let harness = harness();
+    let ExplorerResponse::Chain(page) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
+        panic!("a chain page");
+    };
+    let mut live = harness.explorer.live();
+    let event = tokio::time::timeout(LIMIT, live.wait_for(|event| event.live.tip_time.is_some()))
+        .await
+        .expect("the tip's time goes out")
+        .expect("the explorer runs")
+        .clone();
+    assert_eq!(event.live.tip.map(|tip| tip.height), Some(TIP));
+    assert_eq!(event.live.tip_time, Some(page.blocks[0].time));
 }
 
 #[tokio::test]
@@ -469,7 +636,7 @@ async fn search_resolves_heights_hashes_and_refuses_keys() {
 }
 
 #[tokio::test]
-async fn only_a_running_node_on_the_served_network_answers() {
+async fn the_first_node_answers_by_its_own_id_on_its_own_network() {
     let harness = harness();
     let call = |node: &'static str| {
         let explorer = harness.explorer.clone();
@@ -478,22 +645,27 @@ async fn only_a_running_node_on_the_served_network_answers() {
                 .call(
                     &NodeId::new(node).unwrap(),
                     ExplorerCall {
-                        request: ExplorerRequest::Chain,
+                        request: ExplorerRequest::Chain { with_fees: true },
                     },
                 )
                 .await
         }
     };
-    let other = call("zebrad-testnet").await.expect_err("the other network");
-    assert_eq!(other.kind, ExplorerErrorKind::NodeNotRunning);
-    assert!(other.message.contains("next start"), "{}", other.message);
-    let unknown = call("zakura-mainnet").await.expect_err("another node");
-    assert_eq!(unknown.kind, ExplorerErrorKind::UnknownNode);
+    // Other nodes get their explorers in a later phase.
+    for other in ["zebrad-testnet", "zebrad-mainnet-2", "zakura-mainnet"] {
+        let err = call(other).await.expect_err("another node");
+        assert_eq!(err.kind, ExplorerErrorKind::UnknownNode, "{other}");
+        assert!(
+            err.message.contains("first when Zeal started"),
+            "{}",
+            err.message
+        );
+    }
 
     harness.status.send_replace(Status::default());
     tokio::time::sleep(Duration::from_millis(20)).await;
     let stopped = harness
-        .ask(ExplorerRequest::Chain)
+        .ask(ExplorerRequest::Chain { with_fees: true })
         .await
         .expect_err("stopped");
     assert_eq!(stopped.kind, ExplorerErrorKind::NodeNotRunning);
@@ -502,27 +674,250 @@ async fn only_a_running_node_on_the_served_network_answers() {
     };
     assert_eq!(live.state, LiveState::NotRunning);
     assert_eq!(harness.counts(), [0; 6], "nothing was read");
+    harness.status.send_replace(running());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        harness
+            .ask(ExplorerRequest::Chain { with_fees: true })
+            .await
+            .is_ok()
+    );
 
-    // zebrad comes back on Testnet: the Testnet id answers and the Mainnet id waits.
+    // After its first run a node keeps its id when its network changes, and zebrad keeps
+    // running on the old network until its next start: the node's page reads nothing of it.
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Testnet);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let before = harness.counts();
+    let waiting = harness
+        .ask(ExplorerRequest::Chain { with_fees: true })
+        .await
+        .expect_err("zebrad still on Mainnet");
+    assert_eq!(waiting.kind, ExplorerErrorKind::NodeNotRunning);
+    assert!(
+        waiting.message.contains("next start"),
+        "{}",
+        waiting.message
+    );
+    let ExplorerResponse::Status(live) = harness.reply(ExplorerRequest::Status).await else {
+        panic!("a status");
+    };
+    assert_eq!(
+        live,
+        ExplorerLive {
+            state: LiveState::OtherNetwork {
+                network: Network::Mainnet
+            },
+            tip: None,
+            tip_time: None,
+            reorg: None,
+        },
+        "no Mainnet tip under a Testnet node"
+    );
+    assert_eq!(delta(harness.counts(), before), [0; 6]);
+
+    // zebrad starts again on Testnet: the same id answers, from the Testnet chain.
     harness
         .chain
         .send_replace(SynthChain::new(Network::Testnet, 4_500_000, NOW));
     harness.stats.send_modify(|stats| {
         if let Some(stats) = stats {
             stats.chain = "test".into();
+            stats.height = 4_500_000;
+            stats.estimated_height = 4_500_000;
         }
     });
-    harness.status.send_replace(running());
+    harness.status.send_replace(running_since(100));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let ExplorerResponse::Chain(page) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
+        panic!("a chain page");
+    };
+    assert_eq!(page.blocks[0].height, 4_500_000);
+    let event = harness.explorer.live().borrow().clone();
+    assert_eq!(event.node, mainnet(), "the node's own id");
+    assert_eq!(event.live.state, LiveState::AtTip);
+
+    // A first run that renames the node moves the explorer to the new id.
+    harness
+        .spec
+        .send_modify(|spec| spec.id = NodeId::new("zebrad-testnet").unwrap());
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(call("zebrad-testnet").await.is_ok());
-    let mainnet = harness
-        .ask(ExplorerRequest::Chain)
-        .await
-        .expect_err("now Testnet");
-    assert_eq!(mainnet.kind, ExplorerErrorKind::NodeNotRunning);
     assert_eq!(
         harness.explorer.live().borrow().node.as_str(),
         "zebrad-testnet"
+    );
+}
+
+impl Harness {
+    /// zebrad stops, and the monitor clears what it read.
+    async fn stop(&self) {
+        self.status.send_replace(Status::default());
+        self.stats.send_replace(None);
+        self.details.send_replace(None);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    async fn live(&self) -> ExplorerLive {
+        let ExplorerResponse::Status(live) = self.reply(ExplorerRequest::Status).await else {
+            panic!("a status");
+        };
+        live
+    }
+}
+
+#[tokio::test]
+async fn a_network_changed_while_zebrad_is_stopped_leaves_nothing_of_the_old_chain() {
+    let harness = harness();
+    chain_pages(&harness).await;
+    harness.stop().await;
+    let live = harness.live().await;
+    assert!(
+        live.tip.is_some_and(|tip| tip.stale),
+        "a stopped node keeps its last tip: {live:?}"
+    );
+
+    // The node moves to Testnet while zebrad is stopped.
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Testnet);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        harness.live().await,
+        ExplorerLive::default(),
+        "no Mainnet tip under a Testnet node"
+    );
+
+    // zebrad starts on Testnet, and the monitor has not read it yet: the pages read Testnet,
+    // with Testnet's upgrade heights.
+    harness
+        .chain
+        .send_replace(SynthChain::new(Network::Testnet, 3_400_000, NOW));
+    harness.status.send_replace(running_since(100));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(harness.live().await, ExplorerLive::default());
+    let (_, page) = chain_pages(&harness).await;
+    assert_eq!(page.blocks[0].height, 3_400_000);
+    assert_eq!(
+        page.next_upgrade.map(|next| next.height),
+        Some(3_536_500),
+        "Testnet's next upgrade, not Mainnet's at 3,428,143"
+    );
+    let live = harness.explorer.live().borrow().live.clone();
+    assert_eq!(
+        live.tip.map(|tip| (tip.height, tip.epoch)),
+        Some((3_400_000, 0)),
+        "a new index, not Mainnet's reorganised"
+    );
+    assert_eq!(live.reorg, None);
+}
+
+#[tokio::test]
+async fn zebrad_stopped_on_the_old_network_leaves_nothing_of_it() {
+    let harness = harness();
+    chain_pages(&harness).await;
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Testnet);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        harness.live().await.state,
+        LiveState::OtherNetwork {
+            network: Network::Mainnet
+        }
+    );
+    // zebrad stops; for a moment the monitor's last statistics still say Mainnet.
+    harness.status.send_replace(Status::default());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(harness.live().await, ExplorerLive::default());
+    harness.stop().await;
+    assert_eq!(harness.live().await, ExplorerLive::default());
+    // zebrad starts again, still before the monitor reads it.
+    harness.status.send_replace(running_since(100));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(harness.live().await, ExplorerLive::default());
+}
+
+#[tokio::test]
+async fn an_answer_from_the_old_network_is_dropped() {
+    let height = 600_000;
+    let testnet = SynthChain::new(Network::Testnet, 3_400_000, NOW);
+    let testnet_subsidy = zec_to_zat(testnet.subsidy(height).total);
+    let harness = harness();
+    assert_ne!(
+        zec_to_zat(harness.chain.borrow().subsidy(height).total),
+        testnet_subsidy,
+        "the networks' subsidies differ at {height}"
+    );
+    // A Mainnet Block page whose subsidy read zebrad holds.
+    harness.subsidy_gate.send_replace(false);
+    let explorer = harness.explorer.clone();
+    let old_page = tokio::spawn(async move {
+        explorer
+            .call(
+                &mainnet(),
+                ExplorerCall {
+                    request: ExplorerRequest::Block {
+                        id: BlockId::Height(height),
+                    },
+                },
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(harness.counts()[5], 1, "the subsidy read is under way");
+    // The node moves to Testnet while zebrad runs on Mainnet; zebrad stops, and the monitor
+    // clears its statistics.
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Testnet);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    harness.stop().await;
+    // zebrad answers the old read late, with Mainnet's subsidy.
+    harness.subsidy_gate.send_replace(true);
+    let old_page = tokio::time::timeout(LIMIT, old_page)
+        .await
+        .expect("the old page is answered")
+        .expect("no panic");
+    // zebrad starts on Testnet, and the monitor reads it.
+    harness.chain.send_replace(testnet.clone());
+    harness.stats.send_replace(Some(NodeStats {
+        chain: "test".into(),
+        ..stats_for(&testnet)
+    }));
+    harness.status.send_replace(running_since(100));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let before = harness.counts();
+    let ExplorerResponse::Block(page) = harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Height(height),
+        })
+        .await
+    else {
+        panic!("a block page");
+    };
+    assert_eq!(
+        delta(harness.counts(), before)[5],
+        1,
+        "Testnet's subsidy is read from zebrad"
+    );
+    assert_eq!(
+        page.reward
+            .and_then(|reward| i64::try_from(reward.subsidy).ok()),
+        Some(testnet_subsidy),
+        "Testnet's subsidy, not Mainnet's"
+    );
+    // The old page went without the subsidy: its read failed when the network changed.
+    assert!(
+        old_page.is_ok_and(|reply| matches!(
+            reply.response,
+            ExplorerResponse::Block(page) if page.reward.is_none()
+        )),
+        "the old page went without its subsidy"
     );
 }
 
@@ -531,7 +926,10 @@ async fn a_reorganisation_at_the_tip_is_followed_once() {
     let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
         config.tip_poll = Duration::from_millis(30);
     });
-    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(_) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     harness
@@ -568,7 +966,10 @@ async fn a_reorganisation_at_the_tip_is_followed_once() {
     let spent = delta(harness.counts(), before);
     assert!(spent[2] <= 10, "at most ten getblockhash: {spent:?}");
     // The page now shows the new branch.
-    let ExplorerResponse::Chain(page) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(page) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     let expected = harness.chain.borrow().hash(TIP).unwrap();
@@ -638,7 +1039,10 @@ async fn blocks_read_while_the_tip_is_unchecked_do_not_mislead_the_fork_search()
         .stats
         .send_replace(Some(syncing(&harness.chain.borrow())));
     tokio::time::sleep(Duration::from_millis(20)).await;
-    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(_) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     // Long enough that the check no longer vouches for the heights near the tip, and that the
@@ -663,7 +1067,10 @@ async fn blocks_read_while_the_tip_is_unchecked_do_not_mislead_the_fork_search()
     else {
         panic!("a block page");
     };
-    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(_) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     let reorg = harness.next_reorg().await;
@@ -691,7 +1098,10 @@ async fn blocks_read_while_the_tip_is_unchecked_do_not_mislead_the_fork_search()
 async fn a_block_found_on_a_new_branch_checks_the_tip_again() {
     // Hidden: the follower does not poll.
     let harness = harness();
-    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(_) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     let fork = harness.change_chain(|chain| {
@@ -762,7 +1172,10 @@ async fn far_apart_known_heights_bound_a_reorganisation() {
     let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
         config.tip_poll = Duration::from_millis(30);
     });
-    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(_) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     // 144 blocks arrive while the Explorer is hidden; shown again, the follower moves on.
@@ -815,7 +1228,10 @@ async fn a_restart_a_block_lower_replaces_nothing() {
     let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
         config.tip_poll = Duration::from_millis(30);
     });
-    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(_) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     harness.show(PageKind::Chain).await;
@@ -842,7 +1258,10 @@ async fn a_restart_lower_on_another_branch_replaced_blocks() {
     let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
         config.tip_poll = Duration::from_millis(30);
     });
-    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(_) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     harness.show(PageKind::Chain).await;
@@ -863,7 +1282,10 @@ async fn a_restart_lower_on_another_branch_replaced_blocks() {
 async fn a_new_run_is_checked_before_heights_near_its_tip_are_trusted() {
     let harness = harness();
     // The Chain page checks the tip, and the blocks near it then come from the cache.
-    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(_) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     let id = BlockId::Height(TIP - 5);
@@ -944,7 +1366,10 @@ async fn a_syncing_node_is_not_followed_and_gets_fewer_reads_at_once() {
 #[tokio::test]
 async fn a_new_run_of_zebrad_keeps_the_cache() {
     let harness = harness();
-    let ExplorerResponse::Chain(first) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(first) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     // zebrad stops, and starts again on another RPC port.
@@ -956,7 +1381,10 @@ async fn a_new_run_of_zebrad_keeps_the_cache() {
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
     let before = harness.counts();
-    let ExplorerResponse::Chain(again) = harness.reply(ExplorerRequest::Chain).await else {
+    let ExplorerResponse::Chain(again) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     assert_eq!(again, first);
@@ -967,19 +1395,18 @@ async fn a_new_run_of_zebrad_keeps_the_cache() {
     );
 }
 
-#[tokio::test]
-async fn a_hidden_explorer_shrinks_its_cache() {
+// The time limits at their own values, on Tokio's paused clock: a sleep there takes no time,
+// and the actor's limits read the same clock.
+
+#[tokio::test(start_paused = true)]
+async fn a_hidden_explorer_shrinks_its_cache_after_ten_minutes() {
+    // An empty idle budget, so the shrinking shows; the wait is the default 10 minutes.
     let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
-        config.idle_after = Duration::from_millis(20);
         config.idle_cache_bytes = 0;
-        config.tip_poll = Duration::from_millis(10);
     });
     let id = BlockId::Hash(harness.chain.borrow().hash(TIP - 2_000).unwrap());
     harness.reply(ExplorerRequest::Block { id }).await;
-    let before = harness.counts();
-    harness.reply(ExplorerRequest::Block { id }).await;
-    assert_eq!(delta(harness.counts(), before), [0; 6], "from the cache");
-    // Shown, then hidden for longer than `idle_after`.
+    // Shown, then hidden.
     harness.show(PageKind::Block).await;
     harness
         .reply(ExplorerRequest::Interest {
@@ -987,7 +1414,16 @@ async fn a_hidden_explorer_shrinks_its_cache() {
             page: PageKind::Block,
         })
         .await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_secs(9 * 60)).await;
+    let before = harness.counts();
+    harness.reply(ExplorerRequest::Block { id }).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0; 6],
+        "nine minutes: kept"
+    );
+    // Asking does not show the page: the explorer stays hidden, and shrinks at ten minutes.
+    tokio::time::sleep(Duration::from_secs(60 + 5)).await;
     let before = harness.counts();
     harness.reply(ExplorerRequest::Block { id }).await;
     assert_eq!(
@@ -997,25 +1433,30 @@ async fn a_hidden_explorer_shrinks_its_cache() {
     );
 }
 
-#[tokio::test]
-async fn a_height_near_the_tip_is_read_again_once_the_check_is_stale() {
-    let fresh = Duration::from_millis(100);
-    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
-        config.fresh = fresh;
-    });
-    let ExplorerResponse::Chain(_) = harness.reply(ExplorerRequest::Chain).await else {
+#[tokio::test(start_paused = true)]
+async fn a_height_near_the_tip_is_read_again_once_the_check_is_ten_seconds_old() {
+    let harness = harness();
+    let ExplorerResponse::Chain(_) = harness
+        .reply(ExplorerRequest::Chain { with_fees: true })
+        .await
+    else {
         panic!("a chain page");
     };
     let (near, deep) = (BlockId::Height(TIP - 5), BlockId::Height(TIP - 2_000));
     for id in [near, deep] {
         harness.reply(ExplorerRequest::Block { id }).await;
     }
+    tokio::time::sleep(Duration::from_secs(9)).await;
     let before = harness.counts();
     for id in [near, deep] {
         harness.reply(ExplorerRequest::Block { id }).await;
     }
-    assert_eq!(delta(harness.counts(), before), [0; 6], "from the cache");
-    tokio::time::sleep(fresh + Duration::from_millis(50)).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0; 6],
+        "nine seconds: from the cache"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
     let before = harness.counts();
     for id in [near, deep] {
         harness.reply(ExplorerRequest::Block { id }).await;
@@ -1027,24 +1468,81 @@ async fn a_height_near_the_tip_is_read_again_once_the_check_is_stale() {
     );
 }
 
-#[tokio::test]
-async fn the_follower_checks_the_tip_at_every_poll() {
-    let poll = Duration::from_millis(100);
-    let harness = harness_with(SynthChain::new(Network::Mainnet, TIP, NOW), |config| {
-        config.tip_poll = poll;
-    });
+#[tokio::test(start_paused = true)]
+async fn the_follower_checks_the_tip_every_two_seconds_while_shown() {
+    let harness = harness();
+    harness.show(PageKind::Chain).await;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let before = harness.counts()[0];
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let checks = harness.counts()[0] - before;
+    // One check a poll: fifteen in 30 s. A check every other poll would make about seven.
+    assert!((14..=16).contains(&checks), "{checks} tip checks in 30 s");
+    // Hidden, it checks nothing.
     harness
         .reply(ExplorerRequest::Interest {
-            visible: true,
+            visible: false,
             page: PageKind::Chain,
         })
         .await;
-    tokio::time::sleep(poll * 3).await;
-    let before = harness.counts()[0];
-    tokio::time::sleep(poll * 15).await;
-    let checks = harness.counts()[0] - before;
-    // One check a poll; a check that skipped every other poll would make about seven.
-    assert!(checks >= 11, "{checks} tip checks in 15 polls");
+    let before = harness.counts();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0; 6],
+        "nothing while hidden"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn zebrad_on_the_old_network_is_not_followed_while_shown() {
+    let harness = harness();
+    // The node moves to Testnet while zebrad runs on Mainnet, and the Explorer is on screen.
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Testnet);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let before = harness.counts();
+    harness.show(PageKind::Chain).await;
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0; 6],
+        "nothing of Mainnet is read"
+    );
+    // The node goes back to Mainnet: the follower checks the tip again.
+    harness
+        .spec
+        .send_modify(|spec| spec.network = Network::Mainnet);
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(harness.counts()[0] > before[0], "the tip is checked again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn another_network_clears_the_cache() {
+    let harness = harness();
+    let id = BlockId::Hash(harness.chain.borrow().hash(TIP - 2_000).unwrap());
+    harness.reply(ExplorerRequest::Block { id }).await;
+    let before = harness.counts();
+    harness.reply(ExplorerRequest::Block { id }).await;
+    assert_eq!(delta(harness.counts(), before), [0; 6], "from the cache");
+    // zebrad reports Testnet, then Mainnet again: nothing known about the first chain is
+    // kept across.
+    for chain in ["test", "main"] {
+        harness.stats.send_modify(|stats| {
+            if let Some(stats) = stats {
+                stats.chain = chain.into();
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let before = harness.counts();
+    harness.reply(ExplorerRequest::Block { id }).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0, 2, 0, 0, 1, 1],
+        "read again"
+    );
 }
 
 /// Every event's fields, as text, from the explorer's threads.

@@ -15,7 +15,7 @@ use explorer_model::{
     upgrades::UpgradeHeights,
 };
 use launcher_types::{
-    Network, NodeId, NodeKind, Phase,
+    Network, NodeId, Phase,
     explorer::{
         BlockHash, BlockId, ChainView, ExplorerCall, ExplorerError, ExplorerErrorKind,
         ExplorerLive, ExplorerLiveEvent, ExplorerReply, ExplorerRequest, ExplorerResponse,
@@ -58,10 +58,17 @@ pub(super) enum Internal {
     },
     /// The tip, checked within `max_age`.
     Tip { max_age: Duration, reply: TipReply },
+    /// What the cache has for a read, without reading.
+    Peek {
+        call: ReadCall,
+        reply: oneshot::Sender<Option<ReadResult>>,
+    },
     /// A read task ended.
     Done {
         call: ReadCall,
         lane: Lane,
+        /// The actor's `network_changes` when the read went out.
+        network_changes: u64,
         result: Result<ReadResult, SourceError>,
     },
     /// The follower checked the tip.
@@ -151,6 +158,22 @@ impl Fetcher {
 
     pub(super) fn header(&self, id: BlockId) -> Pending {
         self.request(ReadCall::Header(id), Lane::Interactive)
+    }
+
+    /// A transaction a page can wait for, on the prefetch lane: interactive reads go first.
+    pub(super) fn tx_later(&self, txid: TxId) -> Pending {
+        self.request(ReadCall::Tx(txid), Lane::Prefetch)
+    }
+
+    /// The cached transaction `txid`, if the cache has it; nothing is read.
+    pub(super) async fn cached_tx(&self, txid: TxId) -> Option<Arc<Tx>> {
+        let (reply, response) = oneshot::channel();
+        let call = ReadCall::Tx(txid);
+        let _ = self.tx.send(Internal::Peek { call, reply });
+        match response.await.ok()?? {
+            ReadResult::Tx(tx) => Some(tx),
+            _ => None,
+        }
     }
 
     /// The tip, checked against the node within `max_age`.
@@ -247,6 +270,7 @@ struct DoneGuard {
     tx: mpsc::UnboundedSender<Internal>,
     call: ReadCall,
     lane: Lane,
+    network_changes: u64,
     sent: bool,
 }
 
@@ -256,6 +280,7 @@ impl DoneGuard {
         let _ = self.tx.send(Internal::Done {
             call: self.call,
             lane: self.lane,
+            network_changes: self.network_changes,
             result,
         });
     }
@@ -267,6 +292,7 @@ impl Drop for DoneGuard {
             let _ = self.tx.send(Internal::Done {
                 call: self.call,
                 lane: self.lane,
+                network_changes: self.network_changes,
                 result: Err(SourceError::Unavailable("the read stopped".into())),
             });
         }
@@ -292,9 +318,12 @@ struct Actor<S, F> {
     recheck: bool,
     visible: bool,
     hidden_since: Option<Instant>,
-    /// The network zebrad last reported, kept while it is stopped.
-    reported: Option<Network>,
+    /// The network of the chain the cache and the index hold: the one zebrad reports, else
+    /// the node's.
     network: Network,
+    /// Bumped when the network changes. Each read carries it, so the answer of a read sent on
+    /// the old network is dropped: none of it applies to the new one.
+    network_changes: u64,
     reorg: Option<ReorgNotice>,
     live: watch::Sender<ExplorerLiveEvent>,
     internal: mpsc::UnboundedSender<Internal>,
@@ -306,9 +335,12 @@ pub(super) fn start<S: ChainSource>(
     config: ExplorerConfig,
     new_source: impl Fn(SocketAddr, PathBuf) -> Result<S, RpcError> + Send + 'static,
 ) -> (mpsc::Sender<Command>, watch::Receiver<ExplorerLiveEvent>) {
-    let network = inputs.spec.borrow().network;
+    let (node, network) = {
+        let spec = inputs.spec.borrow();
+        (spec.id.clone(), spec.network)
+    };
     let (live, live_rx) = watch::channel(ExplorerLiveEvent {
-        node: node_id(network),
+        node,
         live: ExplorerLive::default(),
     });
     let (commands_tx, commands) = mpsc::channel(64);
@@ -329,8 +361,8 @@ pub(super) fn start<S: ChainSource>(
         recheck: false,
         visible: false,
         hidden_since: None,
-        reported: None,
         network,
+        network_changes: 0,
         reorg: None,
         live,
         internal,
@@ -339,17 +371,19 @@ pub(super) fn start<S: ChainSource>(
     (commands_tx, live_rx)
 }
 
-/// The id the explorer serves while zebrad runs on `network`.
-fn node_id(network: Network) -> NodeId {
-    NodeId::suggest(NodeKind::Zebrad, network, &Vec::new())
-}
-
 fn network_of(chain: &str) -> Option<Network> {
     match chain {
         "main" => Some(Network::Mainnet),
         "test" => Some(Network::Testnet),
         _ => None,
     }
+}
+
+/// Now, on Tokio's clock, which tests pause and advance, as the `Instant` the chain index
+/// takes. The explorer's time limits (a check's freshness, the tip poll, the idle cache) all
+/// read it.
+fn now() -> Instant {
+    tokio::time::Instant::now().into_std()
 }
 
 fn unix_now() -> u64 {
@@ -417,6 +451,33 @@ where
         })
     }
 
+    /// The node this explorer serves, under its own id: the one it was started for, which the
+    /// app takes as the first node at launch.
+    fn served(&self) -> NodeId {
+        self.inputs.spec.borrow().id.clone()
+    }
+
+    /// The network of the chain the explorer holds, when it is not the node's: the node's
+    /// network changed, and zebrad has not been read on the new one yet.
+    fn foreign(&self) -> Option<Network> {
+        (self.network != self.inputs.spec.borrow().network).then_some(self.network)
+    }
+
+    /// The network zebrad runs on, when it is not the node's: the node's network changed
+    /// while zebrad ran, and zebrad takes it at its next start.
+    fn other_network(&self) -> Option<Network> {
+        self.run.as_ref().and(self.foreign())
+    }
+
+    /// The tip as the node's pages may see it: none while the explorer holds another
+    /// network's chain, whether zebrad runs or not.
+    fn node_chain(&self) -> Option<ChainView> {
+        match self.foreign() {
+            Some(_) => None,
+            None => self.chain_view(),
+        }
+    }
+
     fn chain_view(&self) -> Option<ChainView> {
         self.index.tip().map(|(height, hash)| ChainView {
             height,
@@ -474,21 +535,20 @@ where
             None => self.stop_reading(),
         }
 
-        let reported = self
+        // zebrad's chain is the one it reports. Before a run's first report, and once zebrad
+        // has stopped and the monitor has cleared its statistics, it is the node's: the next
+        // run starts on the node's network.
+        let network = self
             .inputs
             .stats
             .borrow()
             .as_ref()
-            .and_then(|stats| network_of(&stats.chain));
-        if reported.is_some() {
-            self.reported = reported;
-        }
-        let network = self
-            .reported
+            .and_then(|stats| network_of(&stats.chain))
             .unwrap_or_else(|| self.inputs.spec.borrow().network);
         if network != self.network {
             // Another chain: nothing known about this one applies.
             self.network = network;
+            self.forget_reads();
             self.cache.clear();
             self.index.clear();
             self.reorg = None;
@@ -500,6 +560,27 @@ where
             Limits::SYNCING
         });
         self.publish();
+    }
+
+    /// The time of the block `hash`, when the cache has the block.
+    fn block_time(&mut self, hash: BlockHash) -> Option<u64> {
+        match self.cache.get(&CacheKey::Block(hash))? {
+            ReadResult::Block(block) => block.time.and_then(|time| u64::try_from(time).ok()),
+            _ => None,
+        }
+    }
+
+    /// The network changed: every read asked for on the old one fails, queued or under way, and
+    /// the answer of one under way is dropped when it comes, so a read asked for since on the
+    /// new network goes out on its own.
+    fn forget_reads(&mut self) {
+        self.network_changes += 1;
+        self.sched.clear_queue();
+        for (_, inflight) in self.inflight.drain() {
+            for waiter in inflight.waiters {
+                let _ = waiter.send(Err(not_running()));
+            }
+        }
     }
 
     /// zebrad stopped: queued reads fail; reads in flight report back on their own.
@@ -516,8 +597,11 @@ where
     }
 
     fn publish(&mut self) {
+        let other_network = self.other_network();
         let state = if self.run.is_none() {
             LiveState::NotRunning
+        } else if let Some(network) = other_network {
+            LiveState::OtherNetwork { network }
         } else {
             match self.inputs.stats.borrow().as_ref() {
                 None => LiveState::NotRunning,
@@ -536,12 +620,20 @@ where
                 },
             }
         };
+        // The other network's tip and reorganisations are not this node's, whether zebrad
+        // runs or not.
+        let (tip, reorg) = match self.foreign() {
+            Some(_) => (None, None),
+            None => (self.chain_view(), self.reorg),
+        };
+        let tip_time = tip.and_then(|tip| self.block_time(tip.hash));
         let next = ExplorerLiveEvent {
-            node: node_id(self.network),
+            node: self.served(),
             live: ExplorerLive {
                 state,
-                tip: self.chain_view(),
-                reorg: self.reorg,
+                tip,
+                tip_time,
+                reorg,
             },
         };
         self.live.send_if_modified(|current| {
@@ -553,29 +645,18 @@ where
         });
     }
 
-    /// The node ids this explorer answers: the one of the network zebrad runs on. The other
-    /// network's zebrad id is the backend's node too, after its next start.
+    /// The node this explorer answers: the one it was started for, by its own id. Other nodes
+    /// get their explorers in a later phase (docs/EXPLORER.md, P6).
     fn check_node(&self, node: &NodeId) -> Result<(), ExplorerError> {
-        if *node == node_id(self.network) {
-            return Ok(());
+        if *node == self.served() {
+            Ok(())
+        } else {
+            Err(ExplorerError::new(
+                ExplorerErrorKind::UnknownNode,
+                "The Explorer reads only the node that was first when Zeal started; a later \
+                 version gives every node its own.",
+            ))
         }
-        let other = match self.network {
-            Network::Mainnet => Network::Testnet,
-            Network::Testnet => Network::Mainnet,
-        };
-        if *node == node_id(other) {
-            return Err(ExplorerError::new(
-                ExplorerErrorKind::NodeNotRunning,
-                format!(
-                    "zebrad runs on {}; it changes network at its next start",
-                    self.network
-                ),
-            ));
-        }
-        Err(ExplorerError::new(
-            ExplorerErrorKind::UnknownNode,
-            "this node has no explorer",
-        ))
     }
 
     fn on_command(&mut self, command: Command) {
@@ -584,7 +665,7 @@ where
             let _ = reply.send(Err(err));
             return;
         }
-        let chain = self.chain_view();
+        let chain = self.node_chain();
         match call.request {
             ExplorerRequest::Status => {
                 let live = self.live.borrow().live.clone();
@@ -603,6 +684,13 @@ where
             request => {
                 if self.run.is_none() {
                     let _ = reply.send(Err(not_running()));
+                    return;
+                }
+                if let Some(network) = self.other_network() {
+                    let _ = reply.send(Err(ExplorerError::new(
+                        ExplorerErrorKind::NodeNotRunning,
+                        format!("zebrad runs on {network}; it changes network at its next start"),
+                    )));
                     return;
                 }
                 let stats = self.inputs.stats.borrow().clone();
@@ -630,6 +718,13 @@ where
         }
     }
 
+    /// Whether the follower polls the tip while the page is shown: zebrad runs at the tip, on
+    /// the node's network. Nothing of another network is followed; `follow` itself still
+    /// answers a request that asked for the tip before the network changed.
+    fn polls(&self) -> bool {
+        self.run.is_some() && self.at_tip() && self.other_network().is_none()
+    }
+
     fn set_visible(&mut self, visible: bool) {
         if visible == self.visible {
             return;
@@ -638,23 +733,20 @@ where
         if visible {
             self.hidden_since = None;
             self.cache.set_budget(self.config.cache_bytes);
-            if self.at_tip() && self.run.is_some() {
+            if self.polls() {
                 self.follow();
             }
         } else {
-            self.hidden_since = Some(Instant::now());
+            self.hidden_since = Some(now());
         }
     }
 
     fn on_tick(&mut self) {
-        let now = Instant::now();
+        let now = now();
         // A check that ended just after the last tick is a little younger than a poll at this
         // one; half a poll keeps that check from skipping it, and still skips the tick after a
         // page's own check.
-        if self.visible
-            && self.run.is_some()
-            && self.at_tip()
-            && !self.index.checked_within(self.config.tip_poll / 2, now)
+        if self.visible && self.polls() && !self.index.checked_within(self.config.tip_poll / 2, now)
         {
             self.follow();
         }
@@ -702,7 +794,7 @@ where
             Internal::Tip { max_age, reply } => {
                 if let Some(view) = self
                     .chain_view()
-                    .filter(|_| self.index.checked_within(max_age, Instant::now()))
+                    .filter(|_| self.index.checked_within(max_age, now()))
                 {
                     let _ = reply.send(Ok(view));
                     return;
@@ -714,8 +806,24 @@ where
                 self.tip_waiters.push(reply);
                 self.follow();
             }
-            Internal::Done { call, lane, result } => {
+            Internal::Peek { call, reply } => {
+                let found = self
+                    .cache_key(call, now())
+                    .and_then(|key| self.cache.get(&key).cloned());
+                let _ = reply.send(found);
+            }
+            Internal::Done {
+                call,
+                lane,
+                network_changes,
+                result,
+            } => {
                 self.sched.done(lane);
+                if network_changes != self.network_changes {
+                    // Sent on the old network: its waiters were answered when it changed.
+                    self.pump();
+                    return;
+                }
                 let inflight = self.inflight.remove(&call);
                 let result = match result {
                     Ok(value) => {
@@ -758,7 +866,7 @@ where
             let _ = reply.send(Err(not_running()));
             return;
         }
-        let now = Instant::now();
+        let now = now();
         let key = self.cache_key(call, now);
         if let Some(value) = key.and_then(|key| self.cache.get(&key)) {
             let _ = reply.send(Ok(value.clone()));
@@ -807,10 +915,11 @@ where
                 tx: self.internal.clone(),
                 call,
                 lane,
+                network_changes: self.network_changes,
                 sent: false,
             };
             tokio::spawn(async move {
-                let started = Instant::now();
+                let started = std::time::Instant::now();
                 let result = source.read(call).await;
                 tracing::debug!(
                     method = call.method(),
@@ -845,6 +954,10 @@ where
                 let bytes = 400 + 32 * block.tx.len();
                 self.cache
                     .insert(CacheKey::Block(block.hash), value.clone(), bytes);
+                // The tip's block: its time goes out with the tip.
+                if self.index.tip().is_some_and(|(_, tip)| tip == block.hash) {
+                    self.publish();
+                }
             }
             ReadResult::Tx(tx) => {
                 // Only a transaction of a best-chain block keeps its place.
@@ -867,7 +980,7 @@ where
             ReadResult::Header(header) => {
                 if current
                     && matches!(call, ReadCall::Header(BlockId::Height(_)))
-                    && let Some(key) = self.header_key(header.height, Instant::now())
+                    && let Some(key) = self.header_key(header.height, now())
                 {
                     self.cache.insert(key, value.clone(), 120);
                 }
@@ -907,7 +1020,7 @@ where
     /// Applies a checked tip. When it undid blocks, the cache drops the transactions above the
     /// highest height the check proved still in the chain; a reorganisation is published.
     fn apply(&mut self, update: TipUpdate) -> ChainView {
-        if let Some(undone) = self.index.apply(update, Instant::now()) {
+        if let Some(undone) = self.index.apply(update, now()) {
             let above = i64::from(undone.above);
             self.cache.retain(|_, value| match value {
                 ReadResult::Tx(tx) => tx.height.is_none_or(|height| height <= above),
@@ -936,13 +1049,18 @@ where
 
 /// Checks the node's tip against what the index knew: a block on top, a jump, a tip that went
 /// back, or a reorganisation, which a binary search of the vouched heights bounds: the chains
-/// share the highest height that still matches and differ at the lowest that does not.
+/// share the highest height that still matches and differ at the lowest that does not. Its
+/// reads are interactive, one at a time: pages wait for the tip, and the Chain page's
+/// coinbases on the prefetch lane must not hold it up.
 async fn follow(
     fetch: Fetcher,
     old: Option<(u32, BlockHash)>,
     window: Vec<(u32, BlockHash)>,
 ) -> Result<TipUpdate, ExplorerError> {
-    let best = fetch.request(ReadCall::Best, Lane::Prefetch).best().await?;
+    let best = fetch
+        .request(ReadCall::Best, Lane::Interactive)
+        .best()
+        .await?;
     let tip = (best.height, best.hash);
     let update = |change, learned| TipUpdate {
         tip,
@@ -957,7 +1075,7 @@ async fn follow(
     }
     let hash_at = |at: u32| {
         fetch
-            .request(ReadCall::BlockHash(at), Lane::Prefetch)
+            .request(ReadCall::BlockHash(at), Lane::Interactive)
             .hash()
     };
     // Every answer is the node's own hash at its height, so all of them hold.
@@ -968,7 +1086,7 @@ async fn follow(
             return Ok(update(Change::Jumped, learned));
         }
         let block = fetch
-            .request(ReadCall::Block(BlockId::Hash(best.hash)), Lane::Prefetch)
+            .request(ReadCall::Block(BlockId::Hash(best.hash)), Lane::Interactive)
             .block()
             .await?;
         if best.height == height + 1 && block.previous == Some(hash) {

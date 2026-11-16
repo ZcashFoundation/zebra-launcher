@@ -258,11 +258,13 @@ history before live lines, so logs need no snapshot request. An event for a node
 has not brought yet is dropped; that node's snapshots cover it.
 
 **Explorer IPC.** The block explorer has one command and one event. `explorer {node,
-call}` takes an `ExplorerCall` (an `ExplorerRequest`: `Status`, `Interest`, `Chain`,
-`Block`, `BlockTxs`, `Tx` or `Resolve`) and answers an `ExplorerReply` (the `ChainView` it
-was read against, and the `ExplorerResponse`), or rejects with an `ExplorerError {kind,
-message}`. `explorer_live` carries an `ExplorerLiveEvent {node, live}` when the explorer's
-state (not running, syncing, at the tip), tip or last reorganisation changes, at most
+call}` takes an `ExplorerCall` (an `ExplorerRequest`: `Status`, `Interest`, `Chain
+{with_fees}`, `Block`, `BlockTxs`, `Tx` or `Resolve`) and answers an `ExplorerReply` (the
+`ChainView` it was read against, and the `ExplorerResponse`), or rejects with an
+`ExplorerError {kind, message}`. The Chain page first answers without the fees of rows whose
+coinbases are not read yet (`fees_pending`), then the UI asks `with_fees`. `explorer_live`
+carries an `ExplorerLiveEvent {node, live}` when the explorer's state (not running, syncing,
+at the tip, zebrad still on the other network), tip, tip time or last reorganisation changes, at most
 every 250 ms, and always the latest value. Its snapshot is the `Status` request, which the
 UI sends for a node it has no news of yet.
 An event that arrives while a snapshot request is in flight is newer than the snapshot,
@@ -775,16 +777,24 @@ design; phases P0 and P1 are built, and its "Built so far" section lists where t
 differs.
 
 - **Backend.** `launcher-core/src/explorer.rs` spawns one actor (`ExplorerHandle`, Tauri
-  state of its own, started in `src-tauri/src/explorer.rs`) for the one zebrad the backend
-  runs. It answers the node id `zebrad-<network>` of the network zebrad runs on; the other
-  network's id is not running until zebrad's next start, and any other id has no explorer.
+  state of its own, started in `src-tauri/src/explorer.rs`) for the node that is first in the
+  registry when Zeal starts, and answers that node's own id only. If that node is removed, no
+  node has an Explorer until the next launch. Other nodes get explorers in EXPLORER.md's P6,
+  and until then their ids are answered "the Explorer reads only the node that was first when
+  Zeal started". When the node's
+  network changes while zebrad runs, zebrad keeps the old one until its next start: the
+  actor then publishes `LiveState::OtherNetwork` and reads nothing. Whenever the chain the
+  actor holds is not the node's network, running or stopped, it publishes no tip, tip time
+  or reorganisation, so no page shows the other network's chain under the node. When that
+  chain changes, a read still under way fails, and its answer is dropped when it comes.
   The actor owns, without locks, the source (`RpcSource` over an `OwnedSession`, rebuilt
   when `rpc_addr` or `started_at` changes), the `ChainIndex`, a byte-weighted LRU (64 MiB;
   8 MiB after 10 minutes hidden), the reads in flight and the scheduler. Reads run as
-  tasks that hold a semaphore permit (six, four while the node syncs; interactive reads
-  first, the newest first), their results come back over a channel, and reads of one key
-  merge. `assemble.rs` builds each page from explorer-model's views, and `source.rs` names
-  every RPC method in a closed `ReadCall`, so nothing from IPC picks a method.
+  tasks that hold a semaphore permit (six, four while the node syncs; the reads of pages
+  and of the tip follower first, the newest first, and the Chain page's coinbases in what
+  is left), their results come back over a channel, and reads of one key merge.
+  `assemble.rs` builds each page from explorer-model's views, and `source.rs` names every
+  RPC method in a closed `ReadCall`, so nothing from IPC picks a method.
 - **Reads only when asked.** Nothing is read until a page asks, and the pages ask only
   once the tab has been opened. The UI sends `Interest` when the tab or the document is
   shown or hidden; while shown and at the tip, the actor polls `getbestblockheightandhash`
@@ -799,10 +809,14 @@ differs.
   line and one banner) and `ui/src/explorer/` holds the pages (Chain, Block, Transaction,
   Search), their parts, text and per-node state; `ui/styles/explorer.css` uses the
   `--pool-*` colour tokens. The tab is offered for nodes that keep the chain
-  (`NodeKind::has_explorer`), and amounts are in ZEC, or TAZ on Testnet.
+  (`NodeKind::has_explorer`), and amounts are in ZEC, or TAZ on Testnet, or in zatoshis, with
+  times local, UTC or Unix: the source line's toggles, kept in `localStorage`
+  (`ui/src/explorer/prefs.rs`) as the Grafana page keeps its pickers.
 - **Mock.** `ui/src/mock/explorer.rs` answers the same requests from explorer-model's
-  synthetic chain, one chain per `?herd` node with an explorer, and the dashboard's
-  details read the same chain.
+  synthetic chain, for the first node only as the backend does (`?herd`'s other nodes get
+  its answer), and the dashboard's details read the same chain. The mock's zebrad reports
+  its node's network as it was at its start, so a network change shows `OtherNetwork` until
+  a restart, which gives a new chain on the new network.
 
 ## Updater (opt-in)
 

@@ -108,11 +108,15 @@ pub fn Hidden() -> impl IntoView {
     }
 }
 
-/// A failed answer: what went wrong, in the explorer's words. A node that does not run is the
-/// shell's banner to tell, so the page says nothing more.
+/// A failed answer: what went wrong, in the explorer's words. A node that does not run, or one
+/// the explorer does not serve, is the shell's banner to tell, so the page says nothing more.
 #[component]
 pub fn Failure(error: ExplorerError) -> impl IntoView {
-    (error.kind != ExplorerErrorKind::NodeNotRunning).then(|| {
+    let shell_tells = matches!(
+        error.kind,
+        ExplorerErrorKind::NodeNotRunning | ExplorerErrorKind::UnknownNode
+    );
+    (!shell_tells).then(|| {
         view! {
             <div class="banner banner-warn ex-failure" role="alert">
                 <span>{error.message}</span>
@@ -121,7 +125,8 @@ pub fn Failure(error: ExplorerError) -> impl IntoView {
     })
 }
 
-/// The placeholder a page shows before its first answer.
+/// The placeholder a page shows before its first answer. While it shows, the shell waits for
+/// the page's heading to hand focus to (`focus_page` in `explorer.rs`).
 #[component]
 pub fn Loading() -> impl IntoView {
     view! { <p class="muted ex-loading">"Reading from your node…"</p> }

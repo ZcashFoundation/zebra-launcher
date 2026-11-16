@@ -1,13 +1,15 @@
 //! The block explorer for the window: [`launcher_core::explorer`], started once with the
 //! first node's supervisor, monitor and spec watches, and managed as Tauri state for the
-//! `explorer` command. Other nodes get one in a later phase (docs/EXPLORER.md, P6). Its live state reaches the UI through
+//! `explorer` command. It answers that node's id only, also once another node is first: if
+//! the node is removed, no node has an Explorer until the next launch. Other nodes get one in
+//! a later phase (docs/EXPLORER.md, P6). Its live state reaches the UI through
 //! [`bridge::forward_explorer_live`](crate::bridge::forward_explorer_live).
 
 use launcher_core::explorer::{self, ExplorerConfig, ExplorerHandle, ExplorerInputs};
 
 use crate::app_state::AppState;
 
-/// Starts the explorer of the first node. It reads nothing until the UI asks.
+/// Starts the explorer of the node that is first now. It reads nothing until the UI asks.
 pub fn start(state: &AppState) -> ExplorerHandle {
     // The registry always holds a node: the migration and a fresh install create the first,
     // and the last one cannot be removed.

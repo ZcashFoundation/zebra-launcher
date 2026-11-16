@@ -7,15 +7,16 @@ use launcher_types::{
     Network, NodeId,
     explorer::{
         BlockId, ExplorerRequest, ExplorerResponse, ExplorerRoute, Pool, PoolPart, Shown, TxId,
-        TxPage as Page, TxStatus,
+        TxKind, TxPage as Page, TxStatus,
     },
 };
 use leptos::prelude::*;
 
 use super::{
     parts::{Failure, HashText, Hidden, KindBadge, Loading, PoolChip, RouteLink},
+    prefs::Prefs,
     state::{Loaded, NodeExplorer, load},
-    text,
+    text::{self, Unit},
 };
 use crate::format::{bytes, short_hash, thousands};
 
@@ -27,7 +28,7 @@ pub fn TxPage(
     txid: TxId,
     out: Option<u32>,
 ) -> impl IntoView {
-    let unit = text::unit(network);
+    let prefs = Prefs::get();
     let tip = move || {
         nav.live.with(|live| {
             live.as_ref()
@@ -59,7 +60,11 @@ pub fn TxPage(
                 Loaded::Loading => view! { <Loading /> }.into_any(),
                 Loaded::Failed(error) => view! { <Failure error /> }.into_any(),
                 Loaded::Ready(reply) => match reply.response {
-                    ExplorerResponse::Tx(page) => view! { <Tx page=*page nav unit out /> }.into_any(),
+                    ExplorerResponse::Tx(page) => {
+                        // A new unit draws the same answer again; nothing is read for it.
+                        let unit = prefs.unit(network);
+                        view! { <Tx page=*page nav unit out /> }.into_any()
+                    }
                     _ => view! { <Loading /> }.into_any(),
                 },
             }}
@@ -68,8 +73,9 @@ pub fn TxPage(
 }
 
 #[component]
-fn Tx(page: Page, nav: NodeExplorer, unit: &'static str, out: Option<u32>) -> impl IntoView {
+fn Tx(page: Page, nav: NodeExplorer, unit: Unit, out: Option<u32>) -> impl IntoView {
     let sentence = text::tx_sentence(&page, unit);
+    let coinbase = matches!(page.kind, TxKind::Coinbase { .. });
     let status = page.status.clone();
     view! {
         <section class="ex-section" aria-labelledby="ex-tx-title">
@@ -89,7 +95,7 @@ fn Tx(page: Page, nav: NodeExplorer, unit: &'static str, out: Option<u32>) -> im
                         .shielded
                         .iter()
                         .cloned()
-                        .map(|part| view! { <PoolCard part unit /> })
+                        .map(|part| view! { <PoolCard part unit coinbase /> })
                         .collect_view()}
                 </div>
             </section>
@@ -200,9 +206,10 @@ fn Status(status: TxStatus, nav: NodeExplorer) -> impl IntoView {
     }
 }
 
-/// One shielded pool's part: counts, the net movement, and the hidden per-note amounts.
+/// One shielded pool's part: counts, the net movement, and the per-note amounts: hidden, or in
+/// a coinbase public by consensus but not decrypted here.
 #[component]
-fn PoolCard(part: PoolPart, unit: &'static str) -> impl IntoView {
+fn PoolCard(part: PoolPart, unit: Unit, coinbase: bool) -> impl IntoView {
     let counts = match part.pool {
         Pool::Sapling => format!(
             "{} spend{} · {} output{}",
@@ -235,7 +242,16 @@ fn PoolCard(part: PoolPart, unit: &'static str) -> impl IntoView {
             <h3><PoolChip pool=part.pool /></h3>
             <p>{counts}</p>
             <p>{text::movement(part.pool, -part.net_out, unit)}</p>
-            <p class="ex-hidden-row">"Amount per note: " <Hidden /></p>
+            {if coinbase {
+                view! {
+                    <p title="A coinbase's shielded outputs use the all-zero outgoing viewing key, so anyone can decrypt them">
+                        "Amount per note: public by consensus, not decrypted here"
+                    </p>
+                }
+                .into_any()
+            } else {
+                view! { <p class="ex-hidden-row">"Amount per note: " <Hidden /></p> }.into_any()
+            }}
             {rule.map(|rule| view! { <p class="muted ex-caption">{rule}</p> })}
         </div>
     }
@@ -271,13 +287,16 @@ fn Inputs(page: Page, nav: NodeExplorer) -> impl IntoView {
                 })
                 .collect_view()}
         </ol>
-        <p class="muted ex-caption">"Each input spends an earlier output; its value shows on that transaction's page."</p>
+        // A coinbase's one input spends nothing: its line says what it is instead.
+        {(!matches!(page.kind, TxKind::Coinbase { .. })).then(|| view! {
+            <p class="muted ex-caption">"Each input spends an earlier output; its value shows on that transaction's page."</p>
+        })}
     }
     .into_any()
 }
 
 #[component]
-fn Outputs(page: Page, unit: &'static str, out: Option<u32>) -> impl IntoView {
+fn Outputs(page: Page, unit: Unit, out: Option<u32>) -> impl IntoView {
     if page.outputs.is_empty() {
         return view! { <p class="muted">"No transparent outputs."</p> }.into_any();
     }
@@ -297,13 +316,25 @@ fn Outputs(page: Page, unit: &'static str, out: Option<u32>) -> impl IntoView {
                     {page
                         .outputs
                         .into_iter()
-                        .map(|output| view! {
-                            <tr class:ex-row-selected=out == Some(output.n)>
-                                <td class="ex-num">{output.n}</td>
-                                <td><code class="ex-address">{output.address.unwrap_or_default()}</code></td>
-                                <td>{output.script}</td>
-                                <td class="ex-num">{text::coins(output.zat as i64)}</td>
-                            </tr>
+                        .map(|output| {
+                            // The output an input link led here for: marked in words and by a
+                            // bar, not by the row's tint alone.
+                            let followed = out == Some(output.n);
+                            view! {
+                                <tr class:ex-row-selected=followed aria-current=followed.then_some("true")>
+                                    <td class="ex-num">
+                                        {followed.then(|| view! {
+                                            <span class="chip ex-followed" title="The output the input you followed spends">
+                                                "followed"
+                                            </span>
+                                        })}
+                                        {output.n}
+                                    </td>
+                                    <td><code class="ex-address">{output.address.unwrap_or_default()}</code></td>
+                                    <td>{output.script}</td>
+                                    <td class="ex-num">{unit.number(output.zat as i64)}</td>
+                                </tr>
+                            }
                         })
                         .collect_view()}
                 </tbody>

@@ -6,9 +6,7 @@ use std::collections::HashMap;
 
 use launcher_types::{
     NodeId,
-    explorer::{
-        ExplorerError, ExplorerLive, ExplorerReply, ExplorerRequest, ExplorerRoute, LiveState,
-    },
+    explorer::{ExplorerError, ExplorerLive, ExplorerReply, ExplorerRequest, ExplorerRoute},
 };
 use leptos::{prelude::*, task::spawn_local};
 
@@ -21,12 +19,19 @@ pub struct NodeExplorer {
     pub history: RwSignal<NavHistory>,
     /// The explorer's own news: its tip, whether the node syncs, the last reorganisation.
     pub live: RwSignal<Option<ExplorerLive>>,
-    /// Why the explorer would not say how it is, until it publishes its news: the node's
-    /// zebrad runs on the other network until its next start, say.
+    /// Why the explorer would not say how it is, until it publishes its news: it serves the
+    /// first node only, say.
     pub unavailable: RwSignal<Option<ExplorerError>>,
 }
 
 impl NodeExplorer {
+    /// Whether the explorer reads this node's chain, tracked: the node runs, on its own
+    /// network.
+    pub fn reads(&self) -> bool {
+        self.live
+            .with(|live| live.as_ref().is_some_and(|live| live.state.reads()))
+    }
+
     /// The route shown, tracked.
     pub fn route(&self) -> ExplorerRoute {
         self.history.with(|history| history.current().clone())
@@ -122,10 +127,7 @@ pub fn load(
     let generation = StoredValue::new(0u64);
     Effect::new(
         move |previous: Option<(bool, Option<(ExplorerRequest, u64)>)>| {
-            let reachable = nav.live.with(|live| {
-                live.as_ref()
-                    .is_some_and(|live| live.state != LiveState::NotRunning)
-            });
+            let reachable = nav.reads();
             let next = (reachable, request());
             if previous.as_ref() == Some(&next) {
                 return next;

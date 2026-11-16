@@ -69,6 +69,11 @@
   --pool-orchard: #3987e5;
   --pool-ironwood: #008300;
   --pool-lockbox: #d55181;
+  /* The parts of a block's reward that are not pools (the Explorer's reward split): the miner's
+     share in a hue no pool wears, the funding streams in a neutral. Checked beside each other
+     and beside --pool-lockbox with the palette validator in both sets. */
+  --reward-miner: #c98500;
+  --reward-stream: #b9b8b0;
   /* Sizes that Rust reads back (ui/src/pages/configure.rs, ui/src/components/tooltip.rs), so
      a change here reaches them: the scrolling page's padding, which the Configure page's sticky
      panes are inset by; the gap above the Configure footer; the gap between a help icon and
@@ -122,6 +127,8 @@
   --pool-orchard: #2a78d6;
   --pool-ironwood: #008300;
   --pool-lockbox: #e87ba4;
+  --reward-miner: #eda100;
+  --reward-stream: #5f5e5a;
   color-scheme: light;
 }
 

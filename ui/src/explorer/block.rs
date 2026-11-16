@@ -9,25 +9,27 @@ use launcher_types::{
     Network, NodeId,
     explorer::{
         BlockId, BlockLedger, BlockPage as Page, Budget, ExplorerErrorKind, ExplorerRequest,
-        ExplorerResponse, ExplorerRoute, FutureBlock, LiveState, Pool, RewardSplit, TxidPage,
+        ExplorerResponse, ExplorerRoute, FutureBlock, LiveState, PerPool, Pool, RewardSplit,
+        TxidPage,
     },
 };
 use leptos::prelude::*;
 
 use super::{
     parts::{Failure, HashText, Loading, PoolChip, RouteLink},
+    prefs::Prefs,
     state::{Loaded, NodeExplorer, load},
-    text,
+    text::{self, Unit},
 };
 use crate::{
     app::{AppState, Tab},
-    format::{bytes, local_datetime_short, relative, short_hash, thousands},
+    format::{bytes, relative, short_hash, thousands},
 };
 
 #[component]
 pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId) -> impl IntoView {
     let app = AppState::get();
-    let unit = text::unit(network);
+    let prefs = Prefs::get();
     let tip = move || {
         nav.live.with(|live| {
             live.as_ref()
@@ -58,12 +60,8 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
         let revision = match id {
             _ if future.get() => u64::from(tip().unwrap_or(0)),
             BlockId::Height(height) => {
-                let reached = past_tip.get()
-                    && syncing_at().is_none_or(|at| at >= height)
-                    && nav.live.with(|live| {
-                        live.as_ref()
-                            .is_some_and(|live| live.state != LiveState::NotRunning)
-                    });
+                let reached =
+                    past_tip.get() && syncing_at().is_none_or(|at| at >= height) && nav.reads();
                 (epoch() << 32) | u64::from(reached)
             }
             BlockId::Hash(_) => 0,
@@ -104,6 +102,8 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
                 },
                 Loaded::Ready(reply) => match reply.response {
                     ExplorerResponse::Block(page) => {
+                        // A new unit draws the same answer again; nothing is read for it.
+                        let unit = prefs.unit(network);
                         view! { <Block page=*page nav unit node=node.clone() /> }.into_any()
                     }
                     ExplorerResponse::Future(future) => view! { <Future future nav /> }.into_any(),
@@ -115,8 +115,9 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
 }
 
 #[component]
-fn Block(page: Page, nav: NodeExplorer, unit: &'static str, node: NodeId) -> impl IntoView {
+fn Block(page: Page, nav: NodeExplorer, unit: Unit, node: NodeId) -> impl IntoView {
     let app = AppState::get();
+    let prefs = Prefs::get();
     let summary = page.summary.clone();
     let height = summary.height;
     let time = UNIX_EPOCH + Duration::from_secs(summary.time);
@@ -159,7 +160,7 @@ fn Block(page: Page, nav: NodeExplorer, unit: &'static str, node: NodeId) -> imp
             </div>
             <HashText hash=summary.hash full=true />
             <p class="ex-meta">
-                <span>{local_datetime_short(time)}</span>
+                <span>{move || text::time_text(summary.time, prefs.time.get())}</span>
                 <span class="muted">{move || relative(time, app.now.get())}</span>
                 {move || confirmations().map(|(count, finality)| view! {
                     <span>{format!("{} confirmation{}", thousands(u64::from(count)), if count == 1 { "" } else { "s" })}</span>
@@ -207,7 +208,7 @@ fn Block(page: Page, nav: NodeExplorer, unit: &'static str, node: NodeId) -> imp
 /// The turnstile (V2): each pool's change, split into what the coinbase paid and what users'
 /// transactions moved, then the fees and the burn. Exact zatoshis in a table.
 #[component]
-fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
+fn Turnstile(ledger: BlockLedger, unit: Unit) -> impl IntoView {
     let (Some(deltas), Some(coinbase), Some(users)) =
         (ledger.deltas, ledger.coinbase, ledger.users)
     else {
@@ -219,12 +220,7 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
         }
         .into_any();
     };
-    let largest = Pool::ALL
-        .iter()
-        .map(|pool| deltas.get(*pool).unsigned_abs().max(coinbase.get(*pool)))
-        .max()
-        .unwrap_or(1)
-        .max(1) as f64;
+    let largest = turnstile_scale(&deltas, &coinbase, &users).max(1) as f64;
     let width = |zat: u64| format!("{:.2}%", zat as f64 / largest * 50.0);
     let rows = Pool::ALL.into_iter().map(|pool| {
         let delta = deltas.get(pool);
@@ -234,25 +230,30 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
         view! {
             <tr>
                 <th scope="row"><PoolChip pool /></th>
-                <td class="ex-bar-cell" aria-hidden="true">
-                    <span class="ex-axis"></span>
-                    {(paid > 0).then(|| view! {
-                        <span class=format!("ex-flow ex-flow-coinbase ex-fill-{}", pool.id()) style:width=width(paid)></span>
-                    })}
-                    {(moved != 0 || lockbox && delta != 0).then(|| {
-                        let amount = if lockbox { delta } else { moved };
-                        view! {
-                            <span
-                                class=format!("ex-flow ex-fill-{}", pool.id())
-                                class:ex-flow-out=amount < 0
-                                style:width=width(amount.unsigned_abs())
-                            ></span>
-                        }
-                    })}
+                // The cell stays in the table for assistive technology, so every row has the
+                // header's five cells; only the bars in it are hidden, and the numbers beside
+                // them say the same.
+                <td class="ex-bar-cell">
+                    <span aria-hidden="true">
+                        <span class="ex-axis"></span>
+                        {(paid > 0).then(|| view! {
+                            <span class=format!("ex-flow ex-flow-coinbase ex-fill-{}", pool.id()) style:width=width(paid)></span>
+                        })}
+                        {(moved != 0 || lockbox && delta != 0).then(|| {
+                            let amount = if lockbox { delta } else { moved };
+                            view! {
+                                <span
+                                    class=format!("ex-flow ex-fill-{}", pool.id())
+                                    class:ex-flow-out=amount < 0
+                                    style:width=width(amount.unsigned_abs())
+                                ></span>
+                            }
+                        })}
+                    </span>
                 </td>
-                <td class="ex-num">{text::coins(paid as i64)}</td>
-                <td class="ex-num">{(!lockbox).then(|| text::coins(moved))}</td>
-                <td class="ex-num" title=format!("{delta} zatoshis")>{text::coins(delta)}</td>
+                <td class="ex-num">{unit.number(paid as i64)}</td>
+                <td class="ex-num">{(!lockbox).then(|| unit.number(moved))}</td>
+                <td class="ex-num" title=format!("{delta} zatoshis")>{unit.number(delta)}</td>
             </tr>
         }
     });
@@ -264,7 +265,7 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
                 <thead>
                     <tr>
                         <th scope="col">"Pool"</th>
-                        <th scope="col" class="ex-bar-cell"><span class="visually-hidden">"Change"</span></th>
+                        <th scope="col" class="ex-bar-cell"><span class="visually-hidden">"Bars"</span></th>
                         <th scope="col" class="ex-num" title="Coinbase outputs: the subsidy and the claimed fees">"Coinbase"</th>
                         <th scope="col" class="ex-num" title="The block's other transactions, fees included">"Users"</th>
                         <th scope="col" class="ex-num">{format!("Change ({unit})")}</th>
@@ -276,14 +277,14 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
                         <tr>
                             <th scope="row">"Fees"</th>
                             <td></td><td></td><td></td>
-                            <td class="ex-num">{text::coins(fees as i64)}</td>
+                            <td class="ex-num">{unit.number(fees as i64)}</td>
                         </tr>
                     })}
                     {burned.map(|burned| view! {
                         <tr>
                             <th scope="row" title="NU7 removes ⌊6 F / 10⌋ of a block's fees from circulation">"Burned"</th>
                             <td></td><td></td><td></td>
-                            <td class="ex-num">{text::coins(burned as i64)}</td>
+                            <td class="ex-num">{unit.number(burned as i64)}</td>
                         </tr>
                     })}
                 </tfoot>
@@ -297,10 +298,32 @@ fn Turnstile(ledger: BlockLedger, unit: &'static str) -> impl IntoView {
     .into_any()
 }
 
+/// The turnstile's scale, in zatoshis: its longest bar either side of the axis. Into a pool
+/// the coinbase's bar comes first and the users' adds to it; out of a pool the users' bar
+/// stands alone. The lockbox row draws its change in place of the users' flow.
+fn turnstile_scale(deltas: &PerPool<i64>, coinbase: &PerPool<u64>, users: &PerPool<i64>) -> u64 {
+    Pool::ALL
+        .into_iter()
+        .map(|pool| {
+            let moved = if pool == Pool::Lockbox {
+                deltas.get(pool)
+            } else {
+                users.get(pool)
+            };
+            let into = coinbase
+                .get(pool)
+                .saturating_add(u64::try_from(moved).unwrap_or(0));
+            let out = if moved < 0 { moved.unsigned_abs() } else { 0 };
+            into.max(out)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// The reward split (V3): one bar of the miner's part, the streams, the fees the miner kept and
 /// the burned fees, with the amounts and payout addresses.
 #[component]
-fn RewardBar(reward: RewardSplit, unit: &'static str) -> impl IntoView {
+fn RewardBar(reward: RewardSplit, unit: Unit) -> impl IntoView {
     let mut parts: Vec<(String, u64, &'static str, Option<String>)> =
         vec![("Miner".to_owned(), reward.miner, "ex-fill-miner", None)];
     for stream in &reward.streams {
@@ -328,7 +351,7 @@ fn RewardBar(reward: RewardSplit, unit: &'static str) -> impl IntoView {
         text::amount(reward.subsidy as i64, unit),
         parts
             .iter()
-            .map(|(name, zat, _, _)| format!("{name} {}", text::coins(*zat as i64)))
+            .map(|(name, zat, _, _)| format!("{name} {}", unit.number(*zat as i64)))
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -587,5 +610,29 @@ fn Future(future: FutureBlock, nav: NodeExplorer) -> impl IntoView {
             <p class="muted">"The page becomes the block once your node has it."</p>
             <RouteLink nav route=previous>"Go to the tip"</RouteLink>
         </section>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use launcher_types::explorer::PerPool;
+
+    use super::turnstile_scale;
+
+    #[test]
+    fn the_turnstile_scale_holds_every_bar() {
+        // Orchard: the coinbase pays 10 in and users take 15 out; Sapling: 3 in from the
+        // coinbase and 4 more from users; the lockbox gains 2.
+        let coinbase = PerPool([0, 0, 3, 10, 0, 0]);
+        let users = PerPool([0, 0, 4, -15, 0, 0]);
+        let deltas = PerPool([0, 0, 7, -5, 2, 0]);
+        assert_eq!(turnstile_scale(&deltas, &coinbase, &users), 15);
+        let users = PerPool([0, 0, 4, -1, 0, 0]);
+        let deltas = PerPool([0, 0, 7, 9, 2, 0]);
+        assert_eq!(turnstile_scale(&deltas, &coinbase, &users), 10);
+        let users = PerPool([0, 0, 9, -1, 0, 0]);
+        assert_eq!(turnstile_scale(&deltas, &coinbase, &users), 12);
+        let quiet = PerPool([0; 6]);
+        assert_eq!(turnstile_scale(&quiet, &PerPool([0; 6]), &quiet), 0);
     }
 }

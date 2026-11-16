@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// True on macOS, where the tab shortcuts use the Command key.
-fn is_mac() -> bool {
+pub(crate) fn is_mac() -> bool {
     web_sys::window()
         .and_then(|window| window.navigator().platform().ok())
         .is_some_and(|platform| platform.contains("Mac"))

@@ -11,7 +11,9 @@ use launcher_types::{
     },
 };
 
-use crate::format::{bytes, thousands};
+use std::fmt;
+
+use crate::format::{bytes, datetime_short, local_datetime_short, thousands};
 
 /// Blocks this deep are final in Zebra.
 pub const FINAL_DEPTH: u32 = 1_000;
@@ -39,15 +41,50 @@ pub fn coins(zat: i64) -> String {
     }
 }
 
-/// [`coins`] with the unit: `1.5625 ZEC`.
-pub fn amount(zat: i64, unit: &str) -> String {
-    format!("{} {unit}", coins(zat))
+/// How amounts read: in the network's coin (ZEC, or TAZ on Testnet), or in zatoshis, the
+/// chain's own whole unit. The source line's toggle picks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unit {
+    coin: &'static str,
+    zat: bool,
 }
 
-/// A large amount rounded to two decimals from 1,000 coins up, exact below: pool balances and
-/// the supply.
-pub fn amount_rounded(zat: u64, unit: &str) -> String {
-    if zat < 100_000_000_000 {
+impl Unit {
+    /// `network`'s coin, or zatoshis.
+    pub fn new(network: Network, zat: bool) -> Self {
+        Unit {
+            coin: unit(network),
+            zat,
+        }
+    }
+
+    /// The number alone: `1.5625`, or `156,250,000` in zatoshis.
+    pub fn number(self, zat: i64) -> String {
+        if self.zat {
+            let sign = if zat < 0 { "-" } else { "" };
+            format!("{sign}{}", thousands(zat.unsigned_abs()))
+        } else {
+            coins(zat)
+        }
+    }
+}
+
+/// The unit's name: `ZEC`, `TAZ` or `zat`.
+impl fmt::Display for Unit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.zat { "zat" } else { self.coin })
+    }
+}
+
+/// An exact amount with its unit: `1.5625 ZEC`, `156,250,000 zat`.
+pub fn amount(zat: i64, unit: Unit) -> String {
+    format!("{} {unit}", unit.number(zat))
+}
+
+/// A large amount rounded to two decimals from 1,000 coins up, exact below and in zatoshis:
+/// pool balances and the supply.
+pub fn amount_rounded(zat: u64, unit: Unit) -> String {
+    if zat < 100_000_000_000 || unit.zat {
         return amount(i64::try_from(zat).unwrap_or(i64::MAX), unit);
     }
     let hundredths = (zat + 500_000) / 1_000_000;
@@ -60,7 +97,7 @@ pub fn amount_rounded(zat: u64, unit: &str) -> String {
 
 /// What a transaction or a block did to one pool, as a movement: `1.2 ZEC entered the
 /// Ironwood pool`, `0.5 ZEC left the Orchard pool`.
-pub fn movement(pool: Pool, into: i64, unit: &str) -> String {
+pub fn movement(pool: Pool, into: i64, unit: Unit) -> String {
     match into {
         0 => format!("No change in the {} pool", pool.label()),
         into if into > 0 => format!("{} entered the {} pool", amount(into, unit), pool.label()),
@@ -74,7 +111,7 @@ pub fn net_shielding(users: &PerPool<i64>) -> i64 {
 }
 
 /// The net shielding as words: `13.4 ZEC into shielded pools`.
-pub fn shielding_text(net: i64, unit: &str) -> String {
+pub fn shielding_text(net: i64, unit: Unit) -> String {
     match net {
         0 => "nothing in or out of shielded pools".to_owned(),
         net if net > 0 => format!("{} into shielded pools", amount(net, unit)),
@@ -93,7 +130,7 @@ pub fn notes_text(notes: Option<[u32; 3]>) -> Option<String> {
 
 /// A block in one sentence: `37 transactions · 212 note commitments · users moved 13.4 ZEC
 /// into shielded pools · fees 0.0021 ZEC (0.00126 burned)`.
-pub fn block_sentence(summary: &BlockSummary, unit: &str) -> String {
+pub fn block_sentence(summary: &BlockSummary, unit: Unit) -> String {
     let ledger = &summary.ledger;
     let mut parts = vec![match summary.tx_count {
         1 => "1 transaction".to_owned(),
@@ -110,7 +147,7 @@ pub fn block_sentence(summary: &BlockSummary, unit: &str) -> String {
         (Some(fees), Some(burned)) => parts.push(format!(
             "fees {} ({} burned)",
             amount(fees as i64, unit),
-            coins(burned as i64)
+            unit.number(burned as i64)
         )),
         (Some(fees), None) => parts.push(format!("fees {}", amount(fees as i64, unit))),
         (None, _) => parts.push("fees unknown".to_owned()),
@@ -147,7 +184,7 @@ pub fn budget_fraction(budget: &Budget) -> Option<f64> {
 }
 
 /// The era's check as a caption.
-pub fn check_text(check: &LedgerCheck, unit: &str) -> String {
+pub fn check_text(check: &LedgerCheck, unit: Unit) -> String {
     match check {
         LedgerCheck::Balanced => "Pool changes, the subsidy and the fees add up ✓".to_owned(),
         LedgerCheck::Unclaimed { zat } => format!(
@@ -186,7 +223,7 @@ pub fn kind_label(kind: &TxKind) -> String {
 }
 
 /// A transaction in a sentence, from its public parts only.
-pub fn tx_sentence(page: &TxPage, unit: &str) -> String {
+pub fn tx_sentence(page: &TxPage, unit: Unit) -> String {
     let counts: Vec<String> = page
         .shielded
         .iter()
@@ -213,8 +250,7 @@ pub fn tx_sentence(page: &TxPage, unit: &str) -> String {
                 .to_owned()
         }
         TxKind::Coinbase { shielded_to } => format!(
-            "The block's coinbase, paying into {}; shielded coinbase amounts are public by \
-             consensus.",
+            "The block's coinbase, paying into {}.",
             pools_list(shielded_to)
         ),
         TxKind::Transparent => "Moved value between transparent addresses.".to_owned(),
@@ -249,8 +285,9 @@ pub fn tx_sentence(page: &TxPage, unit: &str) -> String {
     let mut sentence = what;
     if !counts.is_empty() {
         sentence.push_str(&format!(
-            " {}; amounts per note hidden.",
-            capitalise(&counts.join(" and "))
+            " {}; {}.",
+            capitalise(&counts.join(" and ")),
+            note_amounts(&page.kind)
         ));
     }
     match page.fee {
@@ -261,6 +298,18 @@ pub fn tx_sentence(page: &TxPage, unit: &str) -> String {
         Some(Shown::Unknown { .. } | Shown::Hidden) | None => {}
     }
     sentence
+}
+
+/// What the page says of each shielded note's amount: hidden, except in a coinbase, whose
+/// shielded outputs anyone can decrypt (consensus makes them use the all-zero outgoing viewing
+/// key), though the Explorer does not.
+pub fn note_amounts(kind: &TxKind) -> &'static str {
+    match kind {
+        TxKind::Coinbase { .. } => {
+            "amounts per note are public by consensus, but the Explorer does not decrypt notes"
+        }
+        _ => "amounts per note hidden",
+    }
 }
 
 fn plural(count: u32) -> &'static str {
@@ -384,6 +433,72 @@ pub fn not_running_text(phase: &Phase) -> Option<&'static str> {
     })
 }
 
+/// How times read: in the local zone, in UTC, or as Unix seconds. The source line's toggle
+/// picks it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TimeFormat {
+    #[default]
+    Local,
+    Utc,
+    Unix,
+}
+
+impl TimeFormat {
+    pub const ALL: [TimeFormat; 3] = [TimeFormat::Local, TimeFormat::Utc, TimeFormat::Unix];
+
+    /// The toggle's label.
+    pub fn label(self) -> &'static str {
+        match self {
+            TimeFormat::Local => "Local",
+            TimeFormat::Utc => "UTC",
+            TimeFormat::Unix => "Unix",
+        }
+    }
+
+    /// The name it is stored under.
+    pub fn id(self) -> &'static str {
+        match self {
+            TimeFormat::Local => "local",
+            TimeFormat::Utc => "utc",
+            TimeFormat::Unix => "unix",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<TimeFormat> {
+        TimeFormat::ALL.into_iter().find(|format| format.id() == id)
+    }
+
+    /// The format `by` places on in [`TimeFormat::ALL`], wrapping around: the toggle's arrow
+    /// keys.
+    pub fn step(self, by: i32) -> TimeFormat {
+        let index = TimeFormat::ALL
+            .iter()
+            .position(|format| *format == self)
+            .unwrap_or(0) as i32;
+        let len = TimeFormat::ALL.len() as i32;
+        TimeFormat::ALL[(index + by).rem_euclid(len) as usize]
+    }
+}
+
+/// A time `secs` after the Unix epoch, in `format`: `23 Oct, 21:13`, `23 Oct, 21:13 UTC`,
+/// `1792786380`.
+pub fn time_text(secs: u64, format: TimeFormat) -> String {
+    let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    match format {
+        TimeFormat::Local => local_datetime_short(time),
+        TimeFormat::Utc => format!("{} UTC", datetime_short(time, 0)),
+        TimeFormat::Unix => secs.to_string(),
+    }
+}
+
+/// The banner's words while zebrad still runs on `running`, though its node is now on `ours`.
+pub fn other_network_text(running: Network, ours: Network) -> String {
+    format!(
+        "zebrad still runs on {running}, and moves to {ours} at its next start. The Explorer \
+         reads nothing until then; restart the node to explore {ours}."
+    )
+}
+
 /// The hint under the search box, as the query is typed.
 pub fn hint(classified: &Classified, tip: Option<u32>, network: Network) -> String {
     match classified {
@@ -398,7 +513,19 @@ pub fn hint(classified: &Classified, tip: Option<u32>, network: Network) -> Stri
             None => "Height".to_owned(),
         },
         Classified::BelowTip(0) => "The latest block".to_owned(),
-        Classified::BelowTip(back) => format!("{back} blocks below the tip"),
+        Classified::BelowTip(back) => {
+            let blocks = match back {
+                1 => "1 block".to_owned(),
+                n => format!("{} blocks", thousands(u64::from(*n))),
+            };
+            match tip.and_then(|tip| tip.checked_sub(*back)) {
+                Some(height) => format!(
+                    "{blocks} below the tip · block {}",
+                    thousands(u64::from(height))
+                ),
+                None => format!("{blocks} below the tip"),
+            }
+        }
         Classified::Hash(_) => "A block hash or a transaction id".to_owned(),
         Classified::Outpoint(_) => "A transaction output".to_owned(),
         Classified::Route(_) => "A page of the Explorer".to_owned(),
@@ -455,9 +582,19 @@ pub fn not_found_text(hint: &NotFoundHint) -> String {
 
 #[cfg(test)]
 mod tests {
+    use explorer_model::classify::classify_query;
     use launcher_types::explorer::{BlockLedger, Hash32, PoolPart, TxStatus};
 
     use super::*;
+
+    const ZEC: Unit = Unit {
+        coin: "ZEC",
+        zat: false,
+    };
+    const TAZ: Unit = Unit {
+        coin: "TAZ",
+        zat: false,
+    };
 
     #[test]
     fn amounts_are_exact_and_say_their_unit() {
@@ -467,28 +604,53 @@ mod tests {
         assert_eq!(coins(-50_000_000), "-0.5");
         assert_eq!(coins(0), "0");
         assert_eq!(coins(1_465_499_576_514_816), "14,654,995.76514816");
-        assert_eq!(amount(1, "TAZ"), "0.00000001 TAZ");
+        assert_eq!(amount(1, TAZ), "0.00000001 TAZ");
         assert_eq!(unit(Network::Testnet), "TAZ");
         assert_eq!(unit(Network::Mainnet), "ZEC");
         assert_eq!(
-            amount_rounded(1_465_499_576_514_816, "ZEC"),
+            amount_rounded(1_465_499_576_514_816, ZEC),
             "14,654,995.77 ZEC"
         );
-        assert_eq!(amount_rounded(12_345_678, "ZEC"), "0.12345678 ZEC");
+        assert_eq!(amount_rounded(12_345_678, ZEC), "0.12345678 ZEC");
+    }
+
+    #[test]
+    fn amounts_in_zatoshis_and_times_in_each_format() {
+        let zat = Unit::new(Network::Testnet, true);
+        assert_eq!(zat.to_string(), "zat");
+        assert_eq!(amount(156_250_000, zat), "156,250,000 zat");
+        assert_eq!(zat.number(-1_000), "-1,000");
+        assert_eq!(
+            amount_rounded(1_465_499_576_514_816, zat),
+            "1,465,499,576,514,816 zat",
+            "zatoshis are never rounded"
+        );
+        assert_eq!(Unit::new(Network::Testnet, false).to_string(), "TAZ");
+        // 2026-10-23 21:13 UTC.
+        let secs = 1_792_789_980;
+        assert_eq!(time_text(secs, TimeFormat::Utc), "23 Oct, 21:13 UTC");
+        assert_eq!(time_text(secs, TimeFormat::Unix), "1792789980");
+        for format in TimeFormat::ALL {
+            assert_eq!(TimeFormat::from_id(format.id()), Some(format));
+        }
+        assert_eq!(TimeFormat::from_id("julian"), None);
+        assert_eq!(TimeFormat::Local.step(1), TimeFormat::Utc);
+        assert_eq!(TimeFormat::Unix.step(1), TimeFormat::Local, "wraps around");
+        assert_eq!(TimeFormat::Local.step(-1), TimeFormat::Unix);
     }
 
     #[test]
     fn movements_read_as_value_entering_or_leaving() {
         assert_eq!(
-            movement(Pool::Ironwood, 120_000_000, "ZEC"),
+            movement(Pool::Ironwood, 120_000_000, ZEC),
             "1.2 ZEC entered the Ironwood pool"
         );
         assert_eq!(
-            movement(Pool::Orchard, -50_000_000, "ZEC"),
+            movement(Pool::Orchard, -50_000_000, ZEC),
             "0.5 ZEC left the Orchard pool"
         );
         assert_eq!(
-            movement(Pool::Sapling, 0, "ZEC"),
+            movement(Pool::Sapling, 0, ZEC),
             "No change in the Sapling pool"
         );
     }
@@ -526,13 +688,13 @@ mod tests {
             Some(126_000),
         );
         assert_eq!(
-            block_sentence(&block, "ZEC"),
+            block_sentence(&block, ZEC),
             "37 transactions · 212 note commitments · users moved 13.4 ZEC into shielded pools · \
              fees 0.0021 ZEC (0.00126 burned)"
         );
         let unknown = summary(None, None, None);
         assert_eq!(
-            block_sentence(&unknown, "TAZ"),
+            block_sentence(&unknown, TAZ),
             "37 transactions · 212 note commitments · fees unknown"
         );
         assert_eq!(budget_text(&block.ledger.budget), "≥ 212 of 330");
@@ -583,7 +745,7 @@ mod tests {
             fee: Some(Shown::Public { zat: 4_000 }),
         };
         assert_eq!(
-            tx_sentence(&page, "ZEC"),
+            tx_sentence(&page, ZEC),
             "Moved 100 ZEC from Orchard to Ironwood. 2 Orchard actions and 2 Ironwood actions; \
              amounts per note hidden. Fee 0.00004 ZEC."
         );
@@ -598,9 +760,32 @@ mod tests {
             },
             ..page
         };
-        assert!(tx_sentence(&unknown_fee, "ZEC").starts_with(
+        assert!(tx_sentence(&unknown_fee, ZEC).starts_with(
             "Moved transparent value into Sapling and Orchard, with transparent change."
         ));
+        // A coinbase's shielded outputs are public by consensus: never "hidden".
+        let coinbase = TxPage {
+            kind: TxKind::Coinbase {
+                shielded_to: vec![Pool::Sapling],
+            },
+            shielded: vec![PoolPart {
+                pool: Pool::Sapling,
+                spends: 0,
+                outputs: 2,
+                actions: 0,
+                joinsplits: 0,
+                net_out: -250_000_000,
+            }],
+            fee: None,
+            ..unknown_fee
+        };
+        let sentence = tx_sentence(&coinbase, ZEC);
+        assert_eq!(
+            sentence,
+            "The block's coinbase, paying into Sapling. 0 Sapling spends and 2 outputs; amounts \
+             per note are public by consensus, but the Explorer does not decrypt notes."
+        );
+        assert!(!sentence.contains("hidden"));
     }
 
     #[test]
@@ -662,6 +847,15 @@ mod tests {
     }
 
     #[test]
+    fn a_zebrad_on_the_old_network_is_named() {
+        assert_eq!(
+            other_network_text(Network::Mainnet, Network::Testnet),
+            "zebrad still runs on Mainnet, and moves to Testnet at its next start. The Explorer \
+             reads nothing until then; restart the node to explore Testnet."
+        );
+    }
+
+    #[test]
     fn the_banner_follows_the_phase() {
         assert_eq!(not_running_text(&Phase::Running), None);
         assert!(
@@ -696,6 +890,18 @@ mod tests {
                 net
             ),
             "A transparent address of the other network; this node is on Mainnet"
+        );
+        // `tip-1` and `-2` both name the block under the tip.
+        for query in ["tip-1", "-2"] {
+            assert_eq!(
+                hint(&classify_query(query, net), Some(3_601_234), net),
+                "1 block below the tip · block 3,601,233",
+                "{query}"
+            );
+        }
+        assert_eq!(
+            hint(&classify_query("tip-1500", net), None, net),
+            "1,500 blocks below the tip"
         );
         assert!(hint(&Classified::Secret(SecretKind::ViewingKey), None, net).contains("never"));
         assert!(refusal(SecretKind::RecoveryPhrase).contains("not saved"));
