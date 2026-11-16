@@ -1082,8 +1082,9 @@ once the wallet runs confirm it. With zingod chosen, the consent list reads:
   port without a password. Web pages in a browser can't call it".
 
 The consent records the backend (`Consent.backend`), so choosing the other one later asks again;
-"Server software…" in the panel's ⋯ menu does that. `CONSENT_VERSION` doesn't change, so no open
-service pauses for this release.
+a "Server software…" button beside "Turn off and forget…" does that. The panel has no menu as
+built (`ui/src/components/public_services.rs:879` is a plain button), so Z3 adds none.
+`CONSENT_VERSION` doesn't change, so no open service pauses for this release.
 
 Step 2 with zingod:
 
@@ -2482,7 +2483,7 @@ Dashboard   Logs   Configure   Public   Node settings
  └──────────────────────────────┘ └────────────────────────────┘ └──────────────────────────┘
  Zebra at block 3,544,812 · light wallet endpoint 127.0.0.1:9067 · front door running
  Share   Zodl  zec-alice.duckdns.org:443 [Copy] [QR]   Zingo, Zkool  https://zec-alice.duckdns.org:443 [Copy]
- Checks: 17 passed, 1 warning ▸     What is public ▸     [Limits…]  [Test now]  [⋯ Turn off and forget]
+ Checks: 17 passed, 1 warning ▸     What is public ▸     [Limits…]  [Test now]  [Turn off and forget…]
 ```
 
 Other first lines: "Catching up · wallets are told to try again" (with the lag); "Serving · not
