@@ -69,6 +69,17 @@ pub fn pause(spec: &PublicServiceSpec, facts: &Facts) -> Option<(PauseReason, Re
     None
 }
 
+/// Whether the name may be pointed at the network `net` describes: no VPN carries the default
+/// route, and for an open service this computer still has the LAN address the forward targets.
+/// A DNS update from a foreign network would publish where the user is.
+pub fn may_point_name_here(
+    spec: &PublicServiceSpec,
+    net: &launcher_types::public::NetFacts,
+) -> bool {
+    let lan_kept = !spec.opened || spec.lan_addr.is_none() || net.lan_addr == spec.lan_addr;
+    net.vpn.is_none() && lan_kept
+}
+
 /// Why an open service tells wallets to try again, if it must.
 pub fn degraded(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReason> {
     let expired = facts
@@ -309,6 +320,35 @@ mod tests {
             pause(&spec, &held),
             Some((PauseReason::NotResumed, Resume::NeedsYou))
         );
+    }
+
+    #[test]
+    fn the_name_points_here_only_from_the_home_network_without_a_vpn() {
+        let spec = open_spec();
+        let home = serving_facts().net.unwrap();
+        assert!(may_point_name_here(&spec, &home));
+        let vpn = NetFacts {
+            vpn: Some("wg0".into()),
+            ..home.clone()
+        };
+        assert!(!may_point_name_here(&spec, &vpn));
+        let cafe = NetFacts {
+            lan_addr: Some("10.0.4.17".parse().unwrap()),
+            ..home.clone()
+        };
+        assert!(!may_point_name_here(&spec, &cafe));
+        let unknown = NetFacts {
+            lan_addr: None,
+            ..home.clone()
+        };
+        assert!(!may_point_name_here(&spec, &unknown));
+        // During the setup the LAN address is the network step's check.
+        let setting_up = PublicServiceSpec {
+            opened: false,
+            ..spec
+        };
+        assert!(may_point_name_here(&setting_up, &cafe));
+        assert!(!may_point_name_here(&setting_up, &vpn));
     }
 
     #[test]

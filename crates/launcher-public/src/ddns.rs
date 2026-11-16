@@ -2,7 +2,8 @@
 //! the user's token, or only checks a name kept by hand. It compares every 5 minutes and when
 //! the router's address changes, updates only on a change, backs off after errors and stops
 //! asking after a refusal. Without the router's address, DuckDNS takes the address it sees, so
-//! that update goes again every 5 minutes; DuckDNS answers `NOCHANGE` when nothing changed. It resolves the name through the system resolver every 30 s while
+//! that update goes again every 5 minutes; DuckDNS answers `NOCHANGE` when nothing changed. No
+//! update goes out until the service says this network may be exposed ([`Wanted::update`]). It resolves the name through the system resolver every 30 s while
 //! the name does not point here, and every 5 minutes after.
 //!
 //! No request URL is formatted into an error, a log line or the status: the URL holds the
@@ -131,6 +132,16 @@ pub fn parse_duckdns(body: &str) -> Result<Updated, DdnsProblem> {
     Ok(Updated { address, changed })
 }
 
+/// What the name should point at, as the service decides.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Wanted {
+    /// Updates may go out: a network check made since the service last started running found
+    /// this network fit to expose (no VPN, the LAN address the forward targets).
+    pub update: bool,
+    /// The router's public address, when known; DuckDNS takes the address it sees without.
+    pub address: Option<IpAddr>,
+}
+
 /// What the actor needs.
 pub struct DdnsConfig {
     pub name: PublicHostname,
@@ -138,8 +149,7 @@ pub struct DdnsConfig {
     pub api: String,
     pub fetch: Arc<dyn Fetch>,
     pub secrets: Arc<dyn SecretStore>,
-    /// The address the name must point at: the router's public address, when known.
-    pub wanted: watch::Receiver<Option<IpAddr>>,
+    pub wanted: watch::Receiver<Wanted>,
 }
 
 /// What the actor may be asked.
@@ -198,7 +208,10 @@ async fn run(
     let mut retry_at: Option<tokio::time::Instant> = None;
     let mut refused = false;
     loop {
-        let wanted = *config.wanted.borrow_and_update();
+        let Wanted {
+            update,
+            address: wanted,
+        } = *config.wanted.borrow_and_update();
         // The address update, for DuckDNS.
         if let (DnsProvider::DuckDns, Some(subdomain)) = (config.provider, &subdomain) {
             let token = duckdns_token(config.secrets.as_ref(), &config.name).await;
@@ -214,7 +227,7 @@ async fn run(
                 }
             };
             match token {
-                Ok(token) if !refused && due && send => {
+                Ok(token) if update && !refused && due && send => {
                     let v4 = match wanted {
                         Some(IpAddr::V4(v4)) => Some(v4),
                         _ => None,
@@ -346,11 +359,11 @@ mod tests {
     }
 
     async fn taking(
-        wanted: Option<IpAddr>,
+        wanted: Wanted,
     ) -> (
         DdnsHandle,
         mpsc::UnboundedReceiver<String>,
-        watch::Sender<Option<IpAddr>>,
+        watch::Sender<Wanted>,
         tempfile::TempDir,
     ) {
         let dir = tempfile::tempdir().unwrap();
@@ -377,7 +390,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn without_the_routers_address_duckdns_hears_again_every_five_minutes() {
-        let (_handle, mut urls, _wanted, _dir) = taking(None).await;
+        let (_handle, mut urls, _wanted, _dir) = taking(Wanted {
+            update: true,
+            address: None,
+        })
+        .await;
         let url = urls.recv().await.unwrap();
         assert!(url.ends_with("&ip=&verbose=true"), "{url}");
         let first = tokio::time::Instant::now();
@@ -388,15 +405,36 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_routers_address_goes_to_duckdns_once_until_it_changes() {
-        let (_handle, mut urls, wanted, _dir) = taking(Some("203.0.113.10".parse().unwrap())).await;
+        let (_handle, mut urls, wanted, _dir) = taking(Wanted {
+            update: true,
+            address: Some("203.0.113.10".parse().unwrap()),
+        })
+        .await;
         assert!(urls.recv().await.unwrap().contains("ip=203.0.113.10"));
         let hour = std::time::Duration::from_secs(3600);
         assert!(
             tokio::time::timeout(hour, urls.recv()).await.is_err(),
             "nothing changed"
         );
-        wanted.send_replace(Some("203.0.113.11".parse().unwrap()));
+        wanted.send_replace(Wanted {
+            update: true,
+            address: Some("203.0.113.11".parse().unwrap()),
+        });
         assert!(urls.recv().await.unwrap().contains("ip=203.0.113.11"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nothing_goes_to_duckdns_until_the_network_may_be_exposed() {
+        let (handle, mut urls, wanted, _dir) = taking(Wanted::default()).await;
+        let hour = std::time::Duration::from_secs(3600);
+        assert!(tokio::time::timeout(hour, urls.recv()).await.is_err());
+        // The name is still resolved meanwhile.
+        assert!(handle.status.borrow().checked_at.is_some());
+        wanted.send_replace(Wanted {
+            update: true,
+            address: None,
+        });
+        assert!(urls.recv().await.unwrap().ends_with("&ip=&verbose=true"));
     }
 
     #[tokio::test]
@@ -410,7 +448,10 @@ mod tests {
             .await
             .unwrap();
         let (urls_tx, mut urls) = mpsc::unbounded_channel();
-        let (_wanted_tx, wanted) = watch::channel(Some("203.0.113.10".parse().unwrap()));
+        let (_wanted_tx, wanted) = watch::channel(Wanted {
+            update: true,
+            address: Some("203.0.113.10".parse().unwrap()),
+        });
         let mut handle = DdnsHandle::spawn(DdnsConfig {
             name,
             provider: DnsProvider::DuckDns,

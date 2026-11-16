@@ -36,7 +36,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::{
     acme::{AcmeCmd, AcmeConfig, AcmeHandle, LETS_ENCRYPT_PRODUCTION, LETS_ENCRYPT_STAGING},
     awake::KeepAwake,
-    ddns::{DUCKDNS_API, DdnsCmd, DdnsConfig, DdnsHandle, Fetch},
+    ddns::{DUCKDNS_API, DdnsCmd, DdnsConfig, DdnsHandle, Fetch, Wanted},
     gateway::FrontDoor,
     light::LightMonitor,
     netcheck,
@@ -159,7 +159,11 @@ enum Msg {
 enum Internal {
     /// A child's watch changed.
     Poke,
-    Net(NetFacts),
+    /// A network check's facts, from the run of the service numbered `epoch`.
+    Net {
+        net: NetFacts,
+        epoch: u64,
+    },
     LocalTest(Checked<Result<LightdInfo, LocalTestProblem>>),
     Hairpin(Checked<bool>),
     Applied {
@@ -311,6 +315,12 @@ struct Actor {
     net: Option<NetFacts>,
     net_due: Option<tokio::time::Instant>,
     net_running: bool,
+    /// Counts the times the service stopped running, so a network check from before is told
+    /// apart.
+    net_epoch: u64,
+    /// A network check made since the service last started running has come back.
+    net_fresh: bool,
+    was_running: bool,
     firewall: Option<FirewallInfo>,
     port_free: Option<bool>,
     local_test: Option<Checked<Result<LightdInfo, LocalTestProblem>>>,
@@ -330,7 +340,7 @@ struct Actor {
 
     light: Option<Child<LightMonitor>>,
     ddns: Option<Child<DdnsHandle>>,
-    ddns_wanted: watch::Sender<Option<IpAddr>>,
+    ddns_wanted: watch::Sender<Wanted>,
     acme: Option<Child<AcmeHandle>>,
     door: Option<Child<FrontDoor>>,
     challenge: watch::Sender<Option<Arc<launcher_gateway::Challenge>>>,
@@ -433,6 +443,9 @@ impl Actor {
             net: None,
             net_due: None,
             net_running: false,
+            net_epoch: 0,
+            net_fresh: false,
+            was_running: false,
             firewall: None,
             port_free: None,
             local_test: None,
@@ -449,7 +462,7 @@ impl Actor {
             upload: Upload::default(),
             light: None,
             ddns: None,
-            ddns_wanted: watch::channel(None).0,
+            ddns_wanted: watch::channel(Wanted::default()).0,
             acme: None,
             door: None,
             challenge: watch::channel(None).0,
@@ -685,16 +698,10 @@ impl Actor {
     fn internal(&mut self, event: Internal) {
         match event {
             Internal::Poke => {}
-            Internal::Net(net) => {
+            Internal::Net { net, epoch } => {
                 self.net_running = false;
-                self.ddns_wanted.send_if_modified(|wanted| {
-                    let next = (net.wan == WanKind::Public)
-                        .then_some(net.wan_addr)
-                        .flatten();
-                    let changed = *wanted != next;
-                    *wanted = next;
-                    changed
-                });
+                // The name's updates wait for the next look, after the rules saw these facts.
+                self.net_fresh |= epoch == self.net_epoch;
                 self.net = Some(net);
             }
             Internal::LocalTest(result) => {
@@ -824,6 +831,16 @@ impl Actor {
             state,
             PublicState::Paused { .. } | PublicState::NotAvailable { .. } | PublicState::Off
         );
+        // A network check from before the service stopped says nothing about where this
+        // computer is now.
+        if !running {
+            if self.was_running {
+                self.net_epoch += 1;
+                self.net_due = None;
+            }
+            self.net_fresh = false;
+        }
+        self.was_running = running;
 
         // The light monitor follows zebrad's endpoint.
         if self
@@ -859,7 +876,24 @@ impl Actor {
             self.firewall = Some(firewall_info(tool, spec.internal_port));
         }
 
-        // The name.
+        // The name: no update until this run's network check found the network fit to expose.
+        let wanted = Wanted {
+            update: self.net_fresh
+                && self
+                    .net
+                    .as_ref()
+                    .is_some_and(|net| rules::may_point_name_here(spec, net)),
+            address: self
+                .net
+                .as_ref()
+                .filter(|net| net.wan == WanKind::Public)
+                .and_then(|net| net.wan_addr),
+        };
+        self.ddns_wanted.send_if_modified(|current| {
+            let changed = *current != wanted;
+            *current = wanted;
+            changed
+        });
         match &spec.name {
             Some(name) if running => {
                 let key = format!("{name} {:?}", spec.provider);
@@ -1106,9 +1140,10 @@ impl Actor {
         self.net_running = true;
         self.net_due = Some(tokio::time::Instant::now() + NET_EVERY);
         let tx = self.internal_tx.clone();
+        let epoch = self.net_epoch;
         tokio::spawn(async move {
             let net = netcheck::check(SystemTime::now()).await;
-            let _ = tx.send(Internal::Net(net)).await;
+            let _ = tx.send(Internal::Net { net, epoch }).await;
         });
     }
 

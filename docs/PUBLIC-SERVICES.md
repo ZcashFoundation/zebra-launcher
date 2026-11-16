@@ -948,8 +948,11 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   the new value at the authoritative servers within 2 minutes; it backs off after errors and
   stops on "too many updates". Without the router's address (no NAT-PMP answer, carrier-grade
   NAT, a second router), DuckDNS takes the address it sees, which may change unseen, so that
-  update goes again every 5 minutes (DuckDNS answers `NOCHANGE`). A mismatch for 15 minutes,
-  against the router's address or else the one DuckDNS saw, pauses the service. After a change:
+  update goes again every 5 minutes (DuckDNS answers `NOCHANGE`). No update goes out until a
+  network check made since the service last started running finds no VPN on the default route
+  and, once open, the LAN address the forward targets: a laptop that starts Zeal or resumes on
+  a café's network never points the name there. A mismatch for 15 minutes, against the
+  router's address or else the one DuckDNS saw, pauses the service. After a change:
   "Address changed at 14:02. DNS updated; resolvers may use the old one for up to 5 minutes."
 - **Tokens** go to the OS keychain (`keyring` 4.2.0, service `org.zfnd.zeal`, account
   `dns:<provider>:<zone>`: a DuckDNS token covers every name on the user's DuckDNS account,
