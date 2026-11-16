@@ -88,11 +88,12 @@ pub struct MemberReading {
     pub descriptors: Option<u32>,
 }
 
-/// The fields the OS refused for at least one member of a reading.
+/// The fields not read for at least one member of a reading: refused by the OS, or for `cpu`,
+/// not read under Rosetta.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Denied {
-    /// CPU times cannot be read for any member: an x86-64 build under Rosetta, whose Mach
-    /// timebase is unchecked (docs/RESOURCES.md).
+    /// CPU times are not read for any member: an x86-64 build under Rosetta, whose Mach
+    /// timebase is unchecked (docs/RESOURCES.md). The OS refuses nothing there.
     pub cpu: bool,
     pub memory: bool,
     pub io: bool,
@@ -410,13 +411,21 @@ async fn sample_run(
     }
 }
 
-/// Logs each field the OS refused, once per sampler.
+/// Logs each field the OS refused, and CPU not read under Rosetta, once per sampler.
 fn log_denied(logged: &mut Denied, denied: Denied) {
+    if denied.cpu && !logged.cpu {
+        logged.cpu = true;
+        tracing::debug!("CPU is not read under Rosetta until its timebase is checked");
+    }
+    let platform = platform();
     for (now, before, field) in [
-        (denied.cpu, &mut logged.cpu, "CPU"),
         (denied.memory, &mut logged.memory, "memory"),
-        (denied.io, &mut logged.io, "disk I/O"),
-        (denied.descriptors, &mut logged.descriptors, "open files"),
+        (denied.io, &mut logged.io, platform.io_label()),
+        (
+            denied.descriptors,
+            &mut logged.descriptors,
+            platform.descriptors_label(),
+        ),
     ] {
         if now && !*before {
             *before = true;

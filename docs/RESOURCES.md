@@ -1505,7 +1505,9 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      pressure level, which the machine sampler now passes on.
    - Under Rosetta the reader reads no CPU times and sets `Denied::cpu`: the sample's
      `cpu_cores` is `None` and `cpu_secs` stays 0, so the CPU tile reads "not available", while
-     memory, I/O and the counts are read.
+     memory, I/O and the counts are read. The OS refuses nothing there, so the sampler's debug
+     line says CPU is not read under Rosetta; the fields the OS refused are named with the
+     platform's labels ("I/O" and "handles" on Windows).
    - macOS:
      - The walk down `proc_listchildpids` skips the children of a process that started
        before the process that listed it, since that link is to a reused pid.
