@@ -13,12 +13,25 @@ pub const AT_TIP_BLOCKS: u64 = 2;
 /// How long zebrad stays at the tip before the service may open.
 pub const TIP_SETTLED: Duration = Duration::from_secs(10 * 60);
 
+/// How long an open service's zebrad may stay a few blocks behind before wallets are told to
+/// try again. zebrad's estimate of the tip grows by one every 75 s after the tip block's
+/// time, so an ordinary gap between Mainnet blocks puts it 3 behind for a while.
+pub const BEHIND_GRACE: Duration = Duration::from_secs(10 * 60);
+
+/// zebrad this many blocks behind is behind at once.
+pub const FAR_BEHIND_BLOCKS: u64 = 10;
+
 /// Whether zebrad is at the tip.
 pub fn at_tip(height: Option<u64>, tip: Option<u64>) -> bool {
     match (height, tip) {
         (Some(height), Some(tip)) => tip.saturating_sub(height) <= AT_TIP_BLOCKS,
         _ => false,
     }
+}
+
+/// Whether zebrad is known to be behind: more than [`AT_TIP_BLOCKS`] below its estimate.
+pub fn behind(height: Option<u64>, tip: Option<u64>) -> bool {
+    matches!((height, tip), (Some(height), Some(tip)) if tip.saturating_sub(height) > AT_TIP_BLOCKS)
 }
 
 /// The start of an unbroken stretch of time while a condition holds: `since` while it keeps
@@ -76,6 +89,14 @@ mod tests {
         assert!(at_tip(Some(103), Some(102)));
         assert!(!at_tip(Some(100), Some(103)));
         assert!(!at_tip(None, Some(1)));
+    }
+
+    #[test]
+    fn behind_needs_both_heights() {
+        assert!(behind(Some(100), Some(103)));
+        assert!(!behind(Some(100), Some(102)));
+        assert!(!behind(None, Some(103)));
+        assert!(!behind(Some(100), None));
     }
 
     #[test]

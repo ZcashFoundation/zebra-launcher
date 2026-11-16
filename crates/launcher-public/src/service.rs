@@ -19,7 +19,7 @@ use launcher_core::settings::SettingsHandle;
 use launcher_herd::public::{
     self as rules, Checked, Facts, evidence,
     firewall::firewall_info,
-    light::{at_tip, pick_endpoint_port, track_since, wants_endpoint},
+    light::{at_tip, behind, pick_endpoint_port, track_since, wants_endpoint},
     names::{keychain_account, parse_name, plausible_duckdns_token},
 };
 use launcher_types::{
@@ -306,6 +306,7 @@ struct Actor {
     held: Option<launcher_types::public::PauseReason>,
     paused: Option<(String, SystemTime)>,
     at_tip_since: Option<SystemTime>,
+    behind_since: Option<SystemTime>,
     name_elsewhere_since: Option<SystemTime>,
     net: Option<NetFacts>,
     net_due: Option<tokio::time::Instant>,
@@ -392,6 +393,7 @@ impl Actor {
             held: held_at_launch.then_some(launcher_types::public::PauseReason::NotResumed),
             paused: None,
             at_tip_since: None,
+            behind_since: None,
             name_elsewhere_since: None,
             net: None,
             net_due: None,
@@ -503,6 +505,7 @@ impl Actor {
         facts.height = stats.as_ref().map(|stats| stats.height);
         facts.tip = stats.as_ref().map(|stats| stats.estimated_height);
         facts.at_tip_since = self.at_tip_since;
+        facts.behind_since = self.behind_since;
         facts.wallet = self
             .light
             .as_ref()
@@ -574,6 +577,8 @@ impl Actor {
         let mut facts = self.facts(&spec, now);
         self.at_tip_since = track_since(self.at_tip_since, at_tip(facts.height, facts.tip), now);
         facts.at_tip_since = self.at_tip_since;
+        self.behind_since = track_since(self.behind_since, behind(facts.height, facts.tip), now);
+        facts.behind_since = self.behind_since;
         let expected = facts
             .net
             .as_ref()
@@ -605,6 +610,7 @@ impl Actor {
         let facts = self.facts(&spec, now);
         let mut facts = facts;
         facts.at_tip_since = self.at_tip_since;
+        facts.behind_since = self.behind_since;
         facts.name_elsewhere_since = self.name_elsewhere_since;
         let status = rules::status(&spec, &facts, since);
         self.out.send_if_modified(|statuses| {

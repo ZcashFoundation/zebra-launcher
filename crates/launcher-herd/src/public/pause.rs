@@ -87,12 +87,24 @@ pub fn degraded(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReaso
     if facts.phase != Phase::Running || !endpoint_open {
         return Some(DegradedReason::BackingRestarting);
     }
-    if !light::at_tip(facts.height, facts.tip) {
-        let blocks = match (facts.height, facts.tip) {
-            (Some(height), Some(tip)) => tip.saturating_sub(height),
-            _ => 0,
-        };
-        return Some(DegradedReason::BackingBehind { blocks });
+    // A few blocks behind for a moment is an ordinary gap between blocks; an unknown height
+    // is behind.
+    let blocks = match (facts.height, facts.tip) {
+        (Some(height), Some(tip)) => Some(tip.saturating_sub(height)),
+        _ => None,
+    };
+    let behind_long = facts.behind_since.is_some_and(|since| {
+        facts.now.duration_since(since).unwrap_or_default() >= light::BEHIND_GRACE
+    });
+    match blocks {
+        None => return Some(DegradedReason::BackingBehind { blocks: 0 }),
+        Some(blocks)
+            if blocks > light::AT_TIP_BLOCKS
+                && (blocks >= light::FAR_BEHIND_BLOCKS || behind_long) =>
+        {
+            return Some(DegradedReason::BackingBehind { blocks });
+        }
+        Some(_) => {}
     }
     if facts
         .wallet
@@ -331,6 +343,36 @@ mod tests {
         assert_eq!(
             degraded(&spec, &behind),
             Some(DegradedReason::BackingBehind { blocks: 113 })
+        );
+        // zebrad's estimate runs ahead during an ordinary gap between blocks.
+        let mut gap = Facts {
+            height: Some(3_544_810),
+            behind_since: Some(at(NOW - 9 * 60)),
+            ..base.clone()
+        };
+        assert_eq!(degraded(&spec, &gap), None, "3 behind for 9 minutes");
+        gap.behind_since = Some(at(NOW - 10 * 60));
+        assert_eq!(
+            degraded(&spec, &gap),
+            Some(DegradedReason::BackingBehind { blocks: 3 })
+        );
+        let far = Facts {
+            height: Some(3_544_803),
+            behind_since: Some(at(NOW)),
+            ..base.clone()
+        };
+        assert_eq!(
+            degraded(&spec, &far),
+            Some(DegradedReason::BackingBehind { blocks: 10 }),
+            "10 behind at once"
+        );
+        let unknown = Facts {
+            height: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            degraded(&spec, &unknown),
+            Some(DegradedReason::BackingBehind { blocks: 0 })
         );
         let wrong = Facts {
             wallet: Some(Checked {

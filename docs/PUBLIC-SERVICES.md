@@ -1138,7 +1138,7 @@ Zeal shows each step before the system asks, and never elevates without a click.
 | Watch | Every | When it fails | Comes back |
 | --- | --- | --- | --- |
 | zebrad's branch id by `GetLightdInfo`, every 10 min (with Zaino also: within 2 blocks of its archive and not stuck, by `GetLatestBlock` every 10 s) | 10 min; 10 s with Zaino | `Degraded`: the front door says "unavailable" | by itself, after 5 min caught up |
-| zebrad (with Zaino, its archive) running and at the tip | on change | `Degraded` while it restarts or catches up; paused if stopped or halted at end of support | by itself |
+| zebrad (with Zaino, its archive) running and at the tip | on change | `Degraded` while it restarts or catches up: 10 or more blocks behind at once, more than 2 only after 10 min, since zebrad's estimate of the tip grows by one every 75 s after the tip block's time and an ordinary gap between blocks puts it 3 ahead; paused if stopped or halted at end of support | by itself, as soon as it is within 2 |
 | an upgrade the serving software doesn't know, at activation minus one | each block | paused (`BuildTooOld`): zeeder, and Zaino from PS5; on Mainnet zebrad halts at its end of support instead; on Testnet zebrad never halts (`zebrad/src/components/sync/end_of_support.rs:53-60`), so one that doesn't know the upgrade stays at the block before it, and the tip watch keeps the front door `Unavailable` until a Zeal update brings a newer zebrad | after a Zeal update |
 | the name equals the WAN address, at the authoritative servers | 5 min | paused after 15 min | by itself |
 | the LAN address unchanged | 5 min, at start | paused at once | when the forward or address is right again |
