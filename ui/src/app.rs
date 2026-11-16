@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use launcher_types::{
     ApplyOutcome, LogLine, MAX_NODES, MachineResources, Network, NodeId, NodeInfo, Settings, Theme,
-    UpdateHealthFailure, UpdateInfo, UpdateState,
+    UpdateHealthFailure, UpdateInfo, UpdateState, herd::HerdView,
 };
 use leptos::{ev, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
@@ -251,6 +251,8 @@ pub struct AppState {
     pub machine: RwSignal<Option<MachineResources>>,
     /// Opens the add-node dialog: the sidebar, the overview and Settings → Nodes.
     pub add_node: Callback<()>,
+    /// Each network's herd, as its latest `herd` event or the snapshot gave it.
+    pub herds: RwSignal<Vec<HerdView>>,
 }
 
 impl AppState {
@@ -317,6 +319,22 @@ impl AppState {
     /// The nodes on the network the shell shows ([`AppState::network`]), tracked.
     pub fn scoped_nodes(&self) -> Vec<NodeState> {
         self.nodes_on(self.network.get())
+    }
+
+    /// `network`'s herd, tracked: `None` until its view arrived.
+    pub fn herd_of(&self, network: Network) -> Option<HerdView> {
+        self.herds
+            .with(|views| views.iter().find(|view| view.network == network).cloned())
+    }
+
+    /// Keeps a network's newest herd.
+    fn record_herd(&self, view: HerdView) {
+        self.herds.update(|views| {
+            match views.iter_mut().find(|known| known.network == view.network) {
+                Some(known) => *known = view,
+                None => views.push(view),
+            }
+        });
     }
 
     /// [`AppState::node`] without tracking, for event handlers and the shell's own steps.
@@ -642,6 +660,7 @@ pub fn App() -> impl IntoView {
         log_filter_request: RwSignal::new(None),
         machine: RwSignal::new(None),
         add_node: open_add,
+        herds: RwSignal::new(Vec::new()),
     };
     provide_context(state);
     crate::public_state::PublicContext::provide();
@@ -787,6 +806,34 @@ pub fn App() -> impl IntoView {
         "Reading the update state",
         move |info| state.record_update(info),
     ));
+    // Each network's herd comes as an event of its own, plus a snapshot of both: the snapshot
+    // keeps only the networks no event has brought yet.
+    spawn_local(async move {
+        let seen = StoredValue::new(Vec::<Network>::new());
+        let result = api::on_herd(
+            move |view| {
+                seen.update_value(|seen| {
+                    if !seen.contains(&view.network) {
+                        seen.push(view.network);
+                    }
+                });
+                state.record_herd(view);
+            },
+            state.payload_error(),
+        )
+        .await;
+        state.report("Listening for the herd", result);
+        match api::get_herd().await {
+            Ok(views) => {
+                for view in views {
+                    if !seen.with_value(|seen| seen.contains(&view.network)) {
+                        state.record_herd(view);
+                    }
+                }
+            }
+            Err(error) => state.report("Reading the herd", Err(error)),
+        }
+    });
     spawn_local(async move {
         match api::get_settings().await {
             Ok(settings) => state.settings.set(Some(settings)),

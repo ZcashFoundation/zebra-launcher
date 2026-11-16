@@ -14,6 +14,9 @@
 //! | Zakura · Mainnet | running, catching up from a pruned snapshot |
 //! | Zaino · Mainnet | running, indexing the mock's Zebra · Mainnet |
 //! | zcashd · Mainnet | the compatibility build following Zebra · Mainnet, stopped two days ago |
+//!
+//! With `&agree=…` ([`super::agreement`]) Zebra · Mainnet 2 joins them (and for `channels`
+//! Zebra · Mainnet 3 on Beta), and the scenario places the Mainnet nodes' tips.
 
 use std::{
     cell::RefCell,
@@ -32,7 +35,11 @@ use launcher_types::{
 use leptos::prelude::*;
 
 use super::{
-    DEFAULT_DATA_DIR, FIRST_TIP, Flags, config::minimal_config, mock, nodes, resources::NodeSamples,
+    DEFAULT_DATA_DIR, FIRST_TIP, Flags,
+    agreement::{self, Agree},
+    config::minimal_config,
+    mock, nodes,
+    resources::NodeSamples,
 };
 use crate::{clock, format};
 
@@ -44,6 +51,10 @@ const STATS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Testnet's tip in the mock: past its NU7 activation at 4,465,026.
 const TESTNET_TIP: u64 = 4_471_230;
+
+/// Where a scenario of the herd's agreement starts its zebrad nodes: the main node's height
+/// with `?attip`.
+const AT_TIP: u64 = super::AT_TIP_HEIGHT;
 
 /// Where Zakura's pruned snapshot left it, and how fast it catches up.
 const ZAKURA_SNAPSHOT_HEIGHT: u64 = 3_052_000;
@@ -73,8 +84,9 @@ thread_local! {
 }
 
 fn herd_from_url() -> Vec<HerdNode> {
-    if Flags::from_url().herd {
-        herd()
+    let flags = Flags::from_url();
+    if flags.herd {
+        herd(flags.agree)
     } else {
         Vec::new()
     }
@@ -112,8 +124,9 @@ fn info(
     }
 }
 
-/// The five nodes and their starting states.
-fn herd() -> Vec<HerdNode> {
+/// The five nodes and their starting states, and the nodes a scenario of the herd's agreement
+/// adds.
+fn herd(agree: Option<Agree>) -> Vec<HerdNode> {
     let now = clock::now();
     let hours = |h: u64| now - Duration::from_secs(h * 3600);
     let testnet_zebrad = NodeInfo {
@@ -130,7 +143,7 @@ fn herd() -> Vec<HerdNode> {
             ],
         )
     };
-    let nodes = vec![
+    let mut nodes = vec![
         HerdNode::running(
             testnet_zebrad,
             TESTNET_TIP,
@@ -189,6 +202,56 @@ fn herd() -> Vec<HerdNode> {
             &[(PortRole::Rpc, 38232)],
         )),
     ];
+    if let Some(agree) = agree {
+        let second = NodeInfo {
+            name: "Zebra · Mainnet 2".into(),
+            ..info(
+                "zebrad-mainnet-2",
+                NodeKind::Zebrad,
+                Network::Mainnet,
+                None,
+                &[
+                    (PortRole::P2p, 38233),
+                    (PortRole::Rpc, 58232),
+                    (PortRole::Metrics, 10_003),
+                ],
+            )
+        };
+        let started = hours(5);
+        nodes.push(if agree == Agree::Restart {
+            HerdNode::new(
+                second,
+                AT_TIP,
+                Status {
+                    phase: Phase::Starting,
+                    pid: Some(4350),
+                    started_at: Some(now),
+                    ..Status::default()
+                },
+                4351,
+            )
+        } else {
+            HerdNode::running(second, AT_TIP, started, 4350)
+        });
+        if agree == Agree::Channels {
+            let third = NodeInfo {
+                name: "Zebra · Mainnet 3".into(),
+                program: NodeProgram::BundledBeta,
+                ..info(
+                    "zebrad-mainnet-3",
+                    NodeKind::Zebrad,
+                    Network::Mainnet,
+                    None,
+                    &[
+                        (PortRole::P2p, 58233),
+                        (PortRole::Rpc, 58234),
+                        (PortRole::Metrics, 10_004),
+                    ],
+                )
+            };
+            nodes.push(HerdNode::running(third, AT_TIP, started, 4360));
+        }
+    }
     for node in &nodes {
         node.clone().simulate();
     }
@@ -318,6 +381,8 @@ impl HerdNode {
         }
         let tip = self.tip();
         let height = match self.kind() {
+            // Where a scenario of the herd's agreement puts it.
+            _ if let Some(height) = agreement::scripted_height(&self.id()) => height,
             // Catching up from the snapshot.
             NodeKind::Zakura => {
                 let next = self.height.load(Ordering::Relaxed) + ZAKURA_BLOCKS_PER_TICK;
@@ -332,8 +397,12 @@ impl HerdNode {
         };
         self.height.store(height, Ordering::Relaxed);
         let indexer = self.kind() == NodeKind::Zaino;
+        // A node a block ahead of the main one sees that far.
+        let tip = tip.max(height);
         let stats = NodeStats {
-            best: None,
+            best: (!indexer)
+                .then(|| agreement::best(&self.id(), self.network(), height))
+                .flatten(),
             height,
             estimated_height: tip,
             verification_progress: if tip == 0 {

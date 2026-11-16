@@ -130,6 +130,27 @@ pub(super) fn emit_nodes() {
     emit(&NODES, list());
 }
 
+/// Every node with its status and newest statistics, as the API gives them: for the mock's
+/// herd.
+pub(super) fn snapshot() -> Vec<(NodeInfo, Status, Option<NodeStats>)> {
+    list()
+        .into_iter()
+        .filter_map(|info| {
+            if is_main(&info.id) {
+                let mock = mock();
+                return Some((
+                    info,
+                    mock.status.get_untracked(),
+                    mock.stats.get_untracked(),
+                ));
+            }
+            let status = herd::status(&info.id)?;
+            let stats = herd::stats(&info.id)?;
+            Some((info, status, stats))
+        })
+        .collect()
+}
+
 /// The nodes, the main one first while it is there.
 fn list() -> Vec<NodeInfo> {
     let main = (!main_removed()).then(|| mock().info.get_untracked());

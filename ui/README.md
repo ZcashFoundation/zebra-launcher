@@ -124,6 +124,37 @@ every node command and event carries a node's id, and the mock's zebrad below is
   started (0.2 cores, 2.4 GiB); a zebrad the dialog adds uses what the mock's zebrad does at
   the tip. With `?herd` the computer has 16 CPUs and 32 GiB, and its figures count every
   node. The real backend has the same API and rules; there every node is a zebrad for now.
+- the herd's agreement (docs/HERD.md): with several nodes, the overview starts with one
+  sentence about the network shown ("Your 3 Mainnet nodes agree on block 3,551,204", or who is
+  behind, stuck or on another chain, with the fork's height), each counted node's card says
+  where it stands ("In the herd: agrees"), the network's tab in the sidebar has a check or a
+  warning mark with the sentence in its tooltip, and a node's sidebar item has its state in its
+  title. The mock runs launcher-herd's real engine every 5 s over its nodes' tips, answering
+  the engine's `getblockhash` probes from a scripted chain (`src/mock/agreement.rs`). With
+  `?herd` alone the Testnet nodes agree and the Mainnet nodes are still catching up.
+  `?herd&agree` adds Zebra · Mainnet 2, puts the mock's zebrad and Zakura · Mainnet at the tip
+  (it implies `?attip`), and the three agree; ten minutes of rounds run before the first view,
+  so each scenario shows its state at once. `&agree=` picks a scenario:
+  - `behind`: Zebra · Mainnet 2 fell 6 blocks behind and still advances (a warning);
+  - `stall`: Zebra · Mainnet 2 is stuck where it was 16 blocks ago (a warning);
+  - `fork`: Zebra · Mainnet 2 has been on a chain of its own for about 4 blocks: "Zebra ·
+    Mainnet 2 is on a different chain since block …; your other 2 Mainnet nodes agree on block
+    …" (a problem);
+  - `race`: Zebra · Mainnet 2 holds a competing block at every new height, which is normal: the
+    nodes agree;
+  - `split`: Zebra · Mainnet and Zebra · Mainnet 2 split while Zakura still catches up, so no
+    side has a majority: "Your Mainnet nodes disagree since block …, and Zeal can't tell which
+    is right";
+  - `impl`: Zakura · Mainnet is on a chain of its own: "Zebra and Zakura disagree since block
+    …";
+  - `channels`: Zebra · Mainnet 3, on Beta, is on a chain of its own: "Zebra Stable and Zebra
+    Beta disagree since block …", a disagreement between channels rather than one node being
+    wrong;
+  - `restart`: Zebra · Mainnet 2 is restarting: "2 of your 3 Mainnet nodes agree …; Zebra ·
+    Mainnet 2 is restarting";
+  - `deepfork`: Zebra · Mainnet 2 is on a chain that split 1,500 blocks ago, past zebrad's
+    rollback window;
+  - `silent`: Zebra · Mainnet 2, a block ahead, does not answer the probes and is set aside.
 - the Explorer (Ctrl/Cmd+3, or Ctrl+K, Cmd+K on macOS, for its search): as in the backend it
   serves the first node, the mock's own zebrad, over a synthetic chain from explorer-model,
   answered with the backend's own page builders, and the dashboard's best block, pools,
@@ -243,6 +274,8 @@ to the CSP when it serves the bundled assets.
 | `src/app.rs` | Shared state (`AppState`: the node list from `list_nodes` and the `nodes` event, matched by id, the selected node and `open_docs(DocsSection)`), backend subscriptions, the shell with `Tab::Docs`: header, the tab bar for one node or the sidebar for several, and the first-run wizard |
 | `src/node_state.rs` | One node's state: what the backend reports about it and the histories and log analysis the UI keeps for it |
 | `src/node_summary.rs` | A node's state in a few words, for the sidebar and the overview. Pure, tested natively |
+| `src/herd_view.rs` | The herd as the window shows it: the overview's sentence, a node's state on its card, the network tab's mark and the words a sidebar item's title gains, from the `herd` event's `HerdView`. Pure, tested natively |
+| `src/mock/agreement.rs` | The mock's herd: launcher-herd's engine every 5 s per network over the mock's nodes, with the `agree=` scenarios' scripted chain |
 | `src/theme.rs` | Light and dark appearance: resolves the setting against the system preference and applies it to the document |
 | `src/clock.rs` | The current time from JavaScript's `Date` (`SystemTime::now()` panics on wasm) |
 | `src/clipboard.rs` | Copying text to the system clipboard |

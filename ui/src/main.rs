@@ -21,6 +21,7 @@ mod explorer;
 mod format;
 mod grafana_url;
 mod health;
+mod herd_view;
 mod insights;
 mod log_view;
 mod metrics_history;

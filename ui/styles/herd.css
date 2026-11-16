@@ -505,3 +505,59 @@
   font-size: 11px;
   font-weight: 400;
 }
+
+/* The herd's agreement (docs/HERD.md): the overview's sentence for the network shown, each
+   card's state in the herd, and the mark on the network's tab. The glyph and the word carry
+   the state; the colour only accompanies. */
+
+.herd-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.herd-glyph {
+  flex: none;
+  font-weight: 700;
+}
+
+.net-tab .herd-glyph {
+  font-size: 11px;
+}
+
+.herd-tone-ok .herd-word,
+.herd-glyph.herd-tone-ok,
+.herd-tone-ok > .herd-glyph {
+  color: var(--ok);
+}
+
+.herd-tone-warning .herd-word,
+.herd-glyph.herd-tone-warning,
+.herd-tone-warning > .herd-glyph {
+  color: var(--warn);
+}
+
+.herd-tone-problem .herd-word,
+.herd-glyph.herd-tone-problem,
+.herd-tone-problem > .herd-glyph {
+  color: var(--error);
+}
+
+.herd-line.herd-tone-problem {
+  border-color: var(--error);
+}
+
+.node-card-herd {
+  margin: 0;
+  font-size: 13px;
+}
+
+.node-card-herd-label {
+  margin-right: 6px;
+  color: var(--muted);
+}

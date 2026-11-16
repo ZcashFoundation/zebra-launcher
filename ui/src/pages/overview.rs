@@ -10,6 +10,7 @@ use crate::{
     app::{AppState, Tab},
     components::zebrad_channel::ZebradChannelChip,
     format::{controls, thousands},
+    herd_view,
     node_state::NodeState,
     node_summary::{Tone, summarize},
 };
@@ -95,6 +96,7 @@ pub fn Overview(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
                     </button>
                 </div>
             </div>
+            <HerdLine />
             <div class="node-cards">
                 {move || {
                     let nodes = state.scoped_nodes();
@@ -121,8 +123,27 @@ pub fn Overview(#[prop(into)] on_add: Callback<()>) -> impl IntoView {
     }
 }
 
+/// The network's herd in one sentence (docs/HERD.md): whether its nodes agree, or who is
+/// behind, stuck or on another chain. Nothing for a network without a herd.
+#[component]
+fn HerdLine() -> impl IntoView {
+    let state = AppState::get();
+    let herd = move || state.herd_of(state.network.get());
+    move || {
+        let herd = herd();
+        let (text, tone) = herd_view::sentence(herd.as_ref())?;
+        let glyph = herd_view::glyph(herd.as_ref());
+        Some(view! {
+            <p class=format!("herd-line {}", tone.class()) role="status">
+                {glyph.map(|glyph| view! { <span class=glyph.class() aria-hidden="true">{glyph.symbol()}</span> })}
+                <span>{text}</span>
+            </p>
+        })
+    }
+}
+
 /// One node's card: name, kind and network, its state with a meter for a syncing full node,
-/// a line of facts, and Open plus Start or Stop.
+/// its state in the herd, a line of facts, and Open plus Start or Stop.
 #[component]
 fn NodeCard(node: NodeState) -> impl IntoView {
     let state = AppState::get();
@@ -204,6 +225,10 @@ fn NodeCard(node: NodeState) -> impl IntoView {
         });
     };
     let label = move || node.info.with(|info| info.name.clone());
+    let herd = move || {
+        let (network, id) = node.info.with(|info| (info.network, info.id.clone()));
+        herd_view::node_state(state.herd_of(network).as_ref(), &id)
+    };
     view! {
         <article
             class="card node-card"
@@ -243,6 +268,17 @@ fn NodeCard(node: NodeState) -> impl IntoView {
                             >
                                 <div class="meter-fill" style:width=format!("{percent}%")></div>
                             </div>
+                        }
+                    })
+            }}
+            {move || {
+                herd()
+                    .map(|(word, sentence, tone)| {
+                        view! {
+                            <p class=format!("node-card-herd {}", tone.class()) title=sentence>
+                                <span class="node-card-herd-label">"In the herd"</span>
+                                <span class="herd-word">{word}</span>
+                            </p>
                         }
                     })
             }}
