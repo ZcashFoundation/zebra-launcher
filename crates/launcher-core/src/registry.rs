@@ -1008,7 +1008,16 @@ impl Actor {
                     .try_config_permit()
                     .map_err(NodeError::Failed)?;
                 let files = next.paths(&self.config.paths);
-                let keys = next.managed_keys(&self.config.paths);
+                let mut keys = next.managed_keys(&self.config.paths);
+                // The first node serves the light client server: the write that changes its
+                // network also removes the endpoint, which belongs to the service's network,
+                // before zebrad's next start.
+                if index == 0 {
+                    keys.lightwalletd = config::LightwalletdKey::for_public(
+                        &self.settings.current().public,
+                        next.network,
+                    );
+                }
                 blocking(move || config::ensure(&files, &keys).map_err(io::Error::other))
                     .await
                     .map_err(|err| {

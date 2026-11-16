@@ -1155,3 +1155,36 @@ async fn the_updater_follows_the_herd_and_the_mainnet_nodes_statistics() {
         .expect("no statistics while it is stopped");
     within(fx.registry.shutdown()).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_network_change_removes_the_light_wallet_endpoint_in_the_same_write() {
+    let fx = fixture().await;
+    let first = fx.registry.first().expect("first");
+    let mut spec = launcher_types::public::PublicServiceSpec::new_light_server(
+        first.id.clone(),
+        Network::Mainnet,
+    );
+    spec.backend_port = Some(9067);
+    within(fx.settings.update(move |s| s.public.services.push(spec)))
+        .await
+        .expect("a light client server");
+    let mut keys = first.managed_keys();
+    keys.lightwalletd = config::LightwalletdKey::Listen(9067);
+    config::ensure(&first.paths, &keys).expect("the endpoint key");
+    let toml = fs::read_to_string(first.paths.zebrad_config()).expect("zebrad.toml");
+    assert!(toml.contains("lightwalletd_listen_addr"), "{toml}");
+
+    within(fx.registry.update(
+        &first.id,
+        NodeUpdate {
+            network: Some(Network::Testnet),
+            ..NodeUpdate::default()
+        },
+    ))
+    .await
+    .expect("to Testnet");
+    let toml = fs::read_to_string(first.paths.zebrad_config()).expect("zebrad.toml");
+    assert!(toml.contains("network = \"Testnet\""), "{toml}");
+    assert!(!toml.contains("lightwalletd_listen_addr"), "{toml}");
+    within(fx.registry.shutdown()).await;
+}

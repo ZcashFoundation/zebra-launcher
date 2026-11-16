@@ -477,6 +477,7 @@ impl Actor {
         let mut status = self.status_rx.clone();
         let mut stats = self.stats_rx.clone();
         let mut settings = self.settings.watch();
+        let mut node = self.node_rx.clone();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -498,6 +499,8 @@ impl Actor {
                 _ = status.changed() => {}
                 _ = stats.changed() => {}
                 _ = settings.changed() => {}
+                // A network change holds the service at once.
+                Ok(()) = node.changed() => {}
                 _ = tick.tick() => {}
             }
         }
