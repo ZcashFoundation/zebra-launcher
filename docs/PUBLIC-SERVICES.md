@@ -61,8 +61,9 @@ supervised zebrad, today's `launcher.json`), Linux only and labelled experimenta
   read from fixtures captured from zebrad 7.0.0; the light monitor runs Zodl's check every 10
   minutes; a network change pauses the service and removes the key for zebrad's next start.
 - Front door v1 (`launcher-gateway`) in Zeal's process, on its own runtime and thread: the four
-  modes, the SNI and ALPN checks, TLS-ALPN-01 answers, the v1 limits (128 connections, 8 per
-  IPv4 address or IPv6 /64, 2 new a second with a burst of 16, a 10 s handshake, 10 minutes
+  modes, the SNI and ALPN checks, TLS-ALPN-01 answers, the v1 limits (128 connections, a full
+  front door closing the largest holder's oldest one for a newcomer, 8 per IPv4 address or
+  IPv6 /64, 2 new a second with a burst of 16, a 10 s handshake, 10 minutes
   idle, a 2 hour age, the upload budget), closing at once on pause and at quit.
 - The `AcmeActor`: instant-acme with ring, rcgen and x509-parser, TLS-ALPN-01, staging then
   production, verification with the platform verifier, renewal at two thirds of the lifetime,
@@ -1177,7 +1178,7 @@ limits connections, **v2** (PS2) ends HTTP/2 and limits streams and methods
 
 | Limit | Default | How | In |
 | --- | --- | --- | --- |
-| connections, all clients | 128 | `Arc<Semaphore>`, the permit held by the connection | v1 |
+| connections, all clients | 128; when full, a newcomer from a network holding fewer than the largest holder closes that holder's oldest connection | `LimitsActor`, a oneshot per connection to close it | v1 |
 | connections per IPv4 address or IPv6 /64 | 8 | `LimitsActor` (`::ffff:` mapped to IPv4) | v1 |
 | new connections per address | 2 a second, burst 16 | token bucket in `LimitsActor` | v1 |
 | TLS handshake; idle connection | 10 s; 10 min without a byte | timers | v1 |
@@ -1589,8 +1590,9 @@ came first): `public_status` (one changed `PublicStatus`, counters coalesced to 
   clients in one process. `launcher-core`'s reqwest stays at 0.12 without TLS.
 - **No locks** (`clippy.toml` bans them): each service's state in its actor, published on
   `watch`; the certificate, challenge and mode on `watch` inside the front door; per-address
-  counts in `LimitsActor` (mpsc in, oneshot out, a guard's drop sends `Closed`); connections,
-  method concurrency and the upload budget on `Arc<Semaphore>`; counters on `AtomicU64`; the
+  and total connection counts in `LimitsActor` (mpsc in, oneshot out, a oneshot per
+  connection to close it, a guard's drop sends `Closed`); method concurrency and the upload
+  budget on `Arc<Semaphore>`; counters on `AtomicU64`; the
   keychain through `spawn_blocking`. No DashMap: it locks its shards.
 
 ## UI

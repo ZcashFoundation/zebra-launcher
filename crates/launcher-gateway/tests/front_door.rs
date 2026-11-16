@@ -564,3 +564,41 @@ async fn a_taken_port_fails_the_start() {
         "{result:?}"
     );
 }
+
+/// Linux routes all of 127.0.0.0/8 to loopback, so a second client address is at hand.
+#[cfg(target_os = "linux")]
+mod another_address {
+    use super::*;
+
+    async fn connect_from(door: &Door, local: Ipv4Addr) -> std::io::Result<TlsStream<TcpStream>> {
+        let socket = tokio::net::TcpSocket::new_v4()?;
+        socket.bind(SocketAddr::from((local, 0)))?;
+        let tcp = socket.connect(door.addr).await?;
+        let name = ServerName::try_from(NAME).unwrap().to_owned();
+        TlsConnector::from(client_config(&door.trust, H2_ALPN))
+            .connect(name, tcp)
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_full_front_door_makes_room_for_another_network() {
+        let two = Limits {
+            max_connections: 2,
+            ..Limits::default()
+        };
+        let door = start(Mode::Open, echo_backend().await, two, quick_timers()).await;
+        let mut first = within(connect(&door)).await.expect("first");
+        let mut second = within(connect(&door)).await.expect("second");
+        assert!(
+            within(connect(&door)).await.is_err(),
+            "full, and from the same address"
+        );
+        let mut other = within(connect_from(&door, Ipv4Addr::new(127, 0, 0, 2)))
+            .await
+            .expect("another address gets a slot");
+        assert_eq!(within(echo(&mut other, b"hi")).await, b"hi");
+        // The holder's oldest connection made room; its newer one stays.
+        within(closes(&mut first)).await;
+        assert_eq!(within(echo(&mut second, b"ok")).await, b"ok");
+    }
+}
