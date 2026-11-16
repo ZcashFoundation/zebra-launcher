@@ -467,6 +467,17 @@ impl TimeFormat {
     pub fn from_id(id: &str) -> Option<TimeFormat> {
         TimeFormat::ALL.into_iter().find(|format| format.id() == id)
     }
+
+    /// The format `by` places on in [`TimeFormat::ALL`], wrapping around: the toggle's arrow
+    /// keys.
+    pub fn step(self, by: i32) -> TimeFormat {
+        let index = TimeFormat::ALL
+            .iter()
+            .position(|format| *format == self)
+            .unwrap_or(0) as i32;
+        let len = TimeFormat::ALL.len() as i32;
+        TimeFormat::ALL[(index + by).rem_euclid(len) as usize]
+    }
 }
 
 /// A time `secs` after the Unix epoch, in `format`: `23 Oct, 21:13`, `23 Oct, 21:13 UTC`,
@@ -623,6 +634,9 @@ mod tests {
             assert_eq!(TimeFormat::from_id(format.id()), Some(format));
         }
         assert_eq!(TimeFormat::from_id("julian"), None);
+        assert_eq!(TimeFormat::Local.step(1), TimeFormat::Utc);
+        assert_eq!(TimeFormat::Unix.step(1), TimeFormat::Local, "wraps around");
+        assert_eq!(TimeFormat::Local.step(-1), TimeFormat::Unix);
     }
 
     #[test]

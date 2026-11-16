@@ -30,6 +30,7 @@ use wasm_bindgen::JsCast;
 use crate::{
     api,
     app::{AppState, Tab},
+    charts::widgets::focus_sibling,
     components::{icons::info_icon, nav::is_mac},
     format::{controls, relative, thousands},
 };
@@ -447,39 +448,60 @@ fn SourceLine(
 }
 
 /// The unit and time toggles: amounts in the network's coin (TAZ in the warning tone, as
-/// Testnet is everywhere) or in zatoshis; times local, in UTC or as Unix seconds. The choices
-/// are remembered ([`Prefs`]).
+/// Testnet is everywhere) or in zatoshis; times local, in UTC or as Unix seconds. Each is a
+/// radio group, as the dashboard's range control is: one Tab stop, the arrow keys choose. The
+/// choices are remembered ([`Prefs`]).
 #[component]
 fn Toggles(network: Signal<Network>) -> impl IntoView {
     let prefs = Prefs::get();
-    let pressed = |on: bool| if on { "true" } else { "false" };
+    let checked = |on: bool| if on { "true" } else { "false" };
+    let tabindex = |on: bool| if on { "0" } else { "-1" };
+    // Two choices: either arrow picks the other.
+    let unit_keys = move |ev: web_sys::KeyboardEvent| {
+        if arrow_step(&ev).is_some() {
+            prefs.set_zat(!prefs.zat.get_untracked());
+        }
+    };
     view! {
-        <span class="ex-toggle" role="group" aria-label="Amounts in">
+        <span class="ex-toggle" role="radiogroup" aria-label="Amounts in">
             <button
                 type="button"
+                role="radio"
                 class:ex-unit-test=move || network.get() == Network::Testnet
-                aria-pressed=move || pressed(!prefs.zat.get())
+                aria-checked=move || checked(!prefs.zat.get())
+                tabindex=move || tabindex(!prefs.zat.get())
                 on:click=move |_| prefs.set_zat(false)
+                on:keydown=unit_keys
             >
                 {move || text::unit(network.get())}
             </button>
             <button
                 type="button"
+                role="radio"
                 title="Zatoshis: 100,000,000 to the coin"
-                aria-pressed=move || pressed(prefs.zat.get())
+                aria-checked=move || checked(prefs.zat.get())
+                tabindex=move || tabindex(prefs.zat.get())
                 on:click=move |_| prefs.set_zat(true)
+                on:keydown=unit_keys
             >
                 "zat"
             </button>
         </span>
-        <span class="ex-toggle" role="group" aria-label="Times in">
+        <span class="ex-toggle" role="radiogroup" aria-label="Times in">
             {TimeFormat::ALL
                 .into_iter()
                 .map(|format| view! {
                     <button
                         type="button"
-                        aria-pressed=move || pressed(prefs.time.get() == format)
+                        role="radio"
+                        aria-checked=move || checked(prefs.time.get() == format)
+                        tabindex=move || tabindex(prefs.time.get() == format)
                         on:click=move |_| prefs.set_time(format)
+                        on:keydown=move |ev: web_sys::KeyboardEvent| {
+                            if let Some(by) = arrow_step(&ev) {
+                                prefs.set_time(format.step(by));
+                            }
+                        }
                     >
                         {format.label()}
                     </button>
@@ -487,6 +509,19 @@ fn Toggles(network: Signal<Network>) -> impl IntoView {
                 .collect_view()}
         </span>
     }
+}
+
+/// A radio group's arrow key: the step it moves the choice by, with focus moved to that radio
+/// and the key's default (scrolling) prevented. `None` for other keys.
+fn arrow_step(ev: &web_sys::KeyboardEvent) -> Option<i32> {
+    let by = match ev.key().as_str() {
+        "ArrowRight" | "ArrowDown" => 1,
+        "ArrowLeft" | "ArrowUp" => -1,
+        _ => return None,
+    };
+    ev.prevent_default();
+    focus_sibling(ev, by);
+    Some(by)
 }
 
 /// One banner, the most important first: a node the explorer does not serve, one that does not
