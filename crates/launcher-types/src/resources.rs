@@ -26,7 +26,7 @@ pub struct NodeResources {
     /// within a run. 0 while `cpu_cores` is `None` for the whole run.
     pub cpu_secs: f64,
     /// Over the last interval (the first sample: since the spawn); 1.0 is one logical CPU.
-    /// `None` when CPU cannot be read.
+    /// `None` when CPU cannot be read: an x86-64 build under Rosetta.
     #[serde(default)]
     pub cpu_cores: Option<f64>,
     /// The live processes' memory, summed (see [`Platform::memory_label`]).
@@ -51,7 +51,8 @@ pub struct NodeResources {
     #[serde(default)]
     pub descriptors: Option<u32>,
     /// The process Zeal started first, then the others in tree order (each process before
-    /// its children, children by start time); at most [`MAX_MEMBERS`].
+    /// its children, children by start time; on Windows, which reads no parents, by start
+    /// time); at most [`MAX_MEMBERS`].
     pub members: Vec<ProcessUsage>,
 }
 
@@ -59,7 +60,7 @@ pub struct NodeResources {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProcessUsage {
     pub pid: u32,
-    /// Its parent, when the parent is a member too.
+    /// Its parent, when the parent is a member too; always `None` on Windows.
     #[serde(default)]
     pub parent: Option<u32>,
     /// As the OS reports it, cleaned to one line of plain text: `zebrad`, `python3`,
@@ -131,7 +132,8 @@ pub struct MachineResources {
     #[serde(default)]
     pub cpu_busy_cores: Option<f64>,
     pub memory_total_bytes: u64,
-    /// Usable without swapping: MemAvailable on Linux.
+    /// Usable without swapping: MemAvailable on Linux, PhysicalAvailable on Windows, and on
+    /// macOS an estimate (total less app, wired and compressed memory).
     #[serde(default)]
     pub memory_available_bytes: Option<u64>,
     /// Linux and macOS.

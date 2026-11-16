@@ -219,7 +219,7 @@ pub struct NodeHandle {
     /// The latest read of the node's metrics page.
     pub metrics: watch::Receiver<Option<MetricsSnapshot>>,
     /// The newest sample of the node's process tree, `None` while it has no
-    /// run or on a platform that is not measured yet.
+    /// run or on a platform without a resource reader.
     pub resources: watch::Receiver<Option<NodeResources>>,
     /// Keeps the node's starts, data changes and config writes apart.
     pub gates: NodeGates,

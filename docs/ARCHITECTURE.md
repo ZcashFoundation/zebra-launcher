@@ -206,7 +206,7 @@ Each node has one actor task that owns its zebrad child. Nothing else touches it
 | `mpsc<Cmd>` | in | `Start{options}`, `Stop`, `Shutdown`, `Subscribe`, `History{since}`, `Note` (a launcher line for the ring, sent with `try_send`) (`crates/launcher-core/src/supervisor.rs`). `SupervisorHandle::restart` is a `Stop` followed by a `Start`; applying a config is the `apply_config` Tauri command, built on the same handle. |
 | `watch<Vec<Listener>>` | in | the addresses zebrad will listen on, tried before every spawn (`SupervisorConfig::listeners`) |
 | `watch<Status>` | out | `phase` (`Stopped`, `Starting`, `Running`, `Stopping`, `Backoff{until, crashes}`, `Failed{class}`), `pid`, `started_at`, the `rpc_addr` and `metrics_addr` zebrad logged as opened, `last_exit` (`ExitInfo{code, class, detail, requested}`), `stale`, `restarts` (automatic restarts this launcher session) and `last_stop` (`StopReport{requested_at, exited_at, forced}` for the last requested stop) (`crates/launcher-types/src/lib.rs`) |
-| `watch<Option<TreeProbe>>` | out | the current run's process tree for the resource sampler (`SupervisorHandle::watch_probe`): run id, pid, and the spawn on the wall and monotonic clocks, read once in `install_run` with `Status.started_at`. `Some` from the spawn until `finalize`, after the exit drain |
+| `watch<Option<TreeProbe>>` | out | the current run's process tree for the resource sampler (`SupervisorHandle::watch_probe`): run id, pid, and the spawn on the wall and monotonic clocks, read once in `install_run` with `Status.started_at`; on Windows also a `Weak` of the run's job, whose only strong reference is the run's `ChildHandle`. `Some` from the spawn until `finalize`, after the exit drain |
 | `broadcast<LogLine>` | out | live log lines, each with a monotonic `seq` |
 | `oneshot` | reply | each command's answer; `History{since}` returns lines from the 10 000-line `VecDeque` ring, for late subscribers |
 
@@ -350,8 +350,8 @@ zebrad; see
 | Escalation after the grace period (default 60 s) | `SIGKILL` to the process group, `wait()` | `SIGKILL` to the process group, `wait()` | `TerminateJobObject`, wait |
 | Launcher exits | the exit flow stops zebrad first; `PR_SET_PDEATHSIG(SIGTERM)` covers a crash | the exit flow stops zebrad first; after a crash zebrad runs on until the next launch finds it through the pidfile | `KILL_ON_JOB_CLOSE` on the per-zebrad Job Object |
 | Stale zebrad on start | pidfile | pidfile | pidfile |
-| Process tree for resource monitoring ([RESOURCES.md](RESOURCES.md)) | from a `/proc` scan every 5 s: the root (checked once against the spawn time), its process group, children of members by parent link (started no earlier than the parent) and members seen before; read parent first | not measured yet: the card stays hidden | not measured yet (the job object will hold the tree) |
-| CPU, memory, disk I/O and counts of the tree | `stat` (utime + stime, and cutime + cstime of the reaped children), `status` (VmRSS, VmHWM), `io` (read_bytes, write_bytes), the entries of `fd`; the computer from `/proc/stat` and `/proc/meminfo` | — | — |
+| Process tree for resource monitoring ([RESOURCES.md](RESOURCES.md)) | from a `/proc` scan every 5 s: the root (checked once against the spawn time), its process group, children of members by parent link (started no earlier than the parent) and members seen before; read parent first | the same rules through libproc: the root, its process group (`proc_listpgrppids`), children of members by parent link (`proc_listchildpids`) and members seen before; `proc_pidinfo(PROC_PIDTASKALLINFO)` for the parent, group and start time, `PROC_PIDTBSDINFO` for a zombie | the job: its process list (`JobObjectBasicProcessIdList`, nested jobs included), each pid checked with `IsProcessInJob` and a zero wait; no parent links. The probe holds the job through a `Weak` for one read at a time, so `KILL_ON_JOB_CLOSE` still fires at `finalize` |
+| CPU, memory, disk I/O and counts of the tree | `stat` (utime + stime, and cutime + cstime of the reaped children), `status` (VmRSS, VmHWM), `io` (read_bytes, write_bytes), the entries of `fd`; the computer from `/proc/stat` and `/proc/meminfo` | `proc_pid_rusage(RUSAGE_INFO_V4)`: user + system time and the reaped children's (Mach ticks × `mach_timebase_info`; not read under Rosetta), the physical footprint and its lifetime peak, disk bytes (a departed member's are lost with it, as XNU rolls up none); threads from `PROC_PIDTASKALLINFO`, open files from `PROC_PIDLISTFDS`; the computer from `HOST_CPU_LOAD_INFO`, `HOST_VM_INFO64`, `hw.memsize`, `vm.swapusage` and `kern.memorystatus_vm_pressure_level` | CPU and all I/O from the job's `JobObjectBasicAndIoAccountingInformation`, exited processes included; per process `GetProcessTimes`, `K32GetProcessMemoryInfo` (working set, its peak, `PrivateUsage`), `GetProcessIoCounters` and `GetProcessHandleCount`, no threads; the computer from `GetSystemTimes`, `GetActiveProcessorCount` and `K32GetPerformanceInfo` (memory and commit) |
 
 - **Stdin-close shutdown** is a proposed upstream, opt-in zebrad flag: zebrad shuts down
   when its stdin reaches EOF and logs `stdin closed, starting shutdown` (target
@@ -577,8 +577,13 @@ counters to a lost total; the published totals never fall within a run. A read t
 a probe change is dropped, failures are logged once per run, and a reader panic stops
 sampling until the next run; each tick logs its read time at debug (about 4 µs per process
 on the computer: 0.6 ms for 150 processes, 11 ms for 2,600). Linux reads `/proc`
-(`resources/linux.rs`, no `unsafe`); macOS and Windows report the reading unsupported, so
-the samplers publish `None` and the dashboard's Resources card stays hidden there.
+(`resources/linux.rs`, no `unsafe`), macOS libproc and Mach's host statistics
+(`resources/macos.rs`), and Windows the node's job and a few calls per process
+(`resources/windows.rs`, with the job's queries in `process/windows.rs`); `unsafe` sits only
+around those OS calls. The fold's rule for a departed member follows the OS: Linux rolls a
+reaped child's CPU and I/O into its parent, macOS only its CPU, and on Windows the job's
+totals replace the sum. On other platforms the samplers publish `None` and the dashboard's
+Resources card stays hidden.
 
 **Dashboard.** The UI keeps three histories since the launcher opened; nothing is persisted.
 `ui/src/stats_history.rs` holds every published `NodeStats` as a `Sample` (up to 4 h of the

@@ -1,10 +1,12 @@
 # Resource monitoring
 
-> **Status, 2026-11-03: phases 1 and 2 are built (the Resources card, live on Linux), and of
-> phase 7 the parts the node registry of MULTI-NODE phase 2a makes possible (a sampler per
-> node, the node-scoped event and command, the herd's figures in the mock); phases 3 to 6 and
-> the rest of phase 7 are the design.** [Phases](#phases) says what each built phase changed
-> from this design. [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built
+> **Status, 2026-11-16: phases 1 to 3 are built (the Resources card, live on Linux, macOS and
+> Windows), and of phase 7 the parts the node registry of MULTI-NODE phase 2a makes possible
+> (a sampler per node, the node-scoped event and command, the herd's figures in the mock);
+> phases 4 to 6 and the rest of phase 7 are the design.** Phase 3 was built on Linux, where the
+> macOS and Windows code is only type-checked; its tests run on CI's macos-15 and windows-2025
+> runners, and what neither could check is listed under [Phases](#phases), which says what
+> each built phase changed from this design. [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built
 > and is updated phase by phase as this lands. [MULTI-NODE.md](MULTI-NODE.md) is the plan it
 > fits into.
 
@@ -1292,7 +1294,7 @@ windows-sys = { workspace = true, features = [
 | File | Calls | Why |
 | --- | --- | --- |
 | `resources/linux.rs` | none | `std::fs` reads and nix's safe `sysconf`; `firstrun.rs` already uses nix's safe `statvfs`. |
-| `resources/macos.rs` | `proc_listpgrppids`, `proc_listchildpids`, `proc_pidinfo` (`PROC_PIDTASKALLINFO`, `PROC_PIDTBSDINFO`, `PROC_PIDLISTFDS`), `proc_pid_rusage`, `sysctlbyname` (`hw.memsize`, `vm.swapusage`, `kern.memorystatus_vm_pressure_level`, `sysctl.proc_translated`), `sysconf` (`_SC_NPROCESSORS_ONLN`), `host_statistics`, `host_statistics64`, and two local declarations (below) | libproc and Mach have no safe binding in the tree, and nix's safe `sysconf` has no `_NPROCESSORS_ONLN` on macOS. |
+| `resources/macos.rs` | `proc_listpgrppids`, `proc_listchildpids`, `proc_pidinfo` (`PROC_PIDTASKALLINFO`, `PROC_PIDTBSDINFO`, `PROC_PIDLISTFDS`), `proc_pid_rusage`, `sysctlbyname` (`hw.memsize`, `vm.swapusage`, `kern.memorystatus_vm_pressure_level`, `sysctl.proc_translated`), `sysconf` (`_SC_NPROCESSORS_ONLN`), `host_statistics`, `host_statistics64`, and three local declarations (below) | libproc and Mach have no safe binding in the tree, and nix's safe `sysconf` has no `_NPROCESSORS_ONLN` on macOS. |
 | `resources/windows.rs` | `OpenProcess`, `WaitForSingleObject`, `GetProcessTimes`, `K32GetProcessMemoryInfo`, `GetProcessIoCounters`, `GetProcessHandleCount`, `QueryFullProcessImageNameW` (the existing pattern), `GetSystemTimes`, `GetActiveProcessorCount`, `K32GetPerformanceInfo` | Win32. |
 | `process/windows.rs` | `QueryInformationJobObject` (two classes), `IsProcessInJob` | The job handle stays in this file. |
 | `firstrun.rs` | `GetDiskFreeSpaceExW` (existing, now with its total), `GetVolumePathNameW` | Win32. |
@@ -1305,7 +1307,8 @@ Each call follows the house pattern:
 - handles wrapped in `OwnedHandle` at once;
 - variable-length lists grown and retried at most three times.
 
-The two local declarations in `resources/macos.rs`:
+The local declarations in `resources/macos.rs` (the third, `host_page_size`, came with the
+build; see phase 3):
 
 ```rust
 #[repr(C)]
@@ -1315,16 +1318,18 @@ struct MachTimebaseInfo {
 }
 
 unsafe extern "C" {
-    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
+    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::kern_return_t;
     safe fn mach_host_self() -> libc::mach_port_t;
+    fn host_page_size(host: libc::mach_port_t, out_page_size: *mut libc::vm_size_t)
+    -> libc::kern_return_t;
 }
 ```
 
-libc 0.2.191 binds both but marks them deprecated
+libc 0.2.191 binds the first two but marks them deprecated
 (``#[deprecated(since = "0.2.55", note = "Use the `mach2` crate instead")]``,
 `src/unix/bsd/apple/mod.rs:4755-4760`), and CI builds with `RUSTFLAGS: -D warnings`
-(`ci.yml:17`). Declaring them locally avoids both an `#[allow(deprecated)]` and the mach2
-crate for two symbols.
+(`ci.yml:17`); it does not bind `host_page_size`. Declaring them locally avoids both an
+`#[allow(deprecated)]` and the mach2 crate for three symbols.
 
 ### No mutexes
 
@@ -1484,6 +1489,77 @@ Each phase is one pull request that ships on its own, with screenshots from the 
 
    Before release, test a notarized, hardened-runtime build by hand. Report CPU as "not
    available" under Rosetta until its timebase is checked. Screenshots from both OSes.
+
+   **Built.** As planned, with these differences:
+
+   - `Fold::new` still takes the platform and derives the `Rollup` rules from it: Linux rolls
+     CPU and I/O into the parent, macOS CPU only (a member's bytes move to `lost` as it
+     leaves, also when its CPU waits on a torn read), and Windows takes the job's totals and
+     tracks no departures.
+   - `TreeReading.job` is a `JobTotals` of seconds and bytes, defined in `resources.rs`, since
+     the reading is built on every OS; `process::windows::JobAccounting` keeps the raw units
+     and has no `total_processes`, which nothing reads. A reading without the job's totals
+     keeps the last ones.
+   - `MemberReading` gains `committed` (Windows' `PrivateUsage`, summed into
+     `committed_bytes`), and `MachineReading` gains the commit charge, its limit and the
+     pressure level, which the machine sampler now passes on.
+   - Under Rosetta the reader reads no CPU times and sets `Denied::cpu`: the sample's
+     `cpu_cores` is `None` and `cpu_secs` stays 0, so the CPU tile reads "not available", while
+     memory, I/O and the counts are read.
+   - macOS:
+     - The walk down `proc_listchildpids` skips the children of a process that started
+       before the process that listed it, since that link is to a reused pid.
+     - A zombie, read through `PROC_PIDTBSDINFO`, counts 0 memory, threads and open files,
+       with its final times and peak from `proc_pid_rusage`.
+     - A member whose `proc_pid_rusage` is refused counts no CPU, since a member's CPU is not
+       optional, and marks memory and I/O as refused.
+     - The name is `pbi_name`, or `pbi_comm` where that is empty.
+     - The VM statistics are in the kernel's pages, so the page size comes from
+       `host_page_size` (libsyscall answers it with `vm_kernel_page_size`): a third local
+       declaration, since libc does not bind it.
+     - The 32-bit tick counters of `HOST_CPU_LOAD_INFO` wrap after weeks; the sampler then
+       gives no busy figure for one interval.
+   - Windows:
+     - A pid that cannot be opened is skipped; the job's totals count it. A member whose image
+       name cannot be read is named "unknown".
+     - The job's accounting is read after the members, so its totals hold at least what they
+       read. `Job::process_ids` grows to at most 65,536 pids, and after its last try returns
+       what fitted.
+     - Members have no parent links (`ppid` 0): the table lists the root and then the others
+       by start time, and the mock's `?os=windows` does the same.
+     - A read after the job closed fails with `NotFound`, which the sampler never logs: the
+       supervisor clears the probe before it drops the job.
+   - Tests:
+     - `tests/resources.rs` runs on all three OSes, with each platform's names, thread counts
+       and parent links, and so does the registry's test of a sampler per node.
+     - The kill-on-close check lives there rather than in `tests/supervisor.rs`, since it
+       needs the sampler: a 50 ms sampler runs through the exit drain of a graceful stop
+       that leaves a `FAKE_ZEBRAD_LINGER_MS` grandchild, which must die within seconds of the
+       finalize instead of after its 30 s. That the `Weak` no longer upgrades is checked
+       through the reader, which then fails with `NotFound`, since the field is
+       crate-private.
+     - Unit tests: `resources/macos.rs` reads its own process, a child by its parent link and
+       then as a zombie, the root check, the timebase and the computer; `resources/windows.rs`
+       reads a `ping` in a job of its own until the job closes (which kills it), FILETIME
+       conversions and the computer.
+   - The unsupported reader stays for other platforms.
+
+   Could not be checked where this was built (Linux under WSL2, with clippy for
+   `aarch64-apple-darwin`, `x86_64-apple-darwin` and `x86_64-pc-windows-msvc`). CI's macos-15 and
+   windows-2025 runners run the readers' unit tests and the live tests, which check, among
+   other things, that libproc's list calls return zombies, that `ri_diskio_byteswritten` counts
+   fake-zebrad's `sync_all` writes, that any process may read
+   `kern.memorystatus_vm_pressure_level`, and that the job keeps exited processes' CPU.
+   Neither checks:
+
+   - a notarized, hardened-runtime build (by hand, before release);
+   - the timebase under Rosetta, and `host_page_size` there; CPU reads "not available" until
+     then;
+   - the macOS available-memory estimate against Activity Monitor;
+   - how much network traffic the Windows job's I/O counts;
+   - whether `QueryInformationJobObject` fails with `ERROR_MORE_DATA` on a short list (the loop
+     handles both answers);
+   - screenshots from both OSes.
 4. **History charts.**
    - `Unit` and gap support in the chart code; the existing charts are byte-identical.
    - The three charts.
@@ -1596,11 +1672,11 @@ Through every phase:
 
 Unconfirmed, to be checked in the phase named:
 
-- **Phase 3:**
+- **Phase 3** (built; still unchecked, see phase 3):
   - libproc calls in a notarized, hardened-runtime build. No hardened-runtime entitlement
     concerns process information, and Zeal is not sandboxed, so they are expected to work.
   - The Mach timebase a Rosetta-translated process sees, and whether `hw.tbfrequency` gives
-    the native rate instead.
+    the native rate instead; also the page size `host_page_size` gives there.
   - The macOS available-memory formula, against Activity Monitor.
   - How much network traffic the Windows job's I/O counters include.
   - Whether `QueryInformationJobObject` fails with `ERROR_MORE_DATA` on a short process

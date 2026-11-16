@@ -168,8 +168,8 @@ pub fn platform() -> Platform {
     }
 }
 
-/// This platform's tree reader. On platforms without one yet, every read fails with
-/// [`io::ErrorKind::Unsupported`].
+/// This platform's tree reader: Linux, macOS and Windows have one. On other platforms every
+/// read fails with [`io::ErrorKind::Unsupported`].
 pub fn platform_reader() -> Arc<dyn Reader> {
     #[cfg(target_os = "linux")]
     {
