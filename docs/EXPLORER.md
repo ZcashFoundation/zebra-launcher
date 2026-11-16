@@ -1236,9 +1236,10 @@ code differs from the design above:
   the phases that use them. Testnet's NU6.2, NU6.3 and NU7 heights are zebra-chain 7.0.0's:
   4,052,000, 4,134,000 and 4,465,026.
 - **The classifier** looks up heights (with `tip`, `latest`, `tip-N` and `-N`), hashes and
-  outpoints, and refuses keys and phrases, a search route's query included. It takes a pasted
-  URL's last segment, `?q=` or fragment, but not an id inside JSON, and it names a `zcash:`
-  request instead of opening its address. The other classes are recognised for the hint and
+  outpoints, and refuses keys and phrases anywhere in a link or a search route. Of a pasted
+  link it reads `q`, else the path's last segment, else the fragment (a place on the page, such
+  as `#1`, unless nothing else is read), each percent-decoded; not an id inside JSON, and it
+  names a `zcash:` request instead of opening its address. The other classes are recognised for the hint and
   answered "a later version".
 - **Tauri.** The explorer's handle is Tauri state of its own, as the updater's is, not an
   `AppState` field, and the node-id rule is the actor's, behind `ExplorerHandle::call(node,

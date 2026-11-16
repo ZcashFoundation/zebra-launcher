@@ -236,18 +236,31 @@ fn is_route(text: &str) -> bool {
     text.contains('/') || text.starts_with("search?")
 }
 
-/// The part of a link after `scheme://`: its fragment, its `q` parameter or its last path
-/// segment, the first that is something the search reads. One level only: a link inside a
-/// link is not unwrapped.
+/// The part of a link after `scheme://` the search reads, percent-decoded: its `q` parameter,
+/// then the last segment of its path, then its fragment, the first that is something the
+/// search reads. `q` is what the link searches for and the path the page it is about; a
+/// fragment is a place on that page, such as `#1` for an output, unless nothing else is read,
+/// as in a link to one of the Explorer's own routes. The host is not a segment. One level
+/// only: a link inside a link is not unwrapped.
 fn link(rest: &str, network: Network) -> Classified {
     let (before, fragment) = match rest.split_once('#') {
         Some((before, fragment)) => (before, Some(fragment)),
         None => (rest, None),
     };
-    let (path, query) = match before.split_once('?') {
-        Some((path, query)) => (path, Some(query)),
+    let (location, query) = match before.split_once('?') {
+        Some((location, query)) => (location, Some(query)),
         None => (before, None),
     };
+    // The host, with any user and port, runs to the first `/`.
+    let path = location.split_once('/').map_or("", |(_, path)| path);
+    let q = query.and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("q=")));
+    let last = path.rsplit('/').find(|segment| !segment.is_empty());
+    for part in [q, last].into_iter().flatten().filter_map(percent_decode) {
+        match classify_plain(normalize(&part), network) {
+            Classified::Unrecognised | Classified::Empty => {}
+            found => return found,
+        }
+    }
     // The fragment may be one of the Explorer's routes.
     if let Some(fragment) = fragment.and_then(percent_decode) {
         let fragment = normalize(&fragment);
@@ -258,14 +271,6 @@ fn link(rest: &str, network: Network) -> Classified {
         };
         if !matches!(found, Classified::Unrecognised | Classified::Empty) {
             return found;
-        }
-    }
-    let q = query.and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("q=")));
-    let last = path.rsplit('/').find(|segment| !segment.is_empty());
-    for part in [q, last].into_iter().flatten().filter_map(percent_decode) {
-        match classify_plain(normalize(&part), network) {
-            Classified::Unrecognised | Classified::Empty => {}
-            found => return found,
         }
     }
     Classified::Unrecognised
@@ -704,6 +709,38 @@ mod tests {
             Classified::Height(3_120_000)
         );
         assert_eq!(main("https://example.com/about"), Classified::Unrecognised);
+        // `q` is decoded, `+` as a space.
+        assert_eq!(
+            main("https://example.com/search?q=3%2C120%2C000"),
+            Classified::Height(3_120_000)
+        );
+        assert_eq!(
+            main("https://example.com/search?q=tip+-+5"),
+            Classified::BelowTip(5)
+        );
+        // What the link searches for and the page it is about come before a place on that
+        // page; the host is not part of the path.
+        assert_eq!(
+            main(&format!("https://example.com/tx/{HASH}#1")),
+            Classified::Hash(hash)
+        );
+        assert_eq!(
+            main(&format!("https://example.com/page/2?q={HASH}")),
+            Classified::Hash(hash)
+        );
+        assert_eq!(main("https://3120000/"), Classified::Unrecognised);
+        assert_eq!(main("https://sapling"), Classified::Unrecognised);
+        assert_eq!(
+            main("http://localhost:1420/index.html#block/3120000"),
+            Classified::Route(ExplorerRoute::Block {
+                id: BlockId::Height(3_120_000)
+            })
+        );
+        assert_eq!(
+            main("https://example.com/about#3120000"),
+            Classified::Height(3_120_000),
+            "a fragment, when nothing else is read"
+        );
         assert_eq!(
             main("block/3120000"),
             Classified::Route(ExplorerRoute::Block {
