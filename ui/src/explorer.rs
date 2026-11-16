@@ -29,7 +29,7 @@ use wasm_bindgen::JsCast;
 use crate::{
     api,
     app::{AppState, Tab},
-    components::icons::info_icon,
+    components::{icons::info_icon, nav::is_mac},
     format::{controls, local_datetime_short, thousands},
 };
 use block::BlockPage;
@@ -122,24 +122,31 @@ pub fn Explorer() -> impl IntoView {
         next
     });
 
-    // Ctrl (or Cmd) + K anywhere opens the selected node's Explorer with the search focused;
-    // `/` does in the Explorer, outside text fields. A node without an Explorer has no search
-    // to open, so the key is left alone there.
+    // Ctrl+K (Cmd+K on macOS) opens the selected node's Explorer with the search focused, and
+    // `/` does in the Explorer. Neither is taken from a text field, where the key may be the
+    // field's own (Ctrl+K deletes to the end of the line in macOS and Emacs-style fields). A
+    // node without an Explorer has no search to open, so the key is left alone there too.
     let search_input = NodeRef::<html::Input>::new();
+    let mac = is_mac();
     let keys = window_event_listener(ev::keydown, move |event| {
-        if event.default_prevented() {
+        if event.default_prevented() || in_text_field(&event) {
             return;
         }
-        let command = (event.ctrl_key() || event.meta_key()) && !event.alt_key();
-        let slash = event.key() == "/"
-            && !command
-            && app.tab.get_untracked() == Tab::Explorer
-            && !in_text_field(&event);
+        let key = event.key();
+        let modifiers = Modifiers {
+            ctrl: event.ctrl_key(),
+            meta: event.meta_key(),
+            alt: event.alt_key(),
+        };
+        let wanted = search_shortcut(&key, modifiers, mac)
+            || key == "/"
+                && !(modifiers.ctrl || modifiers.meta)
+                && app.tab.get_untracked() == Tab::Explorer;
         let has_explorer = app
             .node()
             .info
             .with_untracked(|info| info.kind.has_explorer());
-        if ((command && event.key().eq_ignore_ascii_case("k")) || slash) && has_explorer {
+        if wanted && has_explorer {
             event.prevent_default();
             app.tab.set(Tab::Explorer);
             // From another tab the Explorer is still hidden here, and a hidden field takes no
@@ -256,6 +263,27 @@ fn document_visible_now() -> bool {
 
 fn document_visible() -> bool {
     document_visible_now()
+}
+
+/// The modifier keys held with a key.
+#[derive(Clone, Copy, Debug, Default)]
+struct Modifiers {
+    ctrl: bool,
+    meta: bool,
+    alt: bool,
+}
+
+/// Whether `key` with `modifiers` is the search shortcut: Cmd+K on macOS, Ctrl+K elsewhere, the
+/// modifier the tab shortcuts' labels name (`shortcut_label`). On macOS Ctrl+K is the text
+/// fields' delete to the end of the line, and elsewhere the Windows or Super key belongs to
+/// the system.
+fn search_shortcut(key: &str, modifiers: Modifiers, mac: bool) -> bool {
+    let held = if mac {
+        modifiers.meta && !modifiers.ctrl
+    } else {
+        modifiers.ctrl && !modifiers.meta
+    };
+    held && !modifiers.alt && key.eq_ignore_ascii_case("k")
 }
 
 /// Whether focus is nowhere: on the document's body, as after the focused element left the
@@ -451,4 +479,36 @@ fn Banner(nav: Signal<NodeExplorer>) -> impl IntoView {
         }
     };
     view! { {banner} }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Modifiers, search_shortcut};
+
+    #[test]
+    fn the_search_shortcut_is_the_platforms() {
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        let cmd = Modifiers {
+            meta: true,
+            ..Modifiers::default()
+        };
+        assert!(search_shortcut("k", ctrl, false));
+        assert!(search_shortcut("K", ctrl, false), "with Shift or Caps Lock");
+        assert!(
+            !search_shortcut("k", cmd, false),
+            "the Windows or Super key"
+        );
+        assert!(search_shortcut("k", cmd, true));
+        assert!(
+            !search_shortcut("k", ctrl, true),
+            "macOS fields' delete to the line's end"
+        );
+        let ctrl_alt = Modifiers { alt: true, ..ctrl };
+        assert!(!search_shortcut("k", ctrl_alt, false));
+        assert!(!search_shortcut("j", ctrl, false));
+        assert!(!search_shortcut("k", Modifiers::default(), false));
+    }
 }

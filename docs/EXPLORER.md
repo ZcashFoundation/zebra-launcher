@@ -275,7 +275,9 @@ latency, mempool overlap, the methods the node answers.
 
 ### The box
 
-An ARIA combobox in the shell. Ctrl/Cmd+K anywhere; `/` in the Explorer outside text fields.
+An ARIA combobox in the shell. Ctrl+K (Cmd+K on macOS, where Ctrl+K deletes to the end of a
+line) anywhere outside text fields, for a node that has an Explorer; `/` in the Explorer outside
+text fields.
 Both are free: the shell binds Ctrl/Cmd+digits (app.rs:536-547), Configure binds Ctrl/Cmd+S.
 Before classifying: trim; drop surrounding quotes, angle brackets or backticks; take the address
 of a `zcash:` URI (ZIP 321) and drop its amount, memo and label; take a pasted URL's last
