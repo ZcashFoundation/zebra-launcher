@@ -702,6 +702,28 @@ fn a_fork_past_the_rollback_window_is_deep() {
 }
 
 #[test]
+fn a_top_that_reorganizes_and_climbs_between_rounds_is_asked_again() {
+    // The second node sits 250 blocks below the first, which is asked for its hash there.
+    let mut herd = Harness::new(Network::Mainnet, 2, H);
+    herd.chain.put(&id(1), 0, H - 250);
+    let view = herd.run(200);
+    assert_eq!(view.branches.len(), 1);
+    // Before the next round the first node reorganizes from H - 500 and climbs 1,500 blocks:
+    // its old answer at H - 250 is on the chain it left.
+    herd.chain.fork(&id(0), H - 500, H + 1_500);
+    let view = herd.round();
+    assert_eq!(view.branches.len(), 2);
+    assert_eq!(view.branches[1].fork_at, Some(H - 500));
+    assert_eq!(
+        relation(&view, 1),
+        Relation::CatchingUp {
+            progress: 1.0,
+            same_chain: Some(false)
+        }
+    );
+}
+
+#[test]
 fn probes_that_fail_twice_make_a_node_unknown() {
     let mut herd = Harness::new(Network::Mainnet, 3, H);
     herd.chain.put(&id(2), 0, H - 1);

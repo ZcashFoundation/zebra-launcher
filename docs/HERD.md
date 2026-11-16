@@ -492,8 +492,10 @@ taken together), and every 5 s for the timers.
 
 Load: each node allows two probe calls in flight (a `Semaphore`), each with a 3 s timeout, so
 probes never queue behind the monitor's poll. In the steady state a round costs about one
-`getblockhash` per node behind the top, about once per block. Answers more than 1,000 blocks
-below the top are cached across rounds, since nothing that deep changes.
+`getblockhash` per node behind the top, about once per block. A node's answers more than
+1,000 blocks below its tip are cached across rounds, since nothing that deep changes. When its
+tip changes, an answer stays only if it is that far below the old tip too: between two rounds
+a node can reorganize and then climb past an answer it gave on the chain it left.
 
 ### The fork search
 

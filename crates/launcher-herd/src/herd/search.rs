@@ -39,8 +39,8 @@ pub enum Outcome<T> {
     Failed,
 }
 
-/// The block hashes known of each node's best chain. Answers well below a node's tip outlive
-/// the round; the rest are dropped when the node's tip changes.
+/// The block hashes known of each node's best chain. Answers well below a node's old and new
+/// tips outlive the round; the rest are dropped when the node's tip changes.
 #[derive(Clone, Debug, Default)]
 pub struct Answers {
     hashes: BTreeMap<(NodeId, u32), String>,
@@ -63,13 +63,18 @@ enum Look<'a> {
 
 impl Answers {
     /// Starts a round with these tips: a node whose tip changed loses its answers within
-    /// [`MAX_REORG`] of the new tip, since its best chain may have changed there.
+    /// [`MAX_REORG`] of the lower of its old tip and its new one, since its best chain may
+    /// have changed there. An answer it keeps was final when it was read.
     pub fn begin(&mut self, tips: impl IntoIterator<Item = (NodeId, BlockRef)>) {
         self.failed.clear();
         self.tips = tips.into_iter().collect();
         for (node, tip) in &self.tips {
             if self.read_under.get(node) != Some(tip) {
-                let keep_below = tip.height.saturating_sub(MAX_REORG);
+                let lowest = self
+                    .read_under
+                    .get(node)
+                    .map_or(tip.height, |old| old.height.min(tip.height));
+                let keep_below = lowest.saturating_sub(MAX_REORG);
                 self.hashes
                     .retain(|(owner, height), _| owner != node || *height < keep_below);
                 self.read_under.insert(node.clone(), tip.clone());
@@ -535,5 +540,35 @@ mod tests {
             "deep answers stay"
         );
         assert!(matches!(answers.look(&a, 4_500), Look::Need(_)));
+    }
+
+    #[test]
+    fn answers_near_the_old_tip_are_asked_again_after_a_reorg_and_a_climb() {
+        // Read at tip 5,000, the answer at 4,750 was not final yet. Before the next round the
+        // node reorganizes from 4,500 and climbs to 6,500: 4,750 is final now, on another
+        // chain.
+        let a = id("a");
+        let mut chain = SimChain::new(1);
+        chain.put(&a, 0, 5_000);
+        let mut answers = Answers::default();
+        answers.begin([(a.clone(), chain.tip(&a))]);
+        for height in [3_000, 4_750] {
+            let probe = Probe {
+                node: a.clone(),
+                height,
+            };
+            answers.record(probe.clone(), chain.answer(&probe));
+        }
+        let old = BlockRef {
+            height: 4_750,
+            hash: chain.hash_on(0, 4_750),
+        };
+        chain.fork(&a, 4_500, 6_500);
+        answers.begin([(a.clone(), chain.tip(&a))]);
+        assert!(
+            matches!(answers.look(&a, 3_000), Look::Hash(_)),
+            "answers final when read stay"
+        );
+        assert!(matches!(answers.holds(&a, &old), Outcome::Need(_)));
     }
 }
