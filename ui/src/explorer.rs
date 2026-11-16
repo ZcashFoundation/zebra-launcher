@@ -122,8 +122,9 @@ pub fn Explorer() -> impl IntoView {
         next
     });
 
-    // Ctrl (or Cmd) + K anywhere opens the Explorer with the search focused; `/` does in the
-    // Explorer, outside text fields.
+    // Ctrl (or Cmd) + K anywhere opens the selected node's Explorer with the search focused;
+    // `/` does in the Explorer, outside text fields. A node without an Explorer has no search
+    // to open, so the key is left alone there.
     let search_input = NodeRef::<html::Input>::new();
     let keys = window_event_listener(ev::keydown, move |event| {
         if event.default_prevented() {
@@ -134,7 +135,11 @@ pub fn Explorer() -> impl IntoView {
             && !command
             && app.tab.get_untracked() == Tab::Explorer
             && !in_text_field(&event);
-        if (command && event.key().eq_ignore_ascii_case("k")) || slash {
+        let has_explorer = app
+            .node()
+            .info
+            .with_untracked(|info| info.kind.has_explorer());
+        if ((command && event.key().eq_ignore_ascii_case("k")) || slash) && has_explorer {
             event.prevent_default();
             app.tab.set(Tab::Explorer);
             // From another tab the Explorer is still hidden here, and a hidden field takes no
