@@ -1249,6 +1249,14 @@ over.
     restart on a new zebrad run is what brings zingod back;
   - reports `ZINGOD_VERSION`, read with `include_str!`, which a cargo test checks
     (`check-versions.sh` runs before anything compiles, so it can't).
+
+  `fake-zebrad` answers only five methods today (`crates/launcher-core/src/bin/fake-zebrad.rs:856`),
+  so Z2 also teaches it `getblockhash`: a hash derived from the height, up to its tip, and an
+  error above it. fake-zingod's `GetLatestBlock` sends the same hash in its normal modes and a
+  different one in the wrong-hash mode.
+- **The service actor against fakes** (Z3, launcher-public, under `tokio::time::pause`), for the
+  tip cross-check: three different hashes over 3 minutes give `ChainMismatch` and stop zingod;
+  one or two, as in a reorg, clear; a height above fake-zebrad's tip is skipped.
 - **Contract** (`crates/launcher-public/tests/real_zingod.rs`, ignored by default like
   `real_light_server.rs`; `ZEBRAD_BIN`, `ZINGOD_BIN`). A Regtest zebrad through the supervisor,
   the real `zeal-zingod` through the runner with Zeal's configuration, and the real front door with
