@@ -1258,3 +1258,55 @@ async fn the_node_a_light_client_server_serves_from_stays() {
         .expect("removed");
     within(fx.registry.shutdown()).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(
+    windows,
+    ignore = "Windows ends zebrad's job at once, so the first node does not stay stopping"
+)]
+async fn a_light_client_server_set_up_while_its_node_stops_for_removal_keeps_it() {
+    // The first node ignores the stop request: its removal waits out the stop grace.
+    let fx = fixture_from(true, |paths| {
+        config_with_modes(paths, nothing_in_use, |spec| {
+            if spec.network == Network::Mainnet {
+                "hang-on-signal"
+            } else {
+                "ok"
+            }
+        })
+    })
+    .await;
+    let first = fx.registry.first().expect("first");
+    within(fx.registry.add(draft(Network::Testnet, "Other")))
+        .await
+        .expect("add");
+    within(first.start(&done(), StartOptions::default()))
+        .await
+        .expect("start");
+    let removal = tokio::spawn({
+        let registry = fx.registry.clone();
+        let id = first.id.clone();
+        async move { registry.remove(&id, false).await }
+    });
+    wait_for(&fx.registry, &first.id, "the removal's stop", |s| {
+        s.phase == Phase::Stopping
+    })
+    .await;
+
+    // The service is set up for the first node while it stops, after the removal's check.
+    let spec = launcher_types::public::PublicServiceSpec::new_light_server(
+        first.id.clone(),
+        Network::Mainnet,
+    );
+    within(fx.settings.update(move |s| s.public.services.push(spec)))
+        .await
+        .expect("the node is still first");
+    assert!(matches!(
+        within(removal).await.expect("join"),
+        Err(NodeError::ServesPublic(_))
+    ));
+    assert!(fx.registry.node(&first.id).is_ok(), "still listed");
+    assert_eq!(fx.registry.first().expect("first").id, first.id);
+    assert_eq!(fx.settings.nodes()[0].id, first.id, "and saved first");
+    within(fx.registry.shutdown()).await;
+}

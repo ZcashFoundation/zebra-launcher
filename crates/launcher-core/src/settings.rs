@@ -11,7 +11,9 @@
 
 use std::{fs, io, path::PathBuf};
 
-use launcher_types::{DEFAULT_STOP_GRACE_SECS, Network, PortRole, Settings, is_loopback_http_url};
+use launcher_types::{
+    DEFAULT_STOP_GRACE_SECS, Network, NodeId, PortRole, Settings, is_loopback_http_url,
+};
 pub use launcher_types::{MAX_STOP_GRACE_SECS, MIN_STOP_GRACE_SECS, STOP_GRACE_SECS};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -37,6 +39,13 @@ pub enum SettingsError {
     /// The node list breaks a rule every saved list keeps.
     #[error("the node list cannot be saved: {0}")]
     Nodes(#[from] NodeListError),
+    /// The node list no longer has, as its first node, the node the light client server
+    /// serves from.
+    #[error("{0} serves the light client server")]
+    ServesPublic(NodeId),
+    /// The light client server would be set up for a node that is not the first.
+    #[error("{0} is no longer Zeal's first node")]
+    NotFirstNode(NodeId),
     /// The settings task has stopped.
     #[error("the settings store has stopped")]
     Closed,
@@ -72,6 +81,33 @@ pub fn apply_from_ui(current: &mut Settings, mut incoming: Settings) {
 pub fn for_ui(mut settings: Settings) -> Settings {
     settings.public = Default::default();
     settings
+}
+
+/// The node the light client server serves from, if one is set up.
+fn public_node(settings: &Settings) -> Option<&NodeId> {
+    settings.public.light_server().map(|spec| &spec.node)
+}
+
+/// The rule that keeps the light client server on its node, which PS1 serves from the first
+/// (docs/PUBLIC-SERVICES.md). The settings actor checks it on every change of either side, in
+/// the one order changes are saved in, so a setup and a removal racing each other cannot both
+/// be saved: settings that set the service up for a node other than the first are refused, and
+/// so is a node list whose first node is no longer the one the service names.
+fn check_public_node(
+    before: (&Settings, &[NodeSpec]),
+    after: (&Settings, &[NodeSpec]),
+) -> Result<(), SettingsError> {
+    let first = |nodes: &[NodeSpec]| nodes.first().map(|node| node.id.clone());
+    let Some(node) = public_node(after.0) else {
+        return Ok(());
+    };
+    if public_node(before.0) != Some(node) && first(after.1).as_ref() != Some(node) {
+        return Err(SettingsError::NotFirstNode(node.clone()));
+    }
+    if first(before.1).as_ref() == Some(node) && first(after.1).as_ref() != Some(node) {
+        return Err(SettingsError::ServesPublic(node.clone()));
+    }
+    Ok(())
 }
 
 type Edit = Box<dyn FnOnce(&mut Settings) + Send>;
@@ -228,6 +264,8 @@ impl SettingsHandle {
     }
 
     /// Applies `f` to the current settings, validates the result and saves it.
+    /// Refused when it sets the light client server up for a node that is not
+    /// the first in the list.
     ///
     /// Updates are applied in the order they reach the actor, each on top of the
     /// previous one. On error nothing is saved or published.
@@ -252,8 +290,9 @@ impl SettingsHandle {
     }
 
     /// Saves `nodes` as the node list, next to the current settings. Refused
-    /// unless the list keeps the rules of [`nodes::check_list`]; on error
-    /// nothing is saved.
+    /// unless the list keeps the rules of [`nodes::check_list`], and while the
+    /// light client server serves from the first node, unless that node stays
+    /// first; on error nothing is saved.
     pub async fn save_nodes(&self, nodes: Vec<NodeSpec>) -> Result<(), SettingsError> {
         let (reply, response) = oneshot::channel();
         self.tx
@@ -274,22 +313,30 @@ async fn run(
         // The caller may have given up waiting; a change is saved regardless.
         match msg {
             Msg::Update { edit, reply } => {
-                let mut next = watch.borrow().clone();
+                let current = watch.borrow().clone();
+                let mut next = current.clone();
                 edit(&mut next);
                 let nodes = nodes_watch.borrow().clone();
-                let result = save(&path, &next, &nodes).await.map(|()| {
-                    watch.send_replace(next.clone());
-                    next
-                });
+                let result = match check_public_node((&current, &nodes), (&next, &nodes)) {
+                    Ok(()) => save(&path, &next, &nodes).await.map(|()| {
+                        watch.send_replace(next.clone());
+                        next
+                    }),
+                    Err(err) => Err(err),
+                };
                 let _ = reply.send(result);
             }
             Msg::SaveNodes { nodes, reply } => {
                 let settings = watch.borrow().clone();
-                let result = match nodes::check_list(&nodes) {
+                let current = nodes_watch.borrow().clone();
+                let checked = nodes::check_list(&nodes)
+                    .map_err(SettingsError::from)
+                    .and_then(|()| check_public_node((&settings, &current), (&settings, &nodes)));
+                let result = match checked {
                     Ok(()) => save(&path, &settings, &nodes).await.map(|()| {
                         nodes_watch.send_replace(nodes);
                     }),
-                    Err(err) => Err(err.into()),
+                    Err(err) => Err(err),
                 };
                 let _ = reply.send(result);
             }
@@ -760,6 +807,71 @@ mod tests {
         let reopened = SettingsStore::open(&paths).expect("reopen");
         assert_eq!(reopened.nodes(), nodes);
         assert!(!reopened.current().close_to_tray);
+    }
+
+    #[tokio::test]
+    async fn the_light_client_server_stays_on_the_first_node() {
+        use launcher_types::public::PublicServiceSpec;
+        let (_dir, paths) = paths();
+        let store = SettingsStore::open(&paths).expect("open");
+        let first = store.nodes()[0].clone();
+        let other = NodeSpec {
+            id: NodeId::new("zebrad-testnet").expect("id"),
+            layout: NodeLayout::Folder,
+            ..NodeSpec::first(Network::Testnet)
+        };
+        let light_server = |node: &NodeSpec| {
+            let spec = PublicServiceSpec::new_light_server(node.id.clone(), node.network);
+            move |s: &mut Settings| s.public.services.push(spec)
+        };
+        timeout(T, store.save_nodes(vec![first.clone(), other.clone()]))
+            .await
+            .expect("in time")
+            .expect("two nodes");
+        // Only the first node can serve it.
+        let err = timeout(T, store.update(light_server(&other)))
+            .await
+            .expect("in time")
+            .expect_err("not the first node");
+        assert!(matches!(err, SettingsError::NotFirstNode(_)), "{err:?}");
+        timeout(T, store.update(light_server(&first)))
+            .await
+            .expect("in time")
+            .expect("the first node");
+        // Its node stays first: a list without it, or with another node first, is refused.
+        for nodes in [vec![other.clone()], vec![other.clone(), first.clone()]] {
+            let err = timeout(T, store.save_nodes(nodes))
+                .await
+                .expect("in time")
+                .expect_err("the light client server's node stays first");
+            assert!(matches!(err, SettingsError::ServesPublic(_)), "{err:?}");
+        }
+        assert_eq!(store.nodes(), [first.clone(), other.clone()]);
+        // Other changes to the service and the list go through.
+        timeout(T, store.update(|s| s.public.services[0].switch_on = false))
+            .await
+            .expect("in time")
+            .expect("a change to the service");
+        timeout(T, store.save_nodes(vec![first.clone()]))
+            .await
+            .expect("in time")
+            .expect("another node goes");
+
+        // Forgotten, the node may go; then a setup for it, saved after, is refused.
+        timeout(T, store.update(|s| s.public.services.clear()))
+            .await
+            .expect("in time")
+            .expect("forgotten");
+        timeout(T, store.save_nodes(vec![other.clone()]))
+            .await
+            .expect("in time")
+            .expect("removed");
+        let err = timeout(T, store.update(light_server(&first)))
+            .await
+            .expect("in time")
+            .expect_err("the node was removed");
+        assert!(matches!(err, SettingsError::NotFirstNode(_)), "{err:?}");
+        assert!(store.current().public.is_empty());
     }
 
     #[tokio::test]

@@ -114,7 +114,8 @@ files are brought up to date and its actors started in
   yet, and the registry publishes it as a new handle.
 - **Removing**: refused for the last node, and for the last one not already being
   removed, so two removals at once cannot empty the list; refused for the first node while a
-  light client server, which serves from it, is set up. The removal takes all of the
+  light client server, which serves from it, is set up, including one set up while the node
+  stops for the removal (the settings actor refuses the list without it). The removal takes all of the
   node's start permits and its config permit (no start or apply can begin), stops it,
   and checks the pid file: the supervisor removes it when its own run ends, so a live
   zebrad there is one an earlier launcher run left, and the removal fails naming its pid
@@ -465,7 +466,10 @@ that is the file's only writer: the launcher's own settings (updates, close to t
 Grafana, appearance, the first-run marker) at the top level and the nodes in a `nodes`
 list, which the registry saves through it (`SettingsHandle::save_nodes`; a list that
 breaks the rules of `nodes::check_list`, such as a repeated id, is refused, and a file
-with one counts as corrupt). `set_settings` saves everything the UI sends except
+with one counts as corrupt). The actor also keeps the light client server on the first
+node: it refuses settings that set the service up for another node, and a node list whose
+first node is no longer the service's, so a setup and a removal of that node that race each
+other cannot both be saved. `set_settings` saves everything the UI sends except
 `first_run_done`, which it keeps as stored: only `complete_first_run` sets it. A
 `launcher.json` older than schema version 2 (or without a `schema_version`) predates the
 first-run flow: `SettingsStore::open` sets `first_run_done`, so upgrading users keep
