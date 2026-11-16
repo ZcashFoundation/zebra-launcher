@@ -215,7 +215,17 @@ pub fn headline(herd: &Herd<'_>) -> String {
             let syncing = witnesses.iter().any(|node| {
                 matches!(node.relation, Relation::CatchingUp { progress, .. } if progress < SYNCED_PROGRESS)
             });
-            if syncing {
+            let stopped = witnesses.iter().all(|node| {
+                matches!(
+                    node.relation,
+                    Relation::Excluded {
+                        why: ExcludedWhy::Stopped | ExcludedWhy::EndOfSupport
+                    }
+                )
+            });
+            if stopped {
+                format!("Not checking: your {net} nodes are stopped")
+            } else if syncing {
                 format!("Your {net} nodes are catching up")
             } else {
                 format!("Checking your {net} nodes…")

@@ -353,6 +353,16 @@ fn a_restarting_node_counts_and_comes_back() {
         view.headline,
         "Your 2 Mainnet nodes agree on block 3,551,204; Zebra · Mainnet 3 is stopped"
     );
+    // Every node stopped: nothing is checked.
+    for node in &mut herd.nodes {
+        node.phase = Phase::Stopped;
+    }
+    let view = herd.round();
+    assert_eq!(view.state, HerdState::Checking);
+    assert_eq!(
+        view.headline,
+        "Not checking: your Mainnet nodes are stopped"
+    );
 }
 
 #[test]
