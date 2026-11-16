@@ -157,9 +157,24 @@ pub fn verify_chain(
     extra_roots: &[CertificateDer<'static>],
 ) -> Result<(), AcmeProblem> {
     check_chain(chain_pem, name, extra_roots).map_err(|detail| {
+        let detail = masked(&detail, name);
         tracing::warn!(target: "zeal::public", %detail, "the issued chain does not verify");
         AcmeProblem::Verify
     })
+}
+
+/// `text` with every copy of `name` masked as Copy diagnostics shows it, for the launcher's
+/// log, whose tail goes into the diagnostics as it is.
+fn masked(text: &str, name: &str) -> String {
+    if name.is_empty() {
+        return text.to_string();
+    }
+    text.replace(name, &launcher_core::diagnostics::mask_name(name))
+}
+
+/// `problem` for the log: Let's Encrypt's words for one Zeal does not map quote the name.
+fn logged(problem: &AcmeProblem, name: &str) -> String {
+    masked(&format!("{problem:?}"), name)
 }
 
 /// [`verify_chain`], with the verifier's own words on failure.
@@ -503,6 +518,25 @@ impl AcmeHandle {
     }
 }
 
+/// The issuer of the next order for a name whose certificate is `current`, and whether one is
+/// needed at `now`. `wanted` says the setup or the user asked for a certificate. A certificate
+/// that lapsed, as after renewals that failed until it expired, is needed again without being
+/// asked.
+fn next_order(current: &CertStatus, wanted: bool, now: SystemTime) -> (CertIssuer, bool) {
+    let valid = current.not_after.is_some_and(|not_after| not_after > now);
+    let lapsed = !valid && current.not_after.is_some();
+    let wanted = wanted || lapsed;
+    let renewal_due = current.renew_at.is_some_and(|at| at <= now);
+    let issuer = if current.staging_validated_at.is_none() && !valid {
+        CertIssuer::Staging
+    } else {
+        CertIssuer::Production
+    };
+    let needed =
+        (wanted && !valid) || (valid && renewal_due) || (wanted && issuer == CertIssuer::Staging);
+    (issuer, needed)
+}
+
 async fn run(
     config: AcmeConfig,
     challenge: watch::Sender<Option<Arc<Challenge>>>,
@@ -520,67 +554,47 @@ async fn run(
         let now = SystemTime::now();
         let current = status.borrow().clone();
         let valid = current.not_after.is_some_and(|not_after| not_after > now);
-        let renewal_due = current.renew_at.is_some_and(|at| at <= now);
-        let issuer = if current.staging_validated_at.is_none() && !valid {
-            CertIssuer::Staging
-        } else {
-            CertIssuer::Production
-        };
-        let needed = (wanted && !valid)
-            || (valid && renewal_due)
-            || (wanted && issuer == CertIssuer::Staging);
+        let (issuer, needed) = next_order(&current, wanted, now);
         let blocked = attempts.next_allowed(issuer, now, asked);
         if needed && *can_validate.borrow() && blocked.is_none() {
             status.send_modify(|s| {
                 s.ordering = Some(issuer);
                 s.next_try = None;
             });
-            let result = order(&config, issuer, &challenge).await;
+            let ordered = order(&config, issuer, &challenge).await;
             let now = SystemTime::now();
+            if ordered.as_ref().is_ok_and(|issued| issued.validated) {
+                validated.send_replace(Some(now));
+            }
+            let result = settle(issuer, ordered, |issued| install(&config, issued));
             let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
             attempts.record(issuer, &outcome, now);
             let _ = store::save(&attempts_path, &attempts, false);
             asked = false;
             match result {
-                Ok(issued) => {
-                    if issued.validated {
-                        validated.send_replace(Some(now));
-                    }
-                    match issuer {
-                        CertIssuer::Staging => {
-                            tracing::info!(target: "zeal::public", "Let's Encrypt staging validated the name");
-                            status.send_modify(|s| {
-                                s.ordering = None;
-                                s.staging_validated_at = Some(now);
-                                s.last_problem = None;
-                            });
-                        }
-                        CertIssuer::Production => {
-                            let installed = install(&config, &issued);
-                            match installed {
-                                Ok(key) => {
-                                    tracing::info!(target: "zeal::public", "certificate issued");
-                                    cert.send_replace(Some(key));
-                                    status.send_modify(|s| {
-                                        s.ordering = None;
-                                        s.not_before = Some(issued.not_before);
-                                        s.not_after = Some(issued.not_after);
-                                        s.renew_at =
-                                            Some(renew_at(issued.not_before, issued.not_after));
-                                        s.last_problem = None;
-                                    });
-                                    wanted = false;
-                                }
-                                Err(problem) => status.send_modify(|s| {
-                                    s.ordering = None;
-                                    s.last_problem = Some(problem);
-                                }),
-                            }
-                        }
-                    }
+                Ok((_, None)) => {
+                    tracing::info!(target: "zeal::public", "Let's Encrypt staging validated the name");
+                    status.send_modify(|s| {
+                        s.ordering = None;
+                        s.staging_validated_at = Some(now);
+                        s.last_problem = None;
+                    });
+                }
+                Ok((issued, Some(key))) => {
+                    tracing::info!(target: "zeal::public", "certificate issued");
+                    cert.send_replace(Some(key));
+                    status.send_modify(|s| {
+                        s.ordering = None;
+                        s.not_before = Some(issued.not_before);
+                        s.not_after = Some(issued.not_after);
+                        s.renew_at = Some(renew_at(issued.not_before, issued.not_after));
+                        s.last_problem = None;
+                    });
+                    wanted = false;
                 }
                 Err(problem) => {
-                    tracing::warn!(target: "zeal::public", ?problem, ?issuer, "certificate order failed");
+                    let logged = logged(&problem, &config.name);
+                    tracing::warn!(target: "zeal::public", problem = %logged, ?issuer, "certificate order failed");
                     let next = attempts.next_allowed(issuer, now, false);
                     status.send_modify(|s| {
                         s.ordering = None;
@@ -614,6 +628,24 @@ async fn run(
                 }
             }
             _ = tokio::time::sleep(wake) => {}
+        }
+    }
+}
+
+/// What an order from `issuer` comes to: a staging validation, or a production certificate
+/// with its key for the front door. A production certificate counts once `install` took it,
+/// so one that does not verify or cannot be stored is a failed order, with the backoff.
+fn settle(
+    issuer: CertIssuer,
+    ordered: Result<Issued, AcmeProblem>,
+    install: impl FnOnce(&Issued) -> Result<Arc<CertifiedKey>, AcmeProblem>,
+) -> Result<(Issued, Option<Arc<CertifiedKey>>), AcmeProblem> {
+    let issued = ordered?;
+    match issuer {
+        CertIssuer::Staging => Ok((issued, None)),
+        CertIssuer::Production => {
+            let key = install(&issued)?;
+            Ok((issued, Some(key)))
         }
     }
 }
@@ -697,6 +729,82 @@ mod tests {
     }
 
     #[test]
+    fn a_lapsed_certificate_is_ordered_again_unasked() {
+        let cert = CertStatus {
+            not_after: Some(at(90 * 24)),
+            not_before: Some(at(0)),
+            renew_at: Some(at(60 * 24)),
+            staging_validated_at: Some(at(0)),
+            ordering: None,
+            next_try: None,
+            last_problem: None,
+        };
+        let production = CertIssuer::Production;
+        assert_eq!(next_order(&cert, false, at(24)), (production, false));
+        assert_eq!(
+            next_order(&cert, false, at(61 * 24)),
+            (production, true),
+            "renewal"
+        );
+        assert_eq!(
+            next_order(&cert, false, at(91 * 24)),
+            (production, true),
+            "lapsed"
+        );
+        let none = CertStatus {
+            not_after: None,
+            not_before: None,
+            renew_at: None,
+            ..cert
+        };
+        assert_eq!(
+            next_order(&none, false, at(24)),
+            (production, false),
+            "never asked"
+        );
+        assert_eq!(next_order(&none, true, at(24)), (production, true));
+        let fresh = CertStatus {
+            staging_validated_at: None,
+            ..none
+        };
+        assert_eq!(
+            next_order(&fresh, true, at(24)),
+            (CertIssuer::Staging, true)
+        );
+    }
+
+    #[test]
+    fn a_certificate_that_cannot_be_installed_is_a_failed_order() {
+        let issued = || Issued {
+            chain_pem: String::new(),
+            key_pem: String::new(),
+            not_before: at(0),
+            not_after: at(90 * 24),
+            validated: true,
+        };
+        let mut attempts = Attempts::default();
+        let result = settle(CertIssuer::Production, Ok(issued()), |_| {
+            Err(AcmeProblem::Verify)
+        });
+        let outcome = result.as_ref().map(|_| ()).map_err(Clone::clone);
+        assert_eq!(outcome, Err(AcmeProblem::Verify));
+        attempts.record(CertIssuer::Production, &outcome, at(0));
+        // Counted once, as a production order and a failure, so the backoff applies.
+        assert_eq!(attempts.production.len(), 1);
+        assert_eq!(attempts.failures.len(), 1);
+        assert_eq!(attempts.consecutive_failures, 1);
+        assert_eq!(
+            attempts.next_allowed(CertIssuer::Production, at(0), false),
+            Some(at(1))
+        );
+        // Staging installs nothing.
+        let staged = settle(CertIssuer::Staging, Ok(issued()), |_| {
+            panic!("staging installs nothing")
+        });
+        assert!(matches!(staged, Ok((_, None))));
+    }
+
+    #[test]
     fn a_rate_limit_waits_for_the_retry_after() {
         let mut attempts = Attempts::default();
         attempts.record(
@@ -710,6 +818,22 @@ mod tests {
             attempts.next_allowed(CertIssuer::Production, at(10), true),
             Some(at(30))
         );
+    }
+
+    #[test]
+    fn the_log_masks_the_name_in_let_s_encrypts_words() {
+        let name = "zec-alice.duckdns.org";
+        let problem = AcmeProblem::Other {
+            detail: format!(
+                "Error creating new order :: Cannot issue for \"{name}\": The ACME server refuses to issue a certificate for this domain name, because it is forbidden by policy"
+            ),
+        };
+        let line = logged(&problem, name);
+        assert!(!line.contains("zec-alice"), "{line}");
+        assert!(line.contains("z**.duckdns.org") && line.contains("forbidden by policy"));
+        assert_eq!(logged(&AcmeProblem::Caa, name), "Caa");
+        let verifier = format!("certificate not valid for name \"{name}\"");
+        assert!(!masked(&verifier, name).contains("zec-alice"));
     }
 
     #[test]

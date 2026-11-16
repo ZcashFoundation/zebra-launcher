@@ -11,6 +11,8 @@
 //! | `unconfirmed` | open, with no evidence from outside yet |
 //! | `cgnat` | the setup stopped at the network step: carrier-grade NAT |
 //! | `expiring` | open, with a certificate that expires in 10 days and a renewal that failed |
+//! | `keychain` | open, with a keychain that will not delete the token: "Turn off and forget" says it may still be there |
+//! | `consent` | open, with a consent an earlier Zeal asked for: paused until the user agrees again |
 
 use std::{
     net::{IpAddr, Ipv4Addr},
@@ -46,6 +48,8 @@ pub(crate) enum PublicFlag {
     Unconfirmed,
     Cgnat,
     Expiring,
+    Keychain,
+    Consent,
 }
 
 impl PublicFlag {
@@ -56,6 +60,8 @@ impl PublicFlag {
             "unconfirmed" => Some(PublicFlag::Unconfirmed),
             "cgnat" => Some(PublicFlag::Cgnat),
             "expiring" => Some(PublicFlag::Expiring),
+            "keychain" => Some(PublicFlag::Keychain),
+            "consent" => Some(PublicFlag::Consent),
             _ => None,
         }
     }
@@ -88,6 +94,8 @@ struct World {
     at_tip_since: Option<SystemTime>,
     gateway: GatewayStats,
     month_bytes_up: u64,
+    /// The keychain refuses to delete the token.
+    keychain_locked: bool,
 }
 
 impl World {
@@ -106,6 +114,7 @@ impl World {
             at_tip_since: Some(clock::now() - Duration::from_secs(3 * 3600)),
             gateway: GatewayStats::default(),
             month_bytes_up: 0,
+            keychain_locked: false,
         }
     }
 
@@ -211,6 +220,17 @@ impl World {
                 world.cert = Some(cert);
                 world
             }
+            Some(PublicFlag::Keychain) => World {
+                keychain_locked: true,
+                ..World::serving(network)
+            },
+            Some(PublicFlag::Consent) => {
+                let mut world = World::serving(network);
+                if let Some(consent) = world.spec.as_mut().and_then(|spec| spec.consent.as_mut()) {
+                    consent.version = CONSENT_VERSION - 1;
+                }
+                world
+            }
         }
     }
 
@@ -308,6 +328,11 @@ thread_local! {
 
 fn public() -> MockPublic {
     PUBLIC.with(MockPublic::clone)
+}
+
+/// Whether a light client server is set up: it serves from the mock's first node.
+pub(crate) fn light_server_set_up() -> bool {
+    public().world.with_untracked(|world| world.spec.is_some())
 }
 
 /// The network the mock's zebrad runs on.
@@ -539,8 +564,21 @@ pub async fn answer_public_step(answer: StepAnswer) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn run_public_checks(_step: StepId) -> Result<(), String> {
+pub async fn run_public_checks(step: StepId) -> Result<(), String> {
     let public = public();
+    // "Try again" on the Serving panel: the renewal goes through this time.
+    let failing = public.world.with_untracked(|world| {
+        world.spec.as_ref().is_some_and(|spec| spec.opened)
+            && world
+                .cert
+                .as_ref()
+                .is_some_and(|cert| cert.last_problem.is_some())
+    });
+    if step == StepId::Certificate && failing {
+        public.later(Duration::from_secs(2), |world| {
+            world.cert = Some(World::certificate(90));
+        });
+    }
     public.publish();
     public.advance();
     Ok(())
@@ -572,11 +610,11 @@ pub async fn open_public_service() -> Result<(), OpenError> {
     Ok(())
 }
 
-pub async fn forget_public_service(_remove_token: bool) -> Result<StillPublic, String> {
+pub async fn forget_public_service(remove_token: bool) -> Result<StillPublic, String> {
     let public = public();
-    let spec = public
+    let (spec, locked) = public
         .world
-        .with_untracked(|world| world.spec.clone())
+        .with_untracked(|world| world.spec.clone().map(|spec| (spec, world.keychain_locked)))
         .ok_or("no light client server is set up")?;
     public.update(|world| *world = World::empty());
     Ok(StillPublic {
@@ -589,6 +627,7 @@ pub async fn forget_public_service(_remove_token: bool) -> Result<StillPublic, S
             Vec::new()
         },
         name: spec.name,
+        token_left: remove_token && locked,
     })
 }
 
@@ -607,6 +646,14 @@ mod tests {
             Some(PublicFlag::Serving)
         );
         assert_eq!(PublicFlag::parse(Some("cgnat")), Some(PublicFlag::Cgnat));
+        assert_eq!(
+            PublicFlag::parse(Some("keychain")),
+            Some(PublicFlag::Keychain)
+        );
+        assert_eq!(
+            PublicFlag::parse(Some("consent")),
+            Some(PublicFlag::Consent)
+        );
         assert_eq!(PublicFlag::parse(Some("nonsense")), None);
         assert_eq!(PublicFlag::parse(None), None);
     }

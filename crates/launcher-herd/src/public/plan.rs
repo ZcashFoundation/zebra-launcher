@@ -272,7 +272,7 @@ fn network(spec: &PublicServiceSpec, facts: &Facts) -> Vec<CheckResult> {
 
 /// The address the name must resolve to: the router's public address, or else the one the
 /// provider saw.
-fn expected_address(facts: &Facts) -> Option<IpAddr> {
+pub fn expected_address(facts: &Facts) -> Option<IpAddr> {
     let router = facts
         .net
         .as_ref()

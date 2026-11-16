@@ -1,9 +1,10 @@
 //! The public services' files, under `<app data>/public/`: the ACME accounts in `acme/`, per
 //! name `certs/<name>/` (`cert.pem`, `key.pem`, `attempts.json`), and `state.json` with the
-//! latest evidence and the month's upload. Every write is atomic, and keys and accounts are
+//! latest evidence and staging validation per name and the month's upload. Every write is atomic, and keys and accounts are
 //! owner-only on Unix.
 
 use std::{
+    collections::BTreeMap,
     fs, io,
     io::Write,
     path::{Path, PathBuf},
@@ -121,18 +122,27 @@ impl PublicPaths {
     }
 }
 
+/// What was proven for one name.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NameState {
+    /// The newest evidence of each kind.
+    pub evidence: Vec<Evidence>,
+    /// The last staging validation through the forward.
+    pub staging_validated_at: Option<std::time::SystemTime>,
+}
+
 /// `state.json`: what the service actor keeps between runs.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
-    /// The newest evidence of each kind.
-    pub evidence: Vec<Evidence>,
+    /// Per name, so a new name starts with nothing proven. What an older Zeal kept for the
+    /// whole installation is dropped: it may be another name's.
+    pub names: BTreeMap<String, NameState>,
     /// The month `month_bytes_up` counts, as `YYYY-MM`.
     pub month: String,
     /// Bytes sent to wallets this month, before this run.
     pub month_bytes_up: u64,
-    /// The last staging validation through the forward.
-    pub staging_validated_at: Option<std::time::SystemTime>,
 }
 
 /// Reads `path` as JSON; a missing or unreadable file gives the default.
@@ -185,6 +195,13 @@ mod tests {
             ..State::default()
         };
         save(&path, &state, false).unwrap();
+        assert_eq!(load::<State>(&path), state);
+        // An older Zeal's evidence for the whole installation is not any name's.
+        fs::write(
+            &path,
+            br#"{"evidence":[{"source":"outside_tls_connection","at":{"secs_since_epoch":1,"nanos_since_epoch":0}}],"staging_validated_at":{"secs_since_epoch":1,"nanos_since_epoch":0},"month":"2026-11","month_bytes_up":42}"#,
+        )
+        .unwrap();
         assert_eq!(load::<State>(&path), state);
     }
 }

@@ -7,8 +7,8 @@ use launcher_herd::public::{current_step, names::DUCKDNS_ZONE};
 use launcher_types::{
     Network,
     public::{
-        CONSENT_VERSION, CheckOutcome, ConnectionReport, DnsProvider, PublicStatus, StepAnswer,
-        StepId, StepState, UploadPreset,
+        CONSENT_VERSION, CheckOutcome, ConnectionReport, DnsProvider, PauseReason, PublicState,
+        PublicStatus, StepAnswer, StepId, StepState, UploadPreset,
     },
 };
 use leptos::{prelude::*, task::spawn_local};
@@ -19,8 +19,8 @@ use crate::{
     clipboard::copy_to_clipboard,
     public_state::PublicContext,
     public_text::{
-        self, SERVICE_NAME, Tone, cert_text, check_line, consent_lines, finding_text, network_name,
-        reach_text, state_line, step_mark, step_title, use_lines,
+        self, SERVICE_NAME, Tone, cert_needs_retry, cert_text, check_line, consent_lines,
+        finding_text, network_name, reach_text, state_line, step_mark, step_title, use_lines,
     },
 };
 
@@ -92,6 +92,9 @@ fn Switch(
 pub fn PublicServices() -> impl IntoView {
     let status = light_status();
     let has_service = Memo::new(move |_| status.with(Option::is_some));
+    // What "Turn off and forget" could not undo. It lives here, not in the panel it came from,
+    // because forgetting ends the setup and so removes that panel.
+    let left = RwSignal::new(None::<Vec<String>>);
     view! {
         <section class="settings public" aria-labelledby="public-heading">
             <h2 id="public-heading">"Public services"</h2>
@@ -102,10 +105,20 @@ pub fn PublicServices() -> impl IntoView {
             </p>
             {move || {
                 if has_service.get() {
-                    view! { <LightServer status /> }.into_any()
+                    view! { <LightServer status left /> }.into_any()
                 } else {
                     view! { <NotSetUp /> }.into_any()
                 }
+            }}
+            {move || {
+                left.get().filter(|lines| !lines.is_empty()).map(|lines| view! {
+                    <div class="public-forgotten" role="status">
+                        <p>"Zeal forgot the light client server. Still to do:"</p>
+                        <ul class="public-still">
+                            {lines.into_iter().map(|line| view! { <li>{line}</li> }).collect_view()}
+                        </ul>
+                    </div>
+                })
             }}
         </section>
     }
@@ -207,13 +220,39 @@ fn outcome_class(outcome: &CheckOutcome) -> &'static str {
 
 /// A set-up light client server: the header, the state line, then the setup or the panel.
 #[component]
-fn LightServer(status: Memo<Option<PublicStatus>>) -> impl IntoView {
+fn LightServer(
+    status: Memo<Option<PublicStatus>>,
+    left: RwSignal<Option<Vec<String>>>,
+) -> impl IntoView {
     let state = AppState::get();
     let busy = RwSignal::new(false);
     let note = RwSignal::new(None::<String>);
     let read =
         move |f: fn(&PublicStatus) -> bool| move || status.with(|s| s.as_ref().is_some_and(f));
     let opened = Memo::new(move |_| status.with(|s| s.as_ref().is_some_and(|s| s.opened)));
+    // An open service whose consent a Zeal release no longer covers asks for it again.
+    let consent_lapsed = Memo::new(move |_| {
+        status.with(|s| {
+            s.as_ref().is_some_and(|s| {
+                matches!(
+                    s.state,
+                    PublicState::Paused {
+                        why: PauseReason::ConsentNeeded,
+                        ..
+                    }
+                )
+            })
+        })
+    });
+    let agree = Callback::new(move |()| {
+        act(busy, note, async move {
+            api::public::answer_public_step(StepAnswer::Consent {
+                version: CONSENT_VERSION,
+            })
+            .await
+            .map_err(|error| error.to_string())
+        });
+    });
     let network =
         Memo::new(move |_| status.with(|s| s.as_ref().map_or(Network::Mainnet, |s| s.network)));
     let in_scope = move || state.network.get() == network.get();
@@ -255,13 +294,23 @@ fn LightServer(status: Memo<Option<PublicStatus>>) -> impl IntoView {
                 }
             >
                 {move || {
-                    if opened.get() {
+                    if consent_lapsed.get() {
+                        view! {
+                            <p>
+                                "What Zeal tells you before serving changed since you agreed. \
+                                 The light client server stays paused until you read it and \
+                                 agree again."
+                            </p>
+                            <ConsentScreen status busy on_agree=agree />
+                        }
+                        .into_any()
+                    } else if opened.get() {
                         view! { <Serving status /> }.into_any()
                     } else {
                         view! { <Checklist status /> }.into_any()
                     }
                 }}
-                <Forget />
+                <Forget left />
             </Show>
         </div>
     }
@@ -655,6 +704,19 @@ fn Serving(status: Memo<Option<PublicStatus>>) -> impl IntoView {
         });
     };
     let share = move || status.with(|s| s.as_ref().and_then(|s| s.share.clone()));
+    let retry_cert = move |_| {
+        act(busy, note, async move {
+            api::public::run_public_checks(StepId::Certificate)
+                .await
+                .map_err(|error| error.to_string())
+        });
+    };
+    let cert_failing = move || {
+        status.with(|s| {
+            s.as_ref()
+                .is_some_and(|s| cert_needs_retry(s, state.now.get()))
+        })
+    };
     let checks = move || {
         status.with(|s| {
             let Some(s) = s else { return String::new() };
@@ -694,6 +756,9 @@ fn Serving(status: Memo<Option<PublicStatus>>) -> impl IntoView {
             <div class="card">
                 <h4>"Certificate"</h4>
                 <p>{with(cert_text)}</p>
+                {move || cert_failing().then(|| view! {
+                    <button type="button" disabled=busy on:click=retry_cert>"Try again"</button>
+                })}
             </div>
             <div class="card">
                 <h4>"Use"</h4>
@@ -758,14 +823,16 @@ fn Serving(status: Memo<Option<PublicStatus>>) -> impl IntoView {
 
 /// "Turn off and forget", with what stays public afterwards.
 #[component]
-fn Forget() -> impl IntoView {
+fn Forget(left: RwSignal<Option<Vec<String>>>) -> impl IntoView {
     let public = PublicContext::get();
     let asking = RwSignal::new(false);
     let remove_token = RwSignal::new(true);
     let busy = RwSignal::new(false);
-    let result = RwSignal::new(None::<Vec<String>>);
+    let failed = RwSignal::new(None::<String>);
     let forget = move |_| {
         busy.set(true);
+        failed.set(None);
+        left.set(None);
         spawn_local(async move {
             match api::public::forget_public_service(remove_token.get_untracked()).await {
                 Ok(still) => {
@@ -788,10 +855,16 @@ fn Forget() -> impl IntoView {
                             "{name} stays in DNS history services, and in public certificate logs."
                         ));
                     }
-                    result.set(Some(lines));
+                    if still.token_left {
+                        lines.push(
+                            "Zeal could not delete the DuckDNS token from the keychain, so it may still be there. Delete it in your keychain app, or make a new token on DuckDNS."
+                                .to_owned(),
+                        );
+                    }
+                    left.set(Some(lines));
                     public.refresh();
                 }
-                Err(error) => result.set(Some(vec![error.to_string()])),
+                Err(error) => failed.set(Some(error.to_string())),
             }
             busy.set(false);
             asking.set(false);
@@ -821,9 +894,7 @@ fn Forget() -> impl IntoView {
                     <button type="button" on:click=move |_| asking.set(false)>"Cancel"</button>
                 </div>
             </Show>
-            {move || result.get().map(|lines| view! {
-                <ul class="public-still">{lines.into_iter().map(|line| view! { <li>{line}</li> }).collect_view()}</ul>
-            })}
+            {move || failed.get().map(|error| view! { <p class="error">{error}</p> })}
         </div>
     }
 }

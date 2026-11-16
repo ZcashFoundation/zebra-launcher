@@ -25,8 +25,8 @@ use launcher_types::{
     },
 };
 
-pub use pause::{degraded, pause};
-pub use plan::{current_step, open_gates, plan};
+pub use pause::{degraded, may_point_name_here, name_elsewhere_since, pause, watches_surroundings};
+pub use plan::{current_step, expected_address, open_gates, plan};
 
 /// The zebrad versions Zeal has tested as a light client server.
 pub const TESTED_ZEBRAD: [&str; 1] = ["7.0.0"];
@@ -71,6 +71,8 @@ pub struct Facts {
     pub eta_secs: Option<u64>,
     /// Since when zebrad has been at the tip without a break ([`light::track_since`]).
     pub at_tip_since: Option<SystemTime>,
+    /// Since when zebrad has been behind without a break ([`light::behind`]).
+    pub behind_since: Option<SystemTime>,
     /// The last wallet check of the endpoint on loopback.
     pub wallet: Option<Checked<Result<LightdInfo, WalletProblem>>>,
     pub net: Option<NetFacts>,
@@ -118,6 +120,7 @@ impl Facts {
             tip: None,
             eta_secs: None,
             at_tip_since: None,
+            behind_since: None,
             wallet: None,
             net: None,
             dns: None,

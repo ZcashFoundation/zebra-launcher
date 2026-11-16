@@ -492,7 +492,8 @@ Where phase 2a's code differs from the design above:
   upgraded node's `zebrad.toml` stays as it is.
 - **The port check names the port, not its owner.** A port held by another program fails
   the start as `PortInUse` with the address; the owning process is not looked up.
-- **Removing.** The last node cannot be removed. The node leaves the list before anything is
+- **Removing.** The last node cannot be removed, nor the first while a light client server,
+  which serves from it, is set up. The node leaves the list before anything is
   deleted, so a quit during a long deletion leaves no listed node with part of its state
   gone; what cannot be deleted is named in the error. Deleting a node's data removes its
   chain state with `delete_node_data`'s rules and then the rest of its own folder; for the

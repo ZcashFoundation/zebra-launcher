@@ -149,7 +149,11 @@ every node command and event carries a node's id, and the mock's zebrad below is
   - `unconfirmed`: open, with no evidence from outside yet;
   - `cgnat`: stopped at the network step, behind carrier-grade NAT;
   - `expiring`: open, with a certificate that expires in 10 days and a failed renewal: the
-    header banner on the node's pages.
+    header banner on the node's pages;
+  - `keychain`: open, with a keychain that will not delete the token: "Turn off and forget"
+    says the token may still be there;
+  - `consent`: open, with a consent an earlier Zeal asked for: paused, with the consent screen
+    to agree again.
 
 The flags are read from the query string once, when the page loads; the table at the top of
 [`src/mock.rs`](src/mock.rs) lists every one.

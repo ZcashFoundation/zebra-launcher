@@ -61,8 +61,9 @@ supervised zebrad, today's `launcher.json`), Linux only and labelled experimenta
   read from fixtures captured from zebrad 7.0.0; the light monitor runs Zodl's check every 10
   minutes; a network change pauses the service and removes the key for zebrad's next start.
 - Front door v1 (`launcher-gateway`) in Zeal's process, on its own runtime and thread: the four
-  modes, the SNI and ALPN checks, TLS-ALPN-01 answers, the v1 limits (128 connections, 8 per
-  IPv4 address or IPv6 /64, 2 new a second with a burst of 16, a 10 s handshake, 10 minutes
+  modes, the SNI and ALPN checks, TLS-ALPN-01 answers, the v1 limits (128 connections, a full
+  front door closing the largest holder's oldest one for a newcomer, 8 per IPv4 address or
+  IPv6 /64, 2 new a second with a burst of 16, a 10 s handshake, 10 minutes
   idle, a 2 hour age, the upload budget), closing at once on pause and at quit.
 - The `AcmeActor`: instant-acme with ring, rcgen and x509-parser, TLS-ALPN-01, staging then
   production, verification with the platform verifier, renewal at two thirds of the lifetime,
@@ -77,7 +78,7 @@ supervised zebrad, today's `launcher.json`), Linux only and labelled experimenta
 - The types (`launcher_types::public`), the pure rules (`launcher-herd`), and the screens:
   consent, setup, the status panel with the Share strings, the banners; in Settings → Public
   services, with a card on the node's dashboard and the banner on the node's pages, all in the
-  mock (`?public=setup`, `serving`, `unconfirmed`, `cgnat`, `expiring`).
+  mock (`?public=setup`, `serving`, `unconfirmed`, `cgnat`, `expiring`, `keychain`, `consent`).
 
 **Moved to a point release:** deSEC; ARI (`renewal_info`, `replaces`); "Test now" and the phone
 test (the setup's staging validation is the evidence from outside meanwhile); UPnP IGD's
@@ -93,13 +94,14 @@ which gate the release on each network.
 
 - `grpc.rs` is in `launcher-public`, not `launcher-core`, and decodes the few protobuf messages
   by hand without prost; its decoder is pinned to `LightdInfo` bytes captured from zebrad.
-- The front door's `Unavailable` answers with h2's server directly, not hyper's.
+- The front door's `Unavailable` answers with h2's server directly, not hyper's, with hyper's
+  limits set by hand: 16 streams a connection and a 16 KiB header list.
 - The network checks read the default route from `/proc/net/route` and send NAT-PMP's
   two-byte external-address request themselves: no netdev or crab_nat in PS1.
 - Consent given at step 1, before a name exists, binds to the first name chosen; another name
   asks again.
 - A network change waits for the user's Resume even after switching back (the pause holds),
-  and removes the key without restarting zebrad (`EndpointHost::apply(restart)`).
+  and removes the key without restarting zebrad (`EndpointHost::apply(node, restart)`).
 - The commands take no node in PS1, which has one light client server; the UI reads the steps
   from the status instead of a `public_plan` command, and the upload preset is a step answer
   instead of `set_public_limits`.
@@ -344,6 +346,9 @@ listener; it has neither (an upstream ask, [Phases](#phases)).
   launch, `ensure` writes the key before zebrad's first start, so there is no second restart.
   Automatic pauses close only the front door and keep the endpoint, except a network change
   (below); the switch off, "Turn off and forget" and a launch that doesn't resume remove it.
+  The off also holds in the service actor's memory, so if `launcher.json` cannot be written the
+  front door stays closed and the reply says the off was not saved; a launch writes the key
+  from the settings it prepared, saved or not.
 - **A network change.** In PS1 a light client server belongs to the network it was set up on,
   and the endpoint key is written only while `Settings.network` is that network. Saving the
   other network in Settings → Node pauses the service (`PauseReason::NetworkChanged`) and
@@ -826,8 +831,12 @@ and Next stays disabled until the gates pass.
 
 1. **What becomes public.** The consent screen ([UI](#the-consent-screen)) with the real name,
    address and versions. Gate: an explicit tick, stored as `Consent { version, at, hostname }`
-   and asked again when `CONSENT_VERSION` or the name changes. For the light client server it
-   also accepts Let's Encrypt's Subscriber Agreement (ACME's `termsOfServiceAgreed`).
+   and asked again when `CONSENT_VERSION` or the name changes. An open service whose consent
+   a Zeal release no longer covers pauses (`ConsentNeeded`, until the user agrees again on the
+   consent screen, which the panel then shows): the front door, the name's updates and the
+   endpoint stop, and at launch the endpoint goes before zebrad's first start. For the light
+   client server it also accepts Let's Encrypt's Subscriber Agreement (ACME's
+   `termsOfServiceAgreed`).
 2. **The service.** Light client server: Zeal takes the network's zebrad (in PS1, the one it
    runs), assigns the endpoint's loopback port and restarts zebrad with it. Gates: the zebrad
    is on Zeal's tested list (in PS1, the bundled 7.0.0); zebrad logged
@@ -944,11 +953,23 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   provider saw (DuckDNS's `verbose`), never from an address-echo site.
 - **`DdnsActor`**, one per name, compares every 5 minutes, updates only on change, then expects
   the new value at the authoritative servers within 2 minutes; it backs off after errors and
-  stops on "too many updates". A mismatch for 15 minutes pauses the service. After a change:
+  stops on "too many updates". Without the router's address (no NAT-PMP answer, carrier-grade
+  NAT, a second router), DuckDNS takes the address it sees, which may change unseen, so that
+  update goes again every 5 minutes (DuckDNS answers `NOCHANGE`). No update goes out until a
+  network check made since the service started, or resumed from a pause only the user ends,
+  finds no VPN on the default route and, once open, the LAN address the forward targets: a
+  laptop that starts Zeal or resumes on a café's network never points the name there. A
+  mismatch for 15 minutes, against the router's address or else the one DuckDNS saw, pauses
+  the service. After a change:
   "Address changed at 14:02. DNS updated; resolvers may use the old one for up to 5 minutes."
 - **Tokens** go to the OS keychain (`keyring` 4.2.0, service `org.zfnd.zeal`, account
-  `dns:<provider>:<zone>`); `launcher.json` holds a `SecretRef`, and the UI only learns
-  `has_token`. Without a Secret Service on Linux, a 0600 file, as an explicit choice. No request
+  `dns:<provider>:<zone>`: a DuckDNS token covers every name on the user's DuckDNS account,
+  so it is kept once as `dns:duckdns:duckdns.org` and a new name or provider leaves no other
+  entry); `launcher.json` holds a `SecretRef`, and the UI only learns `has_token`. A token an
+  older Zeal kept under the name (`dns:duckdns:<name>`) is read as a fallback and moves to
+  the zone's entry when the name changes. "Turn off and forget" with the token box ticked
+  deletes every entry the token may be under and says when the keychain refused, so the token
+  may still be there. Without a Secret Service on Linux, a 0600 file, as an explicit choice. No request
   URL is formatted into an error, a log line or the status. `DdnsActor` reports the provider and
   the kind of failure (with reqwest, through `Error::without_url()`). A test makes a DuckDNS
   update fail and finds no token in the ring, `launcher.<date>.log`, the status or Copy
@@ -992,7 +1013,9 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   address change, the address in public logs).
 - **Issuing**: staging first for every new name and every diagnosis (its TLS-ALPN-01 is the
   first proof that 443 reaches here), then production, `classic` profile, a fresh P-256 key;
-  the chain is verified with the platform verifier before it is pushed to the front door.
+  the chain is verified with the platform verifier before it is pushed to the front door. A
+  certificate that does not verify or cannot be stored counts as one failed production order,
+  with the backoff, so a broken verifier or a read-only folder never orders back to back.
 - **Renewal**: at a random time in ARI's window ("exempt from all rate limits"), else at two
   thirds of the lifetime; never an order at startup while a certificate is valid. While paused:
   DNS-01 with a token (PS6), otherwise at resume; Zeal never opens the port to renew. Let's
@@ -1136,12 +1159,12 @@ Zeal shows each step before the system asks, and never elevates without a click.
 | Watch | Every | When it fails | Comes back |
 | --- | --- | --- | --- |
 | zebrad's branch id by `GetLightdInfo`, every 10 min (with Zaino also: within 2 blocks of its archive and not stuck, by `GetLatestBlock` every 10 s) | 10 min; 10 s with Zaino | `Degraded`: the front door says "unavailable" | by itself, after 5 min caught up |
-| zebrad (with Zaino, its archive) running and at the tip | on change | `Degraded` while it restarts or catches up; paused if stopped or halted at end of support | by itself |
+| zebrad (with Zaino, its archive) running and at the tip | on change | `Degraded` while it restarts or catches up: 10 or more blocks behind at once, more than 2 only after 10 min, since zebrad's estimate of the tip grows by one every 75 s after the tip block's time and an ordinary gap between blocks puts it 3 ahead; paused if stopped or halted at end of support | by itself, as soon as it is within 2 |
 | an upgrade the serving software doesn't know, at activation minus one | each block | paused (`BuildTooOld`): zeeder, and Zaino from PS5; on Mainnet zebrad halts at its end of support instead; on Testnet zebrad never halts (`zebrad/src/components/sync/end_of_support.rs:53-60`), so one that doesn't know the upgrade stays at the block before it, and the tip watch keeps the front door `Unavailable` until a Zeal update brings a newer zebrad | after a Zeal update |
 | the name equals the WAN address, at the authoritative servers | 5 min | paused after 15 min | by itself |
 | the LAN address unchanged | 5 min, at start | paused at once | when the forward or address is right again |
 | no VPN on the default route | 5 min | paused | by itself |
-| the certificate | hourly | a banner 14 days out if renewal fails; `ChallengeOnly` at expiry | after issuance |
+| the certificate | hourly | a banner 14 days out if renewal fails, and "Try again" on the panel; `ChallengeOnly` at expiry, with orders going on under the budget | after issuance |
 | the monthly cap | each stats line | paused | next month, or a higher cap |
 | seeder abuse ([limits](#the-seeders-limits)) | 10 s | paused an hour | by itself; after three in 24 h, by the user |
 | the seeder's `/ready` | 10 s | a banner after 10 min (empty answers are cached 10 min, but zebrad asks other seeders too) | by itself |
@@ -1150,7 +1173,10 @@ Zeal shows each step before the system asks, and never elevates without a click.
 Problems that clear themselves keep the front door up in `Unavailable`, so wallets get a clear
 error and TLS-ALPN-01 renewals still work: a long stall of the backend, such as Zaino's at an
 upgrade, must not let the certificate expire. Problems with the exposure itself (the LAN
-address, the name, a VPN, the cap, the user, a too-old build) close it. **Pause**, the switch
+address, the name, a VPN, the cap, the user, a too-old build) close it. The network checks and
+the name's resolution keep running through a pause that ends by itself, so it sees its cause
+clear: a VPN going down, the name pointing here again (until a resolution says so the pause
+for the name holds). A pause only the user ends stops them. **Pause**, the switch
 off, stops the front door or zeeder and deletes the mappings, and removes zebrad's endpoint
 with a restart of zebrad ([How Zeal runs it](#how-zeal-runs-it)); **Resume** re-runs what the
 pause may have changed. **Turn off and forget** also offers to delete Zeal's DNS records, the
@@ -1176,13 +1202,14 @@ limits connections, **v2** (PS2) ends HTTP/2 and limits streams and methods
 
 | Limit | Default | How | In |
 | --- | --- | --- | --- |
-| connections, all clients | 128 | `Arc<Semaphore>`, the permit held by the connection | v1 |
+| connections, all clients | 128; when full, a newcomer from a network holding fewer than the largest holder closes that holder's oldest connection | `LimitsActor`, a oneshot per connection to close it | v1 |
 | connections per IPv4 address or IPv6 /64 | 8 | `LimitsActor` (`::ffff:` mapped to IPv4) | v1 |
 | new connections per address | 2 a second, burst 16 | token bucket in `LimitsActor` | v1 |
 | TLS handshake; idle connection | 10 s; 10 min without a byte | timers | v1 |
 | connection age | 2 h, then closed: zebrad's HTTP/2 ping every 30 s keeps a connection from going idle | a timer | v1 |
 | upload | 10 Mbit/s (the preset) | a `Semaphore` of KiB permits refilled by a ticker | v1 |
 | monthly upload | 300 GB, then paused | `AtomicU64`, totals persisted | v1 |
+| header list in `Unavailable` | 16 KiB (hyper's and zebrad's), then the call or the connection ends | h2 server builder | v1 |
 | streams per connection; header list | 16 (never above the backend's own: zebrad's 20); 16 KiB | hyper `http2` builder | v2 |
 | request body | 4 MiB, `SendTransaction` 2.5 MiB | a counting body, then `RESOURCE_EXHAUSTED` | v2 |
 | `GetBlockRange`, `GetBlockRangeNullifiers` in flight | 16 in all; a 10 s wait, then `UNAVAILABLE` | per-method `Semaphore` | v2 |
@@ -1276,8 +1303,12 @@ learns it all. Zeal keeps as little as it can:
   (the hourly cap's window), and never written down; "a connection from outside" keeps only a
   time;
 - zeeder's lines are filtered and redacted ([Configuration](#configuration));
-- diagnostics (`copy_diagnostics`, Copy summary) blank the addresses, the name and the zone
-  (`z**.example.com`) unless "include addresses" is ticked, and never carry tokens or keys.
+- diagnostics (`copy_diagnostics`, Copy summary) blank the addresses and the name unless
+  "include addresses" is ticked, and never carry tokens or keys. A DuckDNS name keeps its zone,
+  which thousands of names share (`z**.duckdns.org`); any other name keeps only its last label
+  (`z**.a**.net`), since its zone is the user's own domain and certificate logs are searched by
+  domain. The launcher log's tail goes into the diagnostics as it is, so its lines that quote
+  Let's Encrypt or the certificate verifier mask the name the same way.
 
 Third parties, each named at consent: Let's Encrypt (the name, and the address of Zeal's ACME
 client), the DNS provider (the name, the address, the token), the public resolver the user
@@ -1565,7 +1596,8 @@ came first): `public_status` (one changed `PublicStatus`, counters coalesced to 
   (`SettingsHandle::update`), the only writer of `launcher.json`. So neither a stale copy in a
   page nor the webview can set `switch_on`, `resume_on_launch` or `consent`, and
   `apply_from_ui`'s stale-copy test gains a `public` case. `<app data>/public/` holds `acme/`,
-  `certs/<name>/`, `state.json` (mappings, firewall rules added, the latest evidence) and
+  `certs/<name>/`, `state.json` (mappings, firewall rules added, the latest evidence and
+  staging validation per name) and
   `usage.json`, all written atomically.
 - **Crates**, all in `deny.toml`'s allow-list (their trees still to pass `cargo deny`):
   instant-acme 0.8.5 and prost (Apache-2.0); rcgen 0.14, x509-parser 0.18, hickory-resolver
@@ -1587,8 +1619,9 @@ came first): `public_status` (one changed `PublicStatus`, counters coalesced to 
   clients in one process. `launcher-core`'s reqwest stays at 0.12 without TLS.
 - **No locks** (`clippy.toml` bans them): each service's state in its actor, published on
   `watch`; the certificate, challenge and mode on `watch` inside the front door; per-address
-  counts in `LimitsActor` (mpsc in, oneshot out, a guard's drop sends `Closed`); connections,
-  method concurrency and the upload budget on `Arc<Semaphore>`; counters on `AtomicU64`; the
+  and total connection counts in `LimitsActor` (mpsc in, oneshot out, a oneshot per
+  connection to close it, a guard's drop sends `Closed`); method concurrency and the upload
+  budget on `Arc<Semaphore>`; counters on `AtomicU64`; the
   keychain through `spawn_blocking`. No DashMap: it locks its shards.
 
 ## UI
@@ -1812,7 +1845,7 @@ upstream gate opens first ships first.
 | Phase | Ships | Needs | Screenshots from |
 | --- | --- | --- | --- |
 | **PS0 Decide and ask** | this document, the edits below, the upstream issues | — | — |
-| **PS1 A light client server from zebrad (Linux)** | zebrad's endpoint as a managed loopback key, with the restart, the log line and the health checks; front door v1 in Zeal's process (`launcher-gateway`), its modes and v1 limits; `AcmeActor` (TLS-ALPN-01, staging then production, renewal) against Pebble in CI; the name step (DuckDNS, deSEC, by hand) with `DdnsActor` and the keychain; the read-only network checks and "Check my connection"; the forward by hand with the vendor guides; the firewall commands; the local, hairpin and phone tests and "Test now"; Open, pause and resume; keep-awake; the types, the pure logic and the screens (consent, setup, panel, Share, tray items, banners); Testnet and Mainnet, labelled experimental | today's single supervisor and settings: the endpoint's port is a default with a free-port check, not MULTI-NODE.md's allocator, and the screens sit in Settings → Public services and on the node's page; Zeal's wallet runs passing on Testnet and Mainnet before the release | `?public=setup`, `serving`, `unconfirmed`, `cgnat`, `expiring` |
+| **PS1 A light client server from zebrad (Linux)** | zebrad's endpoint as a managed loopback key, with the restart, the log line and the health checks; front door v1 in Zeal's process (`launcher-gateway`), its modes and v1 limits; `AcmeActor` (TLS-ALPN-01, staging then production, renewal) against Pebble in CI; the name step (DuckDNS, deSEC, by hand) with `DdnsActor` and the keychain; the read-only network checks and "Check my connection"; the forward by hand with the vendor guides; the firewall commands; the local, hairpin and phone tests and "Test now"; Open, pause and resume; keep-awake; the types, the pure logic and the screens (consent, setup, panel, Share, tray items, banners); Testnet and Mainnet, labelled experimental | today's single supervisor and settings: the endpoint's port is a default with a free-port check, not MULTI-NODE.md's allocator, and the screens sit in Settings → Public services and on the node's page; Zeal's wallet runs passing on Testnet and Mainnet before the release | `?public=setup`, `serving`, `unconfirmed`, `cgnat`, `expiring`, `keychain`, `consent` |
 | **PS2 Front door v2** | HTTP/2 ended in the front door: the allow-list (no reflection), per-method limits, deadlines, header stripping, connection age with GOAWAY, trailers-only errors, the browser page, calls per method in the status panel | PS1; the first-sync times and bytes from PS1's wallet runs | `?public=serving`, `ratelimited` |
 | **PS3 macOS** | the light client server on macOS: the Local Network prompt and `NSLocalNetworkUsageDescription`, `caffeinate`, the firewall checks | PS1; how Tauri 2 merges a `src-tauri/Info.plist`, checked | `?public=setup` on macOS |
 | **PS4 The public DNS seeder (Linux)** | the bundled `zeal-zeeder`; the domain step (Cloudflare, deSEC, by hand, a dynamic-DNS NS target), the port 53 guide, firewall help, warm-up, Open, the probe, the watchdog, the panel, Share, redaction, on PS1's shared flow | HERD H5 (the zeeder kind, census, the 8233 dialog, on MULTI-NODE phase 4); PS1; zeeder's crawler setting, or the 8233 dialog | `?public=seeder`, `seeder-warmup`, `seeder-attack`, `portclash` |

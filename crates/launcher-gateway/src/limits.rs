@@ -1,6 +1,9 @@
-//! The per-address limits, in one actor task: open connections per IPv4 address or IPv6 /64,
-//! and new connections per address through a token bucket. Addresses are keyed by SipHash-2-4
-//! under a random key per run, pruned when idle, and never written down.
+//! The connection limits, in one actor task: open connections in all and per IPv4 address or
+//! IPv6 /64, and new connections per address through a token bucket. When every slot is
+//! taken, a newcomer from a network holding fewer connections than the largest holder closes
+//! that holder's oldest connection, so a few networks cannot keep everyone else out.
+//! Addresses are keyed by SipHash-2-4 under a random key per run, pruned when idle, and never
+//! written down.
 
 use std::{
     collections::HashMap,
@@ -64,18 +67,120 @@ impl Counters {
     }
 }
 
+/// One admitted connection.
+#[derive(Debug)]
+struct Open {
+    id: u64,
+    since: Instant,
+    /// Closes the connection.
+    evict: oneshot::Sender<()>,
+}
+
+/// One network's connections and token bucket.
 #[derive(Debug)]
 struct Entry {
-    open: u32,
+    /// Oldest first.
+    open: Vec<Open>,
     tokens: f64,
     refilled: Instant,
     touched: Instant,
 }
 
+impl Entry {
+    fn new(limits: &Limits, now: Instant) -> Self {
+        Entry {
+            open: Vec::new(),
+            tokens: f64::from(limits.new_burst.max(1)),
+            refilled: now,
+            touched: now,
+        }
+    }
+
+    /// Refills the bucket to `now`: whether the network may open one more connection.
+    fn fits(&mut self, limits: &Limits, now: Instant) -> bool {
+        let rate = f64::from(limits.new_per_second);
+        let burst = f64::from(limits.new_burst.max(1));
+        let elapsed = now.duration_since(self.refilled).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * rate).min(burst);
+        self.refilled = now;
+        self.touched = now;
+        self.open.len() < limits.per_address as usize && self.tokens >= 1.0
+    }
+}
+
+/// Every network with an open connection or a recent one.
+#[derive(Debug, Default)]
+struct Table {
+    entries: HashMap<u64, Entry>,
+    next_id: u64,
+}
+
+impl Table {
+    fn open_connections(&self) -> usize {
+        self.entries.values().map(|entry| entry.open.len()).sum()
+    }
+
+    /// Admits a connection from network `key` at `now`: its id and the receiver that hears
+    /// when it is closed for a newcomer, or `None` when it is refused. With every slot taken,
+    /// the network holding the most connections loses its oldest one, if it holds more than
+    /// `key`'s network does.
+    fn admit(
+        &mut self,
+        key: u64,
+        limits: &Limits,
+        now: Instant,
+    ) -> Option<(u64, oneshot::Receiver<()>)> {
+        let entry = self
+            .entries
+            .entry(key)
+            .or_insert_with(|| Entry::new(limits, now));
+        if !entry.fits(limits, now) {
+            return None;
+        }
+        let mine = entry.open.len();
+        if self.open_connections() >= limits.max_connections as usize {
+            // The largest holder; among equals, the one with the oldest connection.
+            let largest = self
+                .entries
+                .values_mut()
+                .filter(|entry| !entry.open.is_empty())
+                .max_by(|a, b| {
+                    a.open
+                        .len()
+                        .cmp(&b.open.len())
+                        .then_with(|| b.open[0].since.cmp(&a.open[0].since))
+                })?;
+            if largest.open.len() <= mine {
+                return None;
+            }
+            let oldest = largest.open.remove(0);
+            let _ = oldest.evict.send(());
+        }
+        let entry = self.entries.get_mut(&key)?;
+        entry.tokens -= 1.0;
+        let id = self.next_id;
+        self.next_id += 1;
+        let (evict, evicted) = oneshot::channel();
+        entry.open.push(Open {
+            id,
+            since: now,
+            evict,
+        });
+        Some((id, evicted))
+    }
+
+    fn closed(&mut self, key: u64, id: u64, now: Instant) {
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.open.retain(|open| open.id != id);
+            entry.touched = now;
+        }
+    }
+}
+
 enum Msg {
     Admit {
         key: u64,
-        reply: oneshot::Sender<bool>,
+        reply: oneshot::Sender<Option<(u64, oneshot::Receiver<()>)>>,
     },
     Set(Limits),
 }
@@ -84,7 +189,7 @@ enum Msg {
 #[derive(Clone, Debug)]
 pub(crate) struct LimitsHandle {
     tx: mpsc::Sender<Msg>,
-    closed: mpsc::UnboundedSender<u64>,
+    closed: mpsc::UnboundedSender<(u64, u64)>,
     keys: (u64, u64),
 }
 
@@ -92,14 +197,23 @@ pub(crate) struct LimitsHandle {
 #[derive(Debug)]
 pub(crate) struct AddressGuard {
     key: u64,
-    closed: mpsc::UnboundedSender<u64>,
+    id: u64,
+    closed: mpsc::UnboundedSender<(u64, u64)>,
 }
 
 impl Drop for AddressGuard {
     fn drop(&mut self) {
         // The actor is gone only when the front door stopped.
-        let _ = self.closed.send(self.key);
+        let _ = self.closed.send((self.key, self.id));
     }
+}
+
+/// An admitted connection's slot, and the receiver that hears when a full front door closes
+/// the connection for a newcomer.
+#[derive(Debug)]
+pub(crate) struct Admitted {
+    pub guard: AddressGuard,
+    pub evicted: oneshot::Receiver<()>,
 }
 
 impl LimitsHandle {
@@ -132,14 +246,19 @@ impl LimitsHandle {
         hasher.finish()
     }
 
-    /// A slot for a new connection from `ip`, or `None` when its network is at its limits.
-    pub(crate) async fn admit(&self, ip: IpAddr) -> Option<AddressGuard> {
+    /// A slot for a new connection from `ip`, or `None` when the limits refuse it.
+    pub(crate) async fn admit(&self, ip: IpAddr) -> Option<Admitted> {
         let key = self.key(ip);
         let (reply, answer) = oneshot::channel();
         self.tx.send(Msg::Admit { key, reply }).await.ok()?;
-        answer.await.ok()?.then(|| AddressGuard {
-            key,
-            closed: self.closed.clone(),
+        let (id, evicted) = answer.await.ok()??;
+        Some(Admitted {
+            guard: AddressGuard {
+                key,
+                id,
+                closed: self.closed.clone(),
+            },
+            evicted,
         })
     }
 
@@ -148,62 +267,42 @@ impl LimitsHandle {
     }
 }
 
-/// Whether a new connection fits `entry` under `limits` at `now`, taking its token if so.
-fn admit(entry: &mut Entry, limits: &Limits, now: Instant) -> bool {
-    let rate = f64::from(limits.new_per_second);
-    let burst = f64::from(limits.new_burst.max(1));
-    let elapsed = now.duration_since(entry.refilled).as_secs_f64();
-    entry.tokens = (entry.tokens + elapsed * rate).min(burst);
-    entry.refilled = now;
-    entry.touched = now;
-    if entry.open >= limits.per_address || entry.tokens < 1.0 {
-        return false;
-    }
-    entry.tokens -= 1.0;
-    entry.open += 1;
-    true
-}
-
 async fn run(
     mut limits: Limits,
     mut rx: mpsc::Receiver<Msg>,
-    mut closed: mpsc::UnboundedReceiver<u64>,
+    mut closed: mpsc::UnboundedReceiver<(u64, u64)>,
     counters: Arc<Counters>,
     stats: watch::Sender<Stats>,
     every: Duration,
 ) {
-    let mut entries: HashMap<u64, Entry> = HashMap::new();
+    let mut table = Table::default();
     let mut tick = tokio::time::interval(every);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            // A freed slot counts before a newcomer that came after it.
+            biased;
+            Some((key, id)) = closed.recv() => table.closed(key, id, Instant::now()),
             msg = rx.recv() => match msg {
                 Some(Msg::Admit { key, reply }) => {
-                    let now = Instant::now();
-                    let entry = entries.entry(key).or_insert(Entry {
-                        open: 0,
-                        tokens: f64::from(limits.new_burst.max(1)),
-                        refilled: now,
-                        touched: now,
-                    });
-                    let _ = reply.send(admit(entry, &limits, now));
+                    let _ = reply.send(table.admit(key, &limits, Instant::now()));
                 }
                 Some(Msg::Set(new)) => limits = new,
                 None => break,
             },
-            Some(key) = closed.recv() => {
-                if let Some(entry) = entries.get_mut(&key) {
-                    entry.open = entry.open.saturating_sub(1);
-                    entry.touched = Instant::now();
-                }
-            }
             _ = tick.tick() => {
                 let now = Instant::now();
-                entries.retain(|_, entry| entry.open > 0 || now.duration_since(entry.touched) < PRUNE_AFTER);
+                table.entries.retain(|_, entry| {
+                    !entry.open.is_empty() || now.duration_since(entry.touched) < PRUNE_AFTER
+                });
                 let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
                 let next = Stats {
-                    open_connections: entries.values().map(|entry| entry.open).sum(),
-                    client_networks: entries.values().filter(|entry| entry.open > 0).count() as u32,
+                    open_connections: table.open_connections() as u32,
+                    client_networks: table
+                        .entries
+                        .values()
+                        .filter(|entry| !entry.open.is_empty())
+                        .count() as u32,
                     handshakes: load(&counters.handshakes),
                     handshakes_failed: load(&counters.handshakes_failed),
                     refused_sni: load(&counters.refused_sni),
@@ -238,6 +337,10 @@ mod tests {
         assert_ne!(network_of(v6a), network_of(v6c));
     }
 
+    fn key(n: u8) -> u64 {
+        u64::from(n)
+    }
+
     #[test]
     fn the_bucket_allows_a_burst_then_the_rate() {
         let limits = Limits {
@@ -247,35 +350,20 @@ mod tests {
             ..Limits::default()
         };
         let start = Instant::now();
-        let mut entry = Entry {
-            open: 0,
-            tokens: 3.0,
-            refilled: start,
-            touched: start,
-        };
-        assert!(admit(&mut entry, &limits, start));
-        assert!(admit(&mut entry, &limits, start));
-        assert!(admit(&mut entry, &limits, start));
-        assert!(!admit(&mut entry, &limits, start), "burst spent");
-        assert!(admit(
-            &mut entry,
-            &limits,
-            start + Duration::from_millis(500)
-        ));
-        assert!(!admit(
-            &mut entry,
-            &limits,
-            start + Duration::from_millis(600)
-        ));
+        let mut table = Table::default();
+        let mut admit = |at: Duration| table.admit(key(1), &limits, start + at).is_some();
+        assert!(admit(Duration::ZERO));
+        assert!(admit(Duration::ZERO));
+        assert!(admit(Duration::ZERO));
+        assert!(!admit(Duration::ZERO), "burst spent");
+        assert!(admit(Duration::from_millis(500)));
+        assert!(!admit(Duration::from_millis(600)));
         // Tokens never exceed the burst.
-        assert!(admit(&mut entry, &limits, start + Duration::from_secs(100)));
-        assert!(admit(&mut entry, &limits, start + Duration::from_secs(100)));
-        assert!(admit(&mut entry, &limits, start + Duration::from_secs(100)));
-        assert!(!admit(
-            &mut entry,
-            &limits,
-            start + Duration::from_secs(100)
-        ));
+        let later = Duration::from_secs(100);
+        assert!(admit(later));
+        assert!(admit(later));
+        assert!(admit(later));
+        assert!(!admit(later));
     }
 
     #[test]
@@ -287,16 +375,81 @@ mod tests {
             ..Limits::default()
         };
         let now = Instant::now();
-        let mut entry = Entry {
-            open: 0,
-            tokens: 100.0,
-            refilled: now,
-            touched: now,
+        let mut table = Table::default();
+        let (first, _) = table.admit(key(1), &limits, now).unwrap();
+        assert!(table.admit(key(1), &limits, now).is_some());
+        assert!(table.admit(key(1), &limits, now).is_none());
+        assert!(
+            table.admit(key(2), &limits, now).is_some(),
+            "another address"
+        );
+        table.closed(key(1), first, now);
+        assert!(table.admit(key(1), &limits, now).is_some());
+    }
+
+    #[test]
+    fn a_full_front_door_closes_the_largest_holders_oldest_connection() {
+        let limits = Limits {
+            max_connections: 4,
+            per_address: 8,
+            new_per_second: 100,
+            new_burst: 100,
+            ..Limits::default()
         };
-        assert!(admit(&mut entry, &limits, now));
-        assert!(admit(&mut entry, &limits, now));
-        assert!(!admit(&mut entry, &limits, now));
-        entry.open -= 1;
-        assert!(admit(&mut entry, &limits, now));
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut table = Table::default();
+        let (_, mut a1) = table.admit(key(1), &limits, at(0)).unwrap();
+        let (_, mut a2) = table.admit(key(1), &limits, at(1)).unwrap();
+        let (_, mut b1) = table.admit(key(2), &limits, at(2)).unwrap();
+        let (_, mut b2) = table.admit(key(2), &limits, at(3)).unwrap();
+
+        // Full, and every network holds as many as a newcomer from one of them would.
+        assert!(table.admit(key(1), &limits, at(4)).is_none());
+        assert!(a1.try_recv().is_err() && b1.try_recv().is_err());
+
+        // A network with none: the oldest connection of the largest holders goes.
+        let (_, mut c1) = table.admit(key(3), &limits, at(5)).unwrap();
+        assert_eq!(a1.try_recv(), Ok(()), "the oldest connection is closed");
+        assert!(a2.try_recv().is_err() && b1.try_recv().is_err());
+        assert_eq!(table.open_connections(), 4);
+
+        // Now network 2 holds the most.
+        assert!(table.admit(key(1), &limits, at(6)).is_some());
+        assert_eq!(b1.try_recv(), Ok(()));
+        assert!(b2.try_recv().is_err() && c1.try_recv().is_err());
+        // One each but network 1, which holds two: a newcomer from 2 takes one of them.
+        assert!(table.admit(key(2), &limits, at(7)).is_some());
+        assert_eq!(a2.try_recv(), Ok(()));
+        assert_eq!(table.open_connections(), 4);
+    }
+
+    #[tokio::test]
+    async fn the_actor_admits_until_full_and_frees_slots() {
+        let limits = Limits {
+            max_connections: 1,
+            ..Limits::default()
+        };
+        let (stats, _) = watch::channel(Stats::default());
+        let handle = LimitsHandle::spawn(
+            limits,
+            Arc::new(Counters::default()),
+            stats,
+            Duration::from_secs(1),
+        );
+        let ip: IpAddr = "203.0.113.10".parse().unwrap();
+        let other: IpAddr = "198.51.100.7".parse().unwrap();
+        let first = handle.admit(ip).await.expect("a free slot");
+        assert!(
+            handle.admit(ip).await.is_none(),
+            "full, and the same network"
+        );
+        let mut first_evicted = first.evicted;
+        let second = handle.admit(other).await.expect("a network with none");
+        assert_eq!((&mut first_evicted).await, Ok(()));
+        drop(first.guard);
+        drop(second);
+        // The freed slot takes a new connection.
+        assert!(handle.admit(ip).await.is_some());
     }
 }

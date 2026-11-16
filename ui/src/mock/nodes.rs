@@ -467,6 +467,12 @@ pub async fn remove_node(node: &NodeId, delete_data: bool) -> Result<u64, String
         ));
     }
     if is_main(node) {
+        if super::public::light_server_set_up() {
+            let name = mock().info.with_untracked(|info| info.name.clone());
+            return Err(format!(
+                "{name} serves the light client server: turn it off and forget it in Settings → Public services before removing the node"
+            ));
+        }
         return remove_main(delete_data).await;
     }
     let name = herd::infos()

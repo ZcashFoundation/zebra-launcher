@@ -19,16 +19,16 @@ use launcher_core::settings::SettingsHandle;
 use launcher_herd::public::{
     self as rules, Checked, Facts, evidence,
     firewall::firewall_info,
-    light::{at_tip, pick_endpoint_port, track_since, wants_endpoint},
-    names::{keychain_account, parse_name, plausible_duckdns_token},
+    light::{at_tip, behind, pick_endpoint_port, track_since, wants_endpoint},
+    names::{DUCKDNS_ACCOUNT, legacy_duckdns_account, parse_name, plausible_duckdns_token},
 };
 use launcher_types::{
     ExitClass, Network, NodeId, NodeStats, Phase, Settings, Status,
     public::{
         CONSENT_VERSION, CheckId, ConnectionReport, Consent, DnsProvider, Evidence, EvidenceSource,
         FirewallInfo, GatewayMode, GatewayStats, LightdInfo, LocalTestProblem, NetFacts, OpenError,
-        PublicHostname, PublicService, PublicServiceSpec, PublicState, PublicStatus, StepAnswer,
-        StepId, StillPublic, WanKind,
+        PublicHostname, PublicService, PublicServiceSpec, PublicState, PublicStatus, SecretRef,
+        StepAnswer, StepId, StillPublic, WanKind,
     },
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -36,11 +36,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::{
     acme::{AcmeCmd, AcmeConfig, AcmeHandle, LETS_ENCRYPT_PRODUCTION, LETS_ENCRYPT_STAGING},
     awake::KeepAwake,
-    ddns::{DUCKDNS_API, DdnsCmd, DdnsConfig, DdnsHandle, Fetch},
+    ddns::{DUCKDNS_API, DdnsCmd, DdnsConfig, DdnsHandle, Fetch, Wanted},
     gateway::FrontDoor,
     light::LightMonitor,
     netcheck,
-    secrets::SecretStore,
+    secrets::{SecretError, SecretStore},
     selftest,
     store::{self, PublicPaths, State},
 };
@@ -54,11 +54,16 @@ const NET_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How often the month's upload is written down.
 const SAVE_EVERY: Duration = Duration::from_secs(10 * 60);
 
-/// What the app does for the actor: write the managed keys from the stored settings and, with
-/// `restart`, restart zebrad if it runs, behind the app's permits. Without `restart` the file
-/// changes for zebrad's next start only, as a network change does.
+/// What the app does for the actor: write `node`'s managed keys from the stored settings and,
+/// with `restart`, restart its zebrad if it runs, behind the app's permits. Without `restart`
+/// the file changes for zebrad's next start only, as a network change does. `node` is the node
+/// the actor's facts come from ([`Wiring::node`]), never another.
 pub trait EndpointHost: Send + Sync + 'static {
-    fn apply(&self, restart: bool) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+    fn apply(
+        &self,
+        node: NodeId,
+        restart: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 }
 
 /// Where the actor gets certificates and names, and what it may do here.
@@ -98,7 +103,8 @@ impl Options {
 /// What the actor needs from the rest of the app.
 pub struct Wiring {
     pub settings: SettingsHandle,
-    /// The serving node's spec: the network it runs on.
+    /// The serving node's spec: its id and the network it runs on. With `status` and `stats`,
+    /// it follows the first node (`RegistryHandle::follow_first`).
     pub node: watch::Receiver<launcher_core::nodes::NodeSpec>,
     pub status: watch::Receiver<Status>,
     pub stats: watch::Receiver<Option<NodeStats>>,
@@ -116,7 +122,8 @@ pub fn prepare_launch(settings: &mut Settings) -> bool {
         return false;
     };
     let held = spec.switch_on && spec.opened && !spec.resume_on_launch;
-    if !spec.switch_on || held {
+    // A consent this release no longer covers waits for the user too.
+    if !spec.switch_on || held || !spec.consent_current() {
         spec.backend_port = None;
     }
     held
@@ -159,7 +166,11 @@ enum Msg {
 enum Internal {
     /// A child's watch changed.
     Poke,
-    Net(NetFacts),
+    /// A network check's facts, from the run of the service numbered `epoch`.
+    Net {
+        net: NetFacts,
+        epoch: u64,
+    },
     LocalTest(Checked<Result<LightdInfo, LocalTestProblem>>),
     Hairpin(Checked<bool>),
     Applied {
@@ -306,10 +317,17 @@ struct Actor {
     held: Option<launcher_types::public::PauseReason>,
     paused: Option<(String, SystemTime)>,
     at_tip_since: Option<SystemTime>,
+    behind_since: Option<SystemTime>,
     name_elsewhere_since: Option<SystemTime>,
     net: Option<NetFacts>,
     net_due: Option<tokio::time::Instant>,
     net_running: bool,
+    /// Counts the times the service stopped watching its surroundings
+    /// ([`rules::watches_surroundings`]), so a network check from before is told apart.
+    net_epoch: u64,
+    /// A network check made since the service last started watching has come back.
+    net_fresh: bool,
+    was_watching: bool,
     firewall: Option<FirewallInfo>,
     port_free: Option<bool>,
     local_test: Option<Checked<Result<LightdInfo, LocalTestProblem>>>,
@@ -324,12 +342,12 @@ struct Actor {
     acme_asked: bool,
     state: State,
     state_saved: tokio::time::Instant,
-    /// The month's upload before the current front door started.
-    door_base: u64,
+    /// This run's upload this month.
+    upload: Upload,
 
     light: Option<Child<LightMonitor>>,
     ddns: Option<Child<DdnsHandle>>,
-    ddns_wanted: watch::Sender<Option<IpAddr>>,
+    ddns_wanted: watch::Sender<Wanted>,
     acme: Option<Child<AcmeHandle>>,
     door: Option<Child<FrontDoor>>,
     challenge: watch::Sender<Option<Arc<launcher_gateway::Challenge>>>,
@@ -354,6 +372,41 @@ fn door_limits(limits: &launcher_types::public::PublicLimits) -> launcher_gatewa
         new_per_second: limits.new_per_second,
         new_burst: limits.new_burst,
         upload_kbit: limits.upload_kbit,
+    }
+}
+
+/// This run's upload this month: what its stopped front doors sent, and the running one's
+/// count, which goes on from before the month began.
+#[derive(Debug, Default)]
+struct Upload {
+    /// Sent this month by front doors that stopped.
+    stopped: u64,
+    /// The running front door's count when the month began.
+    offset: u64,
+}
+
+impl Upload {
+    /// This run's upload this month, with the running front door's count `door`.
+    fn this_run(&self, door: Option<u64>) -> u64 {
+        self.stopped + door.map_or(0, |door| door.saturating_sub(self.offset))
+    }
+
+    fn door_stopped(&mut self, door: u64) {
+        self.stopped += door.saturating_sub(self.offset);
+        self.offset = 0;
+    }
+
+    fn new_month(&mut self, door: Option<u64>) {
+        self.stopped = 0;
+        self.offset = door.unwrap_or(0);
+    }
+}
+
+/// Where the DuckDNS token is kept.
+fn duckdns_secret() -> SecretRef {
+    SecretRef {
+        provider: DnsProvider::DuckDns,
+        account: DUCKDNS_ACCOUNT.to_string(),
     }
 }
 
@@ -392,10 +445,14 @@ impl Actor {
             held: held_at_launch.then_some(launcher_types::public::PauseReason::NotResumed),
             paused: None,
             at_tip_since: None,
+            behind_since: None,
             name_elsewhere_since: None,
             net: None,
             net_due: None,
             net_running: false,
+            net_epoch: 0,
+            net_fresh: false,
+            was_watching: false,
             firewall: None,
             port_free: None,
             local_test: None,
@@ -409,10 +466,10 @@ impl Actor {
             acme_asked: false,
             state,
             state_saved: tokio::time::Instant::now(),
-            door_base: 0,
+            upload: Upload::default(),
             light: None,
             ddns: None,
-            ddns_wanted: watch::channel(None).0,
+            ddns_wanted: watch::channel(Wanted::default()).0,
             acme: None,
             door: None,
             challenge: watch::channel(None).0,
@@ -427,6 +484,7 @@ impl Actor {
         let mut status = self.status_rx.clone();
         let mut stats = self.stats_rx.clone();
         let mut settings = self.settings.watch();
+        let mut node = self.node_rx.clone();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -445,9 +503,12 @@ impl Actor {
                     }
                 },
                 Some(event) = internal.recv() => self.internal(event),
-                _ = status.changed() => {}
-                _ = stats.changed() => {}
-                _ = settings.changed() => {}
+                // A closed watch turns its arm off instead of waking the actor at once forever.
+                Ok(()) = status.changed() => {}
+                Ok(()) = stats.changed() => {}
+                Ok(()) = settings.changed() => {}
+                // A network change holds the service at once.
+                Ok(()) = node.changed() => {}
                 _ = tick.tick() => {}
             }
         }
@@ -503,6 +564,7 @@ impl Actor {
         facts.height = stats.as_ref().map(|stats| stats.height);
         facts.tip = stats.as_ref().map(|stats| stats.estimated_height);
         facts.at_tip_since = self.at_tip_since;
+        facts.behind_since = self.behind_since;
         facts.wallet = self
             .light
             .as_ref()
@@ -526,14 +588,19 @@ impl Actor {
             .map(|acme| acme.handle.status.borrow().clone());
         facts.local_test = self.local_test.clone();
         facts.hairpin = self.hairpin.clone();
-        facts.evidence = self.state.evidence.clone();
+        facts.evidence = spec
+            .name
+            .as_ref()
+            .and_then(|name| self.state.names.get(name.as_str()))
+            .map(|proven| proven.evidence.clone())
+            .unwrap_or_default();
         facts.name_elsewhere_since = self.name_elsewhere_since;
         let stats = self
             .door
             .as_ref()
             .map(|door| door.handle.stats.borrow().clone())
             .unwrap_or_default();
-        facts.month_bytes_up = self.state.month_bytes_up + self.door_base + stats.bytes_up;
+        facts.month_bytes_up = self.state.month_bytes_up + self.upload.this_run(self.door_up());
         facts.gateway = GatewayStats {
             open_connections: stats.open_connections,
             client_networks: stats.client_networks,
@@ -574,19 +641,9 @@ impl Actor {
         let mut facts = self.facts(&spec, now);
         self.at_tip_since = track_since(self.at_tip_since, at_tip(facts.height, facts.tip), now);
         facts.at_tip_since = self.at_tip_since;
-        let expected = facts
-            .net
-            .as_ref()
-            .filter(|net| net.wan == WanKind::Public)
-            .and_then(|net| net.wan_addr);
-        let elsewhere = match (&facts.dns, expected) {
-            (Some(dns), Some(expected)) if dns.checked_at.is_some() => {
-                !dns.resolved.contains(&expected)
-            }
-            _ => false,
-        };
-        self.name_elsewhere_since =
-            track_since(self.name_elsewhere_since, elsewhere && spec.opened, now);
+        self.behind_since = track_since(self.behind_since, behind(facts.height, facts.tip), now);
+        facts.behind_since = self.behind_since;
+        self.name_elsewhere_since = rules::name_elsewhere_since(&spec, &facts);
         facts.name_elsewhere_since = self.name_elsewhere_since;
 
         let steps = rules::plan(&spec, &facts);
@@ -605,6 +662,7 @@ impl Actor {
         let facts = self.facts(&spec, now);
         let mut facts = facts;
         facts.at_tip_since = self.at_tip_since;
+        facts.behind_since = self.behind_since;
         facts.name_elsewhere_since = self.name_elsewhere_since;
         let status = rules::status(&spec, &facts, since);
         self.out.send_if_modified(|statuses| {
@@ -636,9 +694,10 @@ impl Actor {
             // goes from the file before its next start.
             let restart = spec.network == network;
             let host = self.host.clone();
+            let node = self.node_rx.borrow().id.clone();
             let tx = self.internal_tx.clone();
             tokio::spawn(async move {
-                let result = host.apply(restart).await;
+                let result = host.apply(node, restart).await;
                 let _ = tx.send(Internal::Applied { target, result }).await;
             });
         }
@@ -647,16 +706,10 @@ impl Actor {
     fn internal(&mut self, event: Internal) {
         match event {
             Internal::Poke => {}
-            Internal::Net(net) => {
+            Internal::Net { net, epoch } => {
                 self.net_running = false;
-                self.ddns_wanted.send_if_modified(|wanted| {
-                    let next = (net.wan == WanKind::Public)
-                        .then_some(net.wan_addr)
-                        .flatten();
-                    let changed = *wanted != next;
-                    *wanted = next;
-                    changed
-                });
+                // The name's updates wait for the next look, after the rules saw these facts.
+                self.net_fresh |= epoch == self.net_epoch;
                 self.net = Some(net);
             }
             Internal::LocalTest(result) => {
@@ -696,18 +749,26 @@ impl Actor {
                 }
             }
             Internal::Door(launcher_gateway::Event::Outside { at }) => {
-                self.record(Evidence {
-                    source: EvidenceSource::OutsideTlsConnection,
-                    at,
-                });
+                // The front door serves the spec's name.
+                if let Some(name) = self.spec().and_then(|spec| spec.name) {
+                    self.record(
+                        name.as_str(),
+                        Evidence {
+                            source: EvidenceSource::OutsideTlsConnection,
+                            at,
+                        },
+                    );
+                }
             }
             Internal::Door(_) => {}
         }
     }
 
-    fn record(&mut self, new: Evidence) {
-        let before = self.state.evidence.clone();
-        evidence::record(&mut self.state.evidence, new);
+    /// Records evidence for `name`.
+    fn record(&mut self, name: &str, new: Evidence) {
+        let proven = self.state.names.entry(name.to_string()).or_default();
+        let before = proven.evidence.clone();
+        evidence::record(&mut proven.evidence, new);
         // An outside connection is written down at most hourly.
         let worth_saving = before.iter().all(|old| old.source != new.source)
             || before.iter().any(|old| {
@@ -719,11 +780,16 @@ impl Actor {
         }
     }
 
+    /// The running front door's upload since it started.
+    fn door_up(&self) -> Option<u64> {
+        self.door
+            .as_ref()
+            .map(|door| door.handle.stats.borrow().bytes_up)
+    }
+
     fn save_state(&mut self) {
         let mut state = self.state.clone();
-        if let Some(door) = &self.door {
-            state.month_bytes_up += self.door_base + door.handle.stats.borrow().bytes_up;
-        }
+        state.month_bytes_up += self.upload.this_run(self.door_up());
         let _ = store::save(&self.options.paths.state(), &state, false);
         self.state_saved = tokio::time::Instant::now();
     }
@@ -733,7 +799,7 @@ impl Actor {
         if self.state.month != month {
             self.state.month = month;
             self.state.month_bytes_up = 0;
-            self.door_base = 0;
+            self.upload.new_month(self.door_up());
             self.save_state();
         } else if self.state_saved.elapsed() >= SAVE_EVERY {
             self.save_state();
@@ -743,7 +809,8 @@ impl Actor {
     /// Ends the front door and moves its upload into the month's total.
     fn stop_door(&mut self) {
         if let Some(door) = self.door.take() {
-            self.door_base += door.handle.stats.borrow().bytes_up;
+            self.upload
+                .door_stopped(door.handle.stats.borrow().bytes_up);
             door.handle.stop();
         }
         self.can_validate
@@ -761,7 +828,7 @@ impl Actor {
     fn shutdown(&mut self) {
         self.stop_door();
         self.awake = None;
-        self.state.month_bytes_up += std::mem::take(&mut self.door_base);
+        self.state.month_bytes_up += std::mem::take(&mut self.upload).this_run(None);
         let _ = store::save(&self.options.paths.state(), &self.state, false);
     }
 
@@ -776,10 +843,18 @@ impl Actor {
     ) {
         let current = rules::current_step(steps);
         let reached = |step: StepId| spec.opened || current.is_none_or(|current| current >= step);
-        let running = !matches!(
-            state,
-            PublicState::Paused { .. } | PublicState::NotAvailable { .. } | PublicState::Off
-        );
+        // The network checks and the name go on through a pause that ends by itself, so it can.
+        let watching = rules::watches_surroundings(state);
+        // A network check from before they stopped says nothing about where this computer is
+        // now.
+        if !watching {
+            if self.was_watching {
+                self.net_epoch += 1;
+                self.net_due = None;
+            }
+            self.net_fresh = false;
+        }
+        self.was_watching = watching;
 
         // The light monitor follows zebrad's endpoint.
         if self
@@ -801,7 +876,7 @@ impl Actor {
         }
 
         // The read-only network checks, from the network step on.
-        if running
+        if watching
             && reached(StepId::Network)
             && !self.net_running
             && self
@@ -815,9 +890,26 @@ impl Actor {
             self.firewall = Some(firewall_info(tool, spec.internal_port));
         }
 
-        // The name.
+        // The name: no update until this run's network check found the network fit to expose.
+        let wanted = Wanted {
+            update: self.net_fresh
+                && self
+                    .net
+                    .as_ref()
+                    .is_some_and(|net| rules::may_point_name_here(spec, net)),
+            address: self
+                .net
+                .as_ref()
+                .filter(|net| net.wan == WanKind::Public)
+                .and_then(|net| net.wan_addr),
+        };
+        self.ddns_wanted.send_if_modified(|current| {
+            let changed = *current != wanted;
+            *current = wanted;
+            changed
+        });
         match &spec.name {
-            Some(name) if running => {
+            Some(name) if watching => {
                 let key = format!("{name} {:?}", spec.provider);
                 if self.ddns.as_ref().is_none_or(|ddns| ddns.key != key) {
                     let handle = DdnsHandle::spawn(DdnsConfig {
@@ -863,7 +955,10 @@ impl Actor {
                         config,
                         self.challenge.clone(),
                         self.can_validate.subscribe(),
-                        self.state.staging_validated_at,
+                        self.state
+                            .names
+                            .get(name.as_str())
+                            .and_then(|proven| proven.staging_validated_at),
                     );
                     let forwards = vec![
                         forward_changes(handle.status.clone(), self.internal_tx.clone()),
@@ -887,16 +982,29 @@ impl Actor {
                     .try_send(AcmeCmd::Order { asked: false });
                 self.acme_asked = true;
             }
+            let name = acme.key.clone();
             let validated = *acme.handle.validated.borrow();
             let staging = acme.handle.status.borrow().staging_validated_at;
             if let Some(at) = validated {
-                self.record(Evidence {
-                    source: EvidenceSource::TlsAlpn01Validation,
-                    at,
-                });
+                self.record(
+                    &name,
+                    Evidence {
+                        source: EvidenceSource::TlsAlpn01Validation,
+                        at,
+                    },
+                );
             }
-            if staging.is_some() && self.state.staging_validated_at != staging {
-                self.state.staging_validated_at = staging;
+            let kept = self
+                .state
+                .names
+                .get(&name)
+                .and_then(|proven| proven.staging_validated_at);
+            if staging.is_some() && kept != staging {
+                self.state
+                    .names
+                    .entry(name)
+                    .or_default()
+                    .staging_validated_at = staging;
                 self.save_state();
             }
         }
@@ -1062,9 +1170,10 @@ impl Actor {
         self.net_running = true;
         self.net_due = Some(tokio::time::Instant::now() + NET_EVERY);
         let tx = self.internal_tx.clone();
+        let epoch = self.net_epoch;
         tokio::spawn(async move {
             let net = netcheck::check(SystemTime::now()).await;
-            let _ = tx.send(Internal::Net(net)).await;
+            let _ = tx.send(Internal::Net { net, epoch }).await;
         });
     }
 
@@ -1107,15 +1216,17 @@ impl Actor {
             }
             Msg::Switch { on, reply } => {
                 if !on {
-                    // Less exposure acts at once: the front door closes before anything else.
+                    // Less exposure acts at once: the front door closes before anything else,
+                    // and stays closed even if the off cannot be saved.
+                    self.held = Some(launcher_types::public::PauseReason::ByYou);
                     self.stop_door();
                     self.awake = None;
                 }
-                if on {
-                    self.held = None;
-                }
                 self.endpoint_error = None;
                 let result = self.update_spec(move |spec| spec.switch_on = on).await;
+                if on && result.is_ok() {
+                    self.held = None;
+                }
                 let _ = reply.send(result);
             }
             Msg::Answer { answer, reply } => {
@@ -1157,8 +1268,7 @@ impl Actor {
                 "Zeal runs zebrad on the other network; switch to {network} first"
             ));
         }
-        let node = NodeId::new(format!("zebrad-{}", network.as_str().to_ascii_lowercase()))
-            .ok_or("no node id")?;
+        let node = self.node_rx.borrow().id.clone();
         let spec = PublicServiceSpec::new_light_server(node.clone(), network);
         self.settings
             .update(move |settings| settings.public.services.push(spec))
@@ -1188,6 +1298,17 @@ impl Actor {
             }
             StepAnswer::Name { name, provider } => {
                 let name = parse_name(&name, provider).map_err(|err| err.to_string())?;
+                // The token is kept for DuckDNS's zone, so it serves the new name too.
+                let secret = match &spec.name {
+                    Some(old) if *old != name => {
+                        // What was proven for the old name is not the new one's.
+                        if self.state.names.remove(old.as_str()).is_some() {
+                            self.save_state();
+                        }
+                        self.move_legacy_token(old, spec.secret.clone()).await
+                    }
+                    _ => spec.secret.clone(),
+                };
                 self.name_changed();
                 self.update_spec(move |spec| {
                     // Consent given before a name binds to the first one; another name asks again.
@@ -1198,7 +1319,7 @@ impl Actor {
                     }
                     spec.name = Some(name);
                     spec.provider = provider;
-                    spec.secret = None;
+                    spec.secret = secret;
                 })
                 .await
             }
@@ -1212,20 +1333,17 @@ impl Actor {
                         "a DuckDNS token looks like a7c4d0ad-114e-40ef-ba1d-d217904a50f2".into(),
                     );
                 }
-                let account = keychain_account(spec.provider, &name);
                 match self
                     .secrets
-                    .set(account.clone(), token.trim().to_string())
+                    .set(DUCKDNS_ACCOUNT.into(), token.trim().to_string())
                     .await
                 {
                     Ok(()) => {
                         self.keychain_unavailable = false;
-                        let provider = spec.provider;
-                        self.update_spec(move |spec| {
-                            spec.secret =
-                                Some(launcher_types::public::SecretRef { provider, account })
-                        })
-                        .await?;
+                        // An older Zeal's entry for this name would only be left behind.
+                        let _ = self.secrets.delete(legacy_duckdns_account(&name)).await;
+                        self.update_spec(move |spec| spec.secret = Some(duckdns_secret()))
+                            .await?;
                         if let Some(ddns) = &self.ddns {
                             let _ = ddns.handle.commands.try_send(DdnsCmd::Now);
                         }
@@ -1344,6 +1462,8 @@ impl Actor {
 
     async fn forget(&mut self, remove_token: bool) -> Result<StillPublic, String> {
         let spec = self.spec().ok_or("no light client server is set up")?;
+        // Closed until the service is gone, even if a write below fails.
+        self.held = Some(launcher_types::public::PauseReason::ByYou);
         self.stop_children();
         self.update_spec(|spec| {
             spec.switch_on = false;
@@ -1351,13 +1471,26 @@ impl Actor {
         })
         .await?;
         // The endpoint must be gone before the spec is: once it is, the key is the user's.
-        self.host.apply(spec.network == self.network()).await?;
+        let node = self.node_rx.borrow().id.clone();
+        self.host
+            .apply(node, spec.network == self.network())
+            .await?;
         self.applied = Some(None);
-        if remove_token && let Some(name) = &spec.name {
-            let _ = self
-                .secrets
-                .delete(keychain_account(spec.provider, name))
-                .await;
+        // Every entry the token may be under: the zone's, the spec's, and an older Zeal's for
+        // the name, whatever the provider is now. A missing entry is no failure.
+        let mut token_left = false;
+        if remove_token {
+            let mut accounts = vec![DUCKDNS_ACCOUNT.to_string()];
+            accounts.extend(spec.secret.as_ref().map(|secret| secret.account.clone()));
+            accounts.extend(spec.name.as_ref().map(legacy_duckdns_account));
+            accounts.sort();
+            accounts.dedup();
+            for account in accounts {
+                if let Err(err) = self.secrets.delete(account).await {
+                    tracing::warn!(target: "zeal::public", %err, "the DuckDNS token was not deleted");
+                    token_left = true;
+                }
+            }
         }
         self.settings
             .update(|settings| {
@@ -1368,6 +1501,10 @@ impl Actor {
             })
             .await
             .map_err(|err| err.to_string())?;
+        self.held = None;
+        // A new setup proves itself again, whatever its name.
+        self.state.names.clear();
+        self.save_state();
         self.name_changed();
         self.net = None;
         self.port_free = None;
@@ -1385,7 +1522,39 @@ impl Actor {
                 Vec::new()
             },
             name: spec.name,
+            token_left,
         })
+    }
+
+    /// Moves a token an older Zeal kept for the name `old` to the zone's entry, before the name
+    /// or provider changes. Returns where the token is kept now.
+    async fn move_legacy_token(
+        &self,
+        old: &PublicHostname,
+        secret: Option<SecretRef>,
+    ) -> Option<SecretRef> {
+        let legacy = legacy_duckdns_account(old);
+        match self.secrets.get(legacy.clone()).await {
+            Ok(token) => {
+                let kept = self.secrets.get(DUCKDNS_ACCOUNT.into()).await.is_ok()
+                    || self
+                        .secrets
+                        .set(DUCKDNS_ACCOUNT.into(), token)
+                        .await
+                        .is_ok();
+                if kept && self.secrets.delete(legacy.clone()).await.is_ok() {
+                    Some(duckdns_secret())
+                } else {
+                    Some(SecretRef {
+                        provider: DnsProvider::DuckDns,
+                        account: legacy,
+                    })
+                }
+            }
+            Err(SecretError::Missing) => secret.map(|_| duckdns_secret()),
+            // The keychain did not answer: keep the entry for "Turn off and forget".
+            Err(_) => secret,
+        }
     }
 
     async fn check_connection(&mut self) -> ConnectionReport {
@@ -1435,6 +1604,11 @@ mod tests {
         );
         spec.backend_port = Some(9067);
         spec.opened = true;
+        spec.consent = Some(launcher_types::public::Consent {
+            version: CONSENT_VERSION,
+            at: SystemTime::UNIX_EPOCH,
+            hostname: String::new(),
+        });
         settings.public.services.push(spec);
         // Resumes: the key stays, so zebrad's first start opens the endpoint.
         assert!(!prepare_launch(&mut settings));
@@ -1452,6 +1626,34 @@ mod tests {
         spec.backend_port = Some(9067);
         assert!(!prepare_launch(&mut settings));
         assert_eq!(settings.public.light_server().unwrap().backend_port, None);
+        // A consent this release does not cover: the key goes before zebrad starts.
+        let spec = settings.public.light_server_mut().unwrap();
+        spec.switch_on = true;
+        spec.resume_on_launch = true;
+        spec.backend_port = Some(9067);
+        spec.consent = Some(launcher_types::public::Consent {
+            version: CONSENT_VERSION - 1,
+            at: SystemTime::UNIX_EPOCH,
+            hostname: String::new(),
+        });
+        assert!(!prepare_launch(&mut settings));
+        assert_eq!(settings.public.light_server().unwrap().backend_port, None);
+    }
+
+    #[test]
+    fn a_new_month_starts_at_zero_with_a_front_door_running() {
+        let mut upload = Upload::default();
+        // A front door that started last month has sent 250 so far.
+        assert_eq!(upload.this_run(Some(250)), 250);
+        upload.new_month(Some(250));
+        assert_eq!(upload.this_run(Some(250)), 0);
+        assert_eq!(upload.this_run(Some(260)), 10);
+        upload.door_stopped(260);
+        assert_eq!(upload.this_run(None), 10);
+        // The next front door counts from zero.
+        assert_eq!(upload.this_run(Some(5)), 15);
+        upload.new_month(None);
+        assert_eq!(upload.this_run(Some(7)), 7);
     }
 
     #[test]

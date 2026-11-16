@@ -113,7 +113,8 @@ files are brought up to date and its actors started in
   first node takes its network's id (`zebrad-testnet`), as nothing ran or depends on it
   yet, and the registry publishes it as a new handle.
 - **Removing**: refused for the last node, and for the last one not already being
-  removed, so two removals at once cannot empty the list. The removal takes all of the
+  removed, so two removals at once cannot empty the list; refused for the first node while a
+  light client server, which serves from it, is set up. The removal takes all of the
   node's start permits and its config permit (no start or apply can begin), stops it,
   and checks the pid file: the supervisor removes it when its own run ends, so a live
   zebrad there is one an earlier launcher run left, and the removal fails naming its pid
@@ -705,7 +706,10 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
 - **The spec** is `launcher.json`'s `public.services` (no secrets). `set_settings` keeps the
   stored section and `get_settings` leaves it out, so only the public-services commands change
   it, through the settings actor. Tokens are in the OS keychain (`keyring`, service
-  `org.zfnd.zeal`, account `dns:<provider>:<name>`); the spec holds the account name only.
+  `org.zfnd.zeal`, account `dns:<provider>:<zone>`: one DuckDNS token is kept as
+  `dns:duckdns:duckdns.org` for every name); the spec holds the account name only. "Turn off
+  and forget" also deletes the per-name entry an older Zeal kept, and says when the keychain
+  refused to delete the token.
 - **`PublicServices`** (`launcher-public/src/service.rs`) is one actor. At every change of
   zebrad's status or statistics, of the settings or of a child, and every 10 s, it gathers the
   facts, runs launcher-herd's `plan`, `pause`, `state` and `gateway_mode`, drives its children
@@ -717,9 +721,12 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   resolver), the `AcmeActor` and the front door.
 - **zebrad's endpoint.** While the service is switched on with current consent on zebrad's
   network, the actor puts a loopback port in the spec's `backend_port` and asks the app's
-  `EndpointHost` (`src-tauri/src/public.rs`) to apply it: the config permit, the start permit
-  while zebrad runs, `config::ensure` with `managed_keys`, which reads the key from the spec,
-  and a restart only if zebrad was running. A busy permit fails fast and the actor clears the
+  `EndpointHost` (`src-tauri/src/public.rs`) to apply it to the serving node by its id: the
+  config permit, the start permit while zebrad runs, `config::ensure` with `managed_keys`,
+  which reads the key from the spec, and a restart only if zebrad was running. The serving
+  node is the first one: the actor reads its spec, status and statistics through
+  `RegistryHandle::follow_first`, which follows whichever node is first, and applies to the
+  node those come from. A busy permit fails fast and the actor clears the
   port again. Off clears it and applies again; a network change applies it without a restart,
   for zebrad's next start, and holds the service until the user resumes. At launch
   `prepare_launch` drops the endpoint before the first ensure when the service does not
@@ -739,7 +746,9 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   outside), then production with a fresh P-256 key, verified with the platform verifier before
   the front door gets it. Renewal at two thirds of the lifetime, only while the front door is
   up. `attempts.json` keeps the order budget. Files under `<app data>/public/`: `acme/`,
-  `certs/<name>/`, `state.json` (evidence, the month's upload).
+  `certs/<name>/`, `state.json` (per name the evidence and the last staging validation, so a
+  new name starts with staging and nothing proven; the month's upload). A name change drops
+  the old name's entry, and "Turn off and forget" drops them all.
 - **Gates.** "Open to the internet" (`open_public_service`) re-runs every gate in the actor;
   before it the front door serves Let's Encrypt and this computer only. Quitting closes the
   front door before zebrad stops.
@@ -749,7 +758,7 @@ The commands are `get_public_status`, `check_connection`, `begin_public_setup`,
 `forget_public_service` and `open_signup`. The UI's screens are in Settings → Public services,
 with a card on the dashboard and a header banner on the node's pages; every sentence comes
 from `ui/src/public_text.rs`, and the mock's `?public=setup`, `serving`, `unconfirmed`,
-`cgnat` and `expiring` run launcher-herd's rules over fake facts. What PS1 left for later is
+`cgnat`, `expiring`, `keychain` and `consent` run launcher-herd's rules over fake facts. What PS1 left for later is
 listed in PUBLIC-SERVICES.md ("PS1 as built").
 
 ## Block explorer

@@ -36,7 +36,7 @@ use rustls::server::Acceptor;
 pub use rustls::sign::CertifiedKey;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
+    sync::{mpsc, watch},
     task::JoinSet,
 };
 use tokio_rustls::LazyConfigAcceptor;
@@ -45,7 +45,7 @@ pub use tls::{ACME_TLS_ALPN, H2_ALPN, certified_key, certified_key_from_pem, pro
 
 use crate::{
     bandwidth::Bucket,
-    limits::{AddressGuard, Counters, LimitsHandle},
+    limits::{AddressGuard, Admitted, Counters, LimitsHandle},
 };
 
 /// What the front door accepts.
@@ -64,7 +64,9 @@ pub enum Mode {
 /// The connection limits and the upload budget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    /// Open connections from all clients together.
+    /// Open connections from all clients together. When every slot is taken, a newcomer from
+    /// a network holding fewer connections than the largest holder closes that holder's
+    /// oldest connection.
     pub max_connections: u32,
     /// Open connections from one IPv4 address or IPv6 /64.
     pub per_address: u32,
@@ -308,8 +310,6 @@ pub async fn serve(config: Config, inputs: Inputs, outputs: Outputs) -> Result<(
         bucket: bucket.clone(),
         events: outputs.events.clone(),
     });
-    let total = Arc::new(Semaphore::new(config.limits.max_connections as usize));
-    let mut cap = config.limits.max_connections;
     let mut connections = JoinSet::new();
 
     loop {
@@ -321,34 +321,25 @@ pub async fn serve(config: Config, inputs: Inputs, outputs: Outputs) -> Result<(
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 };
-                let Ok(permit) = total.clone().try_acquire_owned() else {
-                    Counters::add(&counters.refused_limits, 1);
-                    continue;
-                };
-                let Some(guard) = limits.admit(peer.ip().to_canonical()).await else {
-                    Counters::add(&counters.refused_limits, 1);
-                    continue;
-                };
                 // `[::]` takes IPv4 as mapped addresses: `::ffff:127.0.0.1` is loopback too.
                 let ip = peer.ip().to_canonical();
-                connections.spawn(connection(stream, ip, ctx.clone(), permit, guard));
+                let Some(Admitted { guard, evicted }) = limits.admit(ip).await else {
+                    Counters::add(&counters.refused_limits, 1);
+                    continue;
+                };
+                let ctx = ctx.clone();
+                connections.spawn(async move {
+                    tokio::select! {
+                        _ = connection(stream, ip, ctx, guard) => {}
+                        // A full front door took the slot for a newcomer.
+                        Ok(()) = evicted => {}
+                    }
+                });
             }
             command = commands.recv() => match command {
                 Some(Command::Limits(new)) => {
                     limits.set(new).await;
                     bucket.set(new.upload_kbit);
-                    if new.max_connections > cap {
-                        total.add_permits((new.max_connections - cap) as usize);
-                    } else if new.max_connections < cap {
-                        let fewer = cap - new.max_connections;
-                        let total = total.clone();
-                        tokio::spawn(async move {
-                            if let Ok(permits) = total.acquire_many(fewer).await {
-                                permits.forget();
-                            }
-                        });
-                    }
-                    cap = new.max_connections;
                 }
                 Some(Command::Stop) | None => break,
             },
@@ -364,13 +355,7 @@ pub async fn serve(config: Config, inputs: Inputs, outputs: Outputs) -> Result<(
 }
 
 /// One client connection, from the ClientHello to the end.
-async fn connection(
-    stream: TcpStream,
-    peer: IpAddr,
-    ctx: Arc<Context>,
-    _permit: OwnedSemaphorePermit,
-    _guard: AddressGuard,
-) {
+async fn connection(stream: TcpStream, peer: IpAddr, ctx: Arc<Context>, _guard: AddressGuard) {
     let _ = stream.set_nodelay(true);
     let acceptor = LazyConfigAcceptor::new(Acceptor::default(), stream);
     let Ok(Ok(start)) = tokio::time::timeout(ctx.timers.handshake, acceptor).await else {

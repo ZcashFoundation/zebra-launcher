@@ -228,6 +228,16 @@ pub struct NodeHandle {
     pub log_generation: Arc<AtomicU64>,
 }
 
+/// The first node's spec, status and statistics, following the node list: when the first node
+/// leaves it, they follow the node that is first then. The light client server serves from
+/// the first node and reads it through these.
+#[derive(Debug)]
+pub struct FirstNode {
+    pub spec: watch::Receiver<NodeSpec>,
+    pub status: watch::Receiver<launcher_types::Status>,
+    pub stats: watch::Receiver<Option<NodeStats>>,
+}
+
 /// Why a node did not start.
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -434,6 +444,55 @@ impl RegistryHandle {
     /// The first node in the list: the one the first run sets up.
     pub fn first(&self) -> Option<NodeHandle> {
         self.nodes.borrow().first().cloned()
+    }
+
+    /// The first node's watches, following whichever node is first; `None` without a node.
+    /// They stop following when every receiver is dropped or the registry ends.
+    pub fn follow_first(&self) -> Option<FirstNode> {
+        let mut node = self.first()?;
+        let (spec_tx, spec) = watch::channel(node.spec());
+        let (status_tx, status) = watch::channel(node.supervisor.status());
+        let (stats_tx, stats) = watch::channel(node.stats.borrow().clone());
+        let mut nodes = self.watch_nodes();
+        tokio::spawn(async move {
+            loop {
+                let mut spec_rx = node.watch_spec();
+                let mut status_rx = node.supervisor.watch_status();
+                let mut stats_rx = node.stats.clone();
+                spec_tx.send_replace(spec_rx.borrow_and_update().clone());
+                status_tx.send_replace(status_rx.borrow_and_update().clone());
+                stats_tx.send_replace(stats_rx.borrow_and_update().clone());
+                node = loop {
+                    tokio::select! {
+                        changed = nodes.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                            let first = nodes.borrow_and_update().first().cloned();
+                            if let Some(first) = first.filter(|first| first.serial != node.serial) {
+                                break first;
+                            }
+                        }
+                        // A removed node's watches close: their arms turn off.
+                        Ok(()) = spec_rx.changed() => {
+                            spec_tx.send_replace(spec_rx.borrow_and_update().clone());
+                        }
+                        Ok(()) = status_rx.changed() => {
+                            status_tx.send_replace(status_rx.borrow_and_update().clone());
+                        }
+                        Ok(()) = stats_rx.changed() => {
+                            stats_tx.send_replace(stats_rx.borrow_and_update().clone());
+                        }
+                        () = spec_tx.closed() => return,
+                    }
+                };
+            }
+        });
+        Some(FirstNode {
+            spec,
+            status,
+            stats,
+        })
     }
 
     /// The nodes among `ids` that are in the list, in the order of `ids`: a
@@ -1008,7 +1067,16 @@ impl Actor {
                     .try_config_permit()
                     .map_err(NodeError::Failed)?;
                 let files = next.paths(&self.config.paths);
-                let keys = next.managed_keys(&self.config.paths);
+                let mut keys = next.managed_keys(&self.config.paths);
+                // The first node serves the light client server: the write that changes its
+                // network also removes the endpoint, which belongs to the service's network,
+                // before zebrad's next start.
+                if index == 0 {
+                    keys.lightwalletd = config::LightwalletdKey::for_public(
+                        &self.settings.current().public,
+                        next.network,
+                    );
+                }
                 blocking(move || config::ensure(&files, &keys).map_err(io::Error::other))
                     .await
                     .map_err(|err| {
@@ -1097,6 +1165,12 @@ impl Actor {
         if !others_stay {
             let name = self.nodes[index].spec.borrow().name.clone();
             let _ = reply.send(Err(NodeError::LastNode(name)));
+            return;
+        }
+        // The first node serves the light client server, which was set up for it alone.
+        if index == 0 && self.settings.current().public.light_server().is_some() {
+            let name = self.nodes[index].spec.borrow().name.clone();
+            let _ = reply.send(Err(NodeError::ServesPublic(name)));
             return;
         }
         let runtime = &mut self.nodes[index];

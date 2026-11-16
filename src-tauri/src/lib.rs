@@ -278,6 +278,8 @@ async fn start(app: &AppHandle) -> Result<(AppState, bool), StartupError> {
     // A public service that does not resume loses zebrad's endpoint before the first start.
     let mut launch = settings.current();
     let held = launcher_public::prepare_launch(&mut launch);
+    // The launch's ensure writes the endpoint from this, even if it cannot be saved.
+    let launch_public = launch.public.clone();
     if launch.public != settings.current().public
         && let Err(err) = settings.update(move |s| s.public = launch.public).await
     {
@@ -301,7 +303,7 @@ async fn start(app: &AppHandle) -> Result<(AppState, bool), StartupError> {
     if let Some(node) = registry.first() {
         let mut keys = node.managed_keys();
         keys.lightwalletd =
-            config::LightwalletdKey::for_public(&settings.current().public, node.spec().network);
+            config::LightwalletdKey::for_public(&launch_public, node.spec().network);
         if let Err(err) = config::ensure(&node.paths, &keys) {
             tracing::error!(%err, "could not update the managed keys in zebrad.toml");
         }

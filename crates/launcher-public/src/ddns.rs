@@ -1,7 +1,9 @@
 //! The name step's actor: one `DdnsActor` per name keeps a DuckDNS name's address current with
 //! the user's token, or only checks a name kept by hand. It compares every 5 minutes and when
 //! the router's address changes, updates only on a change, backs off after errors and stops
-//! asking after a refusal. It resolves the name through the system resolver every 30 s while
+//! asking after a refusal. Without the router's address, DuckDNS takes the address it sees, so
+//! that update goes again every 5 minutes; DuckDNS answers `NOCHANGE` when nothing changed. No
+//! update goes out until the service says this network may be exposed ([`Wanted::update`]). It resolves the name through the system resolver every 30 s while
 //! the name does not point here, and every 5 minutes after.
 //!
 //! No request URL is formatted into an error, a log line or the status: the URL holds the
@@ -17,7 +19,7 @@ use std::{
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty};
-use launcher_herd::public::names::{duckdns_subdomain, keychain_account};
+use launcher_herd::public::names::{DUCKDNS_ACCOUNT, duckdns_subdomain, legacy_duckdns_account};
 use launcher_types::public::{DdnsProblem, DnsProvider, DnsStatus, PublicHostname};
 use tokio::sync::{mpsc, watch};
 
@@ -130,6 +132,17 @@ pub fn parse_duckdns(body: &str) -> Result<Updated, DdnsProblem> {
     Ok(Updated { address, changed })
 }
 
+/// What the name should point at, as the service decides.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Wanted {
+    /// Updates may go out: a network check made since the service last started watching its
+    /// surroundings (at launch, or after a pause only the user ends) found this network fit to
+    /// expose (no VPN, the LAN address the forward targets).
+    pub update: bool,
+    /// The router's public address, when known; DuckDNS takes the address it sees without.
+    pub address: Option<IpAddr>,
+}
+
 /// What the actor needs.
 pub struct DdnsConfig {
     pub name: PublicHostname,
@@ -137,8 +150,7 @@ pub struct DdnsConfig {
     pub api: String,
     pub fetch: Arc<dyn Fetch>,
     pub secrets: Arc<dyn SecretStore>,
-    /// The address the name must point at: the router's public address, when known.
-    pub wanted: watch::Receiver<Option<IpAddr>>,
+    pub wanted: watch::Receiver<Wanted>,
 }
 
 /// What the actor may be asked.
@@ -190,22 +202,33 @@ async fn run(
     status: watch::Sender<DnsStatus>,
     mut commands: mpsc::Receiver<DdnsCmd>,
 ) {
-    let account = keychain_account(config.provider, &config.name);
     let subdomain = duckdns_subdomain(&config.name).map(str::to_string);
     let mut last_sent: Option<Option<IpAddr>> = None;
+    let mut last_sent_at: Option<tokio::time::Instant> = None;
     let mut backoff = FIRST_BACKOFF;
     let mut retry_at: Option<tokio::time::Instant> = None;
     let mut refused = false;
     loop {
-        let wanted = *config.wanted.borrow_and_update();
+        let Wanted {
+            update,
+            address: wanted,
+        } = *config.wanted.borrow_and_update();
         // The address update, for DuckDNS.
         if let (DnsProvider::DuckDns, Some(subdomain)) = (config.provider, &subdomain) {
-            let token = config.secrets.get(account.clone()).await;
+            let token = duckdns_token(config.secrets.as_ref(), &config.name).await;
             let has_token = token.is_ok();
             status.send_modify(|s| s.has_token = has_token);
             let due = retry_at.is_none_or(|at| tokio::time::Instant::now() >= at);
+            let send = match wanted {
+                Some(_) => last_sent != Some(wanted),
+                // The address DuckDNS sees may have changed without Zeal knowing.
+                None => {
+                    last_sent != Some(None)
+                        || last_sent_at.is_none_or(|at| at.elapsed() >= SETTLED_EVERY)
+                }
+            };
             match token {
-                Ok(token) if !refused && due && last_sent != Some(wanted) => {
+                Ok(token) if update && !refused && due && send => {
                     let v4 = match wanted {
                         Some(IpAddr::V4(v4)) => Some(v4),
                         _ => None,
@@ -221,6 +244,7 @@ async fn run(
                     match result {
                         Ok(updated) => {
                             last_sent = Some(wanted);
+                            last_sent_at = Some(tokio::time::Instant::now());
                             backoff = FIRST_BACKOFF;
                             retry_at = None;
                             if updated.changed {
@@ -279,6 +303,17 @@ async fn run(
     }
 }
 
+/// The DuckDNS token: kept for the zone, or for `name` by an older Zeal.
+pub async fn duckdns_token(
+    secrets: &dyn SecretStore,
+    name: &PublicHostname,
+) -> Result<String, SecretError> {
+    match secrets.get(DUCKDNS_ACCOUNT.to_string()).await {
+        Err(SecretError::Missing) => secrets.get(legacy_duckdns_account(name)).await,
+        found => found,
+    }
+}
+
 fn resolved_empty(status: &watch::Sender<DnsStatus>) -> bool {
     status.borrow().resolved.is_empty()
 }
@@ -314,6 +349,95 @@ mod tests {
         }
     }
 
+    /// A DuckDNS that takes every update, sending each URL it was asked.
+    struct Taking(mpsc::UnboundedSender<String>);
+
+    impl Fetch for Taking {
+        fn get(&self, url: String) -> Fetched {
+            let _ = self.0.send(url);
+            Box::pin(async { Ok((200, "OK\n203.0.113.10\n\nNOCHANGE".to_string())) })
+        }
+    }
+
+    async fn taking(
+        wanted: Wanted,
+    ) -> (
+        DdnsHandle,
+        mpsc::UnboundedReceiver<String>,
+        watch::Sender<Wanted>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(crate::secrets::FileStore::new(dir.path()));
+        secrets
+            .set(
+                DUCKDNS_ACCOUNT.into(),
+                "a7c4d0ad-114e-40ef-ba1d-d217904a50f2".into(),
+            )
+            .await
+            .unwrap();
+        let (urls_tx, urls) = mpsc::unbounded_channel();
+        let (wanted_tx, wanted) = watch::channel(wanted);
+        let handle = DdnsHandle::spawn(DdnsConfig {
+            name: PublicHostname::parse("zeal-test.duckdns.org").unwrap(),
+            provider: DnsProvider::DuckDns,
+            api: "https://duckdns.invalid".into(),
+            fetch: Arc::new(Taking(urls_tx)),
+            secrets,
+            wanted,
+        });
+        (handle, urls, wanted_tx, dir)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_the_routers_address_duckdns_hears_again_every_five_minutes() {
+        let (_handle, mut urls, _wanted, _dir) = taking(Wanted {
+            update: true,
+            address: None,
+        })
+        .await;
+        let url = urls.recv().await.unwrap();
+        assert!(url.ends_with("&ip=&verbose=true"), "{url}");
+        let first = tokio::time::Instant::now();
+        urls.recv().await.unwrap();
+        assert!(first.elapsed() >= SETTLED_EVERY);
+        assert!(first.elapsed() < SETTLED_EVERY + WAITING_EVERY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_routers_address_goes_to_duckdns_once_until_it_changes() {
+        let (_handle, mut urls, wanted, _dir) = taking(Wanted {
+            update: true,
+            address: Some("203.0.113.10".parse().unwrap()),
+        })
+        .await;
+        assert!(urls.recv().await.unwrap().contains("ip=203.0.113.10"));
+        let hour = std::time::Duration::from_secs(3600);
+        assert!(
+            tokio::time::timeout(hour, urls.recv()).await.is_err(),
+            "nothing changed"
+        );
+        wanted.send_replace(Wanted {
+            update: true,
+            address: Some("203.0.113.11".parse().unwrap()),
+        });
+        assert!(urls.recv().await.unwrap().contains("ip=203.0.113.11"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nothing_goes_to_duckdns_until_the_network_may_be_exposed() {
+        let (handle, mut urls, wanted, _dir) = taking(Wanted::default()).await;
+        let hour = std::time::Duration::from_secs(3600);
+        assert!(tokio::time::timeout(hour, urls.recv()).await.is_err());
+        // The name is still resolved meanwhile.
+        assert!(handle.status.borrow().checked_at.is_some());
+        wanted.send_replace(Wanted {
+            update: true,
+            address: None,
+        });
+        assert!(urls.recv().await.unwrap().ends_with("&ip=&verbose=true"));
+    }
+
     #[tokio::test]
     async fn a_refused_update_reports_its_kind_and_never_the_token() {
         let token = "a7c4d0ad-114e-40ef-ba1d-d217904a50f2";
@@ -321,11 +445,14 @@ mod tests {
         let secrets = Arc::new(crate::secrets::FileStore::new(dir.path()));
         let name = PublicHostname::parse("zeal-test.duckdns.org").unwrap();
         secrets
-            .set(keychain_account(DnsProvider::DuckDns, &name), token.into())
+            .set(DUCKDNS_ACCOUNT.into(), token.into())
             .await
             .unwrap();
         let (urls_tx, mut urls) = mpsc::unbounded_channel();
-        let (_wanted_tx, wanted) = watch::channel(Some("203.0.113.10".parse().unwrap()));
+        let (_wanted_tx, wanted) = watch::channel(Wanted {
+            update: true,
+            address: Some("203.0.113.10".parse().unwrap()),
+        });
         let mut handle = DdnsHandle::spawn(DdnsConfig {
             name,
             provider: DnsProvider::DuckDns,

@@ -86,6 +86,9 @@ pub fn pause_text(why: &PauseReason, status: &PublicStatus) -> String {
         PauseReason::NotResumed => {
             "Zeal started without opening it, as you chose. Switch it on to resume.".into()
         }
+        PauseReason::ConsentNeeded => {
+            "what Zeal tells you before serving changed. Read it again and agree to resume.".into()
+        }
     }
 }
 
@@ -209,6 +212,14 @@ pub fn cert_text(status: &PublicStatus, now: SystemTime) -> String {
         Some(_) => "The certificate expired".into(),
         None => "No certificate yet".into(),
     }
+}
+
+/// Whether the Serving panel offers to try the certificate again: the last order failed, or the
+/// certificate expired.
+pub fn cert_needs_retry(status: &PublicStatus, now: SystemTime) -> bool {
+    status.cert.as_ref().is_some_and(|cert| {
+        cert.last_problem.is_some() || cert.not_after.is_some_and(|not_after| not_after <= now)
+    })
 }
 
 /// A banner for the header and the panel: automatic pauses, problems wallets see and a
@@ -760,9 +771,16 @@ mod tests {
         assert_eq!(tone, Tone::Warn);
         assert!(text.contains("expires in 10 days"), "{text}");
         assert!(text.contains("couldn't reach this computer"), "{text}");
+        assert!(
+            cert_needs_retry(&status, now),
+            "the panel offers to try again"
+        );
         // Without a failure, an expiry is the renewal's business.
         status.cert.as_mut().unwrap().last_problem = None;
         assert_eq!(banner(&status, now), None);
+        assert!(!cert_needs_retry(&status, now));
+        // An expired certificate can be tried again too.
+        assert!(cert_needs_retry(&status, at(NOW + 11 * 86_400)));
         // The user's own pause needs no banner.
         status.state = PublicState::Paused {
             why: PauseReason::ByYou,

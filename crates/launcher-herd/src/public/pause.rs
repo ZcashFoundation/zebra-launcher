@@ -5,11 +5,11 @@
 //! themselves (zebrad restarting or behind, a failed wallet check, an expired certificate)
 //! keep it up and tell wallets to try again, so Let's Encrypt's renewals still get through.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use launcher_types::{
     Phase,
-    public::{DegradedReason, PauseReason, PublicServiceSpec, Resume},
+    public::{DegradedReason, PauseReason, PublicServiceSpec, PublicState, Resume},
 };
 
 use super::{Facts, light};
@@ -27,6 +27,10 @@ const GB: u64 = 1_000_000_000;
 pub fn pause(spec: &PublicServiceSpec, facts: &Facts) -> Option<(PauseReason, Resume)> {
     if !spec.switch_on {
         return Some((PauseReason::ByYou, Resume::NeedsYou));
+    }
+    // During the setup, consent is the first step's.
+    if spec.opened && !spec.consent_current() {
+        return Some((PauseReason::ConsentNeeded, Resume::NeedsYou));
     }
     if spec.network != facts.network {
         return Some((PauseReason::NetworkChanged, Resume::NeedsYou));
@@ -69,6 +73,50 @@ pub fn pause(spec: &PublicServiceSpec, facts: &Facts) -> Option<(PauseReason, Re
     None
 }
 
+/// Whether the name may be pointed at the network `net` describes: no VPN carries the default
+/// route, and for an open service this computer still has the LAN address the forward targets.
+/// A DNS update from a foreign network would publish where the user is.
+pub fn may_point_name_here(
+    spec: &PublicServiceSpec,
+    net: &launcher_types::public::NetFacts,
+) -> bool {
+    let lan_kept = !spec.opened || spec.lan_addr.is_none() || net.lan_addr == spec.lan_addr;
+    net.vpn.is_none() && lan_kept
+}
+
+/// Since when an open service's name has resolved away from this network without a break,
+/// from the last value in `facts.name_elsewhere_since` and the facts at `facts.now`. Without a
+/// resolution to compare, the last answer holds: a pause for the name must not end because
+/// nothing looked.
+pub fn name_elsewhere_since(spec: &PublicServiceSpec, facts: &Facts) -> Option<SystemTime> {
+    if !spec.opened {
+        return None;
+    }
+    // Without NAT-PMP's answer, the address DuckDNS saw, as the name step checks.
+    let expected = super::expected_address(facts);
+    match (&facts.dns, expected) {
+        (Some(dns), Some(expected)) if dns.checked_at.is_some() => light::track_since(
+            facts.name_elsewhere_since,
+            !dns.resolved.contains(&expected),
+            facts.now,
+        ),
+        _ => facts.name_elsewhere_since,
+    }
+}
+
+/// Whether the network checks and the name's resolution run in `state`: while the service
+/// runs, and through a pause that ends by itself, so they see its cause clear. A pause only
+/// the user ends stops them.
+pub fn watches_surroundings(state: &PublicState) -> bool {
+    match state {
+        PublicState::Paused { resumes, .. } => {
+            matches!(resumes, Resume::Automatic | Resume::NextMonth)
+        }
+        PublicState::NotAvailable { .. } | PublicState::Off => false,
+        PublicState::SettingUp { .. } | PublicState::Serving | PublicState::Degraded { .. } => true,
+    }
+}
+
 /// Why an open service tells wallets to try again, if it must.
 pub fn degraded(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReason> {
     let expired = facts
@@ -87,12 +135,24 @@ pub fn degraded(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReaso
     if facts.phase != Phase::Running || !endpoint_open {
         return Some(DegradedReason::BackingRestarting);
     }
-    if !light::at_tip(facts.height, facts.tip) {
-        let blocks = match (facts.height, facts.tip) {
-            (Some(height), Some(tip)) => tip.saturating_sub(height),
-            _ => 0,
-        };
-        return Some(DegradedReason::BackingBehind { blocks });
+    // A few blocks behind for a moment is an ordinary gap between blocks; an unknown height
+    // is behind.
+    let blocks = match (facts.height, facts.tip) {
+        (Some(height), Some(tip)) => Some(tip.saturating_sub(height)),
+        _ => None,
+    };
+    let behind_long = facts.behind_since.is_some_and(|since| {
+        facts.now.duration_since(since).unwrap_or_default() >= light::BEHIND_GRACE
+    });
+    match blocks {
+        None => return Some(DegradedReason::BackingBehind { blocks: 0 }),
+        Some(blocks)
+            if blocks > light::AT_TIP_BLOCKS
+                && (blocks >= light::FAR_BEHIND_BLOCKS || behind_long) =>
+        {
+            return Some(DegradedReason::BackingBehind { blocks });
+        }
+        Some(_) => {}
     }
     if facts
         .wallet
@@ -106,7 +166,7 @@ pub fn degraded(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReaso
 
 #[cfg(test)]
 mod tests {
-    use std::{net::IpAddr, time::SystemTime};
+    use std::net::IpAddr;
 
     use launcher_types::{
         ExitClass, Network, NodeId,
@@ -289,6 +349,18 @@ mod tests {
             pause(&spec, &failed),
             Some((PauseReason::BackingStopped, Resume::Automatic))
         );
+        let lapsed = PublicServiceSpec {
+            consent: Some(Consent {
+                version: CONSENT_VERSION - 1,
+                ..spec.consent.clone().unwrap()
+            }),
+            ..spec.clone()
+        };
+        assert_eq!(
+            pause(&lapsed, &base),
+            Some((PauseReason::ConsentNeeded, Resume::NeedsYou)),
+            "a release that changed the consent asks again"
+        );
         let held = Facts {
             held: Some(PauseReason::NotResumed),
             ..base
@@ -297,6 +369,98 @@ mod tests {
             pause(&spec, &held),
             Some((PauseReason::NotResumed, Resume::NeedsYou))
         );
+    }
+
+    #[test]
+    fn the_name_points_here_only_from_the_home_network_without_a_vpn() {
+        let spec = open_spec();
+        let home = serving_facts().net.unwrap();
+        assert!(may_point_name_here(&spec, &home));
+        let vpn = NetFacts {
+            vpn: Some("wg0".into()),
+            ..home.clone()
+        };
+        assert!(!may_point_name_here(&spec, &vpn));
+        let cafe = NetFacts {
+            lan_addr: Some("10.0.4.17".parse().unwrap()),
+            ..home.clone()
+        };
+        assert!(!may_point_name_here(&spec, &cafe));
+        let unknown = NetFacts {
+            lan_addr: None,
+            ..home.clone()
+        };
+        assert!(!may_point_name_here(&spec, &unknown));
+        // During the setup the LAN address is the network step's check.
+        let setting_up = PublicServiceSpec {
+            opened: false,
+            ..spec
+        };
+        assert!(may_point_name_here(&setting_up, &cafe));
+        assert!(!may_point_name_here(&setting_up, &vpn));
+    }
+
+    #[test]
+    fn a_name_pointing_elsewhere_holds_until_a_resolution_says_otherwise() {
+        let spec = open_spec();
+        let mut facts = serving_facts();
+        let dns = |resolved: &str, checked: bool| DnsStatus {
+            name: PublicHostname::parse("zec.example.com").unwrap(),
+            provider: DnsProvider::Manual,
+            has_token: false,
+            resolved: vec![resolved.parse().unwrap()],
+            provider_saw: None,
+            updated_at: None,
+            problem: None,
+            checked_at: checked.then(|| at(NOW)),
+        };
+        facts.dns = Some(dns("198.51.100.7", true));
+        assert_eq!(name_elsewhere_since(&spec, &facts), Some(at(NOW)));
+        facts.name_elsewhere_since = Some(at(NOW - 20 * 60));
+        // Paused: no resolution, or none yet from a new resolver. It still points away.
+        facts.dns = None;
+        assert_eq!(name_elsewhere_since(&spec, &facts), Some(at(NOW - 20 * 60)));
+        facts.dns = Some(dns("198.51.100.7", false));
+        assert_eq!(name_elsewhere_since(&spec, &facts), Some(at(NOW - 20 * 60)));
+        facts.dns = Some(dns("203.0.113.10", true));
+        assert_eq!(
+            name_elsewhere_since(&spec, &facts),
+            None,
+            "points here again"
+        );
+        let setting_up = PublicServiceSpec {
+            opened: false,
+            ..spec
+        };
+        facts.name_elsewhere_since = Some(at(NOW - 20 * 60));
+        assert_eq!(name_elsewhere_since(&setting_up, &facts), None);
+    }
+
+    #[test]
+    fn pauses_that_end_by_themselves_keep_watching() {
+        let paused = |why, resumes| PublicState::Paused {
+            why,
+            since: at(0),
+            resumes,
+        };
+        let vpn = PauseReason::VpnRoute {
+            interface: "wg0".into(),
+        };
+        assert!(watches_surroundings(&paused(vpn, Resume::Automatic)));
+        assert!(watches_surroundings(&paused(
+            PauseReason::DataCap,
+            Resume::NextMonth
+        )));
+        assert!(!watches_surroundings(&paused(
+            PauseReason::ByYou,
+            Resume::NeedsYou
+        )));
+        assert!(!watches_surroundings(&paused(
+            PauseReason::NotResumed,
+            Resume::NeedsYou
+        )));
+        assert!(watches_surroundings(&PublicState::Serving));
+        assert!(!watches_surroundings(&PublicState::Off));
     }
 
     #[test]
@@ -331,6 +495,36 @@ mod tests {
         assert_eq!(
             degraded(&spec, &behind),
             Some(DegradedReason::BackingBehind { blocks: 113 })
+        );
+        // zebrad's estimate runs ahead during an ordinary gap between blocks.
+        let mut gap = Facts {
+            height: Some(3_544_810),
+            behind_since: Some(at(NOW - 9 * 60)),
+            ..base.clone()
+        };
+        assert_eq!(degraded(&spec, &gap), None, "3 behind for 9 minutes");
+        gap.behind_since = Some(at(NOW - 10 * 60));
+        assert_eq!(
+            degraded(&spec, &gap),
+            Some(DegradedReason::BackingBehind { blocks: 3 })
+        );
+        let far = Facts {
+            height: Some(3_544_803),
+            behind_since: Some(at(NOW)),
+            ..base.clone()
+        };
+        assert_eq!(
+            degraded(&spec, &far),
+            Some(DegradedReason::BackingBehind { blocks: 10 }),
+            "10 behind at once"
+        );
+        let unknown = Facts {
+            height: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            degraded(&spec, &unknown),
+            Some(DegradedReason::BackingBehind { blocks: 0 })
         );
         let wrong = Facts {
             wallet: Some(Checked {
