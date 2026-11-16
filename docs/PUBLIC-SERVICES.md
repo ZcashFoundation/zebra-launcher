@@ -1130,8 +1130,8 @@ address only (Apple DTS).
 **When no forward helps** (step 3 finds these): carrier-grade NAT leaves no inbound IPv4 (many
 providers give a public IPv4 on request; otherwise IPv6, PS6, and a DS-Lite line's IPv6 reaches
 only IPv6 clients); a second router needs the forward on both, or bridge mode (AVM: an inner
-FRITZ!Box's forwards "will have no effect"); a VPN on the default route sends replies the wrong
-way.
+FRITZ!Box's forwards "will have no effect"); a VPN on the route to the internet sends replies
+the wrong way.
 
 ### Firewalls
 

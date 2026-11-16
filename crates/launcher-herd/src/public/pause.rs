@@ -73,11 +73,11 @@ pub fn pause(spec: &PublicServiceSpec, facts: &Facts) -> Option<(PauseReason, Re
     None
 }
 
-/// Whether the name may be pointed at the network `net` describes: the check found the default
-/// route's gateway and this computer's LAN address, as the network step needs, no VPN carries
-/// that route, and for an open service this computer still has the LAN address the forward
-/// targets. A DNS update from a foreign network would publish where the user is, and a route
-/// that could not be read says nothing about a VPN.
+/// Whether the name may be pointed at the network `net` describes: the check found the router's
+/// default route and this computer's LAN address, as the network step needs, no VPN on the
+/// route to the internet, and for an open service this computer still has the LAN address the
+/// forward targets. A DNS update from a foreign network would publish where the user is, and a
+/// route that could not be read says nothing about a VPN.
 pub fn may_point_name_here(
     spec: &PublicServiceSpec,
     net: &launcher_types::public::NetFacts,

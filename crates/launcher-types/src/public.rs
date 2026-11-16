@@ -486,7 +486,7 @@ pub enum PauseReason {
     LanAddressChanged { was: IpAddr },
     /// The name has pointed elsewhere for 15 minutes.
     NameElsewhere { points_to: Vec<IpAddr> },
-    /// A VPN carries the default route.
+    /// A VPN is on the route to the internet: its interface, or the address sent from.
     VpnRoute { interface: String },
     /// The month's upload reached the cap.
     DataCap,
@@ -599,7 +599,7 @@ pub enum CheckId {
     AtTip,
     /// This computer has a LAN address and a gateway.
     LanAddress,
-    /// No VPN carries the default route.
+    /// No VPN is on the route to the internet.
     NoVpn,
     /// The router has a public address.
     WanAddress,
@@ -915,11 +915,11 @@ pub enum WanKind {
 /// What this computer and its router say about the network: read-only checks.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetFacts {
-    /// This computer's address on the default route.
+    /// This computer's address towards the router.
     pub lan_addr: Option<IpAddr>,
-    /// The default route's gateway.
+    /// The router: the gateway of the lowest-metric default route that has one.
     pub gateway: Option<IpAddr>,
-    /// The default route's interface.
+    /// That default route's interface.
     pub interface: Option<String>,
     /// The VPN on the route to the internet, if any (a heuristic): its interface, or the
     /// address this computer sends from when no interface has it.
