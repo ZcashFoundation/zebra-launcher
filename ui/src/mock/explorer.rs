@@ -100,7 +100,8 @@ impl NodeView {
     }
 }
 
-fn network_of(chain: &str) -> Option<Network> {
+/// The network zebrad's `chain` names.
+pub(super) fn network_of(chain: &str) -> Option<Network> {
     match chain {
         "main" => Some(Network::Mainnet),
         "test" => Some(Network::Testnet),
@@ -243,6 +244,12 @@ fn with_explorer<T>(
             .iter()
             .position(|explorer| explorer.node == view.id)
         {
+            // zebrad came back on another network: nothing known of the old chain applies, as
+            // the backend clears its cache and its index.
+            Some(index) if explorers[index].chain.network() != view.network => {
+                explorers[index] = Explorer::new(view, height, estimated);
+                index
+            }
             Some(index) => index,
             None => {
                 explorers.push(Explorer::new(view, height, estimated));

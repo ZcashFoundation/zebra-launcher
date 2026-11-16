@@ -138,7 +138,11 @@ every node command and event carries a node's id, and the mock's zebrad below is
   unknown. `?reorg` replaces the main node's top two blocks about every 90 s at the tip (with
   `?attip`), and the Explorer shows the banner. With `?herd` the other nodes' Explorer tabs
   say that the Explorer reads only the node that was first when Zeal started: each node gets
-  its own in P6.
+  its own in P6. The mock's zebrad runs on its node's network as it was when it started, as
+  zebrad does: change the network in Settings or Node settings while it runs and the Explorer
+  shows the "zebrad still runs on Mainnet" banner with no tip; restart the node and it shows a
+  Testnet chain, in TAZ with the unit toggle in the warning tone. `?firstrun` with Testnet
+  starts there.
 
 - the light client server (docs/PUBLIC-SERVICES.md), in Settings → Public services, with a card
   on the dashboard and a banner on the node's pages. The mock runs launcher-herd's real rules

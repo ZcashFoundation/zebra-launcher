@@ -69,7 +69,7 @@ use std::{
 
 use launcher_types::{
     ConfigDocument, EosInfo, ExitClass, ExitInfo, FirstRunInfo, ImportOutcome, LegacyInstall,
-    LogLevel, LogLine, LogStream, MachineResources, MetricsSnapshot, NodeDataDirChoice,
+    LogLevel, LogLine, LogStream, MachineResources, MetricsSnapshot, Network, NodeDataDirChoice,
     NodeDetails, NodeId, NodeInfo, NodeResources, NodeStats, OpenTarget, Phase, Settings,
     StaleProcessInfo, Status, UpdateHealthFailure, UpdateInfo, UpdateMode, UpdateState,
 };
@@ -727,6 +727,8 @@ impl Mock {
         };
         let height_base = self.height_base.load(Ordering::Relaxed);
         let at_tip = self.flags.at_tip();
+        // A run starts on the node's network and keeps it until zebrad stops, as zebrad does.
+        let network = self.info.with_untracked(|info| info.network);
         let mut stats = self.stats.get_untracked().unwrap_or_else(|| NodeStats {
             height: height_base,
             estimated_height: if at_tip.is_some() {
@@ -737,25 +739,31 @@ impl Mock {
             verification_progress: 0.0,
             peers: 8,
             mempool_transactions: 0,
-            chain: "main".into(),
+            chain: match network {
+                Network::Mainnet => "main".into(),
+                Network::Testnet => "test".into(),
+            },
             zebrad_version: "7.0.0".into(),
             last_error: Some("(mock) no initial peers in the network config".into()),
             eos: Some(EosInfo {
                 // At the tip, the end of support keeps its distance: that many days of
                 // blocks above it.
                 block_height: match at_tip {
-                    Some(_) => height_base + eos_days * 24 * 3600 / target_spacing(height_base),
+                    Some(_) => {
+                        height_base + eos_days * 24 * 3600 / target_spacing(network, height_base)
+                    }
                     None => 3_160_000,
                 },
                 estimated_time: clock::now() + Duration::from_secs(eos_days * 24 * 3600),
             }),
             updated_at: clock::now(),
         });
+        let network = explorer::network_of(&stats.chain).unwrap_or(network);
         let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
         match scenario {
             Scenario::Normal if at_tip.is_some() => {
                 // At the tip: a block per target spacing.
-                if (tick + 1).is_multiple_of(target_spacing(stats.height + 1)) {
+                if (tick + 1).is_multiple_of(target_spacing(network, stats.height + 1)) {
                     stats.height += 1;
                 }
                 stats.estimated_height = stats.height;
@@ -838,10 +846,9 @@ impl Mock {
     }
 }
 
-/// The target seconds between Mainnet blocks at `height`.
-fn target_spacing(height: u64) -> u64 {
-    let heights =
-        explorer_model::upgrades::UpgradeHeights::defaults(launcher_types::Network::Mainnet);
+/// The target seconds between blocks on `network` at `height`.
+fn target_spacing(network: Network, height: u64) -> u64 {
+    let heights = explorer_model::upgrades::UpgradeHeights::defaults(network);
     u64::from(heights.target_spacing(u32::try_from(height).unwrap_or(u32::MAX)))
 }
 
@@ -1168,8 +1175,9 @@ mod tests {
         assert_eq!(Flags::parse("?explorer=empty&attip").at_tip(), Some(9));
         assert_eq!(Flags::parse("?explorer=slow").explorer, ExplorerFlag::Slow);
         assert_eq!(Flags::parse("?tip=lots").at_tip(), None);
-        assert_eq!(target_spacing(3_543_405), 25);
-        assert_eq!(target_spacing(3_100_000), 75);
+        assert_eq!(target_spacing(Network::Mainnet, 3_543_405), 25);
+        assert_eq!(target_spacing(Network::Mainnet, 3_100_000), 75);
+        assert_eq!(target_spacing(Network::Testnet, 3_543_405), 75);
         assert_eq!(Flags::parse("?stalled").scenario(), Scenario::Stalled);
         assert_eq!(
             Flags::parse("?nopeers&stalled").scenario(),

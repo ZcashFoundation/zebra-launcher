@@ -806,7 +806,9 @@ differs.
   (`ui/src/explorer/prefs.rs`) as the Grafana page keeps its pickers.
 - **Mock.** `ui/src/mock/explorer.rs` answers the same requests from explorer-model's
   synthetic chain, for the first node only as the backend does (`?herd`'s other nodes get
-  its answer), and the dashboard's details read the same chain.
+  its answer), and the dashboard's details read the same chain. The mock's zebrad reports
+  its node's network as it was at its start, so a network change shows `OtherNetwork` until
+  a restart, which gives a new chain on the new network.
 
 ## Updater (opt-in)
 
