@@ -340,15 +340,10 @@ fn Plot(
                     )
                 })
                 .collect();
-            // Two lines of one quantity (peers by direction): their sum too.
+            // Two lines of one quantity (peers by direction, bytes read and written): their
+            // sum too, a dash unless both have a reading.
             if d.series.len() >= 2 && !separate {
-                let total: f64 = d
-                    .series
-                    .iter()
-                    .filter_map(|s| s.values.get(index))
-                    .filter(|value| value.is_finite())
-                    .sum();
-                rows.push(("chart-series-muted", "Total", unit.full(total)));
+                rows.push(("chart-series-muted", "Total", unit.full(d.total_at(index))));
             }
             (d.times.get(index).copied(), rows)
         });

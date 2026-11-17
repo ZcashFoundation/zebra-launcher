@@ -792,6 +792,11 @@ mod tests {
         assert_eq!(values(&io, 1)[..5], [mb, mb, mb, mb, None]);
         assert_eq!(values(&io, 1)[5], mb, "over the 40 s it missed");
         assert_eq!(values(&io, 0)[0], Some(500_000.0));
+        // The tooltip's total: of both lines at a sample, a dash at a gap and at the restart,
+        // where nothing was measured.
+        let total = |index| crate::charts::Unit::BytesPerSec.full(io.total_at(index));
+        assert_eq!(total(0), "1.5 MB/s");
+        assert_eq!((total(4).as_str(), total(6).as_str()), ("—", "—"));
 
         // A range: its first rate is over the interval that ends in it.
         let recent = history.chart(ChartKind::Cpu, Some(Duration::from_secs(7)), now, &machine);

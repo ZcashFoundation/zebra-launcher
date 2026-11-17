@@ -743,6 +743,16 @@ impl ChartData {
     pub fn len(&self) -> usize {
         self.times.len()
     }
+
+    /// The sum of the lines at `index`, for the tooltip's total of two lines of one quantity
+    /// (peers by direction, bytes read and written). It is non-finite, so a dash, unless every
+    /// line has a reading there: at a gap nothing was measured, which is not 0.
+    pub fn total_at(&self, index: usize) -> f64 {
+        self.series
+            .iter()
+            .map(|s| s.values.get(index).copied().unwrap_or(f64::NAN))
+            .sum()
+    }
 }
 
 /// Everything the chart view draws, in `viewBox` units.
@@ -1511,6 +1521,30 @@ mod tests {
             }],
         };
         assert_eq!(geometry(&blank, true, Unit::Cores, |_| 0, VIEW_W), None);
+    }
+
+    #[test]
+    fn a_total_needs_a_reading_of_every_line() {
+        let data = ChartData {
+            times: (0..3).map(|i| at(i * 5)).collect(),
+            series: vec![
+                Series {
+                    name: "Read",
+                    class: "chart-series-1",
+                    values: vec![1.0, f64::NAN, f64::NAN],
+                },
+                Series {
+                    name: "Written",
+                    class: "chart-series-2",
+                    values: vec![2.0, 4.0, f64::NAN],
+                },
+            ],
+        };
+        assert_eq!(data.total_at(0), 3.0);
+        // One line missing is no total, and a gap in both is not 0.
+        assert_eq!(Unit::Count.full(data.total_at(1)), "—");
+        assert_eq!(Unit::BytesPerSec.full(data.total_at(2)), "—");
+        assert_eq!(Unit::Count.full(data.total_at(3)), "—", "past the end");
     }
 
     #[test]

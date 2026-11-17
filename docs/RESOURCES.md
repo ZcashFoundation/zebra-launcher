@@ -1649,7 +1649,9 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      "This node" is washed only while the computer's line is missing, and the computer's
      muted line alone never is: washed, it read as this node's CPU.
    - A gap is a point half way between the two samples with no value in any series, so the
-     tooltip and the table show a dash there. A line's end dot and the end label sit on its
+     tooltip and the table show a dash there, the tooltip's total too: a total needs a
+     reading of every line (`ChartData::total_at`), as the sum of what is there read "0
+     bytes/s" at every gap in the I/O chart. A line's end dot and the end label sit on its
      last finite value.
    - The charts' times are the node's samples. The computer's figures beside each are its
      newest sample at or before it, within 15 s (`MachineHistory::at`), so the computer's
