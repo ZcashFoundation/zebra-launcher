@@ -681,6 +681,12 @@ button.link.ex-link {
   outline-offset: 2px;
 }
 
+/* The row the grid's keys made active, while the grid has focus. */
+.ex-vrow-active {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* The columns' widths, the gaps and the padding add up to the rows' least width. The Net
    column holds two pools' amounts in coins. */
 .ex-vrow {

@@ -1371,11 +1371,17 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
 - **VirtualList** has a fixed height of 14 rows, so it needs no `ResizeObserver`; rows are
   asked for 25 at a time once scrolling has rested for 120 ms, rather than at most two
   viewports a second: of a big block only the chunks with rows in view, the one with the
-  first row in view last, as the explorer reads the newest request first. No re-anchoring: a block has at most about 10,000 rows. There are no
-  `j` and `k` keys (P3's shortcuts); the scroller takes focus, so the browser's scrolling
-  keys work. The table has no sort or filter, and the block's sentence no counts by kind.
+  first row in view last, as the explorer reads the newest request first. No re-anchoring:
+  a block has at most about 10,000 rows. The rows' slots are in the page in slot order, so
+  the rowgroup's `aria-owns` lists them in row order, and the grid is one Tab stop with an
+  active row (`aria-activedescendant`): the arrow keys, Page Up and Down, Home and End move
+  it, scroll it into view and show its hover card, and Enter opens its transaction. The rows'
+  links take no Tab stop, and a scroll that reassigns a focused slot moves focus to the
+  grid. There are no `j` and `k` keys (P3's shortcuts). The table has no sort or filter,
+  and the block's sentence no counts by kind.
 - **Prefetching** reads ahead a Block page's neighbours (◀ ▶), a big block's overscan rows
-  out of view and its next 25 rows, and whatever a hover card is about. The Chain page's rows are not read ahead.
+  out of view and its next 25 rows, and whatever a hover card is about. The Chain page's
+  rows are not read ahead.
 - **Outpoints.** `tx/<txid>?out=n` marks the output, brings it into view and lights its node
   in V6 on hover; its spent status and "Find the spending transaction" come with P4.
 - **Hover cards** are on every link to a block or a transaction and on the table's rows, not

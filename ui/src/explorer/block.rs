@@ -22,7 +22,7 @@ use launcher_types::{
 use leptos::{prelude::*, task::spawn_local};
 
 use super::{
-    cards::{CARD_ID, hover_handlers},
+    cards::{CARD_ID, HoverCards, hover_handlers},
     parts::{Failure, HashText, Loading, PoolChip, RouteLink, RpcCalls},
     prefs::Prefs,
     state::{Loaded, NodeExplorer, load},
@@ -644,6 +644,33 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
             });
         }
     });
+    // The row the grid's keys made active: its hover card under its link, and Enter opens it.
+    let txid_at = move |index: u32| {
+        store
+            .rows
+            .with_untracked(|rows| rows.get(&index).map(|row| row.txid))
+            .or_else(|| first.with_value(|first| first.get(index as usize).copied()))
+    };
+    let cards = HoverCards::get();
+    let on_active = Callback::new(move |active: Option<(u32, web_sys::Element)>| {
+        let Some(cards) = cards else {
+            return;
+        };
+        match active {
+            Some((index, row)) => {
+                let link = row.query_selector(".ex-link").ok().flatten().unwrap_or(row);
+                if let Some(txid) = txid_at(index) {
+                    cards.enter(CardTarget::Tx { txid }, link);
+                }
+            }
+            None => cards.leave_soon(),
+        }
+    });
+    let on_open = Callback::new(move |index: u32| {
+        if let Some(txid) = txid_at(index) {
+            nav.go(ExplorerRoute::Tx { txid, out: None });
+        }
+    });
     let unit = move || prefs.unit(network);
     let header = move || {
         let unit = unit();
@@ -700,9 +727,11 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
         view! {
             <span role="gridcell" class="ex-num muted">{move || index.get()}</span>
             <span role="gridcell">
+                // No Tab stop of its own: the grid is one, and its keys open the active row.
                 <button
                     type="button"
                     class="link ex-link"
+                    tabindex="-1"
                     aria-describedby=CARD_ID
                     on:click=move |_| {
                         if let Some(txid) = txid() {
@@ -710,9 +739,7 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
                         }
                     }
                     on:mouseenter=move |event| enter(event.into())
-                    on:focus=move |event| enter(event.into())
                     on:mouseleave=move |event| leave(event.into())
-                    on:blur=move |event| leave(event.into())
                 >
                     <code>{move || txid().map_or_else(|| "…".to_owned(), |txid| short_hash(&txid.to_hex()))}</code>
                 </button>
@@ -786,10 +813,13 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
             <VirtualList
                 total
                 rows_shown=ROWS_SHOWN
+                id="ex-txs-row"
                 label=format!("The block's {} transactions", thousands(u64::from(total)))
                 header
                 row
                 on_window
+                on_active
+                on_open
             />
             <p class="muted ex-caption">
                 "Fees come from the outputs each transaction spends. Per action and × are ZIP 317's, \

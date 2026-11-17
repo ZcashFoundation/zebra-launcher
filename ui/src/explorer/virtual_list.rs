@@ -2,9 +2,13 @@
 //! ones in view and a few either side are in the page. Each row slot is made once and keyed
 //! by its index modulo the slots, so scrolling moves slots and updates their text rather than
 //! building rows. The scroll position is read once a frame, and the page hears of the rows in
-//! view once scrolling settles, so a fling asks the node for nothing. An ARIA grid with
-//! `aria-rowcount` and each row's `aria-rowindex`; the scroller takes focus, so the keys that
-//! scroll work.
+//! view once scrolling settles, so a fling asks the node for nothing.
+//!
+//! An ARIA grid with `aria-rowcount` and each row's `aria-rowindex`. The slots are in the page
+//! in slot order, not row order, so the rowgroup's `aria-owns` lists them in row order, and
+//! the grid is one Tab stop with an active row (`aria-activedescendant`) rather than a Tab
+//! stop per row, whose order would follow the slots: the arrow keys, Page Up and Down, Home and
+//! End move the active row and scroll it into view, and Enter opens it.
 
 use std::time::Duration;
 
@@ -71,20 +75,68 @@ pub fn slot_row(slot: u32, first: u32, slots: u32) -> u32 {
     first + (slot + slots - first % slots) % slots
 }
 
+/// The slots of a window starting at row `first`, in the order of the rows they show.
+pub fn slots_in_row_order(first: u32, slots: u32) -> Vec<u32> {
+    (first..first + slots).map(|row| row % slots).collect()
+}
+
+/// The row a key moves the active row to, of `total` rows with `page` in view at once: from
+/// the active row, or with none from `first_seen`, the first row in view. `None` for another
+/// key.
+pub fn key_target(
+    key: &str,
+    active: Option<u32>,
+    first_seen: u32,
+    total: u32,
+    page: u32,
+) -> Option<u32> {
+    let last = total.checked_sub(1)?;
+    let from = active.unwrap_or(first_seen).min(last);
+    let moved = u32::from(active.is_some());
+    Some(match key {
+        "ArrowDown" => (from + moved).min(last),
+        "ArrowUp" => from.saturating_sub(moved),
+        "PageDown" => (from + page.max(1)).min(last),
+        "PageUp" => from.saturating_sub(page.max(1)),
+        "Home" => 0,
+        "End" => last,
+        _ => return None,
+    })
+}
+
+/// Where to scroll a viewport `height` pixels tall, scrolled `top`, so row `row` of `row_px`
+/// pixels is all in view; `None` when it is already.
+pub fn scroll_for(row: u32, top: f64, height: f64, row_px: f64) -> Option<f64> {
+    let start = f64::from(row) * row_px;
+    if start < top {
+        Some(start)
+    } else if start + row_px > top + height {
+        Some(start + row_px - height)
+    } else {
+        None
+    }
+}
+
 /// A virtual list of `total` rows, at most `rows_shown` of them in view at once, under a
 /// header row. `row` builds one slot's cells, once, from the row index it shows (a signal:
-/// the cells read it). `on_window` hears of the rows in the page and those in view once
-/// scrolling settles, and when the list first shows.
+/// the cells read it); its controls should take no Tab stop of their own. `on_window` hears of
+/// the rows in the page and those in view once scrolling settles, and when the list first
+/// shows. `on_active` hears of the row the keys made active, with its element, and of `None`
+/// when focus leaves the list; `on_open` of Enter on the active row. `id` names the slots for
+/// ARIA, `{id}-{slot}`.
 #[component]
 pub fn VirtualList<H, HV, R, V>(
     total: u32,
     rows_shown: u32,
+    id: &'static str,
     /// The grid's name for assistive technology.
     label: String,
     /// The header row's cells.
     header: H,
     row: R,
     on_window: Callback<Window>,
+    on_active: Callback<Option<(u32, web_sys::Element)>>,
+    on_open: Callback<u32>,
 ) -> impl IntoView
 where
     H: Fn() -> HV + Send + Sync + 'static,
@@ -97,10 +149,18 @@ where
     let top = RwSignal::new(0.0f64);
     let window = Memo::new(move |_| Window::of(top.get(), height, ROW, total, OVERSCAN));
     let scroller = NodeRef::<html::Div>::new();
+    let body = NodeRef::<html::Div>::new();
     let frame_pending = StoredValue::new(false);
     let settle = StoredValue::new(0u64);
+    let active = RwSignal::new(None::<u32>);
+    let focused = RwSignal::new(false);
+    let slot_id = move |row: u32| format!("{id}-{}", row % slots.max(1));
+    // The slots' first row: near the end they keep to the last rows, so none shows a row past
+    // them.
+    let first = Memo::new(move |_| window.get().rows.0.min(total - slots));
 
-    // Scroll events come faster than frames: the position is read once a frame.
+    // Scroll events come faster than frames: the position is read once a frame. A slot that
+    // had focus (a row's control, clicked) may show another row now: focus goes to the grid.
     let on_scroll = move |_| {
         if frame_pending.get_value() {
             return;
@@ -110,6 +170,55 @@ where
             frame_pending.try_set_value(false);
             if let Some(scroller) = scroller.get_untracked() {
                 top.try_set(f64::from(scroller.scroll_top()));
+                let in_rows = document()
+                    .active_element()
+                    .zip(body.get_untracked())
+                    .is_some_and(|(focus, body)| body.contains(Some(&focus)));
+                if in_rows {
+                    let _ = scroller.focus();
+                }
+            }
+        });
+    };
+    // An active row scrolled out of the page by other means is active no more: its slot shows
+    // another row.
+    Effect::new(move |_| {
+        let (start, end) = window.get().rows;
+        if active
+            .get_untracked()
+            .is_some_and(|row| row < start || row >= end)
+        {
+            active.set(None);
+        }
+    });
+    let on_key = move |event: web_sys::KeyboardEvent| {
+        let key = event.key();
+        if key == "Enter" {
+            if let Some(row) = active.get_untracked() {
+                event.prevent_default();
+                on_open.run(row);
+            }
+            return;
+        }
+        let first_seen = window.get_untracked().seen.0;
+        let Some(row) = key_target(&key, active.get_untracked(), first_seen, total, rows_shown)
+        else {
+            return;
+        };
+        event.prevent_default();
+        if let Some(scroller) = scroller.get_untracked()
+            && let Some(to) = scroll_for(row, top.get_untracked(), height, ROW)
+        {
+            scroller.set_scroll_top(to as i32);
+            top.set(to);
+        }
+        active.set(Some(row));
+        // Once the slots show the row, the page hears of it with its element.
+        request_animation_frame(move || {
+            if active.try_get_untracked() == Some(Some(row))
+                && let Some(element) = document().get_element_by_id(&slot_id(row))
+            {
+                on_active.run(Some((row, element)));
             }
         });
     };
@@ -129,15 +238,15 @@ where
     });
     let slot_views = (0..slots)
         .map(|slot| {
-            // Near the end the slots keep to the last rows, so none shows a row past them.
-            let index = Memo::new(move |_| {
-                slot_row(slot, window.get().rows.0.min(total - slots), slots)
-            });
+            let index = Memo::new(move |_| slot_row(slot, first.get(), slots));
             let cells = row(index);
+            let is_active = move || focused.get() && active.get() == Some(index.get());
             view! {
                 <div
                     class="ex-vrow"
+                    class:ex-vrow-active=is_active
                     role="row"
+                    id=format!("{id}-{slot}")
                     aria-rowindex=move || (index.get() + 2).to_string()
                     style:transform=move || format!("translateY({}px)", f64::from(index.get()) * ROW)
                 >
@@ -146,19 +255,39 @@ where
             }
         })
         .collect_view();
+    let owns = move || {
+        slots_in_row_order(first.get(), slots)
+            .into_iter()
+            .map(|slot| format!("{id}-{slot}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
     view! {
         <div
             class="ex-vlist"
             role="grid"
             aria-label=label
             aria-rowcount=(total + 1).to_string()
+            aria-activedescendant=move || active.get().map(slot_id)
             tabindex="0"
             node_ref=scroller
             style:height=format!("{}px", height + ROW)
             on:scroll=on_scroll
+            on:keydown=on_key
+            on:focus=move |_| focused.set(true)
+            on:blur=move |_| {
+                focused.set(false);
+                on_active.run(None);
+            }
         >
             <div class="ex-vrow ex-vhead" role="row" aria-rowindex="1">{header()}</div>
-            <div class="ex-vbody" role="rowgroup" style:height=format!("{}px", f64::from(total) * ROW)>
+            <div
+                class="ex-vbody"
+                role="rowgroup"
+                aria-owns=owns
+                node_ref=body
+                style:height=format!("{}px", f64::from(total) * ROW)
+            >
                 {slot_views}
             </div>
         </div>
@@ -168,6 +297,31 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_keys_move_the_active_row_and_bring_it_into_view() {
+        // With no row active, the first key starts from the first row in view.
+        assert_eq!(key_target("ArrowDown", None, 100, 5_000, 14), Some(100));
+        assert_eq!(
+            key_target("ArrowDown", Some(100), 100, 5_000, 14),
+            Some(101)
+        );
+        assert_eq!(key_target("ArrowUp", Some(0), 0, 5_000, 14), Some(0));
+        assert_eq!(
+            key_target("PageDown", Some(4_990), 0, 5_000, 14),
+            Some(4_999)
+        );
+        assert_eq!(key_target("PageUp", Some(10), 0, 5_000, 14), Some(0));
+        assert_eq!(key_target("Home", Some(10), 0, 5_000, 14), Some(0));
+        assert_eq!(key_target("End", None, 0, 5_000, 14), Some(4_999));
+        assert_eq!(key_target("Tab", Some(10), 0, 5_000, 14), None);
+        assert_eq!(key_target("End", None, 0, 0, 14), None, "no rows");
+        // A row below the view scrolls up into it; one above, down; one in view stays.
+        let height = 14.0 * ROW;
+        assert_eq!(scroll_for(20, 0.0, height, ROW), Some(21.0 * ROW - height));
+        assert_eq!(scroll_for(3, 10.0 * ROW, height, ROW), Some(3.0 * ROW));
+        assert_eq!(scroll_for(12, 0.0, height, ROW), None);
+    }
 
     #[test]
     fn the_window_covers_the_view_and_the_overscan() {
@@ -209,6 +363,12 @@ mod tests {
                 .collect();
             rows.sort_unstable();
             assert_eq!(rows, (first..first + slots).collect::<Vec<_>>(), "{first}");
+        }
+        // Assistive technology reads the slots in the order of their rows.
+        assert_eq!(slots_in_row_order(94, 27)[..3], [13, 14, 15]);
+        let order = slots_in_row_order(94, 27);
+        for (place, slot) in order.iter().enumerate() {
+            assert_eq!(slot_row(*slot, 94, 27), 94 + place as u32);
         }
         // Scrolling one row moves one slot; the others keep their rows.
         let before: Vec<u32> = (0..slots).map(|slot| slot_row(slot, 94, slots)).collect();
