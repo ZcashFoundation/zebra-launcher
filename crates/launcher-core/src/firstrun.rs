@@ -59,14 +59,35 @@ pub fn start_allowed(settings: &Settings) -> Result<(), String> {
     }
 }
 
-/// The bytes available to this user on the volume holding `path`.
+/// A volume that holds a folder, as [`volume`] reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Volume {
+    /// Tells volumes apart: the device number on Unix, the volume path on Windows.
+    pub key: String,
+    /// For display: the volume's mount point (`/`, `/mnt/zcash`), or its path on Windows
+    /// (`D:\`).
+    pub label: String,
+    /// Bytes available to this user.
+    pub available: u64,
+    /// The volume's size.
+    pub total: u64,
+}
+
+/// The volume holding `path`: its space and its name.
 ///
 /// `path` does not need to exist yet: the nearest existing ancestor is
 /// measured, which is the volume a new directory there would land on (unless
-/// a mount point is created in between).
-pub fn free_space(path: &Path) -> io::Result<u64> {
+/// a mount point is created in between). On a dead network mount the call can
+/// hang, so a caller that must not wait runs it on a task of its own.
+pub fn volume(path: &Path) -> io::Result<Volume> {
     let existing = nearest_existing(path)?;
-    platform_free_space(&existing)
+    platform_volume(&existing)
+}
+
+/// The bytes available to this user on the volume holding `path`, as
+/// [`volume`] reads it.
+pub fn free_space(path: &Path) -> io::Result<u64> {
+    Ok(volume(path)?.available)
 }
 
 /// `path` or its closest ancestor that exists, as a directory.
@@ -94,36 +115,82 @@ fn nearest_existing(path: &Path) -> io::Result<PathBuf> {
 }
 
 #[cfg(unix)]
-fn platform_free_space(dir: &Path) -> io::Result<u64> {
+fn platform_volume(dir: &Path) -> io::Result<Volume> {
+    use std::os::unix::fs::MetadataExt;
+
     let stat = nix::sys::statvfs::statvfs(dir).map_err(io::Error::from)?;
     // The field types differ between Linux and macOS.
     #[allow(clippy::unnecessary_cast)]
-    let (blocks, size) = (stat.blocks_available() as u64, stat.fragment_size() as u64);
-    Ok(blocks.saturating_mul(size))
+    let (available, blocks, size) = (
+        stat.blocks_available() as u64,
+        stat.blocks() as u64,
+        stat.fragment_size() as u64,
+    );
+    let dev = fs::metadata(dir)?.dev();
+    Ok(Volume {
+        key: dev.to_string(),
+        label: mount_point(dir, dev).display().to_string(),
+        available: available.saturating_mul(size),
+        total: blocks.saturating_mul(size),
+    })
+}
+
+/// The topmost of `dir` and its ancestors on the device `dev`: the mount point
+/// of the volume holding `dir`.
+#[cfg(unix)]
+fn mount_point(dir: &Path, dev: u64) -> PathBuf {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let mut top = dir.clone();
+    for ancestor in dir.ancestors().skip(1) {
+        match fs::metadata(ancestor) {
+            Ok(meta) if meta.dev() == dev => top = ancestor.to_path_buf(),
+            _ => break,
+        }
+    }
+    top
 }
 
 #[cfg(windows)]
-fn platform_free_space(dir: &Path) -> io::Result<u64> {
+fn platform_volume(dir: &Path) -> io::Result<Volume> {
     use std::os::windows::ffi::OsStrExt;
 
-    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetVolumePathNameW};
 
     let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut available: u64 = 0;
-    // SAFETY: `wide` is NUL-terminated and outlives the call, `available` is
-    // writable, and the two optional out pointers may be null.
+    let (mut available, mut total) = (0u64, 0u64);
+    // SAFETY: `wide` is NUL-terminated and outlives the call, `available` and
+    // `total` are writable, and the last out pointer may be null.
     let ok = unsafe {
         GetDiskFreeSpaceExW(
             wide.as_ptr(),
             &mut available,
-            std::ptr::null_mut(),
+            &mut total,
             std::ptr::null_mut(),
         )
     };
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(available)
+    // A volume path is at most a long path's length; the call fails if it does
+    // not fit.
+    let mut root = vec![0u16; 32_768];
+    let len = u32::try_from(root.len()).unwrap_or(u32::MAX);
+    // SAFETY: `wide` is NUL-terminated, and `root` is writable for `len` wide
+    // characters.
+    let ok = unsafe { GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), len) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let end = root.iter().position(|&c| c == 0).unwrap_or(root.len());
+    let label = String::from_utf16_lossy(&root[..end]);
+    Ok(Volume {
+        key: label.to_lowercase(),
+        label,
+        available,
+        total,
+    })
 }
 
 /// Creates `dir` if needed and checks that the launcher can write there, by
@@ -540,6 +607,50 @@ mod tests {
             nearest_existing(&dir.path().join("a/b")).expect("ancestor"),
             dir.path()
         );
+    }
+
+    #[test]
+    fn a_folder_and_its_volume() {
+        let dir = tempdir();
+        let volume = volume(dir.path()).expect("the temp dir's volume");
+        assert!(volume.total >= volume.available, "{volume:?}");
+        assert!(volume.total > 0, "{volume:?}");
+        // A folder that does not exist yet is on its nearest ancestor's volume.
+        let missing = super::volume(&dir.path().join("a/b")).expect("a new folder's volume");
+        assert_eq!(
+            (missing.key.as_str(), missing.label.as_str()),
+            (volume.key.as_str(), volume.label.as_str())
+        );
+        // The label is an ancestor of the folder: its mount point, or its volume path.
+        let resolved = dir.path().canonicalize().expect("resolved");
+        let under = |path: &Path| {
+            path.starts_with(&volume.label)
+                || path
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .starts_with(&volume.label.to_lowercase())
+        };
+        assert!(
+            under(&resolved) || under(dir.path()),
+            "{} under {}",
+            resolved.display(),
+            volume.label
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let dev = fs::metadata(dir.path()).expect("metadata").dev();
+            assert_eq!(volume.key, dev.to_string());
+            // Above the label is another volume, or nothing.
+            let label = Path::new(&volume.label);
+            assert!(
+                label
+                    .parent()
+                    .is_none_or(|parent| fs::metadata(parent).expect("metadata").dev() != dev),
+                "{}",
+                volume.label
+            );
+        }
     }
 
     #[test]
