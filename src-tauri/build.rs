@@ -61,6 +61,8 @@ const COMMANDS: &[&str] = &[
     "run_public_checks",
     "open_public_service",
     "forget_public_service",
+    "rebuild_public_index",
+    "delete_public_index",
     "open_signup",
     "explorer",
 ];

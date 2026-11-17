@@ -43,7 +43,8 @@ use tracing::Instrument;
 
 use crate::{
     app_state::{AppState, legacy_cache_dir},
-    bridge, docs, sidecar,
+    bridge, docs,
+    sidecar::{self, Sidecar},
 };
 
 /// How long `apply_config` waits for zebrad to accept a configuration.
@@ -436,6 +437,24 @@ pub fn open_path<R: Runtime>(
             Some(addr) => opener.open_url(format!("http://{addr}/metrics"), None::<&str>),
             None => return Err("zebrad is not running, so its metrics page is closed".into()),
         },
+        // The light client server's network names the file; the UI sends no path.
+        OpenTarget::ZingodLog => {
+            let network = state
+                .settings
+                .current()
+                .public
+                .light_server()
+                .map(|spec| spec.network)
+                .ok_or("no light client server is set up")?;
+            let log = state.paths.log_dir().join(format!(
+                "zingod-{}.log",
+                network.as_str().to_ascii_lowercase()
+            ));
+            if !log.is_file() {
+                return Err("zingod hasn't run here yet, so it has no log".into());
+            }
+            opener.open_path(path_arg(&log), None::<&str>)
+        }
     };
     result.map_err(message)
 }
@@ -585,10 +604,16 @@ pub async fn delete_node_data(state: State<'_, AppState>, node: NodeId) -> Resul
 /// OS, the stable zebrad binary, the settings, the updater's records and the
 /// launcher log, then for each node its spec, resolved channel binary, stop grace, status,
 /// statistics, newest process tree sample, `zebrad.toml` and the last lines
-/// of its log, and last the computer's newest sample
-/// ([`diagnostics::machine_section`]). The UI copies it to the clipboard.
+/// of its log, the computer's newest sample ([`diagnostics::machine_section`]),
+/// and last zingod's status, the paths of its files and its last 200 redacted
+/// lines, while the light client server has zingod set up. The UI copies it to
+/// the clipboard.
 #[tauri::command]
-pub async fn copy_diagnostics(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn copy_diagnostics(
+    state: State<'_, AppState>,
+    public: State<'_, PublicServices>,
+) -> Result<String, String> {
+    let zingod = public.indexer_diagnostics().await;
     let paths = state.paths.clone();
     let settings = state.settings.current();
     let nodes: Vec<_> = state
@@ -608,14 +633,17 @@ pub async fn copy_diagnostics(state: State<'_, AppState>) -> Result<String, Stri
         .collect();
     let machine = state.machine.borrow().clone();
     blocking(move || {
-        let sidecar = sidecar::resolve(&paths, ZebradChannel::Stable);
+        let sidecar = sidecar::resolve(&paths, Sidecar::Zebrad(ZebradChannel::Stable));
         let reports: Vec<diagnostics::NodeReport<'_>> = nodes
             .iter()
             .map(
                 |(info, files, status, stats, resources, stop_grace)| diagnostics::NodeReport {
                     info,
                     paths: files,
-                    sidecar: Some(sidecar::resolve(&paths, info.program.channel())),
+                    sidecar: Some(sidecar::resolve(
+                        &paths,
+                        Sidecar::Zebrad(info.program.channel()),
+                    )),
                     status,
                     stats: stats.as_ref(),
                     resources: resources.as_ref(),
@@ -625,6 +653,10 @@ pub async fn copy_diagnostics(state: State<'_, AppState>) -> Result<String, Stri
             .collect();
         let mut text = diagnostics::bundle(&paths, &settings, &reports, Some(&sidecar));
         text.push_str(&diagnostics::machine_section(machine.as_ref()));
+        if let Some(zingod) = zingod {
+            text.push_str("\n== zingod ==\n");
+            text.push_str(&zingod);
+        }
         text
     })
     .await
@@ -747,13 +779,29 @@ pub async fn open_public_service(public: State<'_, PublicServices>) -> Result<()
     public.open().await
 }
 
-/// Turns the service off and forgets it, and returns what stays public.
+/// Turns the service off and forgets it, and returns what stays public. With `remove_index`,
+/// zingod's index and state go from the folder the service recorded, once zingod has stopped.
 #[tauri::command]
 pub async fn forget_public_service(
     public: State<'_, PublicServices>,
     remove_token: bool,
+    remove_index: bool,
 ) -> Result<StillPublic, String> {
-    public.forget(remove_token).await
+    public.forget(remove_token, remove_index).await
+}
+
+/// Rebuilds zingod's index: the front door says "try again", zingod stops, its index and state
+/// go from the recorded folder, and it builds again, for hours.
+#[tauri::command]
+pub async fn rebuild_public_index(public: State<'_, PublicServices>) -> Result<(), String> {
+    public.rebuild_index().await
+}
+
+/// Deletes zingod's index and state from the recorded folder, after switching back to Zebra's
+/// built-in server; refused while zingod serves.
+#[tauri::command]
+pub async fn delete_public_index(public: State<'_, PublicServices>) -> Result<(), String> {
+    public.delete_index().await
 }
 
 /// Opens a provider's sign-up page, compiled into Zeal: the UI never sends a URL.

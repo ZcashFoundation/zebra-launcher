@@ -243,6 +243,33 @@ every node command and event carries a node's id, and the mock's zebrad below is
   - `consent`: open, with a consent an earlier Zeal asked for: paused, with the consent screen
     to agree again.
 
+  With zingod as the backend, on a Testnet first node built from the `/status` answers
+  captured from zingod 1.1.0. The window shows Testnet, in the warning tone:
+  - `zingod-choose`: the consent screen with both servers; choosing zingod and agreeing
+    starts its index build at the Service step, whose checks list each line, and the setup
+    goes on while it builds;
+  - `zingod`: open and serving from zingod, with the Server card (version, state, heights,
+    index, memory and CPU, Open the log, Rebuild…), "Server software…" beside "Turn off and
+    forget…", whose box deletes zingod's index, and "zingod reads this node" in the zebrad
+    strip;
+  - one state for each row of docs/PUBLIC-SERVICES.md's failure table, with the panel's first
+    line and its buttons: `zingod-building` (block 1,204,331 of 4,612,019 with an ETA),
+    `zingod-building-early` (no target yet), `zingod-catchup` (syncing at the tip while
+    zebrad's mempool is off), `zingod-restarting`, `zingod-waiting` (for zebrad's tip),
+    `zingod-booting`, `zingod-nozebra` (paused), `zingod-unreachable`, `zingod-down`,
+    `zingod-behind`, `zingod-wallet` (a wrong answer to the wallet check), `zingod-stuck`
+    (Open the log), `zingod-backoff`, `zingod-crashloop` (Open the log, Try again),
+    `zingod-config` (Copy diagnostics), `zingod-cookie`,
+    `zingod-port`, `zingod-locked` and `zingod-folder` (Try again), `zingod-disk`,
+    `zingod-room` (switched to zingod without the room for its first build), `zingod-broken`
+    and `zingod-mismatch` (Rebuild…), `zingod-tooold` (paused), `zingod-untested`;
+  - `zingod-mainnet`: the consent screen on Mainnet, with zingod disabled: "being tested on
+    Testnet first";
+  - `zingod-absent`: the consent screen with no `zeal-zingod` bundled: "Linux only for now".
+
+  Try again brings a failed zingod back, Rebuild… builds the index again, and choosing Zebra's
+  built-in server under "Server software…" keeps the index with Delete beside it.
+
 The flags are read from the query string once, when the page loads; the table at the top of
 [`src/mock.rs`](src/mock.rs) lists every one.
 

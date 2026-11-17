@@ -16,7 +16,8 @@ custody are in [SECURITY.md](SECURITY.md).
   `ZEBRAD_BETA_COMMIT`, `ZEBRAD_BETA_DATE` and corresponding `ZEBRAD_NIGHTLY_*`
   root pins. Each channel's version, full commit and date are released together;
   the complete current values are in [SIDECARS.md](SIDECARS.md).
-- Bundled zingod, Linux only and run by nothing yet: [`ZINGOD_VERSION`](../ZINGOD_VERSION),
+- Bundled zingod, Linux only, the light client server's second backend on Testnet:
+  [`ZINGOD_VERSION`](../ZINGOD_VERSION),
   [`ZINGOD_COMMIT`](../ZINGOD_COMMIT) and [`ZINGOD_DATE`](../ZINGOD_DATE). Zeal builds it
   from that commit; each release carries its vendored source as
   `zingod-src-<ver>.tar.zst` ([SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)).
@@ -159,7 +160,8 @@ Windows Zebra builds can dominate it. Record timings from the first three-channe
 - [ ] **Linux, both architectures**: the installed `zeal-zingod --version` prints
       `zingod <ZINGOD_VERSION>` (`/usr/bin/zeal-zingod` from the `.deb`, `usr/bin/` in
       the extracted AppImage), and `licenses/zingod/` beside the resources holds its
-      `README.txt` and the licence files it names; nothing starts it.
+      `README.txt` and the licence files it names; the [Testnet wallet run with
+      zingod](#the-testnet-wallet-run-with-zingod) passed for this release's pins.
 - [ ] **macOS Apple Silicon and Intel**: the dmg opens; after copying to Applications,
       `spctl -a -vv "/Applications/Zeal.app"` reports
       `source=Notarized Developer ID`. `codesign -dv --verbose=4` on
@@ -184,6 +186,36 @@ Windows Zebra builds can dominate it. Record timings from the first three-channe
       the [update rehearsal](#update-rehearsal) from the previous rc to this release
       works on every target; the `.deb` shows the release link instead of installing.
 <!-- smoke-checklist:end -->
+
+## The Testnet wallet run with zingod
+
+zingod serves Testnet light client servers from Z3 (docs/PUBLIC-SERVICES.md). Before a release
+that offers it, run a Testnet light client server on zingod on a home connection, through the
+front door, and record the results in the release's pull request. The release waits for it,
+and for a new run whenever `ZINGOD_*` or the Stable `ZEBRAD_*` pins changed.
+
+1. Set up the light client server on Testnet with zingod (Settings → Public services, the
+   consent screen's "zingod" card), on a computer whose Testnet zebrad is at the tip, and
+   record:
+   - the first build's time, from zingod's start to `serving`, and the index's size (the
+     Server card);
+   - zingod's peak memory (the Server card, or `ps -o rss` on `zeal-zingod`) and zebrad's
+     CPU under zingod's polls during and after the build;
+   - the tip lag at rest: zingod's served height against Zebra's on the Server card, over an
+     hour;
+   - after a zebrad Restart, how long zingod stays `syncing` while zebrad's mempool is off
+     (the panel's "Catching up" until "Serving").
+2. Zingo, scripted with `zingo-cli` against `https://<name>:443` on Testnet: a new wallet, then
+   one restored from a seed with an old birthday, a full sync of each, and a send with a memo
+   to the other. Record the zingolib version, the first sync's time and the bytes sent (the
+   Use card's month before and after). zebrad's endpoint can't serve this run: Zingo refuses
+   a server without a light wallet protocol version.
+3. Zodl and Zkool by hand, where builds for Testnet exist: add the server (Share), sync and
+   send. Check how each reacts to what zingod 1.1.0 reports: vendor `zingod`, empty
+   `zcashdBuild` and `zcashdSubversion`, and an empty `upgradeName` with `upgradeHeight` 0.
+4. Pass: every wallet syncs and sends through the front door, no pause, crash loop or stall
+   came from zingod, and the tip lag stays within 2 blocks. Record a failure with the wallet
+   and its version; the release waits until it is fixed or zingod's choice is taken back.
 
 ## The updater gate (`UPDATER_ENABLED`)
 

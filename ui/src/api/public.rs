@@ -123,17 +123,42 @@ pub async fn open_public_service() -> Result<(), OpenError> {
 #[serde(rename_all = "camelCase")]
 struct ForgetArgs {
     remove_token: bool,
+    remove_index: bool,
 }
 
-pub async fn forget_public_service(remove_token: bool) -> ApiResult<StillPublic> {
+/// "Turn off and forget": with `remove_index`, zingod's index goes too.
+pub async fn forget_public_service(
+    remove_token: bool,
+    remove_index: bool,
+) -> ApiResult<StillPublic> {
     if !is_tauri() {
         return Ok(wire(
-            mock::public::forget_public_service(remove_token)
+            mock::public::forget_public_service(remove_token, remove_index)
                 .await
                 .map_err(ApiError)?,
         )?);
     }
-    Ok(tauri::invoke("forget_public_service", &ForgetArgs { remove_token }).await?)
+    let args = ForgetArgs {
+        remove_token,
+        remove_index,
+    };
+    Ok(tauri::invoke("forget_public_service", &args).await?)
+}
+
+/// Rebuilds zingod's index: hours of "try again" for wallets.
+pub async fn rebuild_public_index() -> ApiResult<()> {
+    if !is_tauri() {
+        return mock::public::rebuild_public_index().await.map_err(ApiError);
+    }
+    Ok(tauri::invoke0("rebuild_public_index").await?)
+}
+
+/// Deletes zingod's index, kept after switching back to Zebra's built-in server.
+pub async fn delete_public_index() -> ApiResult<()> {
+    if !is_tauri() {
+        return mock::public::delete_public_index().await.map_err(ApiError);
+    }
+    Ok(tauri::invoke0("delete_public_index").await?)
 }
 
 #[derive(Serialize)]

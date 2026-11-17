@@ -168,6 +168,8 @@
 
 .public-cards p {
   margin: 2px 0;
+  /* zingod's index folder is one long path with no spaces. */
+  overflow-wrap: anywhere;
 }
 
 .public-keep {
@@ -180,4 +182,54 @@
 
 .public-dash h3 {
   margin: 0 0 4px;
+}
+
+/* zingod as the backend: the choice on the consent screen, the Service step's checks, the
+   Server card, the buttons beside a problem, and the index kept after switching back. */
+
+.public-backend .radio {
+  flex-wrap: wrap;
+}
+
+.public-backend .radio.disabled {
+  color: var(--muted);
+}
+
+.public-backend .radio-note {
+  flex-basis: 100%;
+  padding-left: 1.6em;
+}
+
+.public-service-checks {
+  grid-column: 2;
+  list-style: none;
+  padding-left: 0;
+  color: var(--text-secondary);
+}
+
+.public-service-checks .public-mark {
+  display: inline-block;
+  width: 1.5em;
+}
+
+.public-forget-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.public-confirm,
+.public-kept-index {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.public-indexer-actions {
+  margin: 0;
+}
+
+.zingod-reads {
+  color: var(--text-secondary);
 }

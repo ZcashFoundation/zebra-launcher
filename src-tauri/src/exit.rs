@@ -1,8 +1,9 @@
 //! Quitting stops every node first.
 //!
-//! On [`RunEvent::ExitRequested`] the exit is prevented, every node's
-//! supervisor is shut down side by side (graceful stop, then kill after that
-//! node's grace period) with an overall cap, and the app exits again with
+//! On [`RunEvent::ExitRequested`] the exit is prevented, the light client
+//! server's front door closes within 5 s, then zingod and every node's
+//! supervisor are shut down side by side (graceful stop, then kill after the
+//! grace period) under the larger of their caps, and the app exits again with
 //! the requested code. The second request
 //! passes through because the guard records that the shutdown finished.
 //! [`RunEvent::Exit`] is the last resort when the event loop ends without a
@@ -100,23 +101,38 @@ fn public_services<R: Runtime>(app: &AppHandle<R>) -> Option<launcher_public::Pu
         .map(|public| public.inner().clone())
 }
 
-/// Closes the public services' front door, then stops every node and its supervisor,
-/// giving up after the cap.
+/// Closes the public services' front door, then stops zingod and every node with its
+/// supervisor side by side, giving up after the cap.
 ///
-/// The cap is the longest of the supervisors' (they stop side by side):
-/// each grace is fixed at launch, while the settings may have changed since.
+/// The cap is the longest of the supervisors' and zingod's (they stop side by
+/// side): each grace is fixed at launch, while the settings may have changed
+/// since.
 async fn shutdown(state: &AppState, public: Option<launcher_public::PublicServices>) {
-    if let Some(public) = public {
-        // Nothing public outlives Zeal: the front door closes before the nodes stop.
+    if let Some(public) = &public {
+        // Nothing public outlives Zeal: the front door closes before zingod and the nodes stop.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), public.shutdown()).await;
     }
-    let cap = state.registry.shutdown_cap();
-    tracing::info!(cap_secs = cap.as_secs(), "stopping the nodes before exit");
-    match tokio::time::timeout(cap, state.registry.shutdown()).await {
-        Ok(()) => tracing::info!("the nodes stopped; exiting"),
+    let indexer_cap = public.as_ref().map_or(std::time::Duration::ZERO, |public| {
+        public.indexer_shutdown_cap()
+    });
+    let cap = state.registry.shutdown_cap().max(indexer_cap);
+    tracing::info!(
+        cap_secs = cap.as_secs(),
+        "stopping zingod and the nodes before exit"
+    );
+    let indexer = async {
+        if let Some(public) = &public {
+            public.stop_indexer().await;
+        }
+    };
+    let both = async {
+        tokio::join!(indexer, state.registry.shutdown());
+    };
+    match tokio::time::timeout(cap, both).await {
+        Ok(()) => tracing::info!("zingod and the nodes stopped; exiting"),
         Err(_) => tracing::error!(
             cap_secs = cap.as_secs(),
-            "the nodes did not stop in time; exiting anyway"
+            "zingod or the nodes did not stop in time; exiting anyway"
         ),
     }
 }

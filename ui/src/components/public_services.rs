@@ -1,14 +1,16 @@
 //! The light client server's screens (docs/PUBLIC-SERVICES.md): Settings → Public services
-//! with the switch, the guided setup and its consent screen, and the status panel; the card on
-//! the node's dashboard; and the header banner for automatic pauses and certificate problems.
-//! Every sentence comes from [`crate::public_text`].
+//! with the switch, the guided setup and its consent screen with the choice of server, and the
+//! status panel with zingod's Server card; the card on the node's dashboard; and the header
+//! banner for automatic pauses and problems wallets see. Every sentence comes from
+//! [`crate::public_text`].
 
 use launcher_herd::public::{current_step, names::DUCKDNS_ZONE};
 use launcher_types::{
-    Network,
+    Network, OpenTarget,
     public::{
-        CONSENT_VERSION, CheckOutcome, ConnectionReport, DnsProvider, PauseReason, PublicState,
-        PublicStatus, StepAnswer, StepId, StepState, UploadPreset,
+        CONSENT_VERSION, CheckOutcome, ConnectionReport, DegradedReason, DnsProvider, Finding,
+        LightBackend, PauseReason, PublicState, PublicStatus, StepAnswer, StepId, StepState,
+        UploadPreset, ZingodChoice,
     },
 };
 use leptos::{prelude::*, task::spawn_local};
@@ -17,10 +19,14 @@ use crate::{
     api,
     app::{AppState, Tab},
     clipboard::copy_to_clipboard,
+    components::radio_choice::RadioChoice,
     public_state::PublicContext,
     public_text::{
-        self, SERVICE_NAME, Tone, cert_needs_retry, cert_text, check_line, consent_lines,
-        finding_text, network_name, reach_text, state_line, step_mark, step_title, use_lines,
+        self, BACKEND_CHOICES, IndexerAction, SERVICE_NAME, Tone, cert_needs_retry, cert_text,
+        check_line, check_mark, check_state_word, consent_lines, finding_text, forget_index_label,
+        indexer_actions, kept_index_line, last_error_line, network_name, reach_text, server_footer,
+        server_lines, service_check_line, state_line, step_mark, step_title, use_lines,
+        zingod_choice_note,
     },
 };
 
@@ -202,7 +208,7 @@ fn ConnectionResult(report: ConnectionReport) -> impl IntoView {
                 .into_iter()
                 .map(|check| {
                     let class = outcome_class(&check.outcome);
-                    view! { <li class=class>{check_line(check.id, &check.outcome)}</li> }
+                    view! { <li class=class>{check_line(check.id, &check.outcome, None)}</li> }
                 })
                 .collect_view()}
         </ul>
@@ -244,14 +250,27 @@ fn LightServer(
             })
         })
     });
-    let agree = Callback::new(move |()| {
-        act(busy, note, async move {
-            api::public::answer_public_step(StepAnswer::Consent {
-                version: CONSENT_VERSION,
-            })
-            .await
-            .map_err(|error| error.to_string())
-        });
+    let at_the_consent = Memo::new(move |_| {
+        status.with(|s| {
+            s.as_ref()
+                .is_some_and(|s| !s.opened && current_step(&s.steps) == Some(StepId::Consent))
+        })
+    });
+    // Choosing the server software asks for consent again, for what that server makes public.
+    let choosing = RwSignal::new(false);
+    let agree = Callback::new(move |backend: LightBackend| {
+        let current = status.with_untracked(|s| s.as_ref().map(|s| s.backend));
+        choosing.set(false);
+        act(busy, note, agree_with(current, backend));
+    });
+    let cancel = Callback::new(move |()| choosing.set(false));
+    // The buttons beside a zingod problem, keyed on what they are: the status changes every
+    // second, and rebuilding them would close a Rebuild… confirmation and clear their note.
+    let degraded_actions = Memo::new(move |_| {
+        status.with(|s| match s.as_ref().map(|s| &s.state) {
+            Some(PublicState::Degraded { why }) => indexer_actions(why),
+            _ => &[],
+        })
     });
     let network =
         Memo::new(move |_| status.with(|s| s.as_ref().map_or(Network::Mainnet, |s| s.network)));
@@ -278,6 +297,20 @@ fn LightServer(
                         view! { <p class=tone_class(tone) role="status">{line}</p> }
                     })
             }}
+            {move || {
+                status
+                    .with(|s| {
+                        s.as_ref().and_then(|s| match &s.state {
+                            PublicState::Degraded { why } => last_error_line(why, s),
+                            _ => None,
+                        })
+                    })
+                    .map(|line| view! { <p class="muted">{line}</p> })
+            }}
+            {move || {
+                let actions = degraded_actions.get();
+                (!actions.is_empty()).then(|| view! { <IndexerActions actions /> })
+            }}
             {move || note.get().map(|note| view! { <p class="error">{note}</p> })}
             <Show
                 when=in_scope
@@ -294,7 +327,13 @@ fn LightServer(
                 }
             >
                 {move || {
-                    if consent_lapsed.get() {
+                    if choosing.get() {
+                        view! {
+                            <p>{public_text::CHOOSE_AGAIN}</p>
+                            <ConsentScreen status busy on_agree=agree on_cancel=cancel />
+                        }
+                        .into_any()
+                    } else if consent_lapsed.get() {
                         view! {
                             <p>
                                 "What Zeal tells you before serving changed since you agreed. \
@@ -310,7 +349,17 @@ fn LightServer(
                         view! { <Checklist status /> }.into_any()
                     }
                 }}
-                <Forget left />
+                <div class="public-forget-row">
+                    // The consent screen already shows the choice.
+                    <Show when=move || {
+                        !choosing.get() && !consent_lapsed.get() && !at_the_consent.get()
+                    }>
+                        <button type="button" on:click=move |_| choosing.set(true)>
+                            "Server software…"
+                        </button>
+                    </Show>
+                    <Forget status left />
+                </div>
             </Show>
         </div>
     }
@@ -344,16 +393,51 @@ fn Checklist(status: Memo<Option<PublicStatus>>) -> impl IntoView {
                             .iter()
                             .filter_map(|check| match &check.outcome {
                                 CheckOutcome::Fail { finding } | CheckOutcome::Warn { finding } => {
-                                    Some(finding_text(finding))
+                                    Some(status.with(|s| finding_text(finding, s.as_ref())))
                                 }
                                 _ => None,
                             })
                             .collect();
                         let is_current = current.get_untracked() == Some(id);
+                        // zingod's Service step lists every check, as each passes, with its
+                        // mark in words for screen readers.
+                        let zingod_lines: Vec<(&'static str, &'static str, String)> = status.with(|s| {
+                            s.as_ref()
+                                .filter(|s| s.backend == LightBackend::Zingod)
+                                .filter(|_| id == StepId::Service && step.state != StepState::Waiting)
+                                .map(|s| {
+                                    step.checks
+                                        .iter()
+                                        .map(|check| {
+                                            (
+                                                check_mark(&check.outcome),
+                                                check_state_word(&check.outcome),
+                                                service_check_line(check, s),
+                                            )
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        });
+                        let problems = if zingod_lines.is_empty() { problems } else { Vec::new() };
                         view! {
                             <li class=class aria-current=is_current.then_some("step")>
                                 <span class="public-mark" aria-hidden="true">{mark}</span>
                                 <span class="public-step-title">{title}</span>
+                                {(!zingod_lines.is_empty()).then(|| view! {
+                                    <ul class="public-checks public-service-checks">
+                                        {zingod_lines
+                                            .into_iter()
+                                            .map(|(mark, word, line)| view! {
+                                                <li>
+                                                    <span class="public-mark" aria-hidden="true">{mark}</span>
+                                                    <span class="visually-hidden">{word}</span>
+                                                    {line}
+                                                </li>
+                                            })
+                                            .collect_view()}
+                                    </ul>
+                                })}
                                 // Waiting steps keep their findings for later; a done step
                                 // can still carry a warning, such as Zebra still syncing.
                                 {(step.state != StepState::Waiting && !problems.is_empty())
@@ -396,8 +480,47 @@ fn StepBody(step: StepId, status: Memo<Option<PublicStatus>>) -> impl IntoView {
                 .map_err(|error| error.to_string())
         });
     };
+    let agree = Callback::new(move |backend: LightBackend| {
+        let current = status.with_untracked(|s| s.as_ref().map(|s| s.backend));
+        act(busy, note, agree_with(current, backend));
+    });
+    // The zingod problem the Service step shows, for its buttons, which are keyed on what they
+    // are, as the panel's.
+    let problem = move || {
+        status.with(|s| {
+            s.as_ref()
+                .and_then(|s| s.steps.iter().find(|step| step.id == StepId::Service))
+                .and_then(|step| {
+                    step.checks.iter().find_map(|check| match &check.outcome {
+                        CheckOutcome::Fail {
+                            finding: Finding::IndexerProblem { why },
+                        } => Some(why.clone()),
+                        CheckOutcome::Fail {
+                            finding: Finding::ChainMismatch { at },
+                        } => Some(DegradedReason::ChainMismatch { at: *at }),
+                        _ => None,
+                    })
+                })
+        })
+    };
+    let problem_actions = Memo::new(move |_| problem().as_ref().map_or(&[][..], indexer_actions));
     let body = match step {
-        StepId::Consent => view! { <ConsentScreen status busy on_agree=Callback::new(move |()| answer(StepAnswer::Consent { version: CONSENT_VERSION })) /> }.into_any(),
+        StepId::Consent => view! { <ConsentScreen status busy on_agree=agree /> }.into_any(),
+        StepId::Service => view! {
+            {move || {
+                problem()
+                    .and_then(|why| status.with(|s| s.as_ref().and_then(|s| last_error_line(&why, s))))
+                    .map(|line| view! { <p class="muted">{line}</p> })
+            }}
+            {move || {
+                let actions = problem_actions.get();
+                (!actions.is_empty()).then(|| view! { <IndexerActions actions /> })
+            }}
+            <div class="buttons">
+                <button type="button" disabled=busy on:click=recheck>"Check again"</button>
+            </div>
+        }
+        .into_any(),
         StepId::Network => view! {
             <div class="buttons">
                 <button type="button" class="primary" disabled=busy on:click=move |_| answer(StepAnswer::LanReserved)>
@@ -461,8 +584,7 @@ fn StepBody(step: StepId, status: Memo<Option<PublicStatus>>) -> impl IntoView {
             .into_any()
         }
         StepId::Open => view! { <OpenButton /> }.into_any(),
-        StepId::Service | StepId::Certificate | StepId::LocalTest | StepId::KeepRunning
-        | StepId::Share => view! {
+        StepId::Certificate | StepId::LocalTest | StepId::KeepRunning | StepId::Share => view! {
             <div class="buttons">
                 <button type="button" disabled=busy on:click=recheck>"Check again"</button>
             </div>
@@ -477,17 +599,77 @@ fn StepBody(step: StepId, status: Memo<Option<PublicStatus>>) -> impl IntoView {
     }
 }
 
-/// What becomes public, for good, and the tick that agrees to it.
+/// The answers for agreeing with `backend`: the backend first when it changes, then the
+/// consent for the text the screen showed.
+async fn agree_with(current: Option<LightBackend>, backend: LightBackend) -> Result<(), String> {
+    if current != Some(backend) {
+        api::public::answer_public_step(StepAnswer::Backend { backend })
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    api::public::answer_public_step(StepAnswer::Consent {
+        version: CONSENT_VERSION,
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// What becomes public, for good, with the choice of server it depends on, and the tick that
+/// agrees to it. `on_agree` gets the server chosen.
 #[component]
 fn ConsentScreen(
     status: Memo<Option<PublicStatus>>,
     busy: RwSignal<bool>,
-    on_agree: Callback<()>,
+    on_agree: Callback<LightBackend>,
+    #[prop(optional)] on_cancel: Option<Callback<()>>,
 ) -> impl IntoView {
     let ticked = RwSignal::new(false);
-    let lines = move || status.with(|s| s.as_ref().map(consent_lines).unwrap_or_default());
+    let initial = status.with_untracked(|s| {
+        s.as_ref()
+            .map_or(launcher_herd::public::zingod::DEFAULT_BACKEND, |s| {
+                s.backend
+            })
+    });
+    let backend = RwSignal::new(initial);
+    let lines = move || {
+        let backend = backend.get();
+        status.with(|s| {
+            s.as_ref()
+                .map(|s| consent_lines(s, backend))
+                .unwrap_or_default()
+        })
+    };
+    // zingod is disabled unless Zeal offers it here; a backend already chosen stays pickable.
+    let disabled = Signal::derive(move || {
+        status.with(|s| {
+            s.as_ref()
+                .filter(|s| {
+                    s.zingod_choice != ZingodChoice::Offered && s.backend != LightBackend::Zingod
+                })
+                .map(|_| vec![LightBackend::Zingod])
+                .unwrap_or_default()
+        })
+    });
+    let notes = Signal::derive(move || {
+        status.with(|s| {
+            s.as_ref()
+                .map(|s| vec![(LightBackend::Zingod, zingod_choice_note(s))])
+                .unwrap_or_default()
+        })
+    });
     view! {
         <div class="public-consent">
+            <fieldset class="public-backend">
+                <legend>"Which server answers wallets?"</legend>
+                <RadioChoice
+                    name="public-backend"
+                    options=BACKEND_CHOICES.to_vec()
+                    selected=Signal::derive(move || Some(backend.get()))
+                    on_select=Callback::new(move |picked| backend.set(picked))
+                    disabled
+                    notes
+                />
+            </fieldset>
             <p><strong>"Serving wallets from this computer makes these public, for good:"</strong></p>
             <ul>{move || lines().0.into_iter().map(|line| view! { <li>{line}</li> }).collect_view()}</ul>
             <p><strong>"What you take on:"</strong></p>
@@ -505,12 +687,177 @@ fn ConsentScreen(
                     type="button"
                     class="primary"
                     disabled=move || busy.get() || !ticked.get()
-                    on:click=move |_| on_agree.run(())
+                    on:click=move |_| on_agree.run(backend.get_untracked())
                 >
                     "Agree and continue"
                 </button>
+                {on_cancel.map(|cancel| view! {
+                    <button type="button" on:click=move |_| cancel.run(())>"Cancel"</button>
+                })}
             </div>
         </div>
+    }
+}
+
+/// The buttons beside a zingod problem's line: the log, Try again, Rebuild or the diagnostics.
+#[component]
+fn IndexerActions(actions: &'static [IndexerAction]) -> impl IntoView {
+    let busy = RwSignal::new(false);
+    let note = RwSignal::new(None::<String>);
+    let rebuilding = RwSignal::new(false);
+    let run = move |action: IndexerAction| match action {
+        IndexerAction::OpenLog => act(busy, note, async move {
+            api::open_path(OpenTarget::ZingodLog, None)
+                .await
+                .map_err(|error| error.to_string())
+        }),
+        IndexerAction::TryAgain => act(busy, note, async move {
+            api::public::run_public_checks(StepId::Service)
+                .await
+                .map_err(|error| error.to_string())
+        }),
+        IndexerAction::Rebuild => rebuilding.set(true),
+        IndexerAction::CopyDiagnostics => act(busy, note, async move {
+            let text = api::copy_diagnostics()
+                .await
+                .map_err(|error| error.to_string())?;
+            copy_to_clipboard(&text)
+                .await
+                .map(|()| note.set(Some("Copied the diagnostics.".into())))
+                .map_err(|error| error.to_string())
+        }),
+    };
+    (!actions.is_empty()).then(|| {
+        view! {
+            <div class="buttons public-indexer-actions">
+                {actions
+                    .iter()
+                    .map(|action| {
+                        let action = *action;
+                        view! {
+                            <button type="button" disabled=busy on:click=move |_| run(action)>
+                                {action.label()}
+                            </button>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+            <Show when=move || rebuilding.get()>
+                <RebuildConfirm on_done=Callback::new(move |()| rebuilding.set(false)) />
+            </Show>
+            {move || note.get().map(|note| view! { <p class="muted">{note}</p> })}
+        }
+    })
+}
+
+/// "Rebuild…": what it costs, and the button that does it.
+#[component]
+fn RebuildConfirm(on_done: Callback<()>) -> impl IntoView {
+    let status = light_status();
+    let busy = RwSignal::new(false);
+    let note = RwSignal::new(None::<String>);
+    let text = move || {
+        status.with(|s| {
+            s.as_ref()
+                .map(public_text::rebuild_text)
+                .unwrap_or_default()
+        })
+    };
+    let rebuild = move |_| {
+        busy.set(true);
+        note.set(None);
+        spawn_local(async move {
+            match api::public::rebuild_public_index().await {
+                Ok(()) => on_done.run(()),
+                Err(error) => note.set(Some(error.to_string())),
+            }
+            busy.set(false);
+        });
+    };
+    view! {
+        <div class="public-confirm">
+            <p>{text}</p>
+            <div class="buttons">
+                <button type="button" class="danger" disabled=busy on:click=rebuild>"Rebuild"</button>
+                <button type="button" on:click=move |_| on_done.run(())>"Cancel"</button>
+            </div>
+            {move || note.get().map(|note| view! { <p class="error">{note}</p> })}
+        </div>
+    }
+}
+
+/// zingod's Server card: its version and state, the heights, the index, memory and CPU, with
+/// the log and Rebuild.
+#[component]
+fn ServerCard(status: Memo<Option<PublicStatus>>) -> impl IntoView {
+    let busy = RwSignal::new(false);
+    let note = RwSignal::new(None::<String>);
+    let rebuilding = RwSignal::new(false);
+    let lines = move || status.with(|s| s.as_ref().map(server_lines).unwrap_or_default());
+    let open_log = move |_| {
+        act(busy, note, async move {
+            api::open_path(OpenTarget::ZingodLog, None)
+                .await
+                .map_err(|error| error.to_string())
+        });
+    };
+    view! {
+        <div class="card public-server">
+            <h4>"Server"</h4>
+            {move || lines().into_iter().map(|line| view! { <p>{line}</p> }).collect_view()}
+            <div class="buttons">
+                <button type="button" disabled=busy on:click=open_log>"Open the log"</button>
+                <button type="button" disabled=busy on:click=move |_| rebuilding.set(true)>
+                    "Rebuild…"
+                </button>
+            </div>
+            <Show when=move || rebuilding.get()>
+                <RebuildConfirm on_done=Callback::new(move |()| rebuilding.set(false)) />
+            </Show>
+            {move || note.get().map(|note| view! { <p class="error">{note}</p> })}
+        </div>
+    }
+}
+
+/// The index zingod left after switching back to Zebra's built-in server, with Delete.
+#[component]
+fn KeptIndex(status: Memo<Option<PublicStatus>>) -> impl IntoView {
+    let busy = RwSignal::new(false);
+    let note = RwSignal::new(None::<String>);
+    let asking = RwSignal::new(false);
+    let line = move || status.with(|s| s.as_ref().and_then(kept_index_line));
+    let delete = move |_| {
+        asking.set(false);
+        act(busy, note, async move {
+            api::public::delete_public_index()
+                .await
+                .map_err(|error| error.to_string())
+        });
+    };
+    move || {
+        line().map(|line| {
+            view! {
+                <div class="public-kept-index">
+                    <p class="muted">{line}</p>
+                    <Show
+                        when=move || asking.get()
+                        fallback=move || view! {
+                            <button type="button" disabled=busy on:click=move |_| asking.set(true)>
+                                "Delete…"
+                            </button>
+                        }
+                    >
+                        <div class="buttons">
+                            <button type="button" class="danger" disabled=busy on:click=delete>
+                                "Delete zingod's index"
+                            </button>
+                            <button type="button" on:click=move |_| asking.set(false)>"Cancel"</button>
+                        </div>
+                    </Show>
+                    {move || note.get().map(|note| view! { <p class="error">{note}</p> })}
+                </div>
+            }
+        })
     }
 }
 
@@ -704,6 +1051,12 @@ fn Serving(status: Memo<Option<PublicStatus>>) -> impl IntoView {
         });
     };
     let share = move || status.with(|s| s.as_ref().and_then(|s| s.share.clone()));
+    let zingod = move || {
+        status.with(|s| {
+            s.as_ref()
+                .is_some_and(|s| s.backend == LightBackend::Zingod && s.indexer.is_some())
+        })
+    };
     let retry_cert = move |_| {
         act(busy, note, async move {
             api::public::run_public_checks(StepId::Certificate)
@@ -769,7 +1122,17 @@ fn Serving(status: Memo<Option<PublicStatus>>) -> impl IntoView {
                         .collect_view()}
                 </ul>
             </div>
+            <Show when=move || zingod()>
+                <ServerCard status />
+            </Show>
         </div>
+        {move || {
+            zingod()
+                .then(|| status.with(|s| s.as_ref().and_then(server_footer)))
+                .flatten()
+                .map(|line| view! { <p class="muted">{line}</p> })
+        }}
+        <KeptIndex status />
         {move || share().map(|share| view! {
             <div class="public-share">
                 <h4>"Share"</h4>
@@ -778,8 +1141,11 @@ fn Serving(status: Memo<Option<PublicStatus>>) -> impl IntoView {
                 <p class="muted">"Zingo and Zkool:"</p>
                 <CopyLine text=share.zingo />
                 <p class="muted">
-                    "The wallet must know NU7, and Zodl's Automatic mode also sends transactions to \
-                     its other servers. This is Zebra's experimental light wallet server."
+                    {move || public_text::share_note(if zingod() {
+                        LightBackend::Zingod
+                    } else {
+                        LightBackend::ZebradEndpoint
+                    })}
                 </p>
             </div>
         })}
@@ -821,12 +1187,24 @@ fn Serving(status: Memo<Option<PublicStatus>>) -> impl IntoView {
     }
 }
 
-/// "Turn off and forget", with what stays public afterwards.
+/// "Turn off and forget", with what stays public afterwards, and zingod's index, ticked: it
+/// holds nothing of the user's and rebuilds from Zebra's chain.
 #[component]
-fn Forget(left: RwSignal<Option<Vec<String>>>) -> impl IntoView {
+fn Forget(
+    status: Memo<Option<PublicStatus>>,
+    left: RwSignal<Option<Vec<String>>>,
+) -> impl IntoView {
     let public = PublicContext::get();
     let asking = RwSignal::new(false);
     let remove_token = RwSignal::new(true);
+    let remove_index = RwSignal::new(true);
+    let index_label = move || status.with(|s| s.as_ref().and_then(forget_index_label));
+    let zingod = move || {
+        status.with(|s| {
+            s.as_ref()
+                .is_some_and(|s| s.backend == LightBackend::Zingod)
+        })
+    };
     let busy = RwSignal::new(false);
     let failed = RwSignal::new(None::<String>);
     let forget = move |_| {
@@ -834,7 +1212,8 @@ fn Forget(left: RwSignal<Option<Vec<String>>>) -> impl IntoView {
         failed.set(None);
         left.set(None);
         spawn_local(async move {
-            match api::public::forget_public_service(remove_token.get_untracked()).await {
+            let index = remove_index.get_untracked() && index_label().is_some();
+            match api::public::forget_public_service(remove_token.get_untracked(), index).await {
                 Ok(still) => {
                     let mut lines = Vec::new();
                     if let Some((external, lan, internal)) = still.forward {
@@ -861,6 +1240,11 @@ fn Forget(left: RwSignal<Option<Vec<String>>>) -> impl IntoView {
                                 .to_owned(),
                         );
                     }
+                    if let Some(left) = still.index_left {
+                        lines.push(format!(
+                            "Zeal could not delete all of zingod's index, so it may still take room: {left}. Delete what is left by hand."
+                        ));
+                    }
                     left.set(Some(lines));
                     public.refresh();
                 }
@@ -880,7 +1264,13 @@ fn Forget(left: RwSignal<Option<Vec<String>>>) -> impl IntoView {
                     </button>
                 }
             >
-                <p>"Zeal closes the front door, removes Zebra's light wallet endpoint and forgets the setup."</p>
+                <p>
+                    {move || public_text::forget_text(if zingod() {
+                        LightBackend::Zingod
+                    } else {
+                        LightBackend::ZebradEndpoint
+                    })}
+                </p>
                 <label class="check">
                     <input
                         type="checkbox"
@@ -889,6 +1279,16 @@ fn Forget(left: RwSignal<Option<Vec<String>>>) -> impl IntoView {
                     />
                     "Also delete the DuckDNS token from the keychain"
                 </label>
+                {move || index_label().map(|label| view! {
+                    <label class="check">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || remove_index.get()
+                            on:change=move |event| remove_index.set(event_target_checked(&event))
+                        />
+                        {label}
+                    </label>
+                })}
                 <div class="buttons">
                     <button type="button" class="danger" disabled=busy on:click=forget>"Turn off and forget"</button>
                     <button type="button" on:click=move |_| asking.set(false)>"Cancel"</button>

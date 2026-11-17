@@ -1,5 +1,6 @@
 //! The public services in the app: the [`EndpointHost`] that writes zebrad's light wallet
-//! endpoint and restarts zebrad behind the app's permits, and the `public_status` event.
+//! endpoint and restarts zebrad behind the app's permits, the bundled zingod, and the
+//! `public_status` event.
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
@@ -20,8 +21,9 @@ const RESTART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Applies the managed keys the way `apply_config` does around a restart: the config permit,
 /// the start permit while zebrad runs, `config::ensure` with the endpoint the service actor
-/// gives, and a restart only if zebrad was running. A busy permit fails fast, so the service
-/// actor clears the port again.
+/// gives, and a restart only if zebrad was running and the file changed, so choosing zingod
+/// restarts zebrad once, to drop its endpoint. A busy permit fails fast, so the service actor
+/// clears the port again.
 struct Host<R: Runtime> {
     app: AppHandle<R>,
 }
@@ -56,11 +58,12 @@ impl<R: Runtime> EndpointHost for Host<R> {
                 port,
                 node.spec().network,
             );
-            tauri::async_runtime::spawn_blocking(move || config::ensure(&paths, &keys))
-                .await
-                .map_err(|err| err.to_string())?
-                .map_err(|err| format!("zebrad.toml could not be updated: {err}"))?;
-            if running && restart {
+            let changed =
+                tauri::async_runtime::spawn_blocking(move || config::ensure(&paths, &keys))
+                    .await
+                    .map_err(|err| err.to_string())?
+                    .map_err(|err| format!("zebrad.toml could not be updated: {err}"))?;
+            if running && restart && changed {
                 tracing::info!("restarting zebrad for the light wallet endpoint");
                 // A start resolves once zebrad accepted its configuration, as in apply_config.
                 tokio::time::timeout(RESTART_TIMEOUT, node.supervisor.restart())
@@ -76,7 +79,9 @@ impl<R: Runtime> EndpointHost for Host<R> {
 /// Starts the public services and forwards their status to the UI. `held` comes from
 /// [`launcher_public::prepare_launch`].
 pub fn start<R: Runtime>(app: &AppHandle<R>, state: &AppState, held: bool) -> PublicServices {
-    let options = Options::new(state.paths.data_dir(), ZEBRAD_VERSION.trim());
+    let mut options = Options::new(&state.paths, ZEBRAD_VERSION.trim());
+    // zingod is bundled on Linux; without it the consent screen disables the choice.
+    options.zingod_binary = crate::sidecar::zingod(&state.paths);
     let fetch: Arc<dyn launcher_public::ddns::Fetch> = match HttpsFetch::new() {
         Ok(fetch) => Arc::new(fetch),
         Err(err) => {
@@ -84,9 +89,10 @@ pub fn start<R: Runtime>(app: &AppHandle<R>, state: &AppState, held: bool) -> Pu
             Arc::new(Unreachable)
         }
     };
-    let (settings, registry, host) = (
+    let (settings, registry, machine, host) = (
         state.settings.clone(),
         state.registry.clone(),
+        state.machine.clone(),
         Arc::new(Host { app: app.clone() }),
     );
     // The actor, its forwarders and the first node's follower are Tokio tasks, and the setup
@@ -101,6 +107,8 @@ pub fn start<R: Runtime>(app: &AppHandle<R>, state: &AppState, held: bool) -> Pu
             node: first.spec,
             status: first.status,
             stats: first.stats,
+            details: first.details,
+            machine,
             host,
             secrets: Arc::new(Keychain),
             fetch,

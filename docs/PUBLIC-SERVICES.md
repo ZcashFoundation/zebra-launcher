@@ -20,8 +20,9 @@
 > ([Phases for zingod](#phases-for-zingod)): Z1 bundles the pinned, attested binary, which
 > nothing runs yet; Z2 supervises it, with a contract test and no UI; Z3 lets a Linux user choose
 > it for a Testnet light client server; Z4 opens Mainnet after a measured gate; Z5 brings macOS.
-> Z1 is built (2026-11-16; [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)), and so is
-> Z2 (2026-11-17; [Z2 as built](#z2-as-built)); the others aren't yet.
+> Z1 is built (2026-11-16; [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)), and so are
+> Z2 (2026-11-17; [Z2 as built](#z2-as-built)) and Z3 (2026-11-17; [Z3 as built](#z3-as-built));
+> Z4 and Z5 aren't yet.
 
 The maintainer asked for two optional services that a user can turn on at home. First: "an
 optional DNS seeder, pull in zeeder", and "The DNS seeder should let you expose the port and
@@ -534,7 +535,9 @@ flag (`?public=<flag>`).
 | zingod can't read zebrad's cookie: the path is a folder, or not readable | `ConfigError` with the cookie text | no restart | "zingod can't read Zebra · Testnet's cookie at /mnt/zebra/testnet/rpc/.cookie: Is a directory (os error 21). [Try again]" | the user's Try again | `zingod-cookie` |
 | zingod's port is taken | the check before the spawn, or `PortInUse` | moves to the next free port, once | "Other programs use ports 18137 and 18138. [Try again]" | the user | `zingod-port` |
 | another program holds the index | `DbLocked`, after the pid file ended Zeal's own leftover | waits | "Another program holds zingod's index in /mnt/zebra/zingod/testnet. [Try again]" | the user | `zingod-locked` |
+| Zeal can't create zingod's folder or write its configuration: the disk isn't the user's to write, is read-only, or isn't mounted | the runner's start fails before the spawn | `IndexerFailed` with `SpawnFailed` and the folder; no start again for the same attempt | "Zeal could not set up zingod's folder /mnt/zebra/zingod/testnet/home: Permission denied (os error 13). Fix its permissions or its disk, then try again. [Try again]" | the user's Try again | `zingod-folder` |
 | the disk fills | free space every 60 s; `DiskFull` | stops zingod below 10 GB free, starts it above 20 GB; after `DiskFull`, starts it again only when bytes ran out and are back, with inodes free | "Waiting for disk space: 6 GB free on /mnt/zebra. zingod starts again above 20 GB." | by itself, or the user's Try again after a quota or inodes ran out | `zingod-disk` |
+| an open service switched to zingod, or rebuilt, has too little room for a first build | the index folder's disk, every minute, counting what is built | doesn't start zingod (`Blocked::NoSpace`); `IndexSpace` until zingod has served from the index once | "Waiting for room: zingod needs 45 GB free in /mnt/zebra/zingod/testnet to build its index, and 30 GB is free. It starts once there is room." | by itself, once there is room | `zingod-room` |
 | the index is damaged, from another chain or of an older format | `IndexBroken` | no restart | "zingod's index is damaged. Rebuilding it takes hours, and wallets are told to try again meanwhile. [Rebuild]" | the user's Rebuild | `zingod-broken` |
 | zingod serves a block zebrad doesn't have | the tip cross-check | stops zingod | "zingod's chain doesn't match Zebra's at block 4,611,980. [Rebuild]" | the user's Rebuild | `zingod-mismatch` |
 | an upgrade zingod doesn't know is active | zebrad's upgrades against `ZINGOD_KNOWS` | doesn't start zingod; `BuildTooOld` | "zingod 1.1.0 doesn't know NU8, which is active. Wallets that use your server see an error until Zeal updates zingod." | a Zeal update | `zingod-tooold` |
@@ -543,7 +546,8 @@ flag (`?public=<flag>`).
 | a set-up zingod meets an untested pair: the node's channel or zebrad's pin changed | `TESTED_ZINGOD` | `IndexerUntested`; doesn't start zingod | "zingod 1.1.0 isn't tested with Zebra 7.1.0-alpha.0 on Testnet yet. Wallets that use your server are told to try again until Zeal updates zingod, or Zebra · Testnet runs a tested version." | a Zeal update, or a tested zebrad | `zingod-untested` |
 | no `zeal-zingod` on this system | `Options.zingod_binary` is `None` | the choice is disabled | "zingod runs on Linux only for now" | — | `zingod-absent` |
 
-A failed wallet check stays PS1's `WalletCheckFailed`. Two lines close the front door: PS1's
+A failed wallet check stays PS1's `WalletCheckFailed`, which names zingod when it is the
+backend (`zingod-wallet`). Two lines close the front door: PS1's
 `BackingStopped` and the pause for an upgrade zingod doesn't know (`gateway_mode` closes it for
 every `Paused`). Every other zingod problem is `Degraded`, so the front door stays up in
 `Unavailable` and TLS-ALPN-01 renewals go on through a long build, stall or rebuild.
@@ -892,14 +896,16 @@ answers 503 through a whole first sync, so Zeal doesn't read it.
   record it).
 - **The stall rule** (pure): `served` unchanged for 5 minutes while zebrad is 4 or more blocks
   ahead, or 15 minutes during a build, since the indexes publish in steps. Zeal restarts zingod
-  once; if it stays stuck, `IndexerStuck` holds until it moves. An upgrade zingod doesn't know
+  once; if it stays stuck, `IndexerStuck` holds until it moves, whether `/status` says it
+  serves, catches up or builds. An upgrade zingod doesn't know
   would look like this ([Upgrades of zingod](#upgrades-of-zingod)).
 - **The tip cross-check**: at most once a minute while zingod is ready, the light monitor calls
   `GetLatestBlock` on loopback and compares the hash at the served height (sent in internal byte
   order, so reversed) with zebrad's `getblockhash` at that height, asked through launcher-core's
   RPC client with zebrad's cookie. Three different answers in a
   row, spanning at least 3 minutes, are `ChainMismatch`: zingod stops and Rebuild is offered. A
-  reorg clears sooner, and a height zebrad doesn't have yet is skipped. `/status` `chain.tip`
+  reorg clears sooner, and a height zebrad doesn't have yet is skipped, keeping the last match
+  or mismatch, so a check just after a block doesn't undo a pass. `/status` `chain.tip`
   can't do this job: it is the tip the validator vouches for, so it always equals zebrad's. The
   same-spec rule prevents the known cause, and zingod's own `Diverged` exit catches an index that
   no longer extends the chain; the cross-check is the cheap backstop.
@@ -1018,7 +1024,8 @@ for that zingod check it.
   `txid_location` 1.4 and `block_hash` 0.13. It grows with the chain. Testnet's size is neither
   documented nor measured.
 - **Before the first build** the Service step needs 100 GB free on Mainnet and 50 GB on Testnet
-  on the index's disk (proposals, set from Z3's and Z4's measurements). It warns, without
+  on the index's disk (proposals, set from Z3's and Z4's measurements), and so does an open
+  service switched to zingod or rebuilt, until zingod has served from the index. It warns, without
   refusing, on a network filesystem: zingod reads its indexes through mmap and asks for local
   storage.
 - **While it runs** the runner reads the free space every 60 s. Below 10 GB it stops zingod with
@@ -1105,7 +1112,10 @@ network sees it come from Zeal's node, as with zebrad's endpoint.
 #### Removing zingod's index
 
 - **"Turn off and forget"** gains "Delete zingod's index (41 GB in /mnt/zebra/zingod/testnet)",
-  ticked: the index holds nothing of the user's and rebuilds from zebrad's chain.
+  ticked: the index holds nothing of the user's and rebuilds from zebrad's chain. The switch-off
+  is saved before the index goes, and what can't be removed is listed with what stays public
+  (`StillPublic.index_left`) rather than failing the forget, so the service can't resume at
+  the next launch.
 - **Switching back to Zebra's built-in server** stops zingod and keeps the index, so switching
   again is quick; the panel shows its size with [Delete].
 - **Rebuild and Delete** stop zingod, then remove `indexes/` and `state/` inside the recorded
@@ -1144,7 +1154,8 @@ both ports are open:
   use. They publish no binaries, so Zeal builds it from their source";
 - "zingod keeps its own index of the chain on /mnt/zebra, about 71 GB on Mainnet";
 - "while it serves, your server's status page is public: its state, its version, its block
-  heights and how much it sent in each 10 minutes";
+  heights, its alarms (one says when Zebra's release reaches its end of support within a week)
+  and how much it sent in each 10 minutes";
 - "while the light client server is switched on, including during setup and automatic pauses,
   programs on this computer can use zingod's port without a password. Web pages in a browser
   can't use its wallet methods, but they can read its public status".
@@ -1168,6 +1179,11 @@ Step 2 with zingod:
  ○ zingod's tip matches Zebra's
  ○ zingod answers the wallet check
 ```
+
+Each mark is said in words for screen readers ("Passed:", "Under way:", "Not checked yet:",
+"Warning:", "Failed:"), and zingod's line follows its state: "Starting zingod 1.1.0, reading
+Zebra · Testnet" while it starts, "zingod 1.1.0 isn't running" while a failure, the disk or a
+mismatch keeps it stopped.
 
 The setup goes on while the index builds, as it does while zebrad syncs; the test on this
 computer and Open wait for it. The status panel's first line follows
@@ -1210,7 +1226,9 @@ PublicServiceSpec {
     #[serde(default)] pub zingod: Option<ZingodSpec>,            // kept after switching back
     // backend_port stays zebrad's endpoint port
 }
-pub struct ZingodSpec { pub port: u16, pub dir: PathBuf }          // recorded when first chosen
+pub struct ZingodSpec { pub port: u16, pub dir: PathBuf,           // recorded when first chosen
+    #[serde(default)] pub mismatch: Option<u64>,                  // until a rebuild or delete
+    #[serde(default)] pub built: bool }                           // zingod served from it once
 Consent { #[serde(default)] pub backend: LightBackend }           // a consent covers one backend
 StepAnswer::Backend { backend: LightBackend }
 CheckId: ZingodTested, UpgradesKnown, IndexSpace, IndexReady, TipMatches
@@ -1230,13 +1248,15 @@ DegradedReason: IndexerStarting { waiting: IndexerWait },         // ZebradTip, 
     IndexerUntested { version: String, zebrad: String, network: Network },
     IndexerStuck { at: u64, zebrad_at: u64 }, IndexBroken,
     IndexerFailed { class: ExitClass, detail: FailDetail },
-    ChainMismatch { at: u64 }, DiskLow { free_bytes: u64 }
+    ChainMismatch { at: u64 }, DiskLow { free_bytes: u64 },
+    IndexSpace { free_bytes: u64, need_bytes: u64 }               // no room for a first build
 pub enum FailDetail { None, Ports { tried: Vec<u16> }, Dir { path: PathBuf },
-    OpenFiles { needed: u64, limit: u64 }, Cookie { path: PathBuf, error: String } }
+    OpenFiles { needed: u64, limit: u64 }, Cookie { path: PathBuf, error: String },
+    Folder { path: PathBuf, error: String } }                     // Zeal's own start, before zingod runs
 PauseReason::BuildTooOld { upgrade: String, height: u64 }
 PublicStatus { pub indexer: Option<IndexerStats> }
-pub struct IndexerStats { version, phase: Phase, status: Option<IndexerStatus>, dir, index_bytes,
-    free_bytes, resources: Option<IndexerResources>, last_exit: Option<ExitInfo> }
+pub struct IndexerStats { version, phase: Phase, status: Option<IndexerStatus>, dir, built,
+    index_bytes, free_bytes, resources: Option<IndexerResources>, last_exit: Option<ExitInfo> }
 pub struct IndexerResources { rss_bytes: u64, cpu_millicores: u32, read_bytes: u64,
     written_bytes: u64 }                                          // integers only
 pub struct IndexerStatus { state, served, tip, target: Option<u64>,
@@ -1256,7 +1276,9 @@ pub struct IndexerStatus { state, served, tip, target: Option<u64>,
   those.
 - **Failure details.** The panel's lines for a failed zingod name the ports tried, the folder,
   the open-file limit to raise, or the cookie and its error; `FailDetail` carries them from the
-  reader's classification.
+  reader's classification. A folder Zeal can't create or write zingod's files in before the
+  spawn is the runner's own `ZingodFacts.start_error`, as `SpawnFailed` with `Folder`: zingod's
+  log has nothing about it, so the panel offers Try again alone.
 
 The names say "indexer" where the code doesn't depend on zingod, so a node kind can take them
 over.
@@ -1386,7 +1408,7 @@ the spawner, touches shared code. None of them needs front door v2 (PS2) or MULT
 | --- | --- | --- |
 | **Z1 Bundle** | the `ZINGOD_*` pins; `build-zingod.sh` and `bump-zingod.sh`; `zingod-sidecars.yml` with its checks and attestation; the source archive on each release; `zeal-zingod` and its licences in the Linux bundles; a minimal `fake-zingod` for `dev-sidecar.sh`. Nothing runs it yet. **Built**: [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux) says how, and where it differs from this design | — |
 | **Z2 Supervise** | `Launch` and the zingod reader in the supervisor; the configuration writer; `DiskFull` and `IndexBroken`; the pure rules; the runner; `fake-zingod`'s modes and fake-zebrad's stale-cookie mode; `real_zingod.rs` in CI. No UI. **Built**: [Z2 as built](#z2-as-built) | Z1 |
-| **Z3 Choose (Linux, Testnet)** | the types; the backend on the consent screen and in the setup; the service actor's and the app's wiring; the disk, stall, cross-check and active-upgrade rules; Rebuild, Delete and Forget's box; the Server card, banners and mock flags; the choice gated on `TESTED_ZINGOD` (1.1.0 with zebrad 7.0.0 on Testnet, listed since Z2). Switching an open service means "unavailable" until the index is built | Z2; the Testnet wallet run before the release |
+| **Z3 Choose (Linux, Testnet)** | the types; the backend on the consent screen and in the setup; the service actor's and the app's wiring; the disk, stall, cross-check and active-upgrade rules; Rebuild, Delete and Forget's box; the Server card, banners and mock flags; the choice gated on `TESTED_ZINGOD` (1.1.0 with zebrad 7.0.0 on Testnet, listed since Z2). Switching an open service means "unavailable" until the index is built. **Built**: [Z3 as built](#z3-as-built) | Z2; the Testnet wallet run before the release |
 | **Z4 Mainnet** | the gate below; `TESTED_ZINGOD` gains Mainnet; the disk and memory numbers from measurements; the scheduled-upgrade countdown and pause; the consent's Mainnet line; Share naming the wallets the runs confirmed; switching while Zebra's endpoint keeps serving; the default for new setups, as the maintainer decides | Z3 and the gate |
 | **Z5 macOS** | `zingod-sidecars.yml` on `macos-15` and `macos-15-intel` (Xcode command line tools for jemalloc's `sh` and `make` and libproc's bindgen, protoc); a `tauri.macos.conf.json` with four `externalBin` entries; the contract test on both macOS runners, in `bundle.yml`, where both binaries are already built: `fetch-zebrad-linux.sh` is Linux only and a macOS zebrad takes 30 to 60 minutes to build uncached, so the job takes that run's `zebrad-stable-<triple>` and `zingod-<triple>` artifacts; `kern.maxfilesperproc` checked against zingod's 1,280 | PS3; the build passing |
 
@@ -1492,6 +1514,102 @@ of "unavailable", measured in Z4. Back to Zebra reverses it; the index stays unt
 - A per-index rebuild from `zingod verify`, and choosing the index's folder.
 - A weekly fetch-and-advisory run, and a watcher for zingod releases.
 - No restart with zebrad for zebrad 7.1.0 and later.
+
+#### Z3 as built
+
+Built 2026-11-17, Linux and Testnet: the types (`LightBackend`, `ZingodSpec`, the consent's
+backend, the Service step's checks and findings, zingod's degraded reasons, `FailDetail`,
+`BuildTooOld`, `IndexerStats`); launcher-herd's Service step, `problem()` for every row of the
+failure table, `choice()` and `DEFAULT_BACKEND`; the service actor's wiring of the runner and
+the tip cross-check; the app's sidecar key, commands, exit flow and diagnostics; and the
+screens with the 29 `zingod…` mock flags. Where it differs from the sections above:
+
+- **The room for a first build is a start condition.** Until zingod has served from the
+  recorded folder's index once (`ZingodSpec.built`, which Rebuild and Delete clear), the actor
+  doesn't give the runner a plan while the index's disk has less than 50 GB free on Testnet
+  (100 GB on Mainnet), counting what is already built (`Blocked::NoSpace`), so no first build
+  starts that would run into the low mark: a setup's, an open service's switched to zingod
+  under "Server software…", or a rebuild's. An open service waiting for it is
+  `Degraded { IndexSpace }`, since it has no checklist to say so. A built index keeps the
+  runner's 10 and 20 GB marks alone, and the Service step's `IndexSpace` no longer asks it for
+  the room.
+- **One check for the room.** The Service step has no checks of its own for the network
+  filesystem and the memory: `IndexSpace` fails for too little room and otherwise warns for a
+  network filesystem (`statfs`'s type on Linux: NFS, SMB, CIFS, Ceph, AFS, Coda, 9P), then for
+  less than 8 GB of memory.
+- **The setup goes on while the index builds.** `IndexReady` warns with the build's progress,
+  and `TipMatches` and `WalletCheck` wait for the index without holding the Service step: the
+  test on this computer and Open wait for `IndexReady` instead (`wait_for_index`). They count
+  only once they fail, so the setup doesn't step back to the Service step, closing the front
+  door, while zingod's first results are under way; a pending cross-check holds Open for up to
+  a minute.
+- **Other zingod problems in the setup** are `Finding::IndexerProblem { why }`, with the status
+  panel's reason, so both say the same; a zingod problem that clears by itself makes its step
+  run rather than fail.
+- **The order of the reasons.** With zingod, zebrad stopped or restarting comes first, then
+  zingod's own problem, then zebrad behind the tip, then the wallet check: "Waiting for Zebra ·
+  Testnet to reach the tip" would otherwise show only while zebrad is 2 to 9 blocks behind.
+  zebrad's restart stays `BackingRestarting`, which the panel words as "zingod restarts with
+  Zebra" for zingod. A zingod an earlier Zeal left (`ZingodFacts.stale`) is `IndexerFailed`
+  with `DbLocked` and the folder: it holds the index. `BuildTooOld` resumes by itself, as a
+  Zeal update brings a zingod that knows the upgrade. The types keep the design's fields:
+  `IndexBehind { blocks }` and `IndexerStuck { at, zebrad_at }`.
+- **A chain mismatch is kept in the spec** (`ZingodSpec.mismatch`), since it belongs to the
+  index: it holds through a restart of Zeal and a change of backend, and only Rebuild or Delete,
+  once the index is gone, clears it. The actor's memory has it first and saves it at the next
+  look.
+- **The status** carries the backend, `ZingodChoice` (offered, not bundled, not on this
+  network, an untested pair) for the consent screen, and `IndexerStats` while the spec records
+  zingod's folder, with its port and whether the index's size is a lower bound.
+- **The actor's own reading.** The actor reads the index folder's disk, its filesystem and the
+  index's size itself every minute once zingod is chosen, for the setup's room and for an index
+  kept after switching back, which the runner never ran on in this run. The consent screen's
+  zingod card has no free-space figure before zingod is chosen: the Service step names it.
+- **The light monitor** follows an endpoint watch the actor fills, zebrad's or zingod's, in
+  place of zebrad's status.
+- **Rebuild and Delete.** Rebuild is refused unless zingod is the backend, Delete while it is.
+  Both run the runner's removal, which waits for zingod's stop, then `remove_index` on the
+  recorded folder again, for an index the runner never had a plan for. Forget's box does the
+  same before the runner ends, after it saved the switch-off; a removal that fails leaves the
+  forget to finish, naming what is left.
+- **Zeal's exit**: `PublicServices::shutdown` closes the front door and leaves zingod running;
+  `stop_indexer` then stops it, beside the registry's shutdown, under the larger cap.
+- **The front door before zingod stops.** The actor puts the front door in `Unavailable` before
+  every stop it decides: a plan that goes, Rebuild, a new attempt, a mismatch, a new backend.
+  Delete comes only after switching back, while the front door serves zebrad's endpoint, so it
+  leaves the front door's mode to the rules. For a restart of a running zingod, `IndexerFacts.restarting` holds while zingod runs
+  for an earlier attempt than the actor's: the runner's facts name the attempt each start was
+  for (`ZingodFacts.started_attempt`), so a stop and start that fall between two looks still
+  end it. The rules read it as zingod starting, so neither the look that asked for the restart
+  nor the next opens the front door again. The runner's own stop below 10 GB free (Z2) comes
+  without it: the actor sees the stop at its next look, within the runner's facts' change.
+- **Try again** (`run_public_checks(Service)`) starts a new attempt only for a zingod that
+  waits for the user, one an earlier Zeal left, or one that is stuck, so "Check again" on a
+  zingod that serves leaves it running.
+- **Diagnostics** carry zingod's supervisor phase and its last `/status`, the paths of its
+  binary, configuration, log, index folder and zebrad's cookie, its port, and its last 200
+  lines, which the reader redacted before the ring.
+- **Tests.** The service actor runs against fake-zebrad and fake-zingod in real time, as the
+  runner's tests do: the supervisor's deadlines use the monotonic clock and the actor's rules
+  the wall clock, so a paused tokio clock drives neither, and the cross-check's span is
+  shortened (`Options.mismatch_span`) instead. One or two mismatches clearing, as in a reorg,
+  are launcher-herd's `CrossCheck` test; a height above zebrad's tip is skipped through
+  `cross_check` against the fakes.
+- **The last error line.** Under a zingod that stopped, crashed or broke its index, the panel
+  and the Service step show its exit's last text, which the reader redacted ("zingod's last
+  error: …"), unless the line already names it (the cookie, the open-file limit, a folder
+  Zeal couldn't set up). A zingod that runs and says it is down shows its own message instead,
+  since its last exit may be an earlier run's. The Server card adds what zingod read and wrote
+  since it started.
+- **The UI.** `RadioChoice` gains disabled options and a note per option. Stop and Restart say
+  that zingod restarts with Zebra in their tooltip, beside "zingod reads this node" in the
+  zebrad strip, only on the network the service serves: a first node moved to the other
+  network holds the service, and zingod with it. The Server card shows CPU in whole percent of
+  a core. The mock's first node is
+  on Testnet for the `zingod…` flags, and on Mainnet for `zingod-mainnet`.
+- **Not in Z3**, as planned: Mainnet, the scheduled-upgrade countdown and pause, switching
+  while Zebra's endpoint keeps serving (Z4), a live log view, choosing the index's folder, and
+  macOS. The Testnet wallet run (RELEASING.md) is still to be done before the release.
 
 #### Upstream asks for zingod
 

@@ -1,6 +1,7 @@
-//! The `LightMonitor`: zebrad's light wallet endpoint as wallets see it. It calls
-//! `GetLightdInfo` over h2c on loopback when the endpoint opens, every 10 minutes and when
-//! asked, and runs the wallet check against zebrad's own height.
+//! The `LightMonitor`: the light client server's backend as wallets see it, zebrad's endpoint
+//! or zingod's. It calls `GetLightdInfo` over h2c on loopback when the endpoint it is given
+//! opens or moves, every 10 minutes and when asked, and runs the wallet check against zebrad's
+//! own height. The service actor gives it zingod's endpoint only once zingod serves.
 
 use std::{
     net::SocketAddr,
@@ -9,7 +10,7 @@ use std::{
 
 use launcher_herd::public::{Checked, wallet};
 use launcher_types::{
-    Network, NodeStats, Status,
+    Network, NodeStats,
     public::{LightdInfo, WalletProblem},
 };
 use tokio::{
@@ -55,21 +56,22 @@ impl Drop for LightMonitor {
 }
 
 impl LightMonitor {
+    /// Starts the monitor of the backend at `endpoint`, `None` while it doesn't serve.
     pub fn spawn(
         network: Network,
-        status: watch::Receiver<Status>,
+        endpoint: watch::Receiver<Option<SocketAddr>>,
         stats: watch::Receiver<Option<NodeStats>>,
     ) -> Self {
         let (result_tx, result) = watch::channel(None);
         let (now, now_rx) = mpsc::channel(2);
-        let task = tokio::spawn(run(network, status, stats, result_tx, now_rx));
+        let task = tokio::spawn(run(network, endpoint, stats, result_tx, now_rx));
         LightMonitor { result, now, task }
     }
 }
 
 async fn run(
     network: Network,
-    mut status: watch::Receiver<Status>,
+    mut status: watch::Receiver<Option<SocketAddr>>,
     stats: watch::Receiver<Option<NodeStats>>,
     result: watch::Sender<Option<Checked<Result<LightdInfo, WalletProblem>>>>,
     mut now: mpsc::Receiver<()>,
@@ -77,7 +79,7 @@ async fn run(
     let mut last: Option<SocketAddr> = None;
     let mut due = true;
     loop {
-        let endpoint = status.borrow_and_update().lightwalletd_addr;
+        let endpoint = *status.borrow_and_update();
         if endpoint != last {
             last = endpoint;
             result.send_replace(None);

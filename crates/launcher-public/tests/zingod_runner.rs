@@ -359,6 +359,7 @@ async fn a_cookie_older_than_the_recorded_start_still_starts_zingod() {
         zebrad,
         chain_mismatch: false,
         upgrades_known: true,
+        space: true,
     };
     let idle = ZingodFacts {
         disk_allows: true,
@@ -419,6 +420,31 @@ async fn crashes_back_off_then_wait_for_a_new_attempt() {
     setup.settings("FAKE_ZINGOD_MODE=serving\nFAKE_ZINGOD_POLL_MS=50\n");
     setup.give_plan(1);
     setup.facts_until("zingod running again", running).await;
+    setup.finish().await;
+}
+
+/// A new attempt restarts a running zingod, and the facts name the attempt it runs for, so the
+/// service actor sees the restart through phases it may miss between two looks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_attempt_restarts_a_running_zingod_and_the_facts_say_for_which() {
+    let setup = setup("ok", "serving", |_| {}).await;
+    setup.give_plan(0);
+    let facts = setup.facts_until("zingod running", running).await;
+    assert_eq!(facts.started_attempt, Some(0));
+    assert!(!facts.restarting(0));
+    assert!(
+        facts.restarting(1),
+        "until the runner starts the new attempt"
+    );
+    setup.give_plan(1);
+    let facts = setup
+        .facts_until("zingod running for the new attempt", |f| {
+            running(f) && f.started_attempt == Some(1)
+        })
+        .await;
+    assert!(!facts.restarting(1));
+    let restarted = facts.last_exit.expect("the first zingod stopped");
+    assert!(restarted.requested, "{restarted:?}");
     setup.finish().await;
 }
 
@@ -493,6 +519,46 @@ async fn a_low_disk_stops_zingod_until_there_is_room() {
         .await;
     setup.disk.set(25 * GB);
     setup.facts_until("zingod running again", running).await;
+    setup.finish().await;
+}
+
+/// An index folder Zeal can't create fails the start before zingod runs: the facts name the
+/// folder and the error, and the runner waits for a new attempt rather than trying again at
+/// every wake.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folder_zeal_cant_create_waits_for_a_new_attempt() {
+    use std::os::unix::fs::PermissionsExt;
+    let setup = setup("ok", "serving", |_| {}).await;
+    let parent = setup.index_dir.parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(&parent).unwrap();
+    let mode = |mode| std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(mode));
+    mode(0o555).unwrap();
+    if std::fs::write(parent.join("probe"), b"").is_ok() {
+        // Root writes there anyway: nothing to see.
+        mode(0o755).unwrap();
+        setup.finish().await;
+        return;
+    }
+    setup.give_plan(0);
+    let facts = setup
+        .facts_until("the start's failure", |f| f.start_error.is_some())
+        .await;
+    let (path, error) = facts.start_error.unwrap();
+    assert_eq!(path, setup.index_dir.join("home"));
+    assert!(error.contains("ermission denied"), "{error}");
+    assert_eq!(facts.phase, Phase::Stopped);
+    mode(0o755).unwrap();
+    setup
+        .facts_stay(
+            "no start again for the same attempt",
+            Duration::from_millis(500),
+            |f| f.phase == Phase::Stopped && f.start_error.is_some(),
+        )
+        .await;
+    setup.give_plan(1);
+    let facts = setup.facts_until("zingod running", running).await;
+    assert_eq!(facts.start_error, None);
     setup.finish().await;
 }
 

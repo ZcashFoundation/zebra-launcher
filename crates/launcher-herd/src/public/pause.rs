@@ -1,18 +1,19 @@
 //! Automatic pauses and degraded service.
 //!
 //! Problems with the exposure itself (the switch, the network, the LAN address, the name, a
-//! VPN, the data cap, a stopped zebrad) close the front door: a pause. Problems that clear
-//! themselves (zebrad restarting or behind, a failed wallet check, an expired certificate)
-//! keep it up and tell wallets to try again, so Let's Encrypt's renewals still get through.
+//! VPN, the data cap, a stopped zebrad, an upgrade zingod doesn't know) close the front door:
+//! a pause. Problems that clear themselves or wait for the user's fix (zebrad restarting or
+//! behind, a failed wallet check, an expired certificate, every other zingod problem) keep it
+//! up and tell wallets to try again, so Let's Encrypt's renewals still get through.
 
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
     Phase,
-    public::{DegradedReason, PauseReason, PublicServiceSpec, PublicState, Resume},
+    public::{DegradedReason, LightBackend, PauseReason, PublicServiceSpec, PublicState, Resume},
 };
 
-use super::{Facts, light};
+use super::{Facts, light, zingod};
 
 /// A name that points elsewhere this long pauses the service.
 pub const NAME_ELSEWHERE_PAUSE: Duration = Duration::from_secs(15 * 60);
@@ -69,6 +70,20 @@ pub fn pause(spec: &PublicServiceSpec, facts: &Facts) -> Option<(PauseReason, Re
     }
     if matches!(facts.phase, Phase::Stopped | Phase::Failed { .. }) {
         return Some((PauseReason::BackingStopped, Resume::Automatic));
+    }
+    // An active upgrade the bundled zingod doesn't know: wallets get an error instead of a
+    // chain that stopped, until a Zeal update brings a zingod that knows it.
+    if spec.backend == LightBackend::Zingod
+        && let Some(zingod) = &facts.zingod
+        && let Some(upgrade) = zingod::unknown_upgrade(&zingod.version, &facts.upgrades)
+    {
+        return Some((
+            PauseReason::BuildTooOld {
+                upgrade: upgrade.name.clone(),
+                height: upgrade.activation_height,
+            },
+            Resume::Automatic,
+        ));
     }
     None
 }
@@ -130,13 +145,24 @@ pub fn degraded(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReaso
     if expired {
         return Some(DegradedReason::CertificateExpired);
     }
-    let endpoint_open = spec.backend_port.is_some_and(|port| {
-        facts
-            .endpoint
-            .is_some_and(|addr| addr.port() == port && addr.ip().is_loopback())
-    });
+    let endpoint_open = match spec.backend {
+        LightBackend::ZebradEndpoint => spec.backend_port.is_some_and(|port| {
+            facts
+                .endpoint
+                .is_some_and(|addr| addr.port() == port && addr.ip().is_loopback())
+        }),
+        // zingod's own port is the last of zebrad's problems below.
+        LightBackend::Zingod => true,
+    };
     if facts.phase != Phase::Running || !endpoint_open {
         return Some(DegradedReason::BackingRestarting);
+    }
+    // zingod's own problems come before zebrad's height: while zingod waits for zebrad to
+    // reach the tip, that is what the panel says.
+    if spec.backend == LightBackend::Zingod
+        && let Some(why) = zingod::problem(spec, facts)
+    {
+        return Some(why);
     }
     // A few blocks behind for a moment is an ordinary gap between blocks; an unknown height
     // is behind.
@@ -201,6 +227,7 @@ mod tests {
             version: CONSENT_VERSION,
             at: at(0),
             hostname: "zec.example.com".into(),
+            backend: Default::default(),
         });
         spec.name = Some(PublicHostname::parse("zec.example.com").unwrap());
         spec.backend_port = Some(9067);

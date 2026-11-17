@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn the_minimal_config_carries_the_nodes_own_ports_and_folders() {
-        let first = first_node(DEFAULT_DATA_DIR);
+        let first = first_node(DEFAULT_DATA_DIR, launcher_types::Network::Mainnet);
         let text = minimal_config(&first, &format!("{DEFAULT_DATA_DIR}/rpc"));
         assert!(
             text.contains(&format!(

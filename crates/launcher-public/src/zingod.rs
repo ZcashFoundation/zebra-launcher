@@ -30,11 +30,12 @@ use std::{
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty, Limited};
 use launcher_core::{
-    firstrun::{dir_size, free_inodes, free_space},
+    firstrun::{dir_size, free_inodes, free_space, network_filesystem},
     logfile::RotatingLogConfig,
     paths::Paths,
     policy::RestartPolicy,
     resources::ResourceSampler,
+    rpc::{RpcClient, RpcError},
     supervisor::{
         self, Listener, LogSubscription, StartOptions, SupervisorConfig, SupervisorError,
         SupervisorHandle,
@@ -42,8 +43,8 @@ use launcher_core::{
     zingod::{ZingodCommand, ZingodConfig, ZingodNetwork, logs::disk_full_kind},
 };
 use launcher_herd::public::zingod::{
-    Cookie, DiskFullEvidence, DiskFullKind, DiskReading, DiskRecovery, ZebradFacts, ZebradRun,
-    ZingodFacts, ZingodResources, answering_zero_since, disk_allows, disk_full_recovery,
+    Cookie, DiskFullEvidence, DiskFullKind, DiskReading, DiskRecovery, TipCheck, ZebradFacts,
+    ZebradRun, ZingodFacts, ZingodResources, answering_zero_since, disk_allows, disk_full_recovery,
 };
 use launcher_types::{
     ExitClass, NodeResources, Phase, PortRole, Status,
@@ -238,6 +239,75 @@ pub fn remove_index(index_dir: &Path) -> io::Result<()> {
     }
 }
 
+/// How long one tip cross-check may take: zingod's `GetLatestBlock` and zebrad's
+/// `getblockhash`.
+pub const CROSS_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One tip cross-check (docs/PUBLIC-SERVICES.md, "Health of zingod"): zingod's
+/// `GetLatestBlock` on loopback, its hash reversed from the internal byte order, against
+/// zebrad's `getblockhash` at that height, asked with zebrad's cookie. A height above
+/// `zebrad_height`, or one zebrad says it doesn't have, is [`TipCheck::Skipped`]. `None` when
+/// either side didn't answer, which says nothing about the chain.
+pub async fn cross_check(
+    zingod: SocketAddr,
+    rpc: SocketAddr,
+    cookie: PathBuf,
+    zebrad_height: Option<u64>,
+) -> Option<(u64, TipCheck)> {
+    let check = async {
+        let stream = TcpStream::connect(zingod).await.ok()?;
+        let block = crate::grpc::get_latest_block(stream, &zingod.to_string(), false)
+            .await
+            .ok()?;
+        if zebrad_height.is_none_or(|height| block.height > height) {
+            return Some((block.height, TipCheck::Skipped));
+        }
+        let display: String = block
+            .hash
+            .iter()
+            .rev()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let client = RpcClient::new(rpc, cookie).ok()?;
+        match client
+            .call::<String>("getblockhash", serde_json::json!([block.height]))
+            .await
+        {
+            Ok(hash) if hash.eq_ignore_ascii_case(&display) => {
+                Some((block.height, TipCheck::Match))
+            }
+            Ok(_) => Some((block.height, TipCheck::Mismatch)),
+            // zebrad's answer for a height above its tip.
+            Err(RpcError::Rpc { code: -8, .. }) => Some((block.height, TipCheck::Skipped)),
+            Err(_) => None,
+        }
+    };
+    tokio::time::timeout(CROSS_CHECK_TIMEOUT, check)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The index folder's disk as the service actor reads it before zingod runs: free bytes and
+/// inodes, whether it is a network filesystem, and the index's size (with whether the walk
+/// stopped early). Each part that can't be read is left out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IndexDisk {
+    pub disk: Option<DiskReading>,
+    pub network_fs: bool,
+    pub index_bytes: Option<(u64, bool)>,
+}
+
+/// Reads [`IndexDisk`] for `index_dir`, blocking.
+pub fn read_index_disk(index_dir: &Path) -> IndexDisk {
+    let indexes = index_dir.join("indexes");
+    IndexDisk {
+        disk: read_disk(index_dir).ok(),
+        network_fs: network_filesystem(index_dir).unwrap_or(false),
+        index_bytes: indexes.is_dir().then(|| dir_size(&indexes, SIZE_LIMIT)),
+    }
+}
+
 /// One read of zingod's `/status` on a new HTTP/1.1 connection, within `limit`.
 pub async fn read_status(addr: SocketAddr, limit: Duration) -> Option<IndexerStatus> {
     let read = async {
@@ -347,6 +417,7 @@ impl ZingodRunner {
             zingod: None,
             started: None,
             stale_for: None,
+            start_failed_for: None,
             starting: false,
             port: None,
             moved: false,
@@ -430,6 +501,9 @@ struct Runner {
     /// again until the key changes, so a process that outlives `SIGKILL` can't make the runner
     /// spin.
     stale_for: Option<(ZebradRun, u64)>,
+    /// The plan's key whose start failed before zingod ran, on a folder Zeal couldn't create or
+    /// write in (`ZingodFacts.start_error`): no start again until the key changes.
+    start_failed_for: Option<(ZebradRun, u64)>,
     /// A start is under way.
     starting: bool,
     /// The port zingod gets, after a move.
@@ -593,7 +667,11 @@ impl Runner {
             }
             return;
         }
-        if !self.disk_read || !facts.disk_allows || self.stale_for == Some(plan.key()) {
+        if !self.disk_read
+            || !facts.disk_allows
+            || self.stale_for == Some(plan.key())
+            || self.start_failed_for == Some(plan.key())
+        {
             return;
         }
         match phase {
@@ -628,7 +706,8 @@ impl Runner {
         }
     }
 
-    fn ensure_supervisor(&mut self, home: &Path) -> io::Result<()> {
+    /// zingod's supervisor for `home`, made once. A failure names the folder it was in.
+    fn ensure_supervisor(&mut self, home: &Path) -> Result<(), (PathBuf, io::Error)> {
         if self.zingod.is_some() {
             return Ok(());
         }
@@ -643,13 +722,15 @@ impl Runner {
         config.pidfile = Some(self.options.pidfile.clone());
         config.log_file = Some(self.options.log.clone());
         config.listeners = listeners_rx;
-        if let Some(parent) = self.options.pidfile.parent() {
-            std::fs::create_dir_all(parent)?;
+        let log_dir = self.options.log.path.parent().map(Path::to_path_buf);
+        for parent in [self.options.pidfile.parent(), log_dir.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            std::fs::create_dir_all(parent).map_err(|err| (parent.to_path_buf(), err))?;
         }
-        if let Some(parent) = self.options.log.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let handle = supervisor::spawn(config)?;
+        // The supervisor opens zingod's log as it starts.
+        let handle = supervisor::spawn(config).map_err(|err| (log_dir.unwrap_or_default(), err))?;
         let resources = ResourceSampler::spawn(handle.watch_probe());
         self.zingod = Some(Zingod {
             status: handle.watch_status(),
@@ -661,23 +742,36 @@ impl Runner {
         Ok(())
     }
 
-    /// Writes the configuration with the current port and starts zingod in a task.
+    /// Writes the configuration with the current port and starts zingod in a task. A folder
+    /// Zeal can't create or write in fails the start for the plan's key ([`Self::start_failed`]).
     async fn start(&mut self, plan: ZingodPlan) {
         let mut config = plan.config.clone();
         if let Some(port) = self.port {
             config.listen.set_port(port);
         }
-        let written = config
+        let home = config.home_dir();
+        let config_dir = self
+            .options
+            .config_file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let prepared = config
             .ensure_dirs()
-            .and_then(|()| config.write(&self.options.config_file));
-        if let Err(err) = written {
-            tracing::warn!(%err, "could not write zingod's configuration");
+            .map_err(|err| (home.clone(), err))
+            .and_then(|()| {
+                config
+                    .write(&self.options.config_file)
+                    .map_err(|err| (config_dir, err))
+            })
+            .and_then(|()| self.ensure_supervisor(&home));
+        if let Err((path, err)) = prepared {
+            self.start_failed(plan.key(), path, &err);
             return;
         }
-        if let Err(err) = self.ensure_supervisor(&config.home_dir()) {
-            tracing::warn!(%err, "could not start zingod's supervisor");
-            return;
-        }
+        self.start_failed_for = None;
+        self.facts
+            .send_if_modified(|facts| facts.start_error.take().is_some());
         let Some(zingod) = &self.zingod else {
             return;
         };
@@ -690,6 +784,7 @@ impl Runner {
         self.facts.send_modify(|facts| {
             facts.port = Some(config.listen.port());
             facts.running_for = Some(plan.zebrad);
+            facts.started_attempt = Some(plan.attempt);
         });
         let handle = zingod.handle.clone();
         // Sent from the actor, so a stop it sends next is handled after this start.
@@ -702,6 +797,18 @@ impl Runner {
             };
             let _ = tx.send(Internal::Started(started)).await;
         });
+    }
+
+    /// A start that failed before zingod ran, on `path`: the runner waits for a new key, and the
+    /// facts name the folder and the error, which is logged once while it stays the same.
+    fn start_failed(&mut self, key: (ZebradRun, u64), path: PathBuf, err: &io::Error) {
+        self.start_failed_for = Some(key);
+        let failure = (path, err.to_string());
+        if self.facts.borrow().start_error.as_ref() != Some(&failure) {
+            tracing::warn!(path = %failure.0.display(), %err, "Zeal could not prepare zingod's start");
+            self.facts
+                .send_modify(|facts| facts.start_error = Some(failure));
+        }
     }
 
     async fn stop(&mut self) {
@@ -782,6 +889,9 @@ impl Runner {
         // A rebuilt index starts from a clean history.
         self.started = None;
         self.stale_for = None;
+        self.start_failed_for = None;
+        self.facts
+            .send_if_modified(|facts| facts.start_error.take().is_some());
         removed
     }
 
@@ -902,10 +1012,12 @@ impl Runner {
         self.facts.send_if_modified(|facts| {
             let changed = facts.phase != status.phase
                 || facts.last_exit != status.last_exit
-                || facts.stale != status.stale;
+                || facts.stale != status.stale
+                || facts.listening != status.lightwalletd_addr;
             facts.phase = status.phase.clone();
             facts.last_exit = status.last_exit.clone();
             facts.stale = status.stale.clone();
+            facts.listening = status.lightwalletd_addr;
             changed
         });
         status.phase

@@ -14,6 +14,9 @@ The app identifier is `org.zfnd.zeal`.
 | `zebrad.toml`, `launcher.json` | `<app_config_dir>` |
 | Logs (`launcher.<date>.log`, `zebrad.log`) | `<app_log_dir>` |
 | Each node added later: its `zebrad.toml`, cookie, `zebrad.log` and default chain state | `<app_local_data_dir>/nodes/<id>` |
+| zingod's index, for a light client server on zingod (Linux; tens of GB) | `<first node's data dir>/zingod/<network>`, the folder the light client server recorded when zingod was first chosen |
+| zingod's `zingod-<network>.toml` and `.pid` | `<app_local_data_dir>/public` |
+| zingod's log (`zingod-<network>.log`) | `<app_log_dir>` |
 
 | OS | `app_local_data_dir` / `app_config_dir` |
 | --- | --- |
@@ -58,8 +61,14 @@ Kept data stays where it is; delete it by hand if you no longer want it.
   outside the AppImage mount:
   `~/.local/share/org.zfnd.zeal/sidecar/<launcher version>/zeal-zebrad`
   (the launcher deletes other versions' copies, never the current one).
-- **deb:** `sudo apt remove zeal-app` (the package installs `/usr/bin/zeal-app`
-  and `/usr/bin/zeal-zebrad`).
+- **deb:** `sudo apt remove zeal-app` (the package installs `/usr/bin/zeal-app`,
+  `/usr/bin/zeal-zebrad` and `/usr/bin/zeal-zingod`).
+- **zingod:** Settings → Public services → "Turn off and forget…" with "Delete zingod's
+  index" ticked removes the index and zingod's state from the recorded folder, and nothing
+  else, and lists what it couldn't remove; after switching back to Zebra's built-in server,
+  "Delete…" beside the kept index does the same. Otherwise remove `<first node's data dir>/zingod` by hand, with Zeal stopped. In
+  an AppImage, the launcher also keeps a copy of zingod in
+  `~/.local/share/org.zfnd.zeal/sidecar/zingod/<launcher version>/zeal-zingod`.
 
 Then remove the directories above to delete state, config and logs.
 

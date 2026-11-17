@@ -114,10 +114,14 @@ impl LightwalletdKey {
     /// The key for zebrad on `network` from the stored public services: the
     /// user's while no light client server is set up, on loopback at the
     /// spec's `backend_port` while the service has one, and removed otherwise,
-    /// including while zebrad runs on another network than the service's.
+    /// including while zebrad runs on another network than the service's and
+    /// while zingod is the backend.
     pub fn for_public(public: &launcher_types::public::PublicConfig, network: Network) -> Self {
         match public.light_server() {
             None => LightwalletdKey::Unmanaged,
+            Some(spec) if spec.backend == launcher_types::public::LightBackend::Zingod => {
+                LightwalletdKey::Absent
+            }
             Some(spec) if spec.network == network => spec
                 .backend_port
                 .map_or(LightwalletdKey::Absent, LightwalletdKey::Listen),
@@ -243,8 +247,9 @@ pub enum ConfigEditError {
 /// Creates `zebrad.toml` with only the managed keys if it is missing, or sets
 /// the managed keys in place in the existing file, keeping everything else.
 ///
-/// The file is only rewritten when a managed value actually changes.
-pub fn ensure(paths: &NodePaths, keys: &ManagedKeys) -> Result<(), ConfigError> {
+/// The file is only rewritten when a managed value actually changes, and the
+/// result says whether it was: a running zebrad needs a restart only then.
+pub fn ensure(paths: &NodePaths, keys: &ManagedKeys) -> Result<bool, ConfigError> {
     let path = paths.zebrad_config();
     let existing = match fs::read_to_string(&path) {
         Ok(text) => Some(text),
@@ -263,7 +268,7 @@ pub fn ensure(paths: &NodePaths, keys: &ManagedKeys) -> Result<(), ConfigError> 
         fs::create_dir_all(paths.config_dir())?;
         fsutil::write_atomic(&path, text.as_bytes())?;
     }
-    Ok(())
+    Ok(changed)
 }
 
 /// The minimal file for `keys`: a short header and the managed keys only.
@@ -878,7 +883,7 @@ tx_cost_limit = 1000
 
         // On: the managed address replaces it, keeping the comment.
         keys.lightwalletd = LightwalletdKey::Listen(9067);
-        ensure(&paths, &keys).expect("ensure");
+        assert!(ensure(&paths, &keys).expect("ensure"), "changed");
         let text = read(&paths).expect("read").text;
         assert!(
             text.contains("# mine\nlightwalletd_listen_addr = \"127.0.0.1:9067\""),
@@ -886,16 +891,19 @@ tx_cost_limit = 1000
         );
         validate(&text).expect("the managed endpoint is on loopback");
         let token = read(&paths).expect("read").token;
-        ensure(&paths, &keys).expect("ensure again");
+        assert!(!ensure(&paths, &keys).expect("ensure again"), "unchanged");
         assert_eq!(read(&paths).expect("read").token, token, "unchanged");
 
         // Off: the key goes, and stays gone.
         keys.lightwalletd = LightwalletdKey::Absent;
-        ensure(&paths, &keys).expect("ensure");
+        assert!(ensure(&paths, &keys).expect("ensure"), "removed");
         let text = read(&paths).expect("read").text;
         assert!(!text.contains("lightwalletd_listen_addr"), "{text}");
         let token = read(&paths).expect("read").token;
-        ensure(&paths, &keys).expect("ensure again");
+        assert!(
+            !ensure(&paths, &keys).expect("ensure again"),
+            "already gone"
+        );
         assert_eq!(read(&paths).expect("read").token, token, "unchanged");
 
         // A new file holds the key only while the service is on.
@@ -935,6 +943,12 @@ tx_cost_limit = 1000
         // Saving the other network removes the key, which the service keeps for later.
         assert_eq!(
             LightwalletdKey::for_public(&public, Network::Testnet),
+            LightwalletdKey::Absent
+        );
+        // With zingod as the backend zebrad's endpoint goes, even with a port left stored.
+        public.services[0].backend = launcher_types::public::LightBackend::Zingod;
+        assert_eq!(
+            LightwalletdKey::for_public(&public, Network::Mainnet),
             LightwalletdKey::Absent
         );
     }
