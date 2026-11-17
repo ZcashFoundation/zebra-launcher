@@ -14,9 +14,9 @@ use launcher_types::{
     Network, NodeId,
     explorer::{
         BlockHash, BlockId, BlockLedger, BlockPage as Page, Budget, CardTarget, ExplorerCall,
-        ExplorerError, ExplorerErrorKind, ExplorerRequest, ExplorerResponse, ExplorerRoute,
-        FutureBlock, LiveState, PerPool, Pool, PrefetchTarget, RewardSplit, RowsRead, Shown,
-        SourceCall, TxRow,
+        ExplorerError, ExplorerErrorKind, ExplorerReply, ExplorerRequest, ExplorerResponse,
+        ExplorerRoute, FutureBlock, LiveState, PerPool, Pool, PrefetchTarget, RewardSplit,
+        RowsRead, Shown, SourceCall, TxRow,
     },
 };
 use leptos::{prelude::*, task::spawn_local};
@@ -123,6 +123,26 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
         }
         Loaded::Loading => future.set(false),
     });
+    // The table is drawn once per block: an answer for the same block again (Show RPC turned on
+    // or off, the node reachable again) keeps its rows, its reads and its place.
+    let block_page = move |value: &Loaded<ExplorerReply>| match value {
+        Loaded::Ready(reply) => match &reply.response {
+            ExplorerResponse::Block(page) => Some(page.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let shown = Memo::new(move |_| {
+        answer
+            .value
+            .with(|value| block_page(value).map(|page| page.summary.hash))
+    });
+    let table_node = node.clone();
+    let table = move || {
+        shown.get()?;
+        let page = *answer.value.with_untracked(block_page)?;
+        Some(view! { <TxTable page nav node=table_node.clone() network /> })
+    };
     view! {
         <div class="ex-block" class:ex-refreshing=move || answer.refreshing.get()>
             {move || match answer.value.get() {
@@ -148,28 +168,27 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
                 Loaded::Ready(reply) => match reply.response {
                     ExplorerResponse::Block(page) => {
                         let page = *page;
-                        let top = page.clone();
-                        view! {
-                            // A new unit draws the same answer again; nothing is read for it.
-                            // The table reads the unit itself, so it keeps its rows and place.
-                            {move || {
-                                let unit = prefs.unit(network);
-                                view! { <Block page=top.clone() nav unit /> }
-                            }}
-                            <TxTable page=page.clone() nav node=node.clone() network />
-                            <section class="ex-section">
-                                <details class="ex-details">
-                                    <summary>"Header details"</summary>
-                                    <Details page nav />
-                                </details>
-                            </section>
-                        }
+                        // A new unit draws the same answer again; nothing is read for it. The
+                        // table reads the unit itself.
+                        (move || {
+                            let unit = prefs.unit(network);
+                            view! { <Block page=page.clone() nav unit /> }
+                        })
                         .into_any()
                     }
                     ExplorerResponse::Future(future) => view! { <Future future nav /> }.into_any(),
                     _ => view! { <Loading /> }.into_any(),
                 },
             }}
+            {table}
+            {move || answer.value.with(block_page).map(|page| view! {
+                <section class="ex-section">
+                    <details class="ex-details">
+                        <summary>"Header details"</summary>
+                        <Details page=*page nav />
+                    </details>
+                </section>
+            })}
             <RpcCalls sources title="What this page asked your node" />
         </div>
     }
