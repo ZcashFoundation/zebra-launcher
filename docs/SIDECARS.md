@@ -387,7 +387,9 @@ To bump by hand, or to finish the watcher's pull request:
 
      Check the result against the commit shown on the GitHub release page.
 3. Run `scripts/check-versions.sh`. The fake zebrad reads `ZEBRAD_VERSION`
-   when it is built, so nothing else carries the version.
+   when it is built. launcher-herd's `TESTED_ZINGOD` carries it too: a
+   launcher-herd test fails until the new version is listed with the bundled
+   zingod, once `real_zingod.rs` passes against it.
    `scripts/bump-zebrad.sh <ver> <commit>` does step 2 and runs the check.
 4. Check the new Linux release locally:
    `scripts/fetch-zebrad-linux.sh --out /tmp/zebrad-check/zebrad`. The cosign
@@ -431,8 +433,8 @@ on Linux only. Only the light client server runs it
   when it is built, through `launcher_types::zingod::version()` (an
   `include_str!`), as fake-zebrad reads `ZEBRAD_VERSION`, and a cargo test
   (`crates/launcher-core/tests/fake_zingod.rs`) checks that its `--version`
-  reports the file's version. From Z3, a launcher-herd test checks that the
-  version is on `TESTED_ZINGOD`.
+  reports the file's version. A launcher-herd test checks that the version is
+  on `TESTED_ZINGOD` and `ZINGOD_KNOWS`.
 - **The name.** The `zeal-` prefix keeps the `.deb`'s `/usr/bin/zeal-zingod`
   from shadowing a system `zingod`.
 - **The date** is the tag commit's date in UTC; zingod's CHANGELOG heads the
@@ -891,7 +893,8 @@ is unknown. Then:
    agree with them. `generate-config` leaves out keys that default to unset, so
    also check the writer's list of such keys (only `cookie_path` at 1.1.0)
    against `packages/zingod/src/config.rs`.
-5. From Z3: update `TESTED_ZINGOD` and `ZINGOD_KNOWS`.
+5. Update `TESTED_ZINGOD` and `ZINGOD_KNOWS` in launcher-herd: `cargo test`
+   fails until the new version is on both.
 6. Run `real_zingod.rs` against the Stable zebrad pin (CI does this on
    the pull request), with `PREV_ZINGOD_BIN` set to the previous pin's build,
    so an index the old one wrote must open with the new one. Then run

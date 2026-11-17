@@ -559,7 +559,7 @@ logged for this run (`Status.rpc_addr`) and the cookie at `NodePaths::rpc_cookie
 always writes `cookie_path`, so zingod's own lookup (`<cache dir>/zebra/.cookie`) never runs.
 
 - **Tested pairs.** `TESTED_ZINGOD` in launcher-herd lists each zingod version with the zebrad
-  versions and networks it passed with: in Z3, 1.1.0 with zebrad 7.0.0 on Testnet; Z4 adds
+  versions and networks it passed with: since Z2, 1.1.0 with zebrad 7.0.0 on Testnet; Z4 adds
   Mainnet once its gate passes. Any other pair disables the choice at setup. For a light client
   server already set up with zingod it is `IndexerUntested`, a `Degraded` reason, so the front
   door stays up in `Unavailable` and renewals go on; PS1's `NotAvailable` would close it. One
@@ -1357,7 +1357,7 @@ the spawner, touches shared code. None of them needs front door v2 (PS2) or MULT
 | --- | --- | --- |
 | **Z1 Bundle** | the `ZINGOD_*` pins; `build-zingod.sh` and `bump-zingod.sh`; `zingod-sidecars.yml` with its checks and attestation; the source archive on each release; `zeal-zingod` and its licences in the Linux bundles; a minimal `fake-zingod` for `dev-sidecar.sh`. Nothing runs it yet. **Built**: [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux) says how, and where it differs from this design | — |
 | **Z2 Supervise** | `Launch` and the zingod reader in the supervisor; the configuration writer; `DiskFull` and `IndexBroken`; the pure rules; the runner; `fake-zingod`'s modes and fake-zebrad's stale-cookie mode; `real_zingod.rs` in CI. No UI. **Built**: [Z2 as built](#z2-as-built) | Z1 |
-| **Z3 Choose (Linux, Testnet)** | the types; the backend on the consent screen and in the setup; the service actor's and the app's wiring; the disk, stall, cross-check and active-upgrade rules; Rebuild, Delete and Forget's box; the Server card, banners and mock flags; `TESTED_ZINGOD` = 1.1.0 with zebrad 7.0.0 on Testnet. Switching an open service means "unavailable" until the index is built | Z2; the Testnet wallet run before the release |
+| **Z3 Choose (Linux, Testnet)** | the types; the backend on the consent screen and in the setup; the service actor's and the app's wiring; the disk, stall, cross-check and active-upgrade rules; Rebuild, Delete and Forget's box; the Server card, banners and mock flags; the choice gated on `TESTED_ZINGOD` (1.1.0 with zebrad 7.0.0 on Testnet, listed since Z2). Switching an open service means "unavailable" until the index is built | Z2; the Testnet wallet run before the release |
 | **Z4 Mainnet** | the gate below; `TESTED_ZINGOD` gains Mainnet; the disk and memory numbers from measurements; the scheduled-upgrade countdown and pause; the consent's Mainnet line; Share naming the wallets the runs confirmed; switching while Zebra's endpoint keeps serving; the default for new setups, as the maintainer decides | Z3 and the gate |
 | **Z5 macOS** | `zingod-sidecars.yml` on `macos-15` and `macos-15-intel` (Xcode command line tools for jemalloc's `sh` and `make` and libproc's bindgen, protoc); a `tauri.macos.conf.json` with four `externalBin` entries; the contract test on both macOS runners, in `bundle.yml`, where both binaries are already built: `fetch-zebrad-linux.sh` is Linux only and a macOS zebrad takes 30 to 60 minutes to build uncached, so the job takes that run's `zebrad-stable-<triple>` and `zingod-<triple>` artifacts; `kern.maxfilesperproc` checked against zingod's 1,280 | PS3; the build passing |
 
@@ -1405,6 +1405,11 @@ command line and the reader) and `Launch` in the supervisor and the spawner; `Di
   zingod in 1s"), not only the start; zebrad's read as before.
 - **`ZINGOD_KNOWS`** for 1.1.0 lists the 11 upgrades of launcher-herd's `BRANCH_IDS`, NU6.2
   and NU6.3 included, with zebrad's names.
+- **`TESTED_ZINGOD`** landed in Z2, not Z3: 1.1.0 with zebrad 7.0.0 on Testnet, with the
+  launcher-herd test that the bundled `ZINGOD_VERSION` is on it and on `ZINGOD_KNOWS`, and the
+  Stable `ZEBRAD_VERSION` with it on each network zingod is offered on. A bump of either pin
+  fails `cargo test` until the lists move (SIDECARS.md's bump steps say so). Z3 gates the
+  choice on it.
 - **What `/status` means**: whether a sync is building or catching up is measured against
   zebrad's height when zingod's target is above it, since that target can be zingod's clock
   estimate (on Regtest, millions of blocks above the tip).
