@@ -1,0 +1,286 @@
+# Builds zeal-zingod, the zingod that the Linux bundles carry, from its pinned
+# commit (ZINGOD_VERSION, ZINGOD_COMMIT) with scripts/build-zingod.sh, which
+# checks the tag, the binary and the licence folder before it installs anything.
+# One artifact per target, `zingod-<target triple>`, holds
+# zeal-zingod-<target triple>, licenses/ (jemalloc-COPYING and aws-lc-LICENSE,
+# copied from the build's own sources) and zingod-build-info.txt. The x86_64
+# job also packs the vendored source as zingod-src-<version>.tar.zst with its
+# sha256, uploaded as `zingod-src-<version>`, and reports the advisories in
+# zingod's Cargo.lock in its summary; they never fail the job.
+#
+# Linux only: zingod 1.1.0 doesn't compile for Windows and has never been built
+# for macOS (docs/SIDECARS.md). Each target builds in ubuntu:22.04, so the
+# binary meets the bundles' glibc floor. The `targets` input (comma-separated
+# triples, empty for all) selects through scripts/select-targets.sh, as
+# zebrad-sidecars.yml does; with no Linux target the build is skipped.
+#
+# With `attest` (the default) the binary and the source archive get a build
+# provenance attestation. ci.yml passes false: a fork's pull request gets no
+# OIDC token, and a binary built from an unmerged branch never carries one.
+# Callers must grant `contents: read`, `id-token: write` and
+# `attestations: write`. The binaries are unsigned, like the zebrad sidecars.
+name: zingod sidecars
+
+on:
+  workflow_call:
+    inputs:
+      targets:
+        description: comma-separated target triples from .github/targets.json (empty builds both Linux targets; other targets are skipped)
+        required: false
+        type: string
+        default: ""
+      attest:
+        description: attest the build provenance of the binary and the source archive
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      version:
+        description: the zingod version the sidecars were built from (no leading v)
+        value: ${{ jobs.targets.outputs.version }}
+      commit:
+        description: the full pinned zingod commit
+        value: ${{ jobs.targets.outputs.commit }}
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: comma-separated target triples from .github/targets.json (empty builds both Linux targets; other targets are skipped)
+        required: false
+        type: string
+        default: ""
+      attest:
+        description: attest the build provenance of the binary and the source archive
+        required: false
+        type: boolean
+        default: true
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Reads and checks the pins once, and selects the Linux targets.
+  targets:
+    name: Select the zingod targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      any: ${{ steps.select.outputs.any }}
+      version: ${{ steps.select.outputs.version }}
+      commit: ${{ steps.select.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: select
+        name: Read the pins and select the targets
+        env:
+          INPUT_TARGETS: ${{ inputs.targets }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+          # shellcheck disable=SC1091 # the pin grammars live in scripts/lib.sh
+          . scripts/lib.sh
+          version="$(read_pin ZINGOD_VERSION)"
+          commit="$(read_pin ZINGOD_COMMIT)"
+          check_stable_version "${version}"
+          check_commit "${commit}"
+          matrix="$(scripts/select-targets.sh --targets "${INPUT_TARGETS}" --family linux)"
+          any="$(jq '.include | length > 0' <<< "${matrix}")"
+          echo "linux: ${matrix}"
+          {
+            echo "matrix=${matrix}"
+            echo "any=${any}"
+            echo "version=${version}"
+            echo "commit=${commit}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "zingod ${version} (commit ${commit})" >> "${GITHUB_STEP_SUMMARY}"
+
+  build:
+    name: zingod (${{ matrix.target }})
+    needs: targets
+    if: needs.targets.outputs.any == 'true'
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      # Native x86_64 and aarch64 runners: build-zingod.sh runs the binary.
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    permissions:
+      contents: read
+      id-token: write # sign the build provenance
+      attestations: write # store the build provenance
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.targets.outputs.version }}
+      COMMIT: ${{ needs.targets.outputs.commit }}
+      TARGET: ${{ matrix.target }}
+      SIDECAR: dist/zeal-zingod-${{ matrix.target }}
+      ARCHIVE: dist/zingod-src-${{ needs.targets.outputs.version }}.tar.zst
+      # The x86_64 job packs the source archive and reads the advisories, once.
+      PRIMARY: ${{ matrix.target == 'x86_64-unknown-linux-gnu' }}
+    steps:
+      # The bare image has no git for checkout, no curl or CA certificates, and
+      # no zstd command. It runs as root; no host sudo or runner packages are
+      # used. build-essential is the C compiler, make and sh for jemalloc's
+      # configure; libprotobuf-dev has the well-known types protoc needs.
+      - name: Install the build prerequisites (Ubuntu 22.04)
+        run: |
+          set -euo pipefail
+          [ "$(id -u)" -eq 0 ] || { echo "::error::the build container must run as root"; exit 1; }
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git zstd binutils build-essential \
+            protobuf-compiler libprotobuf-dev
+
+      # A copy of zebrad-sidecars.yml's pinned, checksummed bootstrap: keep the
+      # two, and setup-tauri's, in sync. Do not replace it with a mutable
+      # install script piped into a shell.
+      - name: Install rustup (Ubuntu 22.04 container)
+        env:
+          RUSTUP_VERSION: 1.29.2
+          RUSTUP_INIT_SHA256_X86_64: 5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+          RUSTUP_INIT_SHA256_AARCH64: a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697
+        run: |
+          set -euo pipefail
+          if command -v rustup > /dev/null 2>&1; then
+            echo "rustup is already installed: $(rustup --version 2> /dev/null)"
+            exit 0
+          fi
+          case "$(uname -m)" in
+            x86_64) triple=x86_64-unknown-linux-gnu; sha256="${RUSTUP_INIT_SHA256_X86_64}" ;;
+            aarch64) triple=aarch64-unknown-linux-gnu; sha256="${RUSTUP_INIT_SHA256_AARCH64}" ;;
+            *) echo "::error::no pinned rustup-init for $(uname -m)"; exit 1 ;;
+          esac
+          init="${RUNNER_TEMP}/rustup-init"
+          curl --proto '=https' --tlsv1.2 -sSf -o "${init}" \
+            "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${triple}/rustup-init"
+          echo "${sha256}  ${init}" | sha256sum -c -
+          chmod +x "${init}"
+          "${init}" -y --no-modify-path --profile minimal --default-toolchain none
+          rm -f "${init}"
+          echo "${CARGO_HOME:-${HOME}/.cargo}/bin" >> "${GITHUB_PATH}"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Fetched before rust-cache, which reads the checkout's Cargo.lock and
+      # toolchain. build-zingod.sh checks the tag and HEAD against the pin.
+      - name: Fetch zingod ${{ needs.targets.outputs.version }}
+        run: |
+          set -euo pipefail
+          git init -q zingod-src
+          git -C zingod-src fetch -q --depth 1 https://github.com/zingolabs/zingod "${COMMIT}"
+          git -C zingod-src -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          test "$(git -C zingod-src rev-parse HEAD)" = "${COMMIT}"
+
+      - name: Install zingod's Rust toolchain
+        working-directory: zingod-src
+        run: rustup toolchain install --profile minimal --no-self-update
+
+      # Cargo's registry and git checkouts only, keyed by the commit and the
+      # target; the build itself always starts clean.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: zingod-src -> target
+          key: zingod-${{ needs.targets.outputs.commit }}-${{ matrix.target }}
+          cache-targets: "false"
+          cache-bin: "false"
+
+      - name: Build and check zingod
+        run: |
+          set -euo pipefail
+          args=(--src-dir zingod-src --target "${TARGET}" --out "${SIDECAR}")
+          [ "${PRIMARY}" != true ] || args+=(--vendor-archive "${ARCHIVE}")
+          scripts/build-zingod.sh "${args[@]}"
+          {
+            echo "### zingod ${VERSION} for ${TARGET}"
+            echo
+            echo '```text'
+            cat dist/zingod-build-info.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      # A report for the bump review, not a gate (docs/SIDECARS.md): the
+      # findings go in the summary and never fail the job. The whole workspace
+      # and every target, with an empty config, so nothing upstream's deny.toml
+      # might ignore is left out. cargo-deny's release binary is pinned by
+      # version and sha256 in .github/tool-versions.env.
+      - name: Report the advisories in zingod's dependencies
+        if: env.PRIMARY == 'true'
+        run: |
+          set -euo pipefail
+          pin() { sed -n "s/^$1=//p" .github/tool-versions.env | tr -d '\r'; }
+          version="$(pin CARGO_DENY_VERSION)"
+          name="cargo-deny-${version}-x86_64-unknown-linux-musl"
+          curl --proto '=https' --tlsv1.2 -sSfL --retry 3 -o "${RUNNER_TEMP}/cargo-deny.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${version}/${name}.tar.gz"
+          echo "$(pin CARGO_DENY_SHA256_X86_64_LINUX)  ${RUNNER_TEMP}/cargo-deny.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/cargo-deny.tar.gz" -C "${RUNNER_TEMP}" "${name}/cargo-deny"
+          : > "${RUNNER_TEMP}/empty-deny.toml"
+          report="${RUNNER_TEMP}/advisories.txt"
+          status=0
+          RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' zingod-src/rust-toolchain.toml)" \
+            "${RUNNER_TEMP}/${name}/cargo-deny" --manifest-path zingod-src/Cargo.toml --locked \
+            --config "${RUNNER_TEMP}/empty-deny.toml" --color never check advisories \
+            > "${report}" 2>&1 || status=$?
+          found="$(grep -E '^(error|warning)\[' "${report}" || true)"
+          {
+            echo "### Advisories in zingod ${VERSION}'s Cargo.lock"
+            echo
+            echo "cargo-deny ${version}, exit status ${status}. Triage these at each bump; they don't fail the build."
+            echo
+            if [ -n "${found}" ]; then
+              while IFS= read -r line; do echo "- ${line}"; done <<< "${found}"
+            else
+              echo "None found."
+            fi
+            echo
+            echo "<details><summary>The full report</summary>"
+            echo
+            echo '```text'
+            cat "${report}"
+            echo '```'
+            echo "</details>"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [ -n "${found}" ]; then
+            echo "::warning title=zingod advisories::$(wc -l <<< "${found}") advisories in zingod ${VERSION}'s Cargo.lock; see the job summary"
+          fi
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: inputs.attest
+        with:
+          subject-path: ${{ env.SIDECAR }}
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: inputs.attest && env.PRIMARY == 'true'
+        with:
+          subject-path: ${{ env.ARCHIVE }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zingod-${{ matrix.target }}
+          path: |
+            ${{ env.SIDECAR }}
+            dist/licenses/
+            dist/zingod-build-info.txt
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: env.PRIMARY == 'true'
+        with:
+          name: zingod-src-${{ needs.targets.outputs.version }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+          if-no-files-found: error

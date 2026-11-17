@@ -561,30 +561,42 @@ dependency), OpenSSL or RocksDB.
 ### zingod in CI
 
 The reusable [`zingod-sidecars.yml`](../.github/workflows/zingod-sidecars.yml)
-workflow takes a `targets` input:
+workflow takes a `targets` input and an `attest` input (true by default). It
+can also be run by hand (Actions → zingod sidecars → Run workflow):
 
-- its first job builds the matrix with `scripts/select-targets.sh --family
-  linux`, and an empty matrix skips the build;
-- each target builds in `ubuntu:22.04` on `ubuntu-24.04` or `ubuntu-24.04-arm`,
-  and caches cargo's registry and git checkouts by commit and target. The bare
-  image has no curl, no CA certificates and no `zstd` command, so the job
-  installs `ca-certificates curl git zstd binutils build-essential
+- its first job checks the pins and builds the matrix with
+  `scripts/select-targets.sh --family linux`, and an empty matrix skips the
+  build;
+- each target builds in `ubuntu:22.04` on `ubuntu-24.04` or `ubuntu-24.04-arm`.
+  The bare image has no curl, no CA certificates and no `zstd` command, so the
+  job installs `ca-certificates curl git zstd binutils build-essential
   protobuf-compiler libprotobuf-dev` with `--no-install-recommends`, then
-  rustup through `zebrad-sidecars.yml`'s pinned, checksummed `rustup-init`
-  step;
-- it runs the checks above. Once, on the x86-64 leg, it runs `cargo deny check
-  advisories` over zingod's `Cargo.lock`, with cargo-deny's release binary
-  pinned by version and sha256 in `.github/tool-versions.env`
-  (`CARGO_DENY_VERSION`), as shellcheck and actionlint are; Zeal's own `deny`
-  job uses a Docker action instead. The findings go in the job's summary and
-  don't fail it (PUBLIC-SERVICES.md's open question 24);
-- it attests provenance with `actions/attest-build-provenance`, for the binary
-  and, on x86-64, the source archive;
+  rustup through a copy of `zebrad-sidecars.yml`'s pinned, checksummed
+  `rustup-init` step. It fetches the pinned commit into `zingod-src` and
+  installs zingod's toolchain before `Swatinem/rust-cache`, which caches only
+  cargo's registry and git checkouts (`cache-targets` and `cache-bin` off),
+  keyed by the commit and the target, so every build starts clean;
+- `build-zingod.sh --src-dir zingod-src` runs the checks above, and the job's
+  summary shows `zingod-build-info.txt`. Once, on the x86-64 leg, it also
+  writes the source archive and runs `cargo deny check advisories` over
+  zingod's `Cargo.lock`: the whole workspace and every target, with an empty
+  configuration, so nothing upstream's `deny.toml` might ignore is left out.
+  cargo-deny's release binary is pinned by version and sha256 in
+  `.github/tool-versions.env` (`CARGO_DENY_VERSION`), as shellcheck and
+  actionlint are; Zeal's own `deny` job uses a Docker action instead. The
+  findings go in the job's summary, with a warning that counts them, and
+  don't fail it (PUBLIC-SERVICES.md's open question 24). On 2026-11-16 the
+  report for 1.1.0 named 15;
+- with `attest`, it attests provenance with `actions/attest-build-provenance`,
+  for the binary and, on x86-64, the source archive;
 - it uploads `zingod-<target triple>`, holding `zeal-zingod-<target triple>`,
-  `licenses/` with the two copied licence files, and `zingod-build-info.txt`
-  (the version, commit, toolchain, protoc version, container, target,
-  `SOURCE_DATE_EPOCH`, the binary's and the licence files' sha256, and the
-  run), and `zingod-src-<ver>`.
+  `licenses/` with the two copied licence files, and `zingod-build-info.txt`,
+  and, from x86-64, `zingod-src-<ver>` with the archive and its `.sha256`.
+
+Two runs of `build-zingod.sh --vendor-archive` in `ubuntu:22.04` containers,
+each from its own temporary checkout, gave byte-identical binaries and source
+archives (2026-11-16), and the archive alone built zingod in a container with
+no network and an empty cargo home.
 
 `bundle.yml` and `release.yml` call it once each, as `sidecars-zingod`. Every
 Linux job that compiles the `zeal` crate needs it, since tauri-build copies
