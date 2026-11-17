@@ -23,7 +23,7 @@ use crate::{
         updates::{HealthFailureBanner, UpdateBanner},
     },
     explorer::Explorer,
-    health::memory_carrier,
+    health::{machine_history, memory_carrier},
     insights::{
         RunEvent,
         events::{config_outcome_event, config_replaced_event, update_events},
@@ -688,7 +688,7 @@ pub fn App() -> impl IntoView {
         update_health: RwSignal::new(None),
         log_filter_request: RwSignal::new(None),
         machine: RwSignal::new(None),
-        machine_history: RwSignal::new(MachineHistory::default()),
+        machine_history: RwSignal::new(machine_history()),
         memory_carrier,
         add_node: open_add,
         herds: RwSignal::new(Vec::new()),

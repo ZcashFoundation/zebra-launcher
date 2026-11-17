@@ -18,7 +18,8 @@ use crate::{
     charts::byte_rate,
     format::{LOW_SPACE_BYTES, bytes, cores, mem_bytes, mem_of, share, thousands},
     machine_history::{
-        Episode, MachineHistory, VOLUME_GAP, available_share, commit_share, volume_fresh,
+        Episode, FreeBelow, MachineHistory, MemoryCondition, VOLUME_GAP, available_share,
+        commit_share, volume_fresh,
     },
     metrics_history::names,
     pages::dashboard::resources::{idle_line, machine_text, root_name},
@@ -60,8 +61,60 @@ pub const FIT_FOR: Duration = Duration::from_secs(60);
 /// The exit sentences look this far back from an exit.
 pub const BEFORE_EXIT: Duration = Duration::from_secs(60);
 
-/// A reading for [`Episode::current`]: its time and its value, if it has one.
-type Reading = (SystemTime, Option<f64>);
+/// Rule 19's conditions, as the computer's history follows them.
+pub const DISK_FULL: FreeBelow = FreeBelow {
+    bytes: DISK_FULL_BYTES,
+    share: None,
+    sustain: Duration::ZERO,
+    margin: DISK_FULL_CLEARS - DISK_FULL_BYTES,
+};
+pub const DISK_LOW: FreeBelow = FreeBelow {
+    bytes: DISK_LOW_BYTES,
+    share: Some(DISK_LOW_SHARE),
+    sustain: DISK_LOW_FOR,
+    margin: DISK_LOW_MARGIN,
+};
+/// Rule 20's.
+pub const MEMORY_OUT: MemoryCondition = MemoryCondition::AvailableBelow {
+    enter: MEMORY_OUT_SHARE,
+    sustain: MEMORY_OUT_FOR,
+    leave: MEMORY_OUT_CLEARS,
+};
+pub const MEMORY_LOW: MemoryCondition = MemoryCondition::AvailableBelow {
+    enter: MEMORY_LOW_SHARE,
+    sustain: MEMORY_LOW_FOR,
+    leave: MEMORY_LOW_CLEARS,
+};
+pub const PRESSURE_CRITICAL: MemoryCondition = MemoryCondition::PressureAtLeast {
+    level: MemoryPressure::Critical,
+    sustain: PRESSURE_FOR,
+};
+pub const PRESSURE_WARNING: MemoryCondition = MemoryCondition::PressureAtLeast {
+    level: MemoryPressure::Warning,
+    sustain: PRESSURE_FOR,
+};
+pub const COMMIT_FULL: MemoryCondition = MemoryCondition::CommitAbove {
+    enter: COMMIT_FULL_SHARE,
+    sustain: MEMORY_OUT_FOR,
+    leave: COMMIT_FULL_CLEARS,
+};
+
+/// The computer's history for the app: it carries the episodes of rules 19 and 20 past the
+/// 4 h of samples it keeps, so a problem inside its leave margin does not clear when the
+/// readings that began it go. Rule 21 adds the node's state size from its metrics history,
+/// which keeps 4 h too, so it is judged on the readings kept.
+pub fn machine_history() -> MachineHistory {
+    MachineHistory::following(
+        &[
+            MEMORY_OUT,
+            MEMORY_LOW,
+            PRESSURE_CRITICAL,
+            PRESSURE_WARNING,
+            COMMIT_FULL,
+        ],
+        &[DISK_FULL, DISK_LOW],
+    )
+}
 
 /// How much more memory than the node that carries the memory verdict another node must use to
 /// take it: this share of the carrier's, and at least [`CARRIER_MARGIN_BYTES`].
@@ -209,29 +262,21 @@ impl Facts<'_> {
         }
     }
 
-    /// The free space readings of the node's volume as an episode's readings, with the newest;
-    /// `None` without a fresh one.
-    fn free_readings(&self) -> Option<(&VolumeUsage, Vec<Reading>)> {
-        let readings = self.volume_readings();
-        let newest = *readings.last()?;
-        let free = readings
-            .iter()
-            .map(|volume| (volume.measured_at, Some(volume.free_bytes as f64)))
-            .collect();
-        Some((newest, free))
+    /// The episode of `condition` on the node's volume, with the newest reading; `None`
+    /// without a fresh one.
+    fn free_episode(&self, condition: FreeBelow) -> Option<(&VolumeUsage, Episode)> {
+        let resources = self.resources();
+        let newest = *self.volume_readings().last()?;
+        let episode = resources
+            .machine_history
+            .free_episode(&resources.info.id, condition)?;
+        Some((newest, episode))
     }
 
     // Rule 19, its problem: under 2 GB free on one reading. It runs before rule 7, as a full
     // disk is what stops zebrad's writes, its RPC and its sync.
     pub(super) fn disk_full(&self) -> Option<Verdict> {
-        let (newest, free) = self.free_readings()?;
-        Episode::current(
-            free,
-            |bytes| bytes < DISK_FULL_BYTES as f64,
-            |bytes| bytes > DISK_FULL_CLEARS as f64,
-            Duration::ZERO,
-            VOLUME_GAP,
-        )?;
+        let (newest, _) = self.free_episode(DISK_FULL)?;
         Some(Verdict::new(
             Level::Problem,
             19,
@@ -248,15 +293,7 @@ impl Facts<'_> {
     // Rule 19, its warning: under min(5 %, 20 GB) free for a minute. It stops nothing yet, so
     // it runs after rule 15 and leaves the running problems their verdict.
     pub(super) fn disk_space_low(&self) -> Option<Verdict> {
-        let (newest, free) = self.free_readings()?;
-        let threshold = ((newest.total_bytes as f64 * DISK_LOW_SHARE) as u64).min(DISK_LOW_BYTES);
-        let episode = Episode::current(
-            free,
-            |bytes| bytes < threshold as f64,
-            |bytes| bytes > (threshold + DISK_LOW_MARGIN) as f64,
-            DISK_LOW_FOR,
-            VOLUME_GAP,
-        )?;
+        let (newest, episode) = self.free_episode(DISK_LOW)?;
         Some(Verdict::new(
             Level::Attention,
             19,
@@ -338,29 +375,19 @@ impl Facts<'_> {
         let macos = machine.pressure.is_some();
         let (headline, reason) = if level == Level::Problem {
             let reason = if macos {
-                history
-                    .pressure_at_least_for(MemoryPressure::Critical, PRESSURE_FOR)
-                    .map(pressure)
+                history.episode(PRESSURE_CRITICAL).map(pressure)
             } else {
                 history
-                    .available_below_for(MEMORY_OUT_SHARE, MEMORY_OUT_FOR, MEMORY_OUT_CLEARS)
+                    .episode(MEMORY_OUT)
                     .map(available)
-                    .or_else(|| {
-                        history
-                            .commit_above_for(COMMIT_FULL_SHARE, MEMORY_OUT_FOR, COMMIT_FULL_CLEARS)
-                            .map(commit)
-                    })
+                    .or_else(|| history.episode(COMMIT_FULL).map(commit))
             };
             ("Memory nearly exhausted", reason?)
         } else {
             let reason = if macos {
-                history
-                    .pressure_at_least_for(MemoryPressure::Warning, PRESSURE_FOR)
-                    .map(pressure)
+                history.episode(PRESSURE_WARNING).map(pressure)
             } else {
-                history
-                    .available_below_for(MEMORY_LOW_SHARE, MEMORY_LOW_FOR, MEMORY_LOW_CLEARS)
-                    .map(available)
+                history.episode(MEMORY_LOW).map(available)
             };
             ("Memory low", reason?)
         };

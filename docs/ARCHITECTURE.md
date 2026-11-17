@@ -638,7 +638,8 @@ the one-off gauges. `ui/src/resource_history.rs` holds the samples of the node's
 rates of CPU and disk I/O, each process's rates, the sparklines of the current run, the
 charts of every sample in a range (with a gap at a restart or after 15 s without samples) and
 the last run's summary. `ui/src/machine_history.rs` holds the computer's samples (4 h of 5 s
-samples) and answers its CPU busy over a span and its figures beside a node's sample. Tiles
+samples) and answers its CPU busy over a span, its figures beside a node's sample, and the
+episodes of the disk and memory verdicts, which it carries past the samples it lets go. Tiles
 and charts read them over the range the user picks (15 min, 1 h, 4 h, all); the sync hero's rate and ETA use a fixed 15 min window (`HERO_RATE_WINDOW`), so
 they do not move with the range control.
 

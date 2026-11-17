@@ -1103,6 +1103,14 @@ gains their rows.
   to another volume, their episodes start afresh there; the old volume's readings would
   have kept its problem going on the new one, which never crossed the threshold. The exit's
   disk sentence reads every reading, as the crash may have come before the move.
+- **Past the 4 h kept.** The computer's history keeps 4 h of samples, but it carries the
+  episodes of rules 19 and 20 past the samples it lets go, so a problem or a warning inside
+  its leave margin ends only at a reading past it, however long it holds, and its "for N"
+  can pass 4 h. Judged on the samples kept, 4 h at 6 % available after 2 min under 5 %
+  turned "Memory nearly exhausted" into "Memory low", though memory never went above 7 %.
+  Rule 21 adds the node's state size from its metrics history, which keeps 4 h too, so it
+  is judged on the readings kept: after 4 h inside its margin it is judged against its entry
+  threshold again.
 - **Reasons** name the facts:
   - "1.4 GB free on the disk with this node's data (/mnt/zcash). zebrad stops when a write
     fails; free some space or move the data folder."
@@ -1249,7 +1257,9 @@ config sets no `block_notify_command`), and its descriptor count is above zero.
   - NaN at run boundaries and gaps;
   - `process_rates`;
   - `last_run`.
-- **`machine_history`:** episodes with their leave margins, and a stale sample.
+- **`machine_history`:** episodes with their leave margins, and a stale sample; the
+  episodes it follows past the samples it lets go are the ones over every sample, and a
+  moved data folder starts its volume's afresh.
 - **Charts:**
   - the `Unit` labels ("6.1 GiB", "2.4 cores", "45 MB/s") and whole-GiB ticks;
   - `line_path` with a NaN gives two subpaths;
@@ -1740,12 +1750,23 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      the rule over readings oldest first. Readings more than `max_gap` apart (the computer
      asleep, or not sampled) are not one run: an entering reading after a gap starts the run
      afresh, and an episode that holds across a gap is counted from the reading after it, so
-     one low reading before a suspend and one after it are never the sustain time. The
-     sustain helpers take the entry threshold, the sustain time and the leave threshold and
-     give the episode: `available_below_for`, `pressure_at_least_for` (which ends below its
-     level) and `commit_above_for`, with the charts' `GAP` (15 s); rules 19 and 21 pass
-     `VOLUME_GAP` (90 s, three of the volume sampler's 30 s intervals), as `VOLUME_INTERVAL`
-     is in launcher-core.
+     one low reading before a suspend and one after it are never the sustain time. Its loop is
+     `EpisodeFold`, whose `step` takes one reading, so a fold can go on later. Rule 20's
+     conditions are `MemoryCondition`s (`AvailableBelow`, `PressureAtLeast`, which ends below
+     its level, and `CommitAbove`, each with its entry threshold, sustain time and leave
+     threshold) and `MachineHistory::episode(condition)` gives the episode, with the charts'
+     `GAP` (15 s). Rule 19's are `FreeBelow`s (under so many bytes, or a share of the volume
+     where that is less, with a margin), on the readings of the volume a node's data is on
+     now (`free_episode(node, condition)`, each reading against its own volume's size); they
+     and rule 21 pass `VOLUME_GAP` (90 s, three of the volume sampler's 30 s intervals), as
+     `VOLUME_INTERVAL` is in launcher-core. The app's history is
+     `MachineHistory::following(memory, free)` with rules 19 and 20's conditions
+     (`health::resources::machine_history`): each sample it lets go past `MAX_SAMPLES` goes
+     into a fold per memory condition and, per node, a fold per free space condition, which
+     the episode then goes on from, so an episode outlasts the samples kept (see "Past the
+     4 h kept" under Rules). A node's folds start afresh when its volume's label changes,
+     and go once none of them is in a run or an episode, as the readings kept then say all
+     there is.
      `MachineHistory` also gains `latest`, `volume_readings(node)` (one per reading, though
      the samples carry each for 30 s), `current_volume_readings(node)` (the newest run of
      them with one label, for rules 19 and 21) and `any_between` for the exit sentences.

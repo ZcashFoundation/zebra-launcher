@@ -15,7 +15,7 @@ use launcher_types::{
     StaleProcessInfo, Status, UpdateInfo, UpdateState, eos_within,
 };
 pub use launcher_types::{Level, NO_PEERS_FOR, STALE_AFTER};
-pub use resources::{ResourceInput, memory_carrier};
+pub use resources::{ResourceInput, machine_history, memory_carrier};
 
 use crate::{
     charts::{eta_text, percent_1},
@@ -1448,7 +1448,7 @@ mod tests {
                 resources: None,
                 resource_history: ResourceHistory::default(),
                 machine: None,
-                machine_history: MachineHistory::default(),
+                machine_history: resources::machine_history(),
                 now: t(now),
                 phase_since: t(0),
             }
@@ -2634,7 +2634,7 @@ mod tests {
         // macOS: the pressure level, not the estimate of what is available.
         let mut scene = Scene::syncing(1200);
         scene.sampled(1000, 1200, AVAILABLE_4);
-        scene.machine_history = MachineHistory::default();
+        scene.machine_history = resources::machine_history();
         scene.machine_with(1100, 1200, |secs, machine| {
             machine.pressure = Some(if secs >= 1130 {
                 MemoryPressure::Critical
@@ -2648,7 +2648,7 @@ mod tests {
             verdict.reason,
             "macOS reports critical memory pressure for 1 min; Zebra · Mainnet uses 6.1 GiB of it"
         );
-        scene.machine_history = MachineHistory::default();
+        scene.machine_history = resources::machine_history();
         scene.machine_with(1100, 1200, |_, machine| {
             machine.memory_available_bytes = Some(AVAILABLE_4);
             machine.pressure = Some(MemoryPressure::Normal);
@@ -2659,7 +2659,7 @@ mod tests {
         let mut scene = Scene::syncing(1200);
         scene.sampled(1000, 1200, 5_046_586_573);
         scene.resources.as_mut().unwrap().committed_bytes = Some(7 << 30);
-        scene.machine_history = MachineHistory::default();
+        scene.machine_history = resources::machine_history();
         scene.machine_with(1000, 1200, |_, machine| {
             machine.commit_bytes = Some(23 << 30);
             machine.commit_limit_bytes = Some(24 << 30);
@@ -2670,6 +2670,51 @@ mod tests {
             verdict.reason,
             "Windows has committed 23 of 24 GiB (96 %) for 3 min; Zebra · Mainnet commits 7 GiB of it"
         );
+    }
+
+    #[test]
+    fn resource_episodes_outlast_the_four_hours_kept() {
+        const AVAILABLE_4: u64 = 644_245_094; // 0.6 GiB of 16: 4 %
+        const AVAILABLE_6: u64 = 1 << 30; // 1 GiB: 6 %, inside the problem's margin
+        // Under 5 % for 3 min, then 6 % for more than the 4 h of samples kept: the problem
+        // holds, as memory never went above 7 %.
+        let mut scene = Scene::syncing(1200);
+        scene.sampled(1000, 1200, AVAILABLE_4);
+        assert_eq!(scene.verdict().level, Level::Problem);
+        scene.sampled(1205, 15_660, AVAILABLE_6);
+        scene.until(15_660);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (20, Level::Problem));
+        assert_eq!(
+            verdict.reason,
+            "This computer has 1 of 16 GiB available (6 %) for 4 h; Zebra · Mainnet uses 6.1 GiB of it"
+        );
+        // Above 7 % it clears, to the warning it has been in all along.
+        scene.sampled(15_665, 15_665, 1_288_490_189); // 1.2 GiB: 7.5 %
+        scene.until(15_665);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (20, Level::Attention));
+        assert!(verdict.reason.contains("for 4 h"), "{}", verdict.reason);
+
+        // Under 2 GB free on one reading, then 2.5 GB for more than 4 h: the disk's problem
+        // holds too.
+        let mut scene = Scene::syncing(1200);
+        scene.disk(1170, 1200, |_| 1_400_000_000);
+        scene.disk(1205, 15_660, |_| 2_500_000_000);
+        scene.until(15_660);
+        let verdict = scene.verdict();
+        assert_eq!(
+            (verdict.rule, verdict.level, verdict.headline.as_str()),
+            (19, Level::Problem, "Disk almost full")
+        );
+        scene.disk(15_665, 15_690, |_| 3_500_000_000);
+        scene.until(15_690);
+        let verdict = scene.verdict();
+        assert_eq!(
+            (verdict.rule, verdict.level, verdict.headline.as_str()),
+            (19, Level::Attention, "Disk space low")
+        );
+        assert!(verdict.reason.contains("for 4 h"), "{}", verdict.reason);
     }
 
     #[test]

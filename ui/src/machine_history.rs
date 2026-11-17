@@ -1,10 +1,10 @@
 //! A short history of the computer's samples (docs/RESOURCES.md): its CPU busy over the last
 //! minute, for the Resources card's footer; its figures beside a node's in the card's charts;
 //! and how long its memory and its volumes have been low, with the leave margins the verdict's
-//! rules need ([`Episode`]). Pure Rust, tested natively.
+//! rules need ([`Episode`]), carried past the samples it lets go. Pure Rust, tested natively.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     time::{Duration, SystemTime},
 };
 
@@ -109,6 +109,136 @@ impl EpisodeFold {
             until: self.newest?,
         })
     }
+
+    /// Whether a run or an episode is going on. A fold without either goes on as a new one
+    /// would.
+    fn busy(&self) -> bool {
+        self.on || self.run.is_some()
+    }
+}
+
+/// A condition on the computer's memory that rule 20 follows. More than [`GAP`] between two
+/// samples breaks it, as in the charts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MemoryCondition {
+    /// The memory available under `enter` of the total for `sustain`; it ends above `leave`.
+    AvailableBelow {
+        enter: f64,
+        sustain: Duration,
+        leave: f64,
+    },
+    /// macOS's memory pressure at `level` or above for `sustain`; it ends at a lower level.
+    PressureAtLeast {
+        level: MemoryPressure,
+        sustain: Duration,
+    },
+    /// Windows' commit charge above `enter` of its limit for `sustain`; it ends under `leave`.
+    CommitAbove {
+        enter: f64,
+        sustain: Duration,
+        leave: f64,
+    },
+}
+
+impl MemoryCondition {
+    /// Goes on with one of the computer's samples.
+    fn step(self, fold: &mut EpisodeFold, sample: &MachineResources) {
+        match self {
+            MemoryCondition::AvailableBelow {
+                enter,
+                sustain,
+                leave,
+            } => fold.step(
+                sample.at,
+                available_share(sample),
+                |share| share < enter,
+                |share| share > leave,
+                sustain,
+                GAP,
+            ),
+            MemoryCondition::PressureAtLeast {
+                level: at_least,
+                sustain,
+            } => {
+                let threshold = level(at_least);
+                fold.step(
+                    sample.at,
+                    sample.pressure.map(level),
+                    |value| value >= threshold,
+                    |value| value < threshold,
+                    sustain,
+                    GAP,
+                );
+            }
+            MemoryCondition::CommitAbove {
+                enter,
+                sustain,
+                leave,
+            } => fold.step(
+                sample.at,
+                commit_share(sample),
+                |share| share > enter,
+                |share| share < leave,
+                sustain,
+                GAP,
+            ),
+        }
+    }
+}
+
+/// A condition on the free space of the volume a node's data is on, which rule 19 follows:
+/// under `bytes`, or under `share` of the volume where that is less, for `sustain`; it ends
+/// `margin` above that. More than [`VOLUME_GAP`] between two readings breaks it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeBelow {
+    pub bytes: u64,
+    pub share: Option<f64>,
+    pub sustain: Duration,
+    pub margin: u64,
+}
+
+impl FreeBelow {
+    /// The free space under which `volume` enters it.
+    fn threshold(self, volume: &VolumeUsage) -> u64 {
+        self.share.map_or(self.bytes, |share| {
+            ((volume.total_bytes as f64 * share) as u64).min(self.bytes)
+        })
+    }
+
+    /// Goes on with a reading of the volume.
+    fn step(self, fold: &mut EpisodeFold, volume: &VolumeUsage) {
+        let threshold = self.threshold(volume);
+        let leave = threshold.saturating_add(self.margin);
+        fold.step(
+            volume.measured_at,
+            Some(volume.free_bytes as f64),
+            |free| free < threshold as f64,
+            |free| free > leave as f64,
+            self.sustain,
+            VOLUME_GAP,
+        );
+    }
+}
+
+/// What the volume readings of a node that a history let go left its [`FreeBelow`]
+/// conditions, while one of them is still in a run or an episode.
+#[derive(Clone, Debug, PartialEq)]
+struct LetGo {
+    /// The volume of the newest of them, and when it was read.
+    label: String,
+    measured_at: Option<SystemTime>,
+    /// One per condition the history follows, in its order.
+    folds: Vec<EpisodeFold>,
+}
+
+impl LetGo {
+    fn new(label: &str, conditions: usize) -> Self {
+        LetGo {
+            label: label.to_owned(),
+            measured_at: None,
+            folds: vec![EpisodeFold::default(); conditions],
+        }
+    }
 }
 
 /// Where the newest run of `readings` with the newest one's label starts.
@@ -123,7 +253,7 @@ fn run_start(readings: &[&VolumeUsage]) -> usize {
         .map_or(0, |before| before + 1)
 }
 
-/// A pressure level as a number, for [`Episode::current`].
+/// A pressure level as a number, for an episode's readings.
 fn level(pressure: MemoryPressure) -> f64 {
     match pressure {
         MemoryPressure::Normal => 0.0,
@@ -155,16 +285,37 @@ pub fn commit_share(machine: &MachineResources) -> Option<f64> {
 /// [`crate::resource_history::MAX_SAMPLES`].
 pub const MAX_SAMPLES: usize = 4 * 60 * 60 / 5;
 
-/// The computer's samples since the launcher opened, oldest first.
+/// The computer's samples since the launcher opened, oldest first, and what the samples it
+/// let go left the conditions it follows.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MachineHistory {
     samples: VecDeque<MachineResources>,
+    /// Each memory condition it follows, with its fold over the samples let go.
+    memory: Vec<(MemoryCondition, EpisodeFold)>,
+    /// The free space conditions it follows.
+    free: Vec<FreeBelow>,
+    /// Their folds over each node's volume readings let go.
+    let_go: BTreeMap<NodeId, LetGo>,
 }
 
 impl MachineHistory {
+    /// An empty history that carries the episodes of `memory` and `free` past the samples it
+    /// lets go, so each ends only at a reading that leaves it, however long it holds. Any
+    /// other condition is judged on the samples kept.
+    pub fn following(memory: &[MemoryCondition], free: &[FreeBelow]) -> Self {
+        MachineHistory {
+            memory: memory
+                .iter()
+                .map(|&condition| (condition, EpisodeFold::default()))
+                .collect(),
+            free: free.to_vec(),
+            ..MachineHistory::default()
+        }
+    }
+
     /// Records a published sample. One taken when the newest was replaces it (the sampler
     /// published the same reading again with more in it); an older one is ignored. Past
-    /// [`MAX_SAMPLES`] the oldest go.
+    /// [`MAX_SAMPLES`] the oldest go, into the folds of the conditions it follows.
     pub fn push(&mut self, sample: &MachineResources) {
         match self.samples.back_mut() {
             Some(newest) if newest.at == sample.at => *newest = sample.clone(),
@@ -172,10 +323,46 @@ impl MachineHistory {
             _ => {
                 self.samples.push_back(sample.clone());
                 while self.samples.len() > MAX_SAMPLES {
-                    self.samples.pop_front();
+                    if let Some(gone) = self.samples.pop_front() {
+                        self.let_go(&gone);
+                    }
                 }
             }
         }
+    }
+
+    /// Folds a sample it lets go into the conditions it follows.
+    fn let_go(&mut self, sample: &MachineResources) {
+        for (condition, fold) in &mut self.memory {
+            condition.step(fold, sample);
+        }
+        if self.free.is_empty() {
+            return;
+        }
+        let free = &self.free;
+        for volume in &sample.volumes {
+            for node in &volume.nodes {
+                let gone = self
+                    .let_go
+                    .entry(node.clone())
+                    .or_insert_with(|| LetGo::new(&volume.label, free.len()));
+                // The samples carry a reading for 30 s.
+                if gone.measured_at.is_some_and(|at| volume.measured_at <= at) {
+                    continue;
+                }
+                // Its data folder moved to another volume ([`Self::current_volume_readings`]).
+                if gone.label != volume.label {
+                    *gone = LetGo::new(&volume.label, free.len());
+                }
+                for (condition, fold) in free.iter().zip(&mut gone.folds) {
+                    condition.step(fold, volume);
+                }
+                gone.measured_at = Some(volume.measured_at);
+            }
+        }
+        // Without a run or an episode, the readings kept say all there is.
+        self.let_go
+            .retain(|_, gone| gone.folds.iter().any(EpisodeFold::busy));
     }
 
     /// The samples taken from `now - span` on.
@@ -201,56 +388,42 @@ impl MachineHistory {
         self.samples.back()
     }
 
-    /// The episode of the available memory under `enter` of the total for `sustain`, which
-    /// ends above `leave`. More than [`GAP`] between two samples breaks it, as in the charts.
-    pub fn available_below_for(
-        &self,
-        enter: f64,
-        sustain: Duration,
-        leave: f64,
-    ) -> Option<Episode> {
-        Episode::current(
-            self.samples
-                .iter()
-                .map(|sample| (sample.at, available_share(sample))),
-            |share| share < enter,
-            |share| share > leave,
-            sustain,
-            GAP,
-        )
+    /// The episode of `condition` at the newest sample, over the samples it let go too when
+    /// it follows the condition.
+    pub fn episode(&self, condition: MemoryCondition) -> Option<Episode> {
+        let mut fold = self
+            .memory
+            .iter()
+            .find(|(followed, _)| *followed == condition)
+            .map_or_else(EpisodeFold::default, |(_, fold)| *fold);
+        for sample in &self.samples {
+            condition.step(&mut fold, sample);
+        }
+        fold.episode()
     }
 
-    /// The episode of macOS's memory pressure at `at_least` or above for `sustain`, which ends
-    /// at a lower level.
-    pub fn pressure_at_least_for(
-        &self,
-        at_least: MemoryPressure,
-        sustain: Duration,
-    ) -> Option<Episode> {
-        let threshold = level(at_least);
-        Episode::current(
-            self.samples
-                .iter()
-                .map(|sample| (sample.at, sample.pressure.map(level))),
-            |value| value >= threshold,
-            |value| value < threshold,
-            sustain,
-            GAP,
-        )
-    }
-
-    /// The episode of Windows' commit charge above `enter` of its limit for `sustain`, which
-    /// ends under `leave`.
-    pub fn commit_above_for(&self, enter: f64, sustain: Duration, leave: f64) -> Option<Episode> {
-        Episode::current(
-            self.samples
-                .iter()
-                .map(|sample| (sample.at, commit_share(sample))),
-            |share| share > enter,
-            |share| share < leave,
-            sustain,
-            GAP,
-        )
+    /// The episode of `condition` on the volume `node`'s data is on now, over its readings
+    /// ([`Self::current_volume_readings`]), and over those it let go of the same volume when it
+    /// follows the condition.
+    pub fn free_episode(&self, node: &NodeId, condition: FreeBelow) -> Option<Episode> {
+        let readings = self.volume_readings(node);
+        let newest = readings.last()?;
+        let start = run_start(&readings);
+        let gone = self
+            .let_go
+            .get(node)
+            .filter(|gone| start == 0 && gone.label == newest.label);
+        let index = self.free.iter().position(|followed| *followed == condition);
+        let (mut fold, after) = match (gone, index) {
+            (Some(gone), Some(index)) => (gone.folds[index], gone.measured_at),
+            _ => (EpisodeFold::default(), None),
+        };
+        for volume in &readings[start..] {
+            if after.is_none_or(|after| volume.measured_at > after) {
+                condition.step(&mut fold, volume);
+            }
+        }
+        fold.episode()
     }
 
     /// The readings of the volume that holds `node`'s data folder, oldest first: one per
@@ -486,7 +659,13 @@ mod tests {
             history.push(&memory(secs, 0.6));
         }
         let two_min = Duration::from_secs(120);
-        let problem = |history: &MachineHistory| history.available_below_for(0.05, two_min, 0.07);
+        let problem = |history: &MachineHistory| {
+            history.episode(MemoryCondition::AvailableBelow {
+                enter: 0.05,
+                sustain: two_min,
+                leave: 0.07,
+            })
+        };
         assert_eq!(problem(&history).map(|e| e.since), Some(at(0)));
         history.push(&memory(125, 1.0));
         assert!(problem(&history).is_some(), "inside the leave margin");
@@ -505,27 +684,24 @@ mod tests {
                 ..sample(secs, None)
             });
         }
-        let minute = Duration::from_secs(60);
+        let pressure = |history: &MachineHistory, level| {
+            history.episode(MemoryCondition::PressureAtLeast {
+                level,
+                sustain: Duration::from_secs(60),
+            })
+        };
         assert_eq!(
-            mac.pressure_at_least_for(MemoryPressure::Critical, minute)
-                .map(|e| e.since),
+            pressure(&mac, MemoryPressure::Critical).map(|e| e.since),
             Some(at(5))
         );
-        assert!(
-            mac.pressure_at_least_for(MemoryPressure::Warning, minute)
-                .is_some()
-        );
+        assert!(pressure(&mac, MemoryPressure::Warning).is_some());
         mac.push(&MachineResources {
             pressure: Some(MemoryPressure::Warning),
             ..sample(70, None)
         });
-        assert_eq!(
-            mac.pressure_at_least_for(MemoryPressure::Critical, minute),
-            None
-        );
+        assert_eq!(pressure(&mac, MemoryPressure::Critical), None);
         assert!(
-            mac.pressure_at_least_for(MemoryPressure::Warning, minute)
-                .is_some(),
+            pressure(&mac, MemoryPressure::Warning).is_some(),
             "still at warning or above"
         );
 
@@ -537,13 +713,254 @@ mod tests {
                 ..sample(secs, None)
             });
         }
-        assert!(windows.commit_above_for(0.95, two_min, 0.93).is_some());
-        assert_eq!(windows.commit_above_for(0.97, two_min, 0.93), None);
+        let commit = |history: &MachineHistory, enter| {
+            history.episode(MemoryCondition::CommitAbove {
+                enter,
+                sustain: two_min,
+                leave: 0.93,
+            })
+        };
+        assert!(commit(&windows, 0.95).is_some());
+        assert_eq!(commit(&windows, 0.97), None);
+        assert_eq!(commit(&history, 0.95), None, "not Windows");
+    }
+
+    #[test]
+    fn followed_episodes_outlast_the_samples_kept() {
+        let out = MemoryCondition::AvailableBelow {
+            enter: 0.05,
+            sustain: Duration::from_secs(120),
+            leave: 0.07,
+        };
+        let mut followed = MachineHistory::following(&[out], &[]);
+        let mut kept = MachineHistory::default();
+        // 16 GiB: 0.6 GiB, under 5 %, for 2 min, then 1.0 GiB, 6.25 % and inside the margin,
+        // for longer than the samples kept.
+        let end = 120 + 5 * MAX_SAMPLES as u64 + 300;
+        for secs in (0..=end).step_by(5) {
+            let sample = memory(secs, if secs <= 120 { 0.6 } else { 1.0 });
+            followed.push(&sample);
+            kept.push(&sample);
+        }
+        assert!(kept.samples[0].at > at(120), "the low samples are gone");
         assert_eq!(
-            history.commit_above_for(0.95, two_min, 0.93),
-            None,
-            "not Windows"
+            followed.episode(out),
+            Some(Episode {
+                since: at(0),
+                until: at(end)
+            })
         );
+        assert_eq!(kept.episode(out), None, "a condition it does not follow");
+        // Above 7 % it ends.
+        followed.push(&memory(end + 5, 1.2));
+        assert_eq!(followed.episode(out), None);
+
+        // The free space on a node's volume: 1,400 bytes on the first reading, then 2,500,
+        // inside the margin, for longer than the samples kept.
+        let full = FreeBelow {
+            bytes: 2_000,
+            share: None,
+            sustain: Duration::ZERO,
+            margin: 1_000,
+        };
+        let low = FreeBelow {
+            bytes: 20_000,
+            share: Some(0.05),
+            sustain: Duration::from_secs(60),
+            margin: 1_000,
+        };
+        let node = NodeId::new("zebrad-mainnet").unwrap();
+        let read = |secs: u64, label: &str, free: u64| MachineResources {
+            volumes: vec![VolumeUsage {
+                label: label.into(),
+                total_bytes: 1_000_000,
+                free_bytes: free,
+                nodes: vec![node.clone()],
+                // Read every 30 s, and carried in the samples between.
+                measured_at: at(secs / 30 * 30),
+            }],
+            ..sample(secs, None)
+        };
+        let mut history = MachineHistory::following(&[], &[full, low]);
+        for secs in (0..=end).step_by(5) {
+            history.push(&read(secs, "/", if secs < 30 { 1_400 } else { 2_500 }));
+        }
+        let since = |condition| history.free_episode(&node, condition).map(|e| e.since);
+        assert_eq!(since(full), Some(at(0)));
+        assert_eq!(since(low), Some(at(0)), "under 5 % of the volume");
+        assert_eq!(
+            since(FreeBelow {
+                bytes: 2_001,
+                ..full
+            }),
+            None,
+            "not followed"
+        );
+        // Its data folder moved to another volume: what came before says nothing about it,
+        // and once the old volume's readings are gone nothing of them is kept.
+        let moved = end + 5;
+        for secs in (moved..=moved + 5 * MAX_SAMPLES as u64).step_by(5) {
+            history.push(&read(secs, "/b", 2_500));
+        }
+        assert_eq!(history.free_episode(&node, full), None);
+        assert!(history.free_episode(&node, low).is_some());
+        assert_eq!(history.let_go.len(), 1);
+        for secs in (moved + 5 * MAX_SAMPLES as u64 + 5..).step_by(5).take(12) {
+            history.push(&read(secs, "/b", 30_000));
+        }
+        assert_eq!(history.free_episode(&node, low), None);
+        for secs in (moved + 5 * MAX_SAMPLES as u64 + 65..)
+            .step_by(5)
+            .take(MAX_SAMPLES)
+        {
+            history.push(&read(secs, "/b", 30_000));
+        }
+        assert!(history.let_go.is_empty(), "no episode to carry");
+    }
+
+    #[test]
+    fn a_followed_episode_is_the_one_over_every_sample() {
+        // Memory that wanders, with gaps and samples without the figure, for three times the
+        // samples kept: carried across the samples let go, each episode is the one over every
+        // sample since the start. From the 1,000th sample it is under 5 % for 3 min, and then
+        // for 4,000 samples it never leaves the problem's margin, nor the pressure warning.
+        let out = MemoryCondition::AvailableBelow {
+            enter: 0.05,
+            sustain: Duration::from_secs(120),
+            leave: 0.07,
+        };
+        let pressure = MemoryCondition::PressureAtLeast {
+            level: MemoryPressure::Warning,
+            sustain: Duration::from_secs(60),
+        };
+        let mut history = MachineHistory::following(&[out, pressure], &[]);
+        let mut every = Vec::new();
+        let mut carried = false;
+        let mut seed = 7u64;
+        let mut secs = 0;
+        for index in 0..3 * MAX_SAMPLES {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let draw = seed >> 33;
+            let held = index < 500 || (1000..5000).contains(&index);
+            let entering = (1000..1036).contains(&index);
+            // Mostly 5 s apart; now and then a gap of 20 s.
+            secs += if draw.is_multiple_of(401) && !entering {
+                20
+            } else {
+                5
+            };
+            let gib = if entering {
+                0.6
+            } else {
+                [0.6, 0.9, 1.0, 1.3][(draw / 7 % if held { 3 } else { 4 }) as usize]
+            };
+            let mut sample = memory(secs, gib);
+            if draw.is_multiple_of(89) && !entering {
+                sample.memory_available_bytes = None;
+            }
+            sample.pressure = Some(
+                [
+                    MemoryPressure::Warning,
+                    MemoryPressure::Critical,
+                    MemoryPressure::Normal,
+                ][(draw / 11 % if held { 2 } else { 3 }) as usize],
+            );
+            history.push(&sample);
+            every.push(sample);
+            if every.len().is_multiple_of(50) {
+                for condition in [out, pressure] {
+                    let over = |samples: &mut dyn Iterator<Item = &MachineResources>| {
+                        let mut fold = EpisodeFold::default();
+                        for sample in samples {
+                            condition.step(&mut fold, sample);
+                        }
+                        fold.episode()
+                    };
+                    let episode = history.episode(condition);
+                    assert_eq!(episode, over(&mut every.iter()), "at {secs} s");
+                    carried |= episode != over(&mut history.samples.iter());
+                }
+            }
+        }
+        assert!(carried, "an episode the samples kept would have ended");
+    }
+
+    #[test]
+    fn a_followed_free_space_episode_is_the_one_over_every_reading() {
+        // A volume read every 30 s whose free space wanders, now and then not read (its
+        // folder missing), and twice moved to another volume, for three times the samples
+        // kept: each episode is the one over every reading of the volume it is on now.
+        let full = FreeBelow {
+            bytes: 2_000,
+            share: None,
+            sustain: Duration::ZERO,
+            margin: 1_000,
+        };
+        let low = FreeBelow {
+            bytes: 20_000,
+            share: Some(0.05),
+            sustain: Duration::from_secs(60),
+            margin: 1_000,
+        };
+        let node = NodeId::new("zebrad-mainnet").unwrap();
+        let mut history = MachineHistory::following(&[], &[full, low]);
+        let mut every = MachineHistory::default();
+        let mut carried = false;
+        let mut seed = 11u64;
+        let mut reading: Option<VolumeUsage> = None;
+        for index in 0..3 * MAX_SAMPLES {
+            let secs = 5 * index as u64;
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let draw = seed >> 33;
+            if secs.is_multiple_of(30) {
+                // From the 1,200th sample on, inside both margins for 4,000 samples.
+                let held = (1200..5200).contains(&index);
+                let free = if (1200..1206).contains(&index) {
+                    1_000
+                } else if held {
+                    [2_500, 2_900, 1_500][(draw / 7 % 3) as usize]
+                } else {
+                    [1_500, 2_500, 3_500, 19_000, 20_500, 21_500][(draw / 7 % 6) as usize]
+                };
+                let label = match index {
+                    ..1000 => "/",
+                    1000..6000 => "/b",
+                    _ => "/",
+                };
+                reading = (!draw.is_multiple_of(53) || held).then(|| VolumeUsage {
+                    label: label.into(),
+                    total_bytes: 1_000_000,
+                    free_bytes: free,
+                    nodes: vec![node.clone()],
+                    measured_at: at(secs),
+                });
+            }
+            let sample = MachineResources {
+                volumes: reading.iter().cloned().collect(),
+                ..sample(secs, None)
+            };
+            history.push(&sample);
+            every.samples.push_back(sample);
+            if index.is_multiple_of(50) {
+                for condition in [full, low] {
+                    let over = |readings: Vec<&VolumeUsage>| {
+                        let mut fold = EpisodeFold::default();
+                        for volume in &readings[run_start(&readings)..] {
+                            condition.step(&mut fold, volume);
+                        }
+                        fold.episode()
+                    };
+                    let episode = history.free_episode(&node, condition);
+                    assert_eq!(episode, over(every.volume_readings(&node)), "at {secs} s");
+                    carried |= episode != over(history.volume_readings(&node));
+                }
+            }
+        }
+        assert!(carried, "an episode the samples kept would have ended");
     }
 
     #[test]
