@@ -201,6 +201,7 @@ mod tests {
             version: CONSENT_VERSION,
             at: at(0),
             hostname: "zec.example.com".into(),
+            backend: Default::default(),
         });
         spec.name = Some(PublicHostname::parse("zec.example.com").unwrap());
         spec.backend_port = Some(9067);

@@ -1303,6 +1303,7 @@ impl Actor {
                         version,
                         at,
                         hostname,
+                        backend: spec.backend,
                     })
                 })
                 .await
@@ -1388,6 +1389,7 @@ impl Actor {
                 self.update_spec(move |spec| spec.resume_on_launch = on)
                     .await
             }
+            StepAnswer::Backend { .. } => Err("zingod can't be chosen yet".into()),
             StepAnswer::Upload { preset } => {
                 let kbit = preset.kbit();
                 if let Some(door) = &self.door {
@@ -1632,6 +1634,7 @@ mod tests {
             version: CONSENT_VERSION,
             at: SystemTime::UNIX_EPOCH,
             hostname: String::new(),
+            backend: Default::default(),
         });
         settings.public.services.push(spec);
         // Resumes: the key stays, so zebrad's first start opens the endpoint.
@@ -1659,6 +1662,7 @@ mod tests {
             version: CONSENT_VERSION - 1,
             at: SystemTime::UNIX_EPOCH,
             hostname: String::new(),
+            backend: Default::default(),
         });
         assert!(!prepare_launch(&mut settings));
         assert_eq!(settings.public.light_server().unwrap().backend_port, None);

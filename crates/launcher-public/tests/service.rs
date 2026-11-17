@@ -636,6 +636,7 @@ async fn an_expired_certificate_is_known_after_a_restart_with_an_earlier_step_fa
         version: CONSENT_VERSION,
         at: std::time::SystemTime::now(),
         hostname: name.into(),
+        backend: Default::default(),
     });
     spec.opened = true;
     s.settings

@@ -4,12 +4,14 @@
 
 use std::time::{Duration, SystemTime};
 
+use launcher_herd::public::zingod::{CATCHING_UP_BLOCKS, DISK_HIGH};
 use launcher_types::{
-    Network,
+    ExitClass, Network,
     public::{
-        AcmeProblem, CheckId, CheckOutcome, DdnsProblem, DegradedReason, EvidenceSource, Finding,
-        FirewallTool, LocalTestProblem, NotAvailable, PauseReason, PublicState, PublicStatus,
-        Reachability, StepId, StepState, WalletProblem,
+        AcmeProblem, CheckId, CheckOutcome, DdnsProblem, DegradedReason, DownReason,
+        EvidenceSource, FailDetail, Finding, FirewallTool, IndexerWait, LightBackend,
+        LocalTestProblem, NotAvailable, PauseReason, PublicState, PublicStatus, Reachability,
+        StepId, StepState, WalletProblem,
     },
 };
 
@@ -47,6 +49,245 @@ pub fn network_name(network: Network) -> &'static str {
     match network {
         Network::Mainnet => "Mainnet",
         Network::Testnet => "Testnet",
+    }
+}
+
+/// The serving node as the UI names it: `Zebra · Testnet`.
+pub fn zebra_name(network: Network) -> String {
+    format!("Zebra · {}", network_name(network))
+}
+
+/// The serving node, by its network when the status is at hand.
+fn serving_zebra(status: Option<&PublicStatus>) -> String {
+    status.map_or_else(|| "Zebra".to_owned(), |status| zebra_name(status.network))
+}
+
+/// The bundled zingod's version, as the status reports it.
+fn zingod_version(status: &PublicStatus) -> String {
+    status.indexer.as_ref().map_or_else(
+        || launcher_types::zingod::version().to_owned(),
+        |indexer| indexer.version.clone(),
+    )
+}
+
+/// `18137 and 18138`, `18137, 18138 and 18139`.
+fn list_ports(ports: &[u16]) -> String {
+    let words: Vec<String> = ports.iter().map(ToString::to_string).collect();
+    match words.as_slice() {
+        [] => "its port".to_owned(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// How far zingod's build is: `block 1,204,331 of 4,612,000 (26 %), about 5 h left`; or `an
+/// hour or more` before it has numbers.
+fn build_progress(served: Option<u64>, target: Option<u64>, eta_secs: Option<u64>) -> String {
+    let (Some(served), Some(target)) = (served, target) else {
+        return "an hour or more".to_owned();
+    };
+    let percent = served.saturating_mul(100) / target.max(1);
+    let eta = match eta_secs {
+        Some(secs) => format!(", about {} left", rough_duration(Duration::from_secs(secs))),
+        None => ", an hour or more left".to_owned(),
+    };
+    format!(
+        "block {} of {} ({percent} %){eta}",
+        thousands(served),
+        thousands(target)
+    )
+}
+
+/// Whether a zingod sync is only catching up: it has a height, and fewer than
+/// [`CATCHING_UP_BLOCKS`] are left, or no target to say how many.
+fn catching_up(served: Option<u64>, target: Option<u64>) -> bool {
+    match (served, target) {
+        (Some(served), Some(target)) => target.saturating_sub(served) < CATCHING_UP_BLOCKS,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
+/// The panel's line for a zingod that waits for the user, from what its exit names.
+fn failed_text(class: ExitClass, detail: &FailDetail, status: Option<&PublicStatus>) -> String {
+    let zebra = serving_zebra(status);
+    match (class, detail) {
+        (ExitClass::ConfigError, FailDetail::Cookie { path, error }) => format!(
+            "zingod can't read {zebra}'s cookie at {}: {error}.",
+            path.display()
+        ),
+        (ExitClass::ConfigError, FailDetail::OpenFiles { needed, limit }) => format!(
+            "zingod needs {} open files, and this computer allows Zeal {}. Raise the open-file \
+             limit (LimitNOFILE in a systemd unit, or ulimit -n), then try again.",
+            thousands(*needed),
+            thousands(*limit)
+        ),
+        (ExitClass::ConfigError, _) => {
+            "zingod refused the settings Zeal wrote. This is a bug in Zeal: copy the diagnostics \
+             and report it."
+                .into()
+        }
+        (ExitClass::PortInUse, FailDetail::Ports { tried }) => {
+            format!("Other programs use ports {}.", list_ports(tried))
+        }
+        (ExitClass::PortInUse, _) => "Another program uses zingod's port.".into(),
+        (ExitClass::DbLocked, FailDetail::Dir { path }) => format!(
+            "Another program holds zingod's index in {}.",
+            path.display()
+        ),
+        (ExitClass::DbLocked, _) => "Another program holds zingod's index.".into(),
+        (ExitClass::DiskFull, FailDetail::Dir { path }) => format!(
+            "zingod ran out of room in {}, though the disk shows free space: a quota or its \
+             inodes. Free some, then try again.",
+            path.display()
+        ),
+        (ExitClass::DiskFull, _) => {
+            "zingod ran out of room for its index. Free some, then try again.".into()
+        }
+        (ExitClass::IndexBroken, _) => indexer_text(&DegradedReason::IndexBroken, status),
+        (ExitClass::SpawnFailed, _) => "Zeal could not start zingod.".into(),
+        (ExitClass::Crash, _) => "zingod stopped unexpectedly 5 times in 10 minutes.".into(),
+        (ExitClass::Clean | ExitClass::EosHalt, _) => "zingod stopped and waits for you.".into(),
+    }
+}
+
+/// The status panel's first line for a zingod problem, without the state's prefix: each row of
+/// docs/PUBLIC-SERVICES.md's table. `None` for a reason that isn't zingod's.
+pub fn indexer_line(why: &DegradedReason, status: &PublicStatus) -> Option<String> {
+    if !is_indexer_reason(why, status.backend) {
+        return None;
+    }
+    let zebra = zebra_name(status.network);
+    Some(match why {
+        DegradedReason::BackingRestarting if status.backend == LightBackend::Zingod => {
+            "Catching up · zingod restarts with Zebra".into()
+        }
+        DegradedReason::IndexerStarting {
+            waiting: IndexerWait::ZebradTip,
+        } => format!("Waiting for {zebra} to reach the tip: zingod starts then"),
+        DegradedReason::IndexerStarting {
+            waiting: IndexerWait::Boot,
+        } => "Catching up · zingod is starting".into(),
+        DegradedReason::IndexerStarting {
+            waiting: IndexerWait::Backoff,
+        } => "Catching up · zingod stopped unexpectedly, and Zeal is starting it again".into(),
+        DegradedReason::IndexBuilding { served, target, .. } if catching_up(*served, *target) => {
+            "Catching up · wallets are told to try again".into()
+        }
+        DegradedReason::IndexBuilding {
+            served,
+            target,
+            eta_secs,
+        } => format!(
+            "Building zingod's index: {}",
+            build_progress(*served, *target, *eta_secs)
+        ),
+        DegradedReason::IndexBehind { blocks } => format!(
+            "Catching up · zingod is {} blocks behind Zebra",
+            thousands(*blocks)
+        ),
+        DegradedReason::IndexerDown {
+            why: DownReason::NoValidator,
+        } => format!("Catching up · zingod can't reach {zebra}"),
+        other => indexer_text(other, Some(status)),
+    })
+}
+
+/// Whether `why` is a zingod problem, or zebrad's restart while zingod serves.
+fn is_indexer_reason(why: &DegradedReason, backend: LightBackend) -> bool {
+    match why {
+        DegradedReason::BackingRestarting => backend == LightBackend::Zingod,
+        DegradedReason::BackingBehind { .. }
+        | DegradedReason::WalletCheckFailed
+        | DegradedReason::CertificateExpired => false,
+        _ => true,
+    }
+}
+
+/// A zingod problem as a sentence of its own, for the banner, the panel and the setup. The
+/// status, when at hand, names the network and the index's folder.
+pub fn indexer_text(why: &DegradedReason, status: Option<&PublicStatus>) -> String {
+    let zebra = serving_zebra(status);
+    match why {
+        DegradedReason::IndexerStarting {
+            waiting: IndexerWait::ZebradTip,
+        } => format!("zingod starts once {zebra} reaches the tip. Wallets are told to try again."),
+        DegradedReason::IndexerStarting {
+            waiting: IndexerWait::Boot,
+        } => "zingod is starting. Wallets are told to try again.".into(),
+        DegradedReason::IndexerStarting {
+            waiting: IndexerWait::Backoff,
+        } => "zingod stopped unexpectedly, and Zeal is starting it again. Wallets are told to \
+              try again."
+            .into(),
+        DegradedReason::IndexBuilding { served, target, .. } if catching_up(*served, *target) => {
+            "zingod is catching up with Zebra. Wallets are told to try again.".into()
+        }
+        DegradedReason::IndexBuilding {
+            served,
+            target,
+            eta_secs,
+        } => format!(
+            "Building zingod's index: {}. Wallets can't use your server until this is done. \
+             Quitting Zeal pauses it, and it goes on where it stopped.",
+            build_progress(*served, *target, *eta_secs)
+        ),
+        DegradedReason::IndexBehind { blocks } => format!(
+            "zingod is {} blocks behind Zebra. Wallets are told to try again.",
+            thousands(*blocks)
+        ),
+        DegradedReason::IndexerDown {
+            why: DownReason::Zingod { reason, message },
+        } => {
+            let said = if message.is_empty() { reason } else { message };
+            format!("zingod is down: {said}.")
+        }
+        DegradedReason::IndexerDown {
+            why: DownReason::NoAnswer,
+        } => "zingod is down: it isn't answering.".into(),
+        DegradedReason::IndexerDown {
+            why: DownReason::NoValidator,
+        } => format!("zingod can't reach {zebra}. Wallets are told to try again."),
+        DegradedReason::IndexerUntested {
+            version,
+            zebrad,
+            network,
+        } => format!(
+            "zingod {version} isn't tested with Zebra {zebrad} on {} yet. Wallets that use your \
+             server are told to try again until Zeal updates zingod, or {zebra} runs a tested \
+             version.",
+            network_name(*network)
+        ),
+        DegradedReason::IndexerStuck { at, zebrad_at } => format!(
+            "zingod is stuck at block {}; Zebra is at {}.",
+            thousands(*at),
+            thousands(*zebrad_at)
+        ),
+        DegradedReason::IndexerFailed { class, detail } => failed_text(*class, detail, status),
+        DegradedReason::IndexBroken => "zingod's index is damaged. Rebuilding it takes hours, and \
+                                        wallets are told to try again meanwhile."
+            .into(),
+        DegradedReason::ChainMismatch { at } => format!(
+            "zingod's chain doesn't match Zebra's at block {}.",
+            thousands(*at)
+        ),
+        DegradedReason::DiskLow { free_bytes } => {
+            let place = status
+                .and_then(|status| status.indexer.as_ref())
+                .map(|indexer| format!(" for zingod's index in {}", indexer.dir.display()))
+                .unwrap_or_default();
+            format!(
+                "Waiting for disk space: {} free{place}. zingod starts again above {}.",
+                bytes(*free_bytes),
+                bytes(DISK_HIGH)
+            )
+        }
+        DegradedReason::BackingRestarting => {
+            "zingod restarts with Zebra. Wallets are told to try again.".into()
+        }
+        DegradedReason::BackingBehind { .. }
+        | DegradedReason::WalletCheckFailed
+        | DegradedReason::CertificateExpired => backing_text(why),
     }
 }
 
@@ -89,11 +330,24 @@ pub fn pause_text(why: &PauseReason, status: &PublicStatus) -> String {
         PauseReason::ConsentNeeded => {
             "what Zeal tells you before serving changed. Read it again and agree to resume.".into()
         }
+        PauseReason::BuildTooOld { upgrade, .. } => format!(
+            "zingod {} doesn't know {upgrade}, which is active. Wallets that use your server see \
+             an error until Zeal updates zingod.",
+            zingod_version(status)
+        ),
     }
 }
 
 /// Why wallets are told to try again, in a sentence.
-pub fn degraded_text(why: &DegradedReason) -> String {
+pub fn degraded_text(why: &DegradedReason, status: &PublicStatus) -> String {
+    if is_indexer_reason(why, status.backend) {
+        return indexer_text(why, Some(status));
+    }
+    backing_text(why)
+}
+
+/// zebrad's and the front door's reasons, the same for either backend.
+fn backing_text(why: &DegradedReason) -> String {
     match why {
         DegradedReason::BackingRestarting => {
             "Zebra is restarting. Wallets are told to try again.".into()
@@ -110,6 +364,7 @@ pub fn degraded_text(why: &DegradedReason) -> String {
         DegradedReason::CertificateExpired => {
             "the certificate expired and could not be renewed. Wallets cannot connect.".into()
         }
+        other => indexer_text(other, None),
     }
 }
 
@@ -181,7 +436,9 @@ pub fn state_line(status: &PublicStatus, now: SystemTime) -> (Tone, String) {
                     "Catching up · wallets are told to try again ({} blocks behind)",
                     thousands(*blocks)
                 ),
-                other => format!("Serving with a problem · {}", degraded_text(other)),
+                other => indexer_line(other, status).unwrap_or_else(|| {
+                    format!("Serving with a problem · {}", degraded_text(other, status))
+                }),
             },
         ),
         PublicState::Paused { why, .. } => {
@@ -242,12 +499,12 @@ pub fn banner(status: &PublicStatus, now: SystemTime) -> Option<(Tone, String)> 
             Tone::Error,
             format!(
                 "Light client server: {}",
-                degraded_text(&DegradedReason::CertificateExpired)
+                degraded_text(&DegradedReason::CertificateExpired, status)
             ),
         )),
         PublicState::Degraded { why } => Some((
             Tone::Warn,
-            format!("Light client server: {}", degraded_text(why)),
+            format!("Light client server: {}", degraded_text(why, status)),
         )),
         _ => failing_expiry.map(|left| {
             (
@@ -352,6 +609,11 @@ pub fn check_name(check: CheckId) -> &'static str {
         CheckId::TipSettled => "Zebra settled at the tip",
         CheckId::Hairpin => "The public address from inside",
         CheckId::KeepAwake => "Keep running",
+        CheckId::ZingodTested => "A tested zingod and Zebra",
+        CheckId::UpgradesKnown => "The network upgrades",
+        CheckId::IndexSpace => "Room for zingod's index",
+        CheckId::IndexReady => "zingod's index",
+        CheckId::TipMatches => "zingod's tip",
     }
 }
 
@@ -424,8 +686,9 @@ fn ddns_text(problem: DdnsProblem) -> &'static str {
     }
 }
 
-/// What a check found, with the fix first.
-pub fn finding_text(finding: &Finding) -> String {
+/// What a check found, with the fix first. The status, when at hand, names the network and
+/// the index's folder in zingod's sentences.
+pub fn finding_text(finding: &Finding, status: Option<&PublicStatus>) -> String {
     match finding {
         Finding::ConsentNeeded => "Read what becomes public, and agree to go on.".into(),
         Finding::NotOnThisSystem => "Public services run on Linux for now.".into(),
@@ -565,17 +828,80 @@ pub fn finding_text(finding: &Finding) -> String {
         Finding::BehindTip { blocks } => {
             format!("Zebra is {} blocks behind the tip.", thousands(*blocks))
         }
+        Finding::UntestedZingod {
+            version,
+            zebrad,
+            network,
+        } => format!(
+            "zingod {version} isn't tested with Zebra {zebrad} on {} yet. Choose Zebra's built-in \
+             server, or wait for a Zeal update.",
+            network_name(*network)
+        ),
+        Finding::UpgradeUnknown { upgrade, height } => {
+            let at = height
+                .map(|height| format!(" since block {}", thousands(height)))
+                .unwrap_or_default();
+            format!(
+                "zingod doesn't know {upgrade}, active{at}. It can't serve until Zeal updates \
+                 zingod."
+            )
+        }
+        Finding::IndexSpace {
+            path,
+            free_bytes,
+            need_bytes,
+        } => format!(
+            "{} free in {}: zingod's index needs {} there. Free some space, or choose Zebra's \
+             built-in server.",
+            bytes(*free_bytes),
+            path.display(),
+            bytes(*need_bytes)
+        ),
+        Finding::NetworkFilesystem { path } => format!(
+            "{} is on a network filesystem. zingod reads its index through memory maps and asks \
+             for a local disk.",
+            path.display()
+        ),
+        Finding::LowMemory {
+            total_bytes,
+            want_bytes,
+        } => format!(
+            "This computer has {} of memory, and zingod's build wants {}: it may be slow.",
+            bytes(*total_bytes),
+            bytes(*want_bytes)
+        ),
+        Finding::IndexBuilding { served, target, .. } if catching_up(*served, *target) => {
+            "zingod is catching up with Zebra; wallets can use your server again soon.".into()
+        }
+        Finding::IndexBuilding {
+            served,
+            target,
+            eta_secs,
+        } => format!(
+            "Building zingod's index: {}. Wallets can't use your server until this is done. \
+             Quitting Zeal pauses it, and it goes on where it stopped.",
+            build_progress(*served, *target, *eta_secs)
+        ),
+        Finding::ChainMismatch { at } => format!(
+            "zingod's chain doesn't match Zebra's at block {}. Rebuild its index.",
+            thousands(*at)
+        ),
+        Finding::IndexerPortTaken { ports } => format!(
+            "Other programs use ports {}. Close one, then try again.",
+            list_ports(ports)
+        ),
+        Finding::IndexerProblem { why } => indexer_text(why, status),
     }
 }
 
 /// A check's outcome as one line: its name and what it found.
-pub fn check_line(check: CheckId, outcome: &CheckOutcome) -> String {
+pub fn check_line(check: CheckId, outcome: &CheckOutcome, status: Option<&PublicStatus>) -> String {
     match outcome {
         CheckOutcome::NotRun => format!("{} · not checked yet", check_name(check)),
         CheckOutcome::Running => format!("{} · checking…", check_name(check)),
         CheckOutcome::Pass => format!("{} · passed", check_name(check)),
         CheckOutcome::Warn { finding } | CheckOutcome::Fail { finding } => {
-            format!("{} · {}", check_name(check), finding_text(finding))
+            format!("{} · {}", check_name(check), finding_text(finding, status))
         }
     }
 }
@@ -692,6 +1018,7 @@ mod tests {
             version: CONSENT_VERSION,
             at: at(NOW),
             hostname: "zec-alice.duckdns.org".into(),
+            backend: Default::default(),
         });
         status(&spec, &Facts::new(at(NOW), Network::Mainnet), at(NOW))
     }
@@ -821,11 +1148,210 @@ mod tests {
             },
         ];
         for finding in &findings {
-            let text = finding_text(finding);
+            let text = finding_text(finding, None);
             assert!(text.ends_with('.'), "{text}");
         }
-        assert!(finding_text(&findings[0]).contains("carrier-grade NAT, 100.72.4.9"));
-        assert!(finding_text(&findings[3]).contains("block 2,900,000 of 3,544,812"));
+        assert!(finding_text(&findings[0], None).contains("carrier-grade NAT, 100.72.4.9"));
+        assert!(finding_text(&findings[3], None).contains("block 2,900,000 of 3,544,812"));
+    }
+
+    #[test]
+    fn every_zingod_problem_has_its_panel_line() {
+        use std::path::PathBuf;
+
+        use launcher_types::{
+            Phase,
+            public::{DownReason, IndexerStats},
+        };
+        let mut status = base();
+        status.network = Network::Testnet;
+        status.backend = LightBackend::Zingod;
+        status.indexer = Some(IndexerStats {
+            version: "1.1.0".into(),
+            phase: Phase::Running,
+            status: None,
+            dir: PathBuf::from("/mnt/zebra/zingod/testnet"),
+            port: 18137,
+            index_bytes: None,
+            index_partial: false,
+            free_bytes: None,
+            resources: None,
+            last_exit: None,
+        });
+        let cases = [
+            (
+                DegradedReason::BackingRestarting,
+                "Catching up · zingod restarts with Zebra",
+            ),
+            (
+                DegradedReason::IndexerStarting {
+                    waiting: IndexerWait::ZebradTip,
+                },
+                "Waiting for Zebra · Testnet to reach the tip: zingod starts then",
+            ),
+            (
+                DegradedReason::IndexerStarting {
+                    waiting: IndexerWait::Boot,
+                },
+                "Catching up · zingod is starting",
+            ),
+            (
+                DegradedReason::IndexBuilding {
+                    served: Some(1_204_331),
+                    target: Some(4_612_000),
+                    eta_secs: Some(5 * 3600),
+                },
+                "Building zingod's index: block 1,204,331 of 4,612,000 (26 %), about 5 h left",
+            ),
+            (
+                DegradedReason::IndexBuilding {
+                    served: None,
+                    target: None,
+                    eta_secs: None,
+                },
+                "Building zingod's index: an hour or more",
+            ),
+            (
+                DegradedReason::IndexBuilding {
+                    served: Some(4_611_990),
+                    target: Some(4_612_000),
+                    eta_secs: None,
+                },
+                "Catching up · wallets are told to try again",
+            ),
+            (
+                DegradedReason::IndexBehind { blocks: 12 },
+                "Catching up · zingod is 12 blocks behind Zebra",
+            ),
+            (
+                DegradedReason::IndexerDown {
+                    why: DownReason::NoValidator,
+                },
+                "Catching up · zingod can't reach Zebra · Testnet",
+            ),
+            (
+                DegradedReason::IndexerStuck {
+                    at: 4_611_002,
+                    zebrad_at: 4_611_019,
+                },
+                "zingod is stuck at block 4,611,002; Zebra is at 4,611,019.",
+            ),
+            (
+                DegradedReason::IndexerFailed {
+                    class: ExitClass::PortInUse,
+                    detail: FailDetail::Ports {
+                        tried: vec![18137, 18138],
+                    },
+                },
+                "Other programs use ports 18137 and 18138.",
+            ),
+            (
+                DegradedReason::IndexerFailed {
+                    class: ExitClass::ConfigError,
+                    detail: FailDetail::Cookie {
+                        path: PathBuf::from("/mnt/zebra/testnet/rpc/.cookie"),
+                        error: "Is a directory (os error 21)".into(),
+                    },
+                },
+                "zingod can't read Zebra · Testnet's cookie at /mnt/zebra/testnet/rpc/.cookie: \
+                 Is a directory (os error 21).",
+            ),
+            (
+                DegradedReason::ChainMismatch { at: 4_611_980 },
+                "zingod's chain doesn't match Zebra's at block 4,611,980.",
+            ),
+            (
+                DegradedReason::DiskLow {
+                    free_bytes: 6_000_000_000,
+                },
+                "Waiting for disk space: 6.0 GB free for zingod's index in \
+                 /mnt/zebra/zingod/testnet. zingod starts again above 20.0 GB.",
+            ),
+        ];
+        for (why, line) in cases {
+            status.state = PublicState::Degraded { why: why.clone() };
+            assert_eq!(state_line(&status, at(NOW)), (Tone::Warn, line.to_owned()));
+            let (_, banner) = banner(&status, at(NOW)).expect("a banner");
+            assert!(banner.starts_with("Light client server: "), "{banner}");
+        }
+        status.state = PublicState::Paused {
+            why: PauseReason::BuildTooOld {
+                upgrade: "NU8".into(),
+                height: 4_700_000,
+            },
+            since: at(NOW),
+            resumes: launcher_types::public::Resume::Automatic,
+        };
+        assert_eq!(
+            state_line(&status, at(NOW)).1,
+            "Paused · zingod 1.1.0 doesn't know NU8, which is active. Wallets that use your \
+             server see an error until Zeal updates zingod."
+        );
+        // zebrad's own reasons read as before with zingod.
+        status.state = PublicState::Degraded {
+            why: DegradedReason::BackingBehind { blocks: 3 },
+        };
+        assert!(
+            state_line(&status, at(NOW))
+                .1
+                .starts_with("Catching up · wallets")
+        );
+        status.backend = LightBackend::ZebradEndpoint;
+        status.state = PublicState::Degraded {
+            why: DegradedReason::BackingRestarting,
+        };
+        assert_eq!(
+            state_line(&status, at(NOW)).1,
+            "Serving with a problem · Zebra is restarting. Wallets are told to try again."
+        );
+    }
+
+    #[test]
+    fn zingods_findings_have_words() {
+        use std::path::PathBuf;
+        let findings = [
+            Finding::UntestedZingod {
+                version: "1.1.0".into(),
+                zebrad: "7.1.0".into(),
+                network: Network::Testnet,
+            },
+            Finding::UpgradeUnknown {
+                upgrade: "NU8".into(),
+                height: Some(4_700_000),
+            },
+            Finding::IndexSpace {
+                path: PathBuf::from("/mnt/zebra/zingod/testnet"),
+                free_bytes: 12_000_000_000,
+                need_bytes: 50_000_000_000,
+            },
+            Finding::NetworkFilesystem {
+                path: PathBuf::from("/mnt/nas/zingod/testnet"),
+            },
+            Finding::LowMemory {
+                total_bytes: 4_000_000_000,
+                want_bytes: 8_000_000_000,
+            },
+            Finding::IndexBuilding {
+                served: Some(100),
+                target: Some(200_000),
+                eta_secs: None,
+            },
+            Finding::ChainMismatch { at: 7 },
+            Finding::IndexerPortTaken {
+                ports: vec![18137, 18138, 18139],
+            },
+            Finding::IndexerProblem {
+                why: DegradedReason::IndexBroken,
+            },
+        ];
+        for finding in &findings {
+            let text = finding_text(finding, None);
+            assert!(text.ends_with('.'), "{text}");
+        }
+        assert!(finding_text(&findings[2], None).starts_with(
+            "12.0 GB free in /mnt/zebra/zingod/testnet: zingod's index needs 50.0 GB"
+        ));
+        assert!(finding_text(&findings[7], None).contains("ports 18137, 18138 and 18139"));
     }
 
     #[test]

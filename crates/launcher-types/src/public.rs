@@ -1,6 +1,7 @@
 //! Public services (docs/PUBLIC-SERVICES.md): a light client server that wallets reach from
 //! the internet through Zeal's TLS front door. PS1 builds the light client server, served by
-//! zebrad's own light wallet endpoint, on Linux. It is experimental, and labelled so.
+//! zebrad's own light wallet endpoint, on Linux. It is experimental, and labelled so. Z3 adds
+//! zingod as a second backend ([`LightBackend`]), on Testnet and on Linux.
 //!
 //! These are the wire and `launcher.json` types. The rules that read them (the setup plan,
 //! pauses, evidence ages, the wallet check) are in `launcher-herd`'s `public` module, so the
@@ -9,12 +10,13 @@
 use std::{
     fmt,
     net::{IpAddr, SocketAddr},
+    path::PathBuf,
     time::SystemTime,
 };
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Network, NodeId};
+use crate::{ExitClass, ExitInfo, Network, NodeId, Phase, zingod::IndexerStatus};
 
 /// The version of the consent text. A [`Consent`] given for an older version, or for another
 /// name, is asked for again.
@@ -34,6 +36,37 @@ pub fn endpoint_port(network: Network) -> u16 {
         Network::Mainnet => 9067,
         Network::Testnet => 19067,
     }
+}
+
+/// The loopback port Zeal gives zingod on `network`, or the next free one above it: 8137 on
+/// Mainnet and 18137 on Testnet, apart from zebrad's endpoint ports so both can listen.
+pub fn zingod_port(network: Network) -> u16 {
+    match network {
+        Network::Mainnet => 8137,
+        Network::Testnet => 18137,
+    }
+}
+
+/// Which server answers wallets behind the front door. A spec or a consent from before Z3 has
+/// none and reads as zebrad's endpoint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightBackend {
+    /// zebrad's own light wallet endpoint (PS1).
+    #[default]
+    ZebradEndpoint,
+    /// zingod, Zingo Labs' indexer, run beside the serving zebrad with an index of its own.
+    Zingod,
+}
+
+/// zingod's port and index folder, recorded when zingod is first chosen and kept after
+/// switching back, so the index isn't orphaned by a later data-folder change.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ZingodSpec {
+    /// zingod's gRPC port on loopback: the front door's upstream.
+    pub port: u16,
+    /// `<the serving node's data folder>/zingod/<network>`.
+    pub dir: PathBuf,
 }
 
 /// The services Zeal can make public. The DNS seeder joins in a later phase (PS4).
@@ -280,12 +313,15 @@ impl UploadPreset {
     }
 }
 
-/// The user's agreement to what becomes public: for a text version and a name.
+/// The user's agreement to what becomes public: for a text version, a name and a backend.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Consent {
     pub version: u32,
     pub at: SystemTime,
     pub hostname: String,
+    /// The backend the text described: what becomes public depends on it.
+    #[serde(default)]
+    pub backend: LightBackend,
 }
 
 /// One public service as `launcher.json` keeps it, under `public.services`. No secrets.
@@ -345,6 +381,12 @@ pub struct PublicServiceSpec {
     /// Keep this computer awake while serving.
     #[serde(default = "default_true")]
     pub keep_awake: bool,
+    /// The server that answers wallets.
+    #[serde(default)]
+    pub backend: LightBackend,
+    /// zingod's port and index folder, once zingod was chosen; kept after switching back.
+    #[serde(default)]
+    pub zingod: Option<ZingodSpec>,
 }
 
 fn default_true() -> bool {
@@ -384,15 +426,18 @@ impl PublicServiceSpec {
             mapping: Mapping::default(),
             limits: PublicLimits::default(),
             keep_awake: true,
+            backend: LightBackend::default(),
+            zingod: None,
         }
     }
 
-    /// Whether the stored consent covers the current text and name. Consent given before a
-    /// name was chosen has an empty `hostname`, and the first name chosen is bound to it;
-    /// another name asks again.
+    /// Whether the stored consent covers the current text, name and backend. Consent given
+    /// before a name was chosen has an empty `hostname`, and the first name chosen is bound to
+    /// it; another name, or the other backend, asks again.
     pub fn consent_current(&self) -> bool {
         self.consent.as_ref().is_some_and(|consent| {
             consent.version == CONSENT_VERSION
+                && consent.backend == self.backend
                 && (consent.hostname.is_empty()
                     || self
                         .name
@@ -470,10 +515,83 @@ pub enum DegradedReason {
     BackingRestarting,
     /// zebrad is behind the network's tip.
     BackingBehind { blocks: u64 },
-    /// zebrad's light wallet endpoint gave a wrong answer to the wallet check.
+    /// The backend gave a wrong answer to the wallet check.
     WalletCheckFailed,
     /// The certificate expired and could not be renewed.
     CertificateExpired,
+    /// zingod doesn't serve yet: it waits for zebrad, opens its index, or waits out a backoff.
+    IndexerStarting { waiting: IndexerWait },
+    /// zingod builds its index, or catches up: the numbers once it has a target, the ETA once
+    /// it has a rate.
+    IndexBuilding {
+        served: Option<u64>,
+        target: Option<u64>,
+        eta_secs: Option<u64>,
+    },
+    /// zingod serves this many blocks behind zebrad.
+    IndexBehind { blocks: u64 },
+    /// zingod is down, doesn't answer, or can't reach zebrad.
+    IndexerDown { why: DownReason },
+    /// The bundled zingod and the serving zebrad aren't a pair Zeal tested on this network:
+    /// zingod isn't started.
+    IndexerUntested {
+        version: String,
+        zebrad: String,
+        network: Network,
+    },
+    /// zingod's served height stayed at `at` after a restart while zebrad is at `zebrad_at`.
+    IndexerStuck { at: u64, zebrad_at: u64 },
+    /// zingod waits for the user: its last exit and what it names.
+    IndexerFailed {
+        class: ExitClass,
+        detail: FailDetail,
+    },
+    /// zingod's index is damaged, of another chain or of an older format: only a rebuild helps.
+    IndexBroken,
+    /// zingod served a block zebrad doesn't have at `at`: zingod is stopped.
+    ChainMismatch { at: u64 },
+    /// The index's disk has this little free: zingod is stopped until there is more.
+    DiskLow { free_bytes: u64 },
+}
+
+/// What zingod's start waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexerWait {
+    /// zebrad to reach the tip in this run.
+    ZebradTip,
+    /// zingod opens and checks its index.
+    Boot,
+    /// The supervisor's backoff after a crash.
+    Backoff,
+}
+
+/// Why zingod doesn't serve.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DownReason {
+    /// zingod's `/status` says `down` or `held`, with its own reason and message.
+    Zingod { reason: String, message: String },
+    /// Three reads of `/status` in a row got no answer.
+    NoAnswer,
+    /// No validator has answered zingod for 30 seconds.
+    NoValidator,
+}
+
+/// What a failed zingod's exit names, for the panel's line.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FailDetail {
+    #[default]
+    None,
+    /// The ports tried after `PortInUse`.
+    Ports { tried: Vec<u16> },
+    /// The folder a held lock or a full disk is in.
+    Dir { path: PathBuf },
+    /// The open-file limit to raise.
+    OpenFiles { needed: u64, limit: u64 },
+    /// zebrad's cookie, and why zingod couldn't read it.
+    Cookie { path: PathBuf, error: String },
 }
 
 /// Why the front door is closed.
@@ -498,6 +616,9 @@ pub enum PauseReason {
     NotResumed,
     /// The consent no longer covers the service: a Zeal release changed what it says.
     ConsentNeeded,
+    /// An active network upgrade the bundled zingod doesn't know: until a Zeal update, wallets
+    /// get an error instead of a chain that stopped.
+    BuildTooOld { upgrade: String, height: u64 },
 }
 
 /// How a paused service comes back.
@@ -631,6 +752,16 @@ pub enum CheckId {
     Hairpin,
     /// The keep-awake choice was made.
     KeepAwake,
+    /// The bundled zingod and the serving zebrad are a pair Zeal tested on this network.
+    ZingodTested,
+    /// zingod knows every network upgrade zebrad lists as active.
+    UpgradesKnown,
+    /// The index's disk has room for zingod's index.
+    IndexSpace,
+    /// zingod serves within 2 blocks of zebrad.
+    IndexReady,
+    /// zingod's tip has zebrad's hash.
+    TipMatches,
 }
 
 /// A check's result, with when it ran.
@@ -753,6 +884,72 @@ pub enum Finding {
     NoHairpin,
     BehindTip {
         blocks: u64,
+    },
+    /// The bundled zingod isn't tested with this zebrad on this network.
+    UntestedZingod {
+        version: String,
+        zebrad: String,
+        network: Network,
+    },
+    /// An active network upgrade zingod doesn't know, and its height if zebrad gave one.
+    UpgradeUnknown {
+        upgrade: String,
+        height: Option<u64>,
+    },
+    /// The index's disk has too little free for zingod's index.
+    IndexSpace {
+        path: PathBuf,
+        free_bytes: u64,
+        need_bytes: u64,
+    },
+    /// The index's folder is on a network filesystem: zingod asks for local storage. A warning.
+    NetworkFilesystem {
+        path: PathBuf,
+    },
+    /// This computer has less memory than zingod's build wants. A warning.
+    LowMemory {
+        total_bytes: u64,
+        want_bytes: u64,
+    },
+    /// zingod builds its index: wallets can use the server once it is done. A warning, like
+    /// [`Finding::Syncing`].
+    IndexBuilding {
+        served: Option<u64>,
+        target: Option<u64>,
+        eta_secs: Option<u64>,
+    },
+    /// zingod served a block zebrad doesn't have at `at`.
+    ChainMismatch {
+        at: u64,
+    },
+    /// Other programs hold the ports zingod tried.
+    IndexerPortTaken {
+        ports: Vec<u16>,
+    },
+    /// Any other zingod problem, with the status panel's reason, so the setup and the panel say
+    /// the same.
+    IndexerProblem {
+        why: DegradedReason,
+    },
+}
+
+/// Whether zingod can be chosen as the backend here, and why not.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ZingodChoice {
+    Offered,
+    /// No `zeal-zingod` is bundled on this system: Linux only for now.
+    #[default]
+    NotBundled,
+    /// zingod isn't offered on this network yet: Mainnet waits for its gate.
+    NotOnNetwork {
+        network: Network,
+    },
+    /// The bundled zingod and the serving zebrad aren't a pair Zeal tested.
+    Untested {
+        version: String,
+        zebrad: String,
+        network: Network,
     },
 }
 
@@ -1069,6 +1266,49 @@ pub struct PublicStatus {
     pub share: Option<ShareInfo>,
     /// The zebrad version wallets are told, for the consent screen.
     pub zebrad_version: Option<String>,
+    /// The server that answers wallets.
+    #[serde(default)]
+    pub backend: LightBackend,
+    /// Whether zingod can be chosen here, for the consent screen.
+    #[serde(default)]
+    pub zingod_choice: ZingodChoice,
+    /// zingod and its index, once zingod was chosen: also after switching back, while the index
+    /// is on disk.
+    #[serde(default)]
+    pub indexer: Option<IndexerStats>,
+}
+
+/// zingod as the light client server runs it, for the Server card. Integers only, so the
+/// status keeps `Eq`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexerStats {
+    /// The bundled zingod's version.
+    pub version: String,
+    /// zingod's supervisor.
+    pub phase: Phase,
+    /// zingod's last `/status` in this run.
+    pub status: Option<IndexerStatus>,
+    /// The index folder, `ZingodSpec::dir`.
+    pub dir: PathBuf,
+    /// zingod's loopback port.
+    pub port: u16,
+    /// The index's size, and whether the walk stopped early, so it is at least that.
+    pub index_bytes: Option<u64>,
+    pub index_partial: bool,
+    /// Free space on the index's disk.
+    pub free_bytes: Option<u64>,
+    pub resources: Option<IndexerResources>,
+    pub last_exit: Option<ExitInfo>,
+}
+
+/// zingod's process tree, in integers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct IndexerResources {
+    pub rss_bytes: u64,
+    /// CPU in thousandths of a core.
+    pub cpu_millicores: u32,
+    pub read_bytes: u64,
+    pub written_bytes: u64,
 }
 
 /// Every service's state: `get_public_status`. Empty while nothing is set up.
@@ -1096,6 +1336,8 @@ pub enum StepAnswer {
     Upload { preset: UploadPreset },
     /// Open again when Zeal starts.
     ResumeOnLaunch { on: bool },
+    /// The server that answers wallets. Choosing the other one asks for consent again.
+    Backend { backend: LightBackend },
 }
 
 /// `open_public_service` refused: the gate that failed.
@@ -1212,6 +1454,7 @@ mod tests {
             version: CONSENT_VERSION,
             at: SystemTime::UNIX_EPOCH,
             hostname: String::new(),
+            backend: LightBackend::ZebradEndpoint,
         });
         assert!(spec.consent_current());
         spec.name = Some(PublicHostname::parse("zec.example.com").unwrap());
@@ -1223,6 +1466,216 @@ mod tests {
         spec.name = Some(PublicHostname::parse("zec.example.com").unwrap());
         spec.consent.as_mut().unwrap().version = CONSENT_VERSION - 1;
         assert!(!spec.consent_current());
+        // A consent covers one backend.
+        spec.consent.as_mut().unwrap().version = CONSENT_VERSION;
+        assert!(spec.consent_current());
+        spec.backend = LightBackend::Zingod;
+        assert!(!spec.consent_current(), "zingod's text wasn't shown");
+        spec.consent.as_mut().unwrap().backend = LightBackend::Zingod;
+        assert!(spec.consent_current());
+    }
+
+    #[test]
+    fn a_spec_and_consent_from_before_zingod_read_as_zebrads_endpoint() {
+        let json = r#"{"service":"light_server","node":"zebrad-testnet","network":"testnet",
+            "switch_on":true,"backend_port":19067,"opened":true,
+            "consent":{"version":1,"at":{"secs_since_epoch":5,"nanos_since_epoch":0},"hostname":"zec.example.com"},
+            "name":"zec.example.com"}"#;
+        let spec: PublicServiceSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.backend, LightBackend::ZebradEndpoint);
+        assert_eq!(spec.zingod, None);
+        assert_eq!(
+            spec.consent.as_ref().map(|consent| consent.backend),
+            Some(LightBackend::ZebradEndpoint)
+        );
+        assert!(spec.consent_current(), "an open PS1 service stays open");
+        assert_eq!(
+            CONSENT_VERSION, 1,
+            "no open service pauses for zingod's release"
+        );
+        assert_eq!(LightBackend::default(), LightBackend::ZebradEndpoint);
+    }
+
+    /// `value` survives the wire.
+    fn round_trips<T>(value: T)
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + fmt::Debug,
+    {
+        let json = serde_json::to_string(&value).unwrap();
+        assert_eq!(serde_json::from_str::<T>(&json).unwrap(), value, "{json}");
+    }
+
+    #[test]
+    fn zingods_wire_types_round_trip() {
+        let path = PathBuf::from("/mnt/zebra/zingod/testnet");
+        round_trips(LightBackend::Zingod);
+        assert_eq!(
+            serde_json::to_value(LightBackend::ZebradEndpoint).unwrap(),
+            serde_json::json!("zebrad_endpoint")
+        );
+        round_trips(ZingodSpec {
+            port: 18137,
+            dir: path.clone(),
+        });
+        round_trips(StepAnswer::Backend {
+            backend: LightBackend::Zingod,
+        });
+        for id in [
+            CheckId::ZingodTested,
+            CheckId::UpgradesKnown,
+            CheckId::IndexSpace,
+            CheckId::IndexReady,
+            CheckId::TipMatches,
+        ] {
+            round_trips(id);
+        }
+        let reasons = [
+            DegradedReason::IndexerStarting {
+                waiting: IndexerWait::ZebradTip,
+            },
+            DegradedReason::IndexerStarting {
+                waiting: IndexerWait::Boot,
+            },
+            DegradedReason::IndexerStarting {
+                waiting: IndexerWait::Backoff,
+            },
+            DegradedReason::IndexBuilding {
+                served: Some(1_204_331),
+                target: Some(4_612_000),
+                eta_secs: Some(18_000),
+            },
+            DegradedReason::IndexBuilding {
+                served: None,
+                target: None,
+                eta_secs: None,
+            },
+            DegradedReason::IndexBehind { blocks: 12 },
+            DegradedReason::IndexerDown {
+                why: DownReason::Zingod {
+                    reason: "tip_unvouched".into(),
+                    message: "no validator vouches for the tip".into(),
+                },
+            },
+            DegradedReason::IndexerDown {
+                why: DownReason::NoAnswer,
+            },
+            DegradedReason::IndexerDown {
+                why: DownReason::NoValidator,
+            },
+            DegradedReason::IndexerUntested {
+                version: "1.1.0".into(),
+                zebrad: "7.1.0-alpha.0".into(),
+                network: Network::Testnet,
+            },
+            DegradedReason::IndexerStuck {
+                at: 4_611_002,
+                zebrad_at: 4_611_019,
+            },
+            DegradedReason::IndexBroken,
+            DegradedReason::ChainMismatch { at: 4_611_980 },
+            DegradedReason::DiskLow {
+                free_bytes: 6_000_000_000,
+            },
+        ];
+        let details = [
+            FailDetail::None,
+            FailDetail::Ports {
+                tried: vec![18137, 18138],
+            },
+            FailDetail::Dir { path: path.clone() },
+            FailDetail::OpenFiles {
+                needed: 1280,
+                limit: 1024,
+            },
+            FailDetail::Cookie {
+                path: PathBuf::from("/mnt/zebra/testnet/rpc/.cookie"),
+                error: "Is a directory (os error 21)".into(),
+            },
+        ];
+        for detail in details {
+            let reason = DegradedReason::IndexerFailed {
+                class: ExitClass::ConfigError,
+                detail,
+            };
+            round_trips(reason.clone());
+            round_trips(Finding::IndexerProblem { why: reason });
+        }
+        for reason in reasons {
+            round_trips(reason.clone());
+            round_trips(PublicState::Degraded { why: reason });
+        }
+        round_trips(PauseReason::BuildTooOld {
+            upgrade: "NU8".into(),
+            height: 4_700_000,
+        });
+        let findings = [
+            Finding::UntestedZingod {
+                version: "1.1.0".into(),
+                zebrad: "7.1.0".into(),
+                network: Network::Mainnet,
+            },
+            Finding::UpgradeUnknown {
+                upgrade: "NU8".into(),
+                height: Some(4_700_000),
+            },
+            Finding::UpgradeUnknown {
+                upgrade: "NU8".into(),
+                height: None,
+            },
+            Finding::IndexSpace {
+                path: path.clone(),
+                free_bytes: 12_000_000_000,
+                need_bytes: 50_000_000_000,
+            },
+            Finding::NetworkFilesystem { path: path.clone() },
+            Finding::LowMemory {
+                total_bytes: 4_000_000_000,
+                want_bytes: 8_000_000_000,
+            },
+            Finding::IndexBuilding {
+                served: Some(1),
+                target: None,
+                eta_secs: None,
+            },
+            Finding::ChainMismatch { at: 4_611_980 },
+            Finding::IndexerPortTaken {
+                ports: vec![18137, 18138],
+            },
+        ];
+        for finding in findings {
+            round_trips(CheckOutcome::Fail { finding });
+        }
+        for choice in [
+            ZingodChoice::Offered,
+            ZingodChoice::NotBundled,
+            ZingodChoice::NotOnNetwork {
+                network: Network::Mainnet,
+            },
+            ZingodChoice::Untested {
+                version: "1.1.0".into(),
+                zebrad: "7.1.0".into(),
+                network: Network::Testnet,
+            },
+        ] {
+            round_trips(choice);
+        }
+        round_trips(IndexerStats {
+            version: "1.1.0".into(),
+            phase: Phase::Running,
+            status: None,
+            dir: path,
+            port: 18137,
+            index_bytes: Some(18_400_000_000),
+            index_partial: true,
+            free_bytes: Some(412_000_000_000),
+            resources: Some(IndexerResources {
+                rss_bytes: 1_400_000_000,
+                cpu_millicores: 30,
+                read_bytes: 9,
+                written_bytes: 10,
+            }),
+            last_exit: None,
+        });
     }
 
     #[test]

@@ -263,6 +263,9 @@ pub fn status(spec: &PublicServiceSpec, facts: &Facts, paused_since: SystemTime)
             .as_ref()
             .map(|name| share::share(name, spec.external_port)),
         zebrad_version: facts.zebrad_version.clone(),
+        backend: spec.backend,
+        zingod_choice: Default::default(),
+        indexer: None,
         state,
     }
 }
@@ -291,6 +294,7 @@ mod tests {
             version: CONSENT_VERSION,
             at: at(0),
             hostname: String::new(),
+            backend: Default::default(),
         });
         spec
     }

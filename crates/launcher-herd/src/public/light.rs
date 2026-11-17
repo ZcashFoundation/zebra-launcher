@@ -120,6 +120,7 @@ mod tests {
             version: CONSENT_VERSION,
             at: at(0),
             hostname: String::new(),
+            backend: Default::default(),
         });
         assert!(wants_endpoint(&spec, &facts));
         assert!(!wants_endpoint(&spec, &Facts::new(at(0), Network::Testnet)));

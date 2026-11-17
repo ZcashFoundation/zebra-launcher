@@ -202,7 +202,7 @@ fn ConnectionResult(report: ConnectionReport) -> impl IntoView {
                 .into_iter()
                 .map(|check| {
                     let class = outcome_class(&check.outcome);
-                    view! { <li class=class>{check_line(check.id, &check.outcome)}</li> }
+                    view! { <li class=class>{check_line(check.id, &check.outcome, None)}</li> }
                 })
                 .collect_view()}
         </ul>
@@ -344,7 +344,7 @@ fn Checklist(status: Memo<Option<PublicStatus>>) -> impl IntoView {
                             .iter()
                             .filter_map(|check| match &check.outcome {
                                 CheckOutcome::Fail { finding } | CheckOutcome::Warn { finding } => {
-                                    Some(finding_text(finding))
+                                    Some(status.with(|s| finding_text(finding, s.as_ref())))
                                 }
                                 _ => None,
                             })

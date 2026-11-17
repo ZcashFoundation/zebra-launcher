@@ -132,6 +132,7 @@ impl World {
             version: CONSENT_VERSION,
             at: now - Duration::from_secs(120),
             hostname: NAME.into(),
+            backend: Default::default(),
         });
         spec.name = names::parse_name(NAME, DnsProvider::DuckDns).ok();
         spec.provider = DnsProvider::DuckDns;
@@ -517,6 +518,7 @@ pub async fn answer_public_step(answer: StepAnswer) -> Result<(), String> {
                         .as_ref()
                         .map(ToString::to_string)
                         .unwrap_or_default(),
+                    backend: Default::default(),
                 })
             })?;
             // zebrad restarts with its endpoint.
@@ -559,6 +561,7 @@ pub async fn answer_public_step(answer: StepAnswer) -> Result<(), String> {
         StepAnswer::Upload { preset } => {
             public.spec_mut(|spec| spec.limits.upload_kbit = preset.kbit())?
         }
+        StepAnswer::Backend { .. } => return Err("zingod can't be chosen yet".into()),
     }
     public.advance();
     Ok(())

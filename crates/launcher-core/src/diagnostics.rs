@@ -966,6 +966,7 @@ mod tests {
             version: 1,
             at: std::time::SystemTime::UNIX_EPOCH,
             hostname: "zec-alice.duckdns.org".into(),
+            backend: Default::default(),
         });
         spec.secret = Some(SecretRef {
             provider: launcher_types::public::DnsProvider::DuckDns,

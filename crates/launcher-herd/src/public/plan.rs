@@ -596,6 +596,7 @@ mod tests {
             version: CONSENT_VERSION,
             at: at(NOW - 3600),
             hostname: name().to_string(),
+            backend: Default::default(),
         });
         spec.backend_port = Some(9067);
         spec.lan_addr = Some(lan());
