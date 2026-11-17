@@ -168,6 +168,8 @@
 
 .public-cards p {
   margin: 2px 0;
+  /* zingod's index folder is one long path with no spaces. */
+  overflow-wrap: anywhere;
 }
 
 .public-keep {
