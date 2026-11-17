@@ -470,9 +470,11 @@ What was built follows PUBLIC-SERVICES.md's Z1, with these differences:
 - The workflows install the artifact through `install_zingod` in
   `scripts/lib.sh`, which also checks the build information's commit, target
   and binary sha256.
-- `ci.yml`'s gate also covers `lib.sh`, `zingod-licenses.sh` and the licence
-  folder, and runs on pull requests only; `bundle.yml` builds zingod on
-  `main`.
+- `ci.yml`'s gate also covers every other file the build runs or reads
+  (`lib.sh`, `zingod-licenses.sh`, the licence folder, `check-glibc.sh`,
+  `cargo-lock-version.sh`, `select-targets.sh`, `targets.json`, and the
+  `GLIBC_FLOOR` and `CARGO_DENY_*` pins), and runs on pull requests only;
+  `bundle.yml` builds zingod on `main`.
 - The advisory report covers zingod's whole workspace and every target, with
   an empty configuration.
 - The cache is the already pinned `Swatinem/rust-cache` with `cache-targets`
@@ -661,9 +663,13 @@ hashes every draft asset, so `SHA256SUMS` and the release's attestations cover
 the archive.
 
 - `ci.yml` runs the workflow on pull requests that change what `zeal-zingod`
-  is built from: the `ZINGOD_*` pins, `build-zingod.sh` and the `lib.sh` it
-  sources, `zingod-licenses.sh` and the licence folder it checks, or the
-  workflow. On pushes to `main` it doesn't, since `bundle.yml` builds it then.
+  is built from: the `ZINGOD_*` pins; `build-zingod.sh`, the `lib.sh` it
+  sources and the `check-glibc.sh` it runs; `zingod-licenses.sh`, the
+  `cargo-lock-version.sh` it runs and the licence folder it checks; the
+  workflow, with the `select-targets.sh` and `.github/targets.json` that pick
+  its matrix; or the `GLIBC_FLOOR` and `CARGO_DENY_*` lines of
+  `.github/tool-versions.env`, which the gate finds in the file's diff. On
+  pushes to `main` it doesn't, since `bundle.yml` builds it then.
   A job that calls a reusable workflow can't have steps, so a `zingod-gate`
   job diffs the pull request against its base, as `real-zebrad`'s gate step
   does, and outputs `run`. The `zingod-sidecars` job has `needs: zingod-gate`

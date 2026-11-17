@@ -166,11 +166,13 @@ jobs:
           ZEBRAD_BIN: ${{ runner.temp }}/zebrad/zebrad
         run: cargo test -p launcher-public --test real_light_server --locked -- --include-ignored --nocapture
   # zeal-zingod, built and checked as the bundles get it, on pull requests that
-  # change what it is built from: the ZINGOD_* pins, build-zingod.sh and the
-  # lib.sh it sources, the licence script and folder it checks, or
-  # zingod-sidecars.yml. bundle.yml
-  # builds it on every push to main. A job that calls a reusable workflow
-  # can't have steps, so this one decides.
+  # change what it is built from: the ZINGOD_* pins; build-zingod.sh, the
+  # lib.sh it sources and the check-glibc.sh it runs; zingod-licenses.sh, the
+  # cargo-lock-version.sh it runs and the licence folder it checks;
+  # zingod-sidecars.yml with the select-targets.sh and targets.json that pick
+  # its matrix; or the GLIBC_FLOOR and CARGO_DENY_* lines of tool-versions.env.
+  # bundle.yml builds it on every push to main. A job that calls a reusable
+  # workflow can't have steps, so this one decides.
   zingod-gate:
     name: Decide whether zingod is built
     runs-on: ubuntu-24.04
@@ -193,7 +195,12 @@ jobs:
           run=false
           if [ "${EVENT}" = pull_request ]; then
             changed="$(git diff --name-only "${BASE_SHA}...HEAD")"
-            if grep -qxE 'ZINGOD_(VERSION|COMMIT|DATE)|scripts/(build-zingod|zingod-licenses|lib)\.sh|src-tauri/resources/licenses/zingod/.+|\.github/workflows/zingod-sidecars\.yml' <<< "${changed}"; then
+            if grep -qxE 'ZINGOD_(VERSION|COMMIT|DATE)|scripts/(build-zingod|zingod-licenses|lib|check-glibc|cargo-lock-version|select-targets)\.sh|\.github/targets\.json|src-tauri/resources/licenses/zingod/.+|\.github/workflows/zingod-sidecars\.yml' <<< "${changed}"; then
+              run=true
+            fi
+            # Of tool-versions.env, only the lines the build reads.
+            pins="$(git diff "${BASE_SHA}...HEAD" -- .github/tool-versions.env)"
+            if grep -qE '^[+-](GLIBC_FLOOR|CARGO_DENY_)' <<< "${pins}"; then
               run=true
             fi
           fi
