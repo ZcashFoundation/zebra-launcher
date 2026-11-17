@@ -897,14 +897,15 @@ is unknown. Then:
    fails until the new version is on both.
 6. Run `real_zingod.rs` against the Stable zebrad pin (CI does this on
    the pull request), with `PREV_ZINGOD_BIN` set to the previous pin's build,
-   so an index the old one wrote must open with the new one. Then run
-   **Bundle**. Its SIGTERM case accepts 1.1.0's abort on `SIGTERM`
-   (PUBLIC-SERVICES.md's
+   so an index the old one wrote must open with the new one. Its SIGTERM
+   case accepts 1.1.0's abort on `SIGTERM` (PUBLIC-SERVICES.md's
    [How Zeal runs zingod](PUBLIC-SERVICES.md#how-zeal-runs-zingod)) and
    prints a note when it happens. Check whether the new version still has
    the `assert!` at `packages/zingod-sync/src/follower.rs:143` and
-   `packages/zingod-nfs/src/nfs.rs:118`, and once a release fixes the race,
-   drop the case's allowance and `logs::SIGTERM_RACE`.
+   `packages/zingod-nfs/src/nfs.rs:118`; once a release fixes the race,
+   drop the case's allowance. fake-zingod's `abort-on-sigterm` and the
+   supervisor's and runner's tests that use it stay: a stop Zeal asked for
+   is a stop however zingod ends it. Then run **Bundle**.
 7. Before a release lists the new version as tested on a network, do the wallet
    runs there; a first Mainnet listing waits for PUBLIC-SERVICES.md's Mainnet
    gate.

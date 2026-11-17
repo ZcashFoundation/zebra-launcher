@@ -687,9 +687,10 @@ short; the panel and zebrad's Stop and Restart say so.
   shorten the drain (measured, despite the comment at `daemon.rs:526`), so Zeal sends one. The
   stop grace is 30 s (proposal), then `SIGKILL` to the process group. A killed zingod reopens its
   indexes by checking each file's length, tail page and `.crc` (`docs/running.md:291-295`).
-- **An abort on `SIGTERM`**, a known upstream issue in zingod 1.1.0. The drain can end in a panic
-  and an abort instead of exit 0: `assert!(cancel.is_cancelled(), "header sync publishes the
-  verified chain until cancel")` at `packages/zingod-sync/src/follower.rs:143` (the same one is at
+- **An abort on `SIGTERM`**, a bug in zingod 1.1.0 (an [upstream ask](#upstream-asks-for-zingod)).
+  The drain can end in a panic and an abort instead of exit 0: `assert!(cancel.is_cancelled(),
+  "header sync publishes the verified chain until cancel")` at
+  `packages/zingod-sync/src/follower.rs:143` (the same one is at
   `packages/zingod-nfs/src/nfs.rs:118`) fires when header sync's chain watch closes before the
   follower sees the cancel, and the panic hook aborts (`packages/zingod/src/main.rs:36-38`). The
   contract test hit it once on x86_64, 285 ms into a stop with no connection open, and the same
@@ -1504,6 +1505,10 @@ of "unavailable", measured in Z4. Back to Zebra reverses it; the index stays unt
   `tokio::signal::unix` and sd-notify; jemalloc off MSVC; directory fsync.
 - macOS in CI.
 - A second signal that ends the drain, as the comment at `daemon.rs:526` says.
+- A `SIGTERM` drain that ends in exit 0 every time: in 1.1.0 header sync's chain watch can close
+  before the follower sees the cancel, and the `assert!` at
+  `packages/zingod-sync/src/follower.rs:143` (and `packages/zingod-nfs/src/nfs.rs:118`) aborts
+  zingod ([How Zeal runs zingod](#how-zeal-runs-zingod)).
 - Docs: `tip_stale` in `docs/running.md`, which the code reports as `tip_unvouched`, and the index
   default in `config.rs:322`'s comment.
 - A `NOTICE` file and the full licence text.
