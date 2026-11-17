@@ -1,0 +1,39 @@
+# Managed by Zeal: rewritten before every start.
+network = "testnet"
+validator_client = "legacy_rpc"
+
+[[trusted_validators]]
+jsonrpc_address = "127.0.0.1:18232"
+cookie_path = "/zeal/nodes/zebrad/rpc/.cookie"
+
+[serve]
+grpc_listen_address = "127.0.0.1:18137"
+state_dir = "/zeal/nodes/zebrad/zingod/testnet/state"
+
+[grpc]
+max_connections = 256
+max_connections_per_ip = 256
+max_streams_per_connection = 16
+
+# Off: zingod would read the pressure of a cgroup it may share with zebrad.
+[grpc.overload]
+cpu_pressure_percent = 0
+io_pressure_percent = 0
+
+[p2p]
+enabled = false
+
+[index.compact_block]
+path = "/zeal/nodes/zebrad/zingod/testnet/indexes/compact_block"
+
+[index.block_hash]
+path = "/zeal/nodes/zebrad/zingod/testnet/indexes/block_hash"
+
+[index.tree_state]
+path = "/zeal/nodes/zebrad/zingod/testnet/indexes/tree_state"
+
+[index.transparent_address]
+path = "/zeal/nodes/zebrad/zingod/testnet/indexes/transparent_address"
+
+[index.txid_location]
+path = "/zeal/nodes/zebrad/zingod/testnet/indexes/txid_location"

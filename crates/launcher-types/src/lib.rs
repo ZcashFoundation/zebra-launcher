@@ -234,7 +234,7 @@ impl LogLine {
     }
 }
 
-/// A notable event detected in zebrad output.
+/// A notable event detected in a supervised program's output: zebrad's, or zingod's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LogEvent {
@@ -272,6 +272,12 @@ pub enum LogEvent {
     PortInUse { message: String },
     /// Any other panic.
     Panic { message: String },
+    /// zingod's gRPC listener is bound (`Listening` with `component=Grpc`): its configuration
+    /// loaded, and it answers at `addr`.
+    IndexerListening { addr: SocketAddr },
+    /// zingod's last words, an `Error:` line or a panic, with the class its reader gave them.
+    /// A deterministic class decides the run's exit class.
+    Failure { class: ExitClass, message: String },
 }
 
 /// Why a zebrad run ended, derived from its exit status and the detected events.

@@ -29,3 +29,4 @@ pub mod runtime;
 pub mod settings;
 pub mod supervisor;
 pub mod updates;
+pub mod zingod;
