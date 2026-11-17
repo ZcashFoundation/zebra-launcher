@@ -661,6 +661,39 @@ mod tests {
     }
 
     #[test]
+    fn each_program_gets_its_own_reader() {
+        use crate::{process::ZebradCommand, zingod::ZingodCommand};
+
+        let raw = "2026-01-01T00:00:00Z  INFO zebra_rpc::queue: sent txid=abcd";
+        let zebrad = Reader::for_launch(&Launch::from(ZebradCommand::new("zebrad", "z.toml")));
+        assert_eq!(zebrad.redact(raw), raw, "zebrad's lines stay as they are");
+        assert_eq!(
+            zebrad
+                .parse_line(1, LogStream::Stdout, raw)
+                .target
+                .as_deref(),
+            Some("zebra_rpc::queue")
+        );
+        let zingod = Reader::for_launch(&Launch::from(ZingodCommand::new(
+            "zeal-zingod",
+            "z.toml",
+            "/h",
+        )));
+        assert_eq!(zingod.redact("ts=1 txid=abcd x=1"), "ts=1 txid=[txid] x=1");
+        assert_eq!(
+            zingod
+                .parse_line(
+                    1,
+                    LogStream::Stdout,
+                    "ts=1 level=info message=x component=Grpc"
+                )
+                .target
+                .as_deref(),
+            Some("Grpc")
+        );
+    }
+
+    #[test]
     fn exit_classification_prefers_deterministic_causes() {
         assert_eq!(
             classify_exit(Some(1), Some(ExitClass::ConfigError)),

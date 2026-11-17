@@ -15,7 +15,7 @@ use std::{
 use launcher_core::{
     policy::RestartPolicy,
     process::ZebradCommand,
-    supervisor::{SupervisorConfig, SupervisorHandle},
+    supervisor::{Launch, SupervisorConfig, SupervisorHandle},
 };
 use launcher_types::{LogLine, Status};
 use tokio::time::timeout;
@@ -41,6 +41,11 @@ pub fn fake_zebrad() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake-zebrad"))
 }
 
+/// The `fake-zingod` binary Cargo built for these tests.
+pub fn fake_zingod() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_fake-zingod"))
+}
+
 /// `fake-zebrad -c config start` in `mode` (`FAKE_ZEBRAD_MODE`), with a
 /// 50 ms heartbeat.
 pub fn fake_zebrad_command(mode: &str, config: &Path) -> ZebradCommand {
@@ -55,7 +60,7 @@ pub fn fake_zebrad_command(mode: &str, config: &Path) -> ZebradCommand {
 /// A supervisor configuration for fast tests: a 3 s stop grace, a 500 ms
 /// exit drain, and restarts that back off 50 to 200 ms and give up after
 /// three crashes within a minute. No pid file and no log file.
-pub fn fast_supervisor_config(command: ZebradCommand) -> SupervisorConfig {
+pub fn fast_supervisor_config(command: impl Into<Launch>) -> SupervisorConfig {
     let mut config = SupervisorConfig::new(command);
     config.stop_grace = Duration::from_secs(3);
     config.exit_drain = Duration::from_millis(500);
