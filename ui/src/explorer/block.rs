@@ -598,8 +598,10 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
     };
     let asked = StoredValue::new(HashSet::<u32>::new());
     let read_ahead = StoredValue::new(HashSet::<u32>::new());
+    let last_window = StoredValue::new(None::<Window>);
     let reader = node.clone();
     let on_window = Callback::new(move |window: Window| {
+        last_window.set_value(Some(window));
         let (start, end) = window.rows;
         if end <= start {
             return;
@@ -651,6 +653,20 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
                 let _ = api::explorer(&node, ExplorerRequest::Prefetch { targets }).await;
             });
         }
+    });
+    // The table outlives Show RPC turned on, and the rows read before were not traced: the
+    // chunks in view are asked again, traced, so its list starts then. The explorer's cache
+    // answers them.
+    Effect::new(move |was_on: Option<bool>| {
+        let on = prefs.rpc.get();
+        if on && was_on == Some(false) {
+            store.sources.set(None);
+            asked.update_value(HashSet::clear);
+            if let Some(window) = last_window.get_value() {
+                on_window.run(window);
+            }
+        }
+        on
     });
     // The row the grid's keys made active: its hover card under its link, and Enter opens it.
     let txid_at = move |index: u32| {

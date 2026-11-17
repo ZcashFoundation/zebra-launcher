@@ -1360,7 +1360,8 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
   took too long or did not run. The tip check is listed as
   `getbestblockheightandhash`, from memory when a recent check vouched for it. Reads made in
   the background (the Chain page's coinbases, prefetches) are not listed. The table lists its
-  own reads, folded, under a count.
+  own reads, folded, under a count. It keeps its rows when Show RPC is turned on, and asks for
+  the rows in view again, traced, so its list starts then; the explorer's memory answers them.
 - **V6** groups inputs by the address they spend from, the largest first, at most twelve
   groups with the smallest merged; outputs keep their order, the first eleven and then "N
   more"; the pools, the lockbox and the fee are drawn beside them. The
