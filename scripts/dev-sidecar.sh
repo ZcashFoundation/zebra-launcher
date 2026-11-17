@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Installs fake-zebrad as all three channel sidecars for the host, so
-# `cargo tauri dev` and `cargo tauri build` work without downloading or building
-# the real zebrad. Never ship a bundle built this way. Windows:
+# Installs fake-zebrad as all three channel sidecars for the host, and on a
+# Linux host fake-zingod as zeal-zingod, so `cargo tauri dev` and
+# `cargo tauri build` work without downloading or building the real zebrad
+# and zingod. Never ship a bundle built this way. Windows:
 # scripts/dev-sidecar.ps1.
 set -euo pipefail
 
@@ -16,9 +17,15 @@ die() {
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 host="$(host_triple)"
 
-# Take the binary's path from cargo, which knows about build.target-dir,
+# zingod is bundled on Linux only (tauri.linux.conf.json).
+zingod=false
+case "${host}" in *-linux-*) zingod=true ;; esac
+bin_args=(--bin fake-zebrad)
+[ "${zingod}" = false ] || bin_args+=(--bin fake-zingod)
+
+# Take the binaries' paths from cargo, which knows about build.target-dir,
 # CARGO_TARGET_DIR and CARGO_BUILD_TARGET. Diagnostics still go to stderr.
-messages="$(cargo build --manifest-path "${root}/Cargo.toml" -p launcher-core --bin fake-zebrad \
+messages="$(cargo build --manifest-path "${root}/Cargo.toml" -p launcher-core "${bin_args[@]}" \
     --message-format=json-render-diagnostics)"
 
 # built NAME: prints where cargo built the binary NAME.
@@ -42,3 +49,9 @@ for channel in stable beta nightly; do
     install_atomic "${fake_zebrad}" "${out}"
     echo "installed ${channel} fake-zebrad ($("${out}" --version)) at ${out}"
 done
+
+if [ "${zingod}" = true ]; then
+    out="${root}/src-tauri/binaries/zeal-zingod-${host}"
+    install_atomic "$(built fake-zingod)" "${out}"
+    echo "installed fake-zingod ($("${out}" --version)) at ${out}"
+fi

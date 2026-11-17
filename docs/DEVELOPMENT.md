@@ -61,7 +61,9 @@ binary. Binaries are never committed.
   fake-zebrad starts fast, needs no chain state, and can be scripted into failure modes
   with the `FAKE_ZEBRAD_MODE` environment variable (`ok`, `crash`, `config-error`,
   `eos-warn`, `eos-halt`, `port-in-use`, `db-locked`, `hang-on-signal`, `stderr-flood`,
-  `non-utf8`), which it inherits from the launcher.
+  `non-utf8`), which it inherits from the launcher. On a Linux host the script also
+  installs `fake-zingod` as `zeal-zingod-<triple>`; it answers only `--version` and
+  `generate-config`, and nothing runs it yet.
 - **Real zebrads:** Stable uses [`ZEBRAD_VERSION`](../ZEBRAD_VERSION),
   [`ZEBRAD_COMMIT`](../ZEBRAD_COMMIT) and [`ZEBRAD_DATE`](../ZEBRAD_DATE). Stable and
   Beta are fetched on Linux with `scripts/fetch-zebrad-linux.sh` or built with
