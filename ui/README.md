@@ -260,8 +260,8 @@ every node command and event carries a node's id, and the mock's zebrad below is
     `zingod-behind`, `zingod-stuck` (Open the log), `zingod-backoff`, `zingod-crashloop`
     (Open the log, Try again), `zingod-config` (Copy diagnostics), `zingod-cookie`,
     `zingod-port`, `zingod-locked` and `zingod-folder` (Try again), `zingod-disk`,
-    `zingod-broken` and `zingod-mismatch` (Rebuild…), `zingod-tooold` (paused),
-    `zingod-untested`;
+    `zingod-room` (switched to zingod without the room for its first build), `zingod-broken`
+    and `zingod-mismatch` (Rebuild…), `zingod-tooold` (paused), `zingod-untested`;
   - `zingod-mainnet`: the consent screen on Mainnet, with zingod disabled: "being tested on
     Testnet first";
   - `zingod-absent`: the consent screen with no `zeal-zingod` bundled: "Linux only for now".

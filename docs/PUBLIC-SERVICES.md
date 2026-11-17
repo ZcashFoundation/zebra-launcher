@@ -537,6 +537,7 @@ flag (`?public=<flag>`).
 | another program holds the index | `DbLocked`, after the pid file ended Zeal's own leftover | waits | "Another program holds zingod's index in /mnt/zebra/zingod/testnet. [Try again]" | the user | `zingod-locked` |
 | Zeal can't create zingod's folder or write its configuration: the disk isn't the user's to write, is read-only, or isn't mounted | the runner's start fails before the spawn | `IndexerFailed` with `SpawnFailed` and the folder; no start again for the same attempt | "Zeal could not set up zingod's folder /mnt/zebra/zingod/testnet/home: Permission denied (os error 13). Fix its permissions or its disk, then try again. [Try again]" | the user's Try again | `zingod-folder` |
 | the disk fills | free space every 60 s; `DiskFull` | stops zingod below 10 GB free, starts it above 20 GB; after `DiskFull`, starts it again only when bytes ran out and are back, with inodes free | "Waiting for disk space: 6 GB free on /mnt/zebra. zingod starts again above 20 GB." | by itself, or the user's Try again after a quota or inodes ran out | `zingod-disk` |
+| an open service switched to zingod, or rebuilt, has too little room for a first build | the index folder's disk, every minute, counting what is built | doesn't start zingod (`Blocked::NoSpace`); `IndexSpace` until zingod has served from the index once | "Waiting for room: zingod needs 45 GB free in /mnt/zebra/zingod/testnet to build its index, and 30 GB is free. It starts once there is room." | by itself, once there is room | `zingod-room` |
 | the index is damaged, from another chain or of an older format | `IndexBroken` | no restart | "zingod's index is damaged. Rebuilding it takes hours, and wallets are told to try again meanwhile. [Rebuild]" | the user's Rebuild | `zingod-broken` |
 | zingod serves a block zebrad doesn't have | the tip cross-check | stops zingod | "zingod's chain doesn't match Zebra's at block 4,611,980. [Rebuild]" | the user's Rebuild | `zingod-mismatch` |
 | an upgrade zingod doesn't know is active | zebrad's upgrades against `ZINGOD_KNOWS` | doesn't start zingod; `BuildTooOld` | "zingod 1.1.0 doesn't know NU8, which is active. Wallets that use your server see an error until Zeal updates zingod." | a Zeal update | `zingod-tooold` |
@@ -1022,7 +1023,8 @@ for that zingod check it.
   `txid_location` 1.4 and `block_hash` 0.13. It grows with the chain. Testnet's size is neither
   documented nor measured.
 - **Before the first build** the Service step needs 100 GB free on Mainnet and 50 GB on Testnet
-  on the index's disk (proposals, set from Z3's and Z4's measurements). It warns, without
+  on the index's disk (proposals, set from Z3's and Z4's measurements), and so does an open
+  service switched to zingod or rebuilt, until zingod has served from the index. It warns, without
   refusing, on a network filesystem: zingod reads its indexes through mmap and asks for local
   storage.
 - **While it runs** the runner reads the free space every 60 s. Below 10 GB it stops zingod with
@@ -1218,7 +1220,8 @@ PublicServiceSpec {
     // backend_port stays zebrad's endpoint port
 }
 pub struct ZingodSpec { pub port: u16, pub dir: PathBuf,           // recorded when first chosen
-    #[serde(default)] pub mismatch: Option<u64> }                 // until a rebuild or delete
+    #[serde(default)] pub mismatch: Option<u64>,                  // until a rebuild or delete
+    #[serde(default)] pub built: bool }                           // zingod served from it once
 Consent { #[serde(default)] pub backend: LightBackend }           // a consent covers one backend
 StepAnswer::Backend { backend: LightBackend }
 CheckId: ZingodTested, UpgradesKnown, IndexSpace, IndexReady, TipMatches
@@ -1238,14 +1241,15 @@ DegradedReason: IndexerStarting { waiting: IndexerWait },         // ZebradTip, 
     IndexerUntested { version: String, zebrad: String, network: Network },
     IndexerStuck { at: u64, zebrad_at: u64 }, IndexBroken,
     IndexerFailed { class: ExitClass, detail: FailDetail },
-    ChainMismatch { at: u64 }, DiskLow { free_bytes: u64 }
+    ChainMismatch { at: u64 }, DiskLow { free_bytes: u64 },
+    IndexSpace { free_bytes: u64, need_bytes: u64 }               // no room for a first build
 pub enum FailDetail { None, Ports { tried: Vec<u16> }, Dir { path: PathBuf },
     OpenFiles { needed: u64, limit: u64 }, Cookie { path: PathBuf, error: String },
     Folder { path: PathBuf, error: String } }                     // Zeal's own start, before zingod runs
 PauseReason::BuildTooOld { upgrade: String, height: u64 }
 PublicStatus { pub indexer: Option<IndexerStats> }
-pub struct IndexerStats { version, phase: Phase, status: Option<IndexerStatus>, dir, index_bytes,
-    free_bytes, resources: Option<IndexerResources>, last_exit: Option<ExitInfo> }
+pub struct IndexerStats { version, phase: Phase, status: Option<IndexerStatus>, dir, built,
+    index_bytes, free_bytes, resources: Option<IndexerResources>, last_exit: Option<ExitInfo> }
 pub struct IndexerResources { rss_bytes: u64, cpu_millicores: u32, read_bytes: u64,
     written_bytes: u64 }                                          // integers only
 pub struct IndexerStatus { state, served, tip, target: Option<u64>,
@@ -1511,12 +1515,17 @@ backend, the Service step's checks and findings, zingod's degraded reasons, `Fai
 `BuildTooOld`, `IndexerStats`); launcher-herd's Service step, `problem()` for every row of the
 failure table, `choice()` and `DEFAULT_BACKEND`; the service actor's wiring of the runner and
 the tip cross-check; the app's sidecar key, commands, exit flow and diagnostics; and the
-screens with the 27 `zingod…` mock flags. Where it differs from the sections above:
+screens with the 28 `zingod…` mock flags. Where it differs from the sections above:
 
-- **The setup's room is a start condition.** A service still being set up doesn't give the
-  runner a plan while the index's disk has less than 50 GB free on Testnet (100 GB on Mainnet),
-  counting what is already built (`Blocked::NoSpace`), so no first build starts that would run
-  into the low mark. An open service keeps the runner's 10 and 20 GB marks alone.
+- **The room for a first build is a start condition.** Until zingod has served from the
+  recorded folder's index once (`ZingodSpec.built`, which Rebuild and Delete clear), the actor
+  doesn't give the runner a plan while the index's disk has less than 50 GB free on Testnet
+  (100 GB on Mainnet), counting what is already built (`Blocked::NoSpace`), so no first build
+  starts that would run into the low mark: a setup's, an open service's switched to zingod
+  under "Server software…", or a rebuild's. An open service waiting for it is
+  `Degraded { IndexSpace }`, since it has no checklist to say so. A built index keeps the
+  runner's 10 and 20 GB marks alone, and the Service step's `IndexSpace` no longer asks it for
+  the room.
 - **One check for the room.** The Service step has no checks of its own for the network
   filesystem and the memory: `IndexSpace` fails for too little room and otherwise warns for a
   network filesystem (`statfs`'s type on Linux: NFS, SMB, CIFS, Ceph, AFS, Coda, 9P), then for

@@ -155,7 +155,7 @@ pub struct StartFacts {
     pub chain_mismatch: bool,
     /// zingod knows every upgrade zebrad lists as active.
     pub upgrades_known: bool,
-    /// The index's disk has room for the build the setup is about to start.
+    /// The index's disk has room for a first build, or the index is built.
     pub space: bool,
 }
 
@@ -245,7 +245,7 @@ pub enum Blocked {
     DiskLow,
     /// An active upgrade zingod doesn't know.
     UpgradeUnknown,
-    /// The index's disk has too little room for the setup's first build.
+    /// The index's disk has too little room for a first build.
     NoSpace,
 }
 
@@ -757,19 +757,31 @@ pub fn choice(facts: &Facts, network: Network) -> ZingodChoice {
     ZingodChoice::Offered
 }
 
-/// Whether the index's disk has room for the setup's build: [`space_needed`], counting what is
-/// already built. Only a service still being set up is held to it; an open one keeps the
+/// Whether the index's disk has room for a first build: [`space_needed`], counting what is
+/// already built. It holds until zingod has served from the index once ([`ZingodSpec::built`]),
+/// for a setup, an open service switched to zingod and a rebuild alike; a built index keeps the
 /// runner's hysteresis alone. An unread disk passes, so the read decides.
+///
+/// [`ZingodSpec::built`]: launcher_types::public::ZingodSpec::built
 fn room(spec: &PublicServiceSpec, zingod: &IndexerFacts) -> bool {
-    spec.opened
+    built(spec)
         || zingod
             .disk
             .is_none_or(|disk| has_room(spec.network, zingod, disk))
 }
 
+/// zingod has served from the recorded folder's index.
+fn built(spec: &PublicServiceSpec) -> bool {
+    spec.zingod.as_ref().is_some_and(|recorded| recorded.built)
+}
+
+/// What is built of the index, in bytes.
+fn built_bytes(zingod: &IndexerFacts) -> u64 {
+    zingod.runner.index_bytes.map_or(0, |(bytes, _)| bytes)
+}
+
 fn has_room(network: Network, zingod: &IndexerFacts, disk: DiskReading) -> bool {
-    let built = zingod.runner.index_bytes.map_or(0, |(bytes, _)| bytes);
-    disk.free_bytes.saturating_add(built) >= space_needed(network)
+    disk.free_bytes.saturating_add(built_bytes(zingod)) >= space_needed(network)
 }
 
 /// [`want`]'s facts from the spec and the facts.
@@ -875,6 +887,11 @@ pub fn problem(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReason
             Blocked::DiskLow => Some(DegradedReason::DiskLow {
                 free_bytes: zingod.disk.map_or(0, |disk| disk.free_bytes),
             }),
+            // A setup's IndexSpace check says it too; an open service has only this.
+            Blocked::NoSpace => Some(DegradedReason::IndexSpace {
+                free_bytes: zingod.disk.map_or(0, |disk| disk.free_bytes),
+                need_bytes: space_needed(spec.network).saturating_sub(built_bytes(zingod)),
+            }),
             // The one port move after `PortInUse` is the runner's, under way.
             Blocked::Failed(ExitClass::PortInUse) if runner.ports_tried.len() < 2 => {
                 starting(IndexerWait::Boot)
@@ -894,11 +911,9 @@ pub fn problem(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReason
             }),
             // A pause, consent or another check says why: the setup's checks, an open
             // service's pause.
-            Blocked::Off
-            | Blocked::NoConsent
-            | Blocked::Held
-            | Blocked::UpgradeUnknown
-            | Blocked::NoSpace => starting(IndexerWait::Boot),
+            Blocked::Off | Blocked::NoConsent | Blocked::Held | Blocked::UpgradeUnknown => {
+                starting(IndexerWait::Boot)
+            }
         },
         Want::Run(run) => {
             if zingod.restarting {
@@ -1046,6 +1061,7 @@ pub fn problem_waits(why: &DegradedReason) -> bool {
             | DegradedReason::IndexBehind { .. }
             | DegradedReason::IndexerDown { .. }
             | DegradedReason::DiskLow { .. }
+            | DegradedReason::IndexSpace { .. }
     )
 }
 
@@ -1113,7 +1129,7 @@ pub fn service_checks(spec: &PublicServiceSpec, facts: &Facts) -> Vec<CheckResul
     };
     let space = match zingod.and_then(|zingod| zingod.disk.map(|disk| (zingod, disk))) {
         None => running(CheckId::IndexSpace),
-        Some((zingod, disk)) if !has_room(spec.network, zingod, disk) => fail(
+        Some((zingod, disk)) if !built(spec) && !has_room(spec.network, zingod, disk) => fail(
             CheckId::IndexSpace,
             Finding::IndexSpace {
                 path: zingod.dir.clone(),
@@ -1274,6 +1290,7 @@ pub fn stats(spec: &PublicServiceSpec, facts: &Facts) -> Option<IndexerStats> {
         phase: runner.phase.clone(),
         status: runner.status.clone(),
         dir: recorded.dir.clone(),
+        built: recorded.built,
         port: runner.port.unwrap_or(recorded.port),
         index_bytes: runner.index_bytes.map(|(bytes, _)| bytes),
         index_partial: runner.index_bytes.is_some_and(|(_, partial)| partial),
@@ -2012,7 +2029,10 @@ mod service_tests {
             Network::Testnet,
         );
         spec.backend = LightBackend::Zingod;
-        spec.zingod = Some(ZingodSpec::new(18137, dir()));
+        spec.zingod = Some(ZingodSpec {
+            built: true,
+            ..ZingodSpec::new(18137, dir())
+        });
         spec.consent = Some(Consent {
             version: CONSENT_VERSION,
             at: at(0),
@@ -2144,6 +2164,7 @@ mod service_tests {
     fn the_service_steps_checks_carry_their_findings() {
         let (mut spec, facts) = serving();
         spec.opened = false;
+        spec.zingod.as_mut().unwrap().built = false;
         // An untested pair: a zebrad pin or channel that moved.
         let mut untested = facts.clone();
         untested.zebrad_version = Some("7.1.0-alpha.0".into());
@@ -2756,6 +2777,54 @@ mod service_tests {
             );
             assert!(!ready(&spec, &facts), "{name}");
         }
+    }
+
+    /// An open service switched to zingod, or rebuilt, builds its index under the room rule as a
+    /// setup does, and says so while it waits: there is no checklist to say it. Once zingod has
+    /// served from the index, the runner's marks alone apply.
+    #[test]
+    fn an_open_service_needs_the_room_until_its_index_is_built() {
+        let (mut spec, mut facts) = serving();
+        spec.zingod.as_mut().unwrap().built = false;
+        let indexer = zingod(&mut facts);
+        indexer.disk = Some(DiskReading {
+            free_bytes: 30 * GB,
+            free_inodes: None,
+        });
+        indexer.runner.index_bytes = Some((5 * GB, false));
+        let runner = &facts.zingod.as_ref().unwrap().runner;
+        assert_eq!(
+            want(&start_facts(&spec, &facts), runner),
+            Want::Stop(Blocked::NoSpace)
+        );
+        let state = degraded_with(&spec, &facts);
+        assert_eq!(
+            state,
+            PublicState::Degraded {
+                why: DegradedReason::IndexSpace {
+                    free_bytes: 30 * GB,
+                    need_bytes: 45 * GB,
+                }
+            },
+            "50 GB, less the 5 GB built"
+        );
+        assert_eq!(gateway_mode(&state, &facts), Some(GatewayMode::Unavailable));
+        assert!(!ready(&spec, &facts));
+
+        spec.zingod.as_mut().unwrap().built = true;
+        let runner = &facts.zingod.as_ref().unwrap().runner;
+        assert_eq!(
+            want(&start_facts(&spec, &facts), runner),
+            Want::Run(RUN),
+            "a built index keeps the 10 and 20 GB marks alone"
+        );
+        let mut setup = spec.clone();
+        setup.opened = false;
+        assert_eq!(
+            outcome(&setup, &facts, CheckId::IndexSpace),
+            CheckOutcome::Pass,
+            "nor does the Service step ask a built index for the room"
+        );
     }
 
     /// Only zebrad stopping and an active upgrade zingod doesn't know close the front door.

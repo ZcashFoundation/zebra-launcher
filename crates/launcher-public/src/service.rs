@@ -1048,6 +1048,19 @@ impl Actor {
             self.restart_zingod();
             changed = true;
         }
+        // zingod serving from its folder's index: the index is built, and the room a first
+        // build needs is no longer asked for.
+        if spec.zingod.as_ref().is_some_and(|recorded| !recorded.built)
+            && zingod_rules::ready(spec, facts)
+        {
+            let _ = self
+                .update_spec(|spec| {
+                    if let Some(zingod) = &mut spec.zingod {
+                        zingod.built = true;
+                    }
+                })
+                .await;
+        }
         // The runner's one move after `PortInUse` goes into the spec.
         if let (Some(port), Some(recorded)) = (runner.port, &spec.zingod)
             && port != recorded.port
@@ -2258,15 +2271,24 @@ impl Actor {
         if restart {
             self.zingod.attempt += 1;
         }
+        // What is left of the index, if anything, is no longer a built one; and the index a
+        // mismatch was found on is gone, once the removal went through.
+        let gone = removed.is_ok();
+        if gone {
+            self.zingod.mismatch = None;
+        }
+        let saved = self
+            .update_spec(move |spec| {
+                if let Some(zingod) = &mut spec.zingod {
+                    zingod.built = false;
+                    if gone {
+                        zingod.mismatch = None;
+                    }
+                }
+            })
+            .await;
         removed?;
-        // The index a mismatch was found on is gone.
-        self.zingod.mismatch = None;
-        self.update_spec(|spec| {
-            if let Some(zingod) = &mut spec.zingod {
-                zingod.mismatch = None;
-            }
-        })
-        .await?;
+        saved?;
         if restart {
             tracing::info!(target: "zeal::public", "zingod's index is rebuilt");
         } else {

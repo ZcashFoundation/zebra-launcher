@@ -907,8 +907,8 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   the spec records zingod's folder and gives it a plan while `plan_run` allows: switched on
   with consent, a tested pair, bundled, no pause that waits for the user, zebrad on the
   service's network with this run's RPC line and cookie and at the tip once in this run, no
-  chain mismatch, every active upgrade known, and room for a setup's first build (50 GB on
-  Testnet, counting what is built). It bumps the plan's attempt for Try again
+  chain mismatch, every active upgrade known, and room for a first build until zingod has
+  served from the index once (50 GB on Testnet, counting what is built). It bumps the plan's attempt for Try again
   (`run_public_checks(Service)`), the stall rule's one restart and no validator for 30 s
   (once per zebrad run), records a port the runner moved to, reads the index folder's disk
   itself every minute, and runs the tip cross-check (zingod's `GetLatestBlock`, hash
@@ -955,7 +955,7 @@ on the node's pages: the consent screen's choice of server (`RadioChoice`), zing
 step with each check, the Server card, "Server software…" and Forget's box for the index;
 the zebrad strip says "zingod reads this node". Every sentence comes from
 `ui/src/public_text.rs`, and the mock's `?public=setup`, `serving`, `unconfirmed`, `cgnat`,
-`expiring`, `keychain`, `consent` and the 27 `zingod…` flags run launcher-herd's rules over
+`expiring`, `keychain`, `consent` and the 28 `zingod…` flags run launcher-herd's rules over
 fake facts, zingod's from its captured `/status` answers. What PS1 and Z3 left for later is
 listed in PUBLIC-SERVICES.md ("PS1 as built", "Z3 as built").
 

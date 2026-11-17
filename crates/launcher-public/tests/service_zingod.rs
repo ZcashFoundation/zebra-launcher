@@ -390,6 +390,20 @@ async fn choosing_zingod_drops_zebrads_endpoint_and_serves_from_zingod() {
     let indexer = status.indexer.expect("the Server card's facts");
     assert_eq!(indexer.phase, Phase::Running);
     assert_eq!(indexer.dir, s.index_dir());
+    let status = s
+        .wait_for("the index built", |status| {
+            status.indexer.as_ref().is_some_and(|indexer| indexer.built)
+        })
+        .await;
+    assert!(
+        s.settings
+            .current()
+            .public
+            .light_server()
+            .and_then(|spec| spec.zingod.as_ref())
+            .is_some_and(|zingod| zingod.built),
+        "{status:?}"
+    );
 
     let spec = s.settings.current().public.light_server().cloned().unwrap();
     assert_eq!(spec.backend_port, None, "zebrad's endpoint is gone");
@@ -536,6 +550,15 @@ async fn three_mismatching_tips_stop_zingod_until_a_rebuild() {
     .await;
     s.services.rebuild_index().await.unwrap();
     assert_eq!(kept(), None, "the rebuild clears it");
+    assert!(
+        s.settings
+            .current()
+            .public
+            .light_server()
+            .and_then(|spec| spec.zingod.as_ref())
+            .is_some_and(|zingod| !zingod.built),
+        "a rebuilt index is a first build again"
+    );
     s.wait_for("zingod again", |status| {
         status
             .indexer

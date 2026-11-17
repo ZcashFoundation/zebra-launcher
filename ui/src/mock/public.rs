@@ -43,6 +43,7 @@
 //! | `zingod-locked` | another program holds zingod's index |
 //! | `zingod-folder` | Zeal can't create zingod's folder: it isn't the user's to write, so Forget leaves the index |
 //! | `zingod-disk` | 6 GB free: zingod waits for disk space |
+//! | `zingod-room` | an open service switched to zingod, with too little room for its first build |
 //! | `zingod-broken` | zingod's index is damaged |
 //! | `zingod-mismatch` | zingod's tip didn't match zebrad's: stopped until a rebuild |
 //! | `zingod-tooold` | NU8 is active and zingod doesn't know it: paused |
@@ -124,6 +125,7 @@ pub(crate) enum ZingodFlag {
     Locked,
     Folder,
     Disk,
+    Room,
     Broken,
     Mismatch,
     TooOld,
@@ -133,7 +135,7 @@ pub(crate) enum ZingodFlag {
 }
 
 impl ZingodFlag {
-    const ALL: [(&'static str, ZingodFlag); 27] = [
+    const ALL: [(&'static str, ZingodFlag); 28] = [
         ("zingod-choose", ZingodFlag::Choose),
         ("zingod", ZingodFlag::Serving),
         ("zingod-building", ZingodFlag::Building),
@@ -155,6 +157,7 @@ impl ZingodFlag {
         ("zingod-locked", ZingodFlag::Locked),
         ("zingod-folder", ZingodFlag::Folder),
         ("zingod-disk", ZingodFlag::Disk),
+        ("zingod-room", ZingodFlag::Room),
         ("zingod-broken", ZingodFlag::Broken),
         ("zingod-mismatch", ZingodFlag::Mismatch),
         ("zingod-tooold", ZingodFlag::TooOld),
@@ -520,7 +523,10 @@ impl World {
         if let Some(spec) = &mut world.spec {
             spec.backend = LightBackend::Zingod;
             spec.backend_port = None;
-            spec.zingod = Some(ZingodSpec::new(ZINGOD_PORT, index_dir(network)));
+            spec.zingod = Some(ZingodSpec {
+                built: true,
+                ..ZingodSpec::new(ZINGOD_PORT, index_dir(network))
+            });
             if let Some(consent) = &mut spec.consent {
                 consent.backend = LightBackend::Zingod;
             }
@@ -711,6 +717,20 @@ impl World {
                     free_inodes: Some(24_000_000),
                 });
                 zingod.runner.disk_allows = false;
+                zingod.runner.phase = Phase::Stopped;
+                zingod.runner.status = None;
+                zingod.runner.listening = None;
+            }
+            ZingodFlag::Room => {
+                if let Some(recorded) = world.spec.as_mut().and_then(|spec| spec.zingod.as_mut()) {
+                    recorded.built = false;
+                }
+                let zingod = zingod(&mut world);
+                zingod.disk = Some(DiskReading {
+                    free_bytes: 30 * GB,
+                    free_inodes: Some(24_000_000),
+                });
+                zingod.runner.index_bytes = Some((5 * GB, false));
                 zingod.runner.phase = Phase::Stopped;
                 zingod.runner.status = None;
                 zingod.runner.listening = None;

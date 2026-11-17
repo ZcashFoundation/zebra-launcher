@@ -72,6 +72,10 @@ pub struct ZingodSpec {
     /// delete.
     #[serde(default)]
     pub mismatch: Option<u64>,
+    /// zingod has served from the index in `dir`: it is built, so the room a first build needs
+    /// is no longer asked for. A rebuild or a delete starts over.
+    #[serde(default)]
+    pub built: bool,
 }
 
 impl ZingodSpec {
@@ -81,6 +85,7 @@ impl ZingodSpec {
             port,
             dir,
             mismatch: None,
+            built: false,
         }
     }
 }
@@ -568,6 +573,10 @@ pub enum DegradedReason {
     ChainMismatch { at: u64 },
     /// The index's disk has this little free: zingod is stopped until there is more.
     DiskLow { free_bytes: u64 },
+    /// The index's disk has too little room for zingod's first build, counting what is built:
+    /// zingod doesn't start until there is `need_bytes`. An open service meets it after a
+    /// switch to zingod or a rebuild; a setup's Service step says it as `Finding::IndexSpace`.
+    IndexSpace { free_bytes: u64, need_bytes: u64 },
 }
 
 /// What zingod's start waits for.
@@ -1308,6 +1317,9 @@ pub struct IndexerStats {
     pub status: Option<IndexerStatus>,
     /// The index folder, `ZingodSpec::dir`.
     pub dir: PathBuf,
+    /// zingod has served from it (`ZingodSpec::built`).
+    #[serde(default)]
+    pub built: bool,
     /// zingod's loopback port.
     pub port: u16,
     /// The index's size, and whether the walk stopped early, so it is at least that.
@@ -1538,6 +1550,7 @@ mod tests {
         round_trips(ZingodSpec::new(18137, path.clone()));
         round_trips(ZingodSpec {
             mismatch: Some(4_611_980),
+            built: true,
             ..ZingodSpec::new(18137, path.clone())
         });
         assert_eq!(
@@ -1607,6 +1620,10 @@ mod tests {
             DegradedReason::ChainMismatch { at: 4_611_980 },
             DegradedReason::DiskLow {
                 free_bytes: 6_000_000_000,
+            },
+            DegradedReason::IndexSpace {
+                free_bytes: 30_000_000_000,
+                need_bytes: 50_000_000_000,
             },
         ];
         let details = [
@@ -1700,6 +1717,7 @@ mod tests {
             phase: Phase::Running,
             status: None,
             dir: path,
+            built: true,
             port: 18137,
             index_bytes: Some(18_400_000_000),
             index_partial: true,

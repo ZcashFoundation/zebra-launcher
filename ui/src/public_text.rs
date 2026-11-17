@@ -289,6 +289,21 @@ pub fn indexer_text(why: &DegradedReason, status: Option<&PublicStatus>) -> Stri
                 bytes(DISK_HIGH)
             )
         }
+        DegradedReason::IndexSpace {
+            free_bytes,
+            need_bytes,
+        } => {
+            let place = status
+                .and_then(|status| status.indexer.as_ref())
+                .map(|indexer| format!(" in {}", indexer.dir.display()))
+                .unwrap_or_default();
+            format!(
+                "Waiting for room: zingod needs {} free{place} to build its index, and {} is \
+                 free. It starts once there is room.",
+                bytes(*need_bytes),
+                bytes(*free_bytes)
+            )
+        }
         DegradedReason::BackingRestarting => {
             "zingod restarts with Zebra. Wallets are told to try again.".into()
         }
@@ -1092,6 +1107,16 @@ pub fn service_check_line(check: &CheckResult, status: &PublicStatus) -> String 
             Some(IndexerStats {
                 free_bytes: Some(free),
                 dir,
+                built: true,
+                ..
+            }) => format!(
+                "{} free in {}, where zingod's index is built",
+                bytes(*free),
+                dir.display()
+            ),
+            Some(IndexerStats {
+                free_bytes: Some(free),
+                dir,
                 ..
             }) => format!(
                 "{} free in {}: zingod's index needs {} there",
@@ -1521,6 +1546,7 @@ mod tests {
             phase: Phase::Running,
             status: None,
             dir: PathBuf::from("/mnt/zebra/zingod/testnet"),
+            built: false,
             port: 18137,
             index_bytes: None,
             index_partial: false,
@@ -1627,6 +1653,14 @@ mod tests {
                 },
                 "Waiting for disk space: 6.0 GB free for zingod's index in \
                  /mnt/zebra/zingod/testnet. zingod starts again above 20.0 GB.",
+            ),
+            (
+                DegradedReason::IndexSpace {
+                    free_bytes: 30_000_000_000,
+                    need_bytes: 45_000_000_000,
+                },
+                "Waiting for room: zingod needs 45.0 GB free in /mnt/zebra/zingod/testnet to \
+                 build its index, and 30.0 GB is free. It starts once there is room.",
             ),
         ];
         for (why, line) in cases {
@@ -1837,6 +1871,7 @@ mod tests {
                 version: "1.1.0".into(),
             }),
             dir: PathBuf::from("/mnt/zebra/zingod/testnet"),
+            built: true,
             port: 18137,
             index_bytes: Some(18_400_000_000),
             index_partial: false,
