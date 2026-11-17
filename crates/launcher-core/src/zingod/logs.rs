@@ -775,7 +775,10 @@ mod tests {
                 ("level".to_string(), "info".to_string()),
             ])
         );
-        assert_eq!(fields("ts=1 ="), Some(vec![("ts".to_string(), "1 =".to_string())]));
+        assert_eq!(
+            fields("ts=1 ="),
+            Some(vec![("ts".to_string(), "1 =".to_string())])
+        );
         assert_eq!(fields("=bad"), None);
     }
 }

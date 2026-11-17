@@ -596,7 +596,28 @@ impl Cases {
             .status()
             .unwrap();
         assert!(killed.success());
-        // A kill is a crash: the supervisor starts it again after its backoff.
+        // A kill is a crash: the supervisor starts it again after its backoff. Wait for that new
+        // zingod, then for its own /status (the old one is gone, so a cached answer can't pass).
+        timeout(LIMIT, async {
+            while zingod_pid(&zingod).await == pid {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("zingod starts again after the kill");
+        timeout(LIMIT, async {
+            loop {
+                if let Some(status) = read_status(zingod.addr(), Duration::from_secs(1)).await
+                    && status.state == IndexerState::Serving
+                    && status.served == Some(5_000)
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the new zingod reopens its index and serves");
         zingod.serving_at(5_000).await;
         zingod.stop().await;
         zebrad.stop().await;

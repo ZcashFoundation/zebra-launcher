@@ -536,7 +536,9 @@ async fn a_stale_zingod_that_cant_be_ended_waits_for_a_new_attempt() {
     std::fs::write(indexes.join("seg-1"), b"index").unwrap();
     let refused = timeout(LIMIT, setup.runner.delete()).await.unwrap();
     assert!(
-        refused.as_ref().is_err_and(|err| err.contains(&pid.to_string())),
+        refused
+            .as_ref()
+            .is_err_and(|err| err.contains(&pid.to_string())),
         "{refused:?}"
     );
     assert!(indexes.join("seg-1").exists(), "the index stays");
