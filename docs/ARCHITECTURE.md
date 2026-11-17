@@ -971,7 +971,10 @@ listed in PUBLIC-SERVICES.md ("PS1 as built", "Z3 as built").
   read, stops it below 10 GB free and starts it again above 20 GB, and after `DiskFull`
   restarts it only on evidence that covers the failure. A start that a stale zingod failed
   (one the supervisor couldn't end) isn't tried again until zebrad's run or the attempt
-  changes, and `ZingodFacts.stale` names it. It reads `/status` every 5 s (hyper,
+  changes, and `ZingodFacts.stale` names it; so is one that failed before the spawn, on a
+  folder Zeal couldn't create or write zingod's files in, which `ZingodFacts.start_error` names
+  with its error. The facts name the attempt each start was for (`started_attempt`), from which
+  the actor tells a restart it asked for is still under way. It reads `/status` every 5 s (hyper,
   HTTP/1.1, a new connection, 2 s),
   the disk every minute, the index's size every 10 minutes (50,000 entries at most, in
   `spawn_blocking`) and the process tree, and publishes them as a `watch<ZingodFacts>`.
