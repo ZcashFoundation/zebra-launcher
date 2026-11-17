@@ -754,10 +754,14 @@ build it only through cargo, with `CARGO_TARGET_DIR` outside the checkout.
 
 ### Bumping ZINGOD_VERSION
 
-`scripts/bump-zingod.sh <ver> <commit>` writes `ZINGOD_VERSION` and
-`ZINGOD_COMMIT`, refreshes the licence folder from a checkout at the commit,
-and runs the version checks; set `ZINGOD_DATE` in the same commit. No watcher
-opens these pull requests yet: upstream's release cadence is unknown. Then:
+[`scripts/bump-zingod.sh`](../scripts/bump-zingod.sh) `<ver> <commit>` fetches
+the commit (or takes a checkout at it with `--src-dir`) and its dependencies,
+refreshes the licence folder through `zingod-licenses.sh`, writes
+`ZINGOD_VERSION` and `ZINGOD_COMMIT`, and runs the version checks. It prints
+the commit's date in UTC: set `ZINGOD_DATE` to it in the same commit. If a
+file it would commit holds an email address, it names the file and writes
+nothing. No watcher opens these pull requests yet: upstream's release cadence
+is unknown. Then:
 
 1. Resolve the tag with `git ls-remote https://github.com/zingolabs/zingod
    "refs/tags/v$VER" "refs/tags/v$VER^{}"`. A `^{}` line, if there is one, is
@@ -774,16 +778,17 @@ opens these pull requests yet: upstream's release cadence is unknown. Then:
    - `rust-toolchain.toml`, `[features]` and `Cargo.lock`'s git sources.
 3. Run the **zingod sidecars** workflow on both Linux targets: every check must
    pass. Read the advisory report.
-4. Capture the fixtures again with `real_zingod.rs`'s capture mode:
+4. From Z2: capture the fixtures again with `real_zingod.rs`'s capture mode:
    `zingod-<ver>-generate.toml`, the log lines, `/status` for each state and
    the `LightdInfo` bytes. `cargo test` fails until the writer and the reader
    agree with them. `generate-config` leaves out keys that default to unset, so
    also check the writer's list of such keys (only `cookie_path` at 1.1.0)
    against `packages/zingod/src/config.rs`.
-5. Update `TESTED_ZINGOD` and `ZINGOD_KNOWS`.
-6. Run `real_zingod.rs` against the Stable zebrad pin (CI does this on the pull
-   request), with `PREV_ZINGOD_BIN` set to the previous pin's build, so an
-   index the old one wrote must open with the new one. Then run **Bundle**.
+5. From Z3: update `TESTED_ZINGOD` and `ZINGOD_KNOWS`.
+6. From Z2: run `real_zingod.rs` against the Stable zebrad pin (CI does this on
+   the pull request), with `PREV_ZINGOD_BIN` set to the previous pin's build,
+   so an index the old one wrote must open with the new one. Then run
+   **Bundle**.
 7. Before a release lists the new version as tested on a network, do the wallet
    runs there; a first Mainnet listing waits for PUBLIC-SERVICES.md's Mainnet
    gate.
