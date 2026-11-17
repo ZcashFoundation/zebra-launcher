@@ -152,8 +152,8 @@ pub struct MachineResources {
     /// macOS only.
     #[serde(default)]
     pub pressure: Option<MemoryPressure>,
-    /// The volumes that hold a node's data folder, read every 30 s; the newest reading goes
-    /// with every sample. Empty until the first reading.
+    /// The volumes that hold a node's data folder, read every 30 s; the newest reading of each
+    /// goes with every sample. Empty until the first reading.
     #[serde(default)]
     pub volumes: Vec<VolumeUsage>,
 }
@@ -168,7 +168,8 @@ pub struct VolumeUsage {
     pub free_bytes: u64,
     /// The nodes whose data folder is on it, in the node list's order.
     pub nodes: Vec<NodeId>,
-    /// When it was read.
+    /// When it was read: the newest read of its folders. A folder whose read hangs keeps its
+    /// last reading, so an old time means old figures.
     pub measured_at: SystemTime,
 }
 

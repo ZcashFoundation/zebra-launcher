@@ -450,9 +450,12 @@ impl MachineSampler {
 
 - **One per app.** Each tick reads the CPU counters and memory in `spawn_blocking`. Busy
   cores are the growth of the counters over the interval.
-- **Volumes.** A separate blocking task reads the volumes every 30 s. An in-flight flag
-  owned by the actor means a hung network mount delays only its own result. Volumes are
-  grouped by device, and each lists the nodes it holds.
+- **Volumes.** Every 30 s, and when the folders change, each folder's volume is read on a
+  blocking task of its own. The actor keeps at most one read in flight per folder, so a hung
+  network mount delays only the folders on it: they keep their last reading, with its time,
+  while the others' readings go on. A folder that leaves the list is forgotten; its stuck
+  read can end on its own. Each read that ends regroups the newest readings by device, each
+  volume listing the nodes it holds, and publishes them.
 - **macOS host port.** The reader takes the host port with `mach_host_self` once and keeps
   it, because each call adds a send right.
 - **End.** The task ends when every receiver is dropped.
@@ -1189,7 +1192,8 @@ timebase path runs) and windows-2025 (`ci.yml`).
     warning per run.
   - Dropping the probe's sender ends the task.
   - The machine's busy cores come from two readings.
-  - A hung volume read does not block the CPU and memory ticks.
+  - A hung volume read does not block the CPU and memory ticks, nor the other folders'
+    volumes, also after its folder leaves the list.
   - Volumes are grouped by device and list their nodes.
 - **Supervisor** (`tests/supervisor.rs`).
   - `watch_probe()` is `Some`, with the same pid as `Status.pid`, from Starting until
@@ -1678,11 +1682,14 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      follows the registry's summaries (a node added, removed or given another folder), not
      from a `data_dirs` mapping of the settings in src-tauri, as several nodes have their own
      folders; a registry test checks that it follows them.
-   - One volume read is in flight at a time, on a blocking task of its own; folders that
-     change during a read are read again when it ends. The newest volumes go into every
-     sample, and a finished read updates the sample already published, so the UI's history
-     gets the sample again with the same time and replaces its newest. A folder whose volume
-     cannot be read is left out, with one warning per sampler and debug lines after it. On a
+   - Each folder's volume is read on a blocking task of its own, at most one read in flight
+     per folder (a `JoinSet`, with the folder of each task's id), so a hung mount holds up
+     only the folders on it; they keep their last reading and its time. A volume's
+     `measured_at` is the newest reading among its folders. The newest volumes go into every
+     sample, and each read that ends updates the sample already published, so the UI's
+     history gets the sample again with the same time and replaces its newest. A folder whose
+     volume cannot be read is left out, with one warning per sampler and debug lines after
+     it. On a
      platform without a machine reader the sampler stops at its first reading, as before,
      and reads no volumes. `MachineResources::volume_of(node)` finds a node's volume, and Copy
      diagnostics has a line per volume under the computer.

@@ -604,7 +604,9 @@ between runs); unlike the RPC monitor and the metrics poller it does not wait fo
 `watch<Option<MachineResources>>`, and every 30 s, and whenever the registry's data folders
 change (`RegistryHandle::watch_data_dirs`), the volumes that hold them (`firstrun::volume`:
 `statvfs` and the mount point on Unix, `GetDiskFreeSpaceExW` and `GetVolumePathNameW` on
-Windows), one read at a time on a task of its own, since a dead network mount can hang it.
+Windows), one read at a time for each folder, each on a task of its own, since a dead
+network mount can hang it: a hung folder keeps its last reading, with its time, and the
+other folders' readings go on.
 Each read is a
 `spawn_blocking` task that takes its inputs by value and returns an owned reading, and each
 sampler is an actor that owns its state. `resources/fold.rs` keeps the tree's totals
