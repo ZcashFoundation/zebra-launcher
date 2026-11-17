@@ -42,7 +42,7 @@ kept as the historical design record; where the two differ, this file describes 
 
 | Path | Role |
 | --- | --- |
-| `crates/launcher-types` | serde types shared by backend and UI (`Status`, `LogLine`, `Settings`, `NodeStats`, `NodeProgram`, `ZebradChannel`, `NodeDocs`, errors). Builds natively and to wasm; no tokio, no Tauri. |
+| `crates/launcher-types` | serde types shared by backend and UI (`Status`, `LogLine`, `Settings`, `NodeStats`, `NodeProgram`, `ZebradChannel`, `NodeDocs`, the zingod pins, errors). Builds natively and to wasm; no tokio, no Tauri. |
 | `crates/explorer-model` | The block explorer's pure model: zebrad's response shapes, the block ledger and shielded budget, network upgrade heights, the search classifier, the pages' views and a synthetic chain for the mock and tests. serde only; builds natively and to wasm. |
 | `crates/launcher-core` | Logic that does not need Tauri: the node registry and node specs, per-channel sidecar resolution, supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind. |
 | `crates/launcher-core/src/bin/fake-zebrad.rs` | Scripted stand-in for zebrad, used by tests and PR bundle builds. |
