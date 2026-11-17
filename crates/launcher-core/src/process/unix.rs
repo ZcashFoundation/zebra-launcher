@@ -11,8 +11,8 @@ use nix::{
 
 /// Puts the child in its own process group, so an escalated kill reaches
 /// anything it started, on Linux makes the kernel send it `SIGTERM` if the
-/// spawning thread dies, and sets its nice value when it isn't 0 (zingod's
-/// 10).
+/// spawning thread dies, and raises its nice value by `nice` when that isn't 0
+/// (zingod's 10).
 pub(super) fn prepare(cmd: &mut tokio::process::Command, nice: i32) {
     cmd.process_group(0);
     // Elsewhere zebrad spawns without a hook, as it always has.
@@ -20,7 +20,8 @@ pub(super) fn prepare(cmd: &mut tokio::process::Command, nice: i32) {
         return;
     }
     // SAFETY: the closure runs in the forked child before exec and only makes
-    // the prctl and setpriority system calls: no allocation and no lock.
+    // the prctl, getpriority and setpriority system calls and sets errno: no
+    // allocation and no lock.
     unsafe {
         cmd.pre_exec(move || {
             #[cfg(target_os = "linux")]
@@ -30,13 +31,24 @@ pub(super) fn prepare(cmd: &mut tokio::process::Command, nice: i32) {
     }
 }
 
-/// Sets the calling process's nice value; 0 leaves it alone.
+/// Raises the calling process's nice value by `nice`, capped at 19; 0 leaves
+/// it alone. It adds to the nice value the child inherited, so the child stays
+/// below the parent's priority, and since it never lowers the value it needs no
+/// privilege at any parent nice.
 fn set_nice(nice: i32) -> io::Result<()> {
     if nice == 0 {
         return Ok(());
     }
+    // getpriority can return -1 as a nice value, so only errno tells an error.
+    Errno::clear();
+    // SAFETY: getpriority reads no memory of ours; `who` 0 is this process.
+    let current = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+    if current == -1 && Errno::last_raw() != 0 {
+        return Err(io::Error::last_os_error());
+    }
     // SAFETY: setpriority reads no memory of ours; `who` 0 is this process.
-    let result = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
+    let result =
+        unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, current.saturating_add(nice).min(19)) };
     if result == -1 {
         return Err(io::Error::last_os_error());
     }
@@ -124,7 +136,8 @@ pub(super) fn executable_of(_pid: u32) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// A child prepared with a nice value runs at it, and one with 0 at ours.
+    /// A child prepared with a nice value runs at ours plus that value, capped
+    /// at 19, and one with 0 at ours.
     #[test]
     fn the_child_runs_at_its_nice_value() {
         let nice_of = |nice: i32| {

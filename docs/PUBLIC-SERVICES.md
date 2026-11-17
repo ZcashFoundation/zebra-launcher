@@ -650,8 +650,8 @@ short; the panel and zebrad's Stop and Restart say so.
     today's: `-c <config> start`, the `ZEBRA_*` variables removed, the colour variables forced
     off and the stdin-close pairing checked. zingod's branch gets `-c <config> start`, stdin null,
     a cleared environment with its five variables (below), and no
-    stdin-close argument. `unix::prepare` takes a nice value and sets it in the same `pre_exec`
-    as the parent-death signal.
+    stdin-close argument. `unix::prepare` takes a nice value and adds it to the inherited one in
+    the same `pre_exec` as the parent-death signal.
   - The actor (`supervisor/actor.rs`): the spawn (`:456`) passes the `Launch`; the pid file
     records `Launch::binary()` (`:509`); the "started" note names the program, "zingod started
     (pid N)" (`:536`); and the detector, the line parser, the exit classifier and `Running` at
@@ -1381,6 +1381,9 @@ command line and the reader) and `Launch` in the supervisor and the spawner; `Di
   makes the one port move, keeps the disk's hysteresis and applies the `DiskFull` recovery, with
   the herd's functions that `want()` uses. The moved port is in `ZingodFacts.port`, for Z3 to
   record in the spec; a new zebrad run or attempt starts again from the plan's port.
+- **nice** adds 10 to the nice value zingod inherits from Zeal, capped at 19, rather than
+  setting 10: zingod stays below zebrad at any nice Zeal runs at, and raising a nice value
+  needs no privilege, where lowering one (Zeal at nice 15, say) fails the spawn.
 - **Notes**: every note of the supervisor names its program ("zingod exited", "restarting
   zingod in 1s"), not only the start; zebrad's read as before.
 - **`ZINGOD_KNOWS`** for 1.1.0 lists the 11 upgrades of launcher-herd's `BRANCH_IDS`, NU6.2

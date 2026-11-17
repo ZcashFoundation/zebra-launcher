@@ -378,8 +378,9 @@ zebrad and zingod; see
 **Spawn environment.** `zebrad -c <the node's zebrad.toml> start`. Every inherited
 `ZEBRA_*` variable is removed with `env_remove` (never `env_clear`, which would drop
 `PATH`, `HOME`, `SystemRoot` and `LOCALAPPDATA`). zingod is the exception:
-`zeal-zingod -c <config> start` runs with stdin null, at nice 10 (set with `setpriority` in
-the same `pre_exec` as the parent-death signal), and a cleared environment holding only
+`zeal-zingod -c <config> start` runs with stdin null, at nice 10 above Zeal's, capped at 19
+(added with `getpriority` and `setpriority` in the same `pre_exec` as the parent-death signal,
+so it needs no privilege), and a cleared environment holding only
 `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME` under `<index dir>/home` and
 `RUST_LOG=zingod=info` (`ZingodCommand::env`), so no `ZINGOD_CONFIG_*`, malformed `RUST_LOG`
 or `NOTIFY_SOCKET` reaches it. It runs on Linux only and starts no program. `ZEBRA_TRACING__USE_COLOR=false` and

@@ -1,5 +1,5 @@
-//! How zingod is started: `zeal-zingod -c <config> start`, with stdin null, at nice 10, in an
-//! environment that holds only what Zeal sets.
+//! How zingod is started: `zeal-zingod -c <config> start`, with stdin null, at nice 10 above
+//! Zeal's, in an environment that holds only what Zeal sets.
 //!
 //! The environment is cleared, an exception to zebrad's rule (docs/ARCHITECTURE.md): zingod
 //! runs on Linux only and, with `[snapshot]` off, starts no program, so it needs no `PATH`.
@@ -13,7 +13,8 @@ use std::{ffi::OsString, path::PathBuf};
 /// The filter zingod logs with: its own crates at INFO, its default.
 pub const RUST_LOG: &str = "zingod=info";
 
-/// zingod's nice value: zebrad gets the CPU first while zingod builds its index on every core.
+/// How far zingod's nice value is above Zeal's, capped at 19: zebrad gets the CPU first while
+/// zingod builds its index on every core.
 pub const NICE: i32 = 10;
 
 /// How to run zingod.
