@@ -1418,8 +1418,10 @@ command line and the reader) and `Launch` in the supervisor and the spawner; `Di
   with no connection or with an h2c client that answers zingod's GOAWAY, and zingod's whole
   10 s drain with one that doesn't; a flipped last written byte of
   `compact_block/blocks.dat` fails the next start with `<file>: tail page fails its checksum`.
-  Its capture mode wrote the zingod fixtures. The disk-full texts and how `Diverged` reaches
-  stderr are still unconfirmed: fake-zingod plays the texts the code has.
+  Its capture mode wrote the zingod fixtures. It checks zingod's `GetLightdInfo` fields
+  directly, over its own call, so no `LightdInfo` bytes fixture was captured from zingod: the
+  decoder stays pinned to zebrad's. The disk-full texts and how `Diverged` reaches stderr are
+  still unconfirmed: fake-zingod plays the texts the code has.
 - **CI**: `real-zingod` runs on both Linux targets with this run's `zingod-<triple>`, and
   `zingod-gate` now also runs on every push to `main`, so `main` builds zingod there as well
   as in `bundle.yml`. It runs without `PREV_ZINGOD_BIN`, since there is no previous pin yet. The
@@ -2664,9 +2666,9 @@ herd's peer counts (whether the counters split by zone is unconfirmed).
   a test that no plan step makes a network request; pauses with their hysteresis and resume
   rules (zebrad behind or restarting, the name elsewhere, the cap, a third attack); evidence
   ages, and DNS-01 never counting; the endpoint's key present only while the service is on; the
-  branch check; Zodl's check over `LightdInfo` bytes captured from zebrad's endpoint (and from
-  zingod in Z2), with field numbers pinned to a vendored `service.proto`; `PublicHostname` and
-  `SeedZone`. zingod's are in [Tests for zingod](#tests-for-zingod).
+  branch check; Zodl's check over `LightdInfo` bytes captured from zebrad's endpoint, with
+  field numbers pinned to a vendored `service.proto`; `PublicHostname` and `SeedZone`. zingod's
+  are in [Tests for zingod](#tests-for-zingod).
 - **Adapters**: zebrad's managed key, written while the service is on, removed when it is off,
   a hand edit overridden, a non-loopback value refused, a hand-set loopback value kept while no
   service is set up; the `Opened lightwalletd gRPC endpoint at` and bind-failure lines from
