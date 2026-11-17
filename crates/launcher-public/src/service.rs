@@ -2251,13 +2251,13 @@ impl Actor {
             .map_err(|err| err.to_string())
     }
 
-    /// zingod's part of the diagnostics: its status, its files and its last log lines, which
-    /// the reader redacted before they reached the ring.
+    /// zingod's part of the diagnostics: its supervisor's phase and its last `/status`, the
+    /// paths of its files (the cookie is a path) and its last log lines, which the reader
+    /// redacted before they reached the ring.
     async fn indexer_diagnostics(&mut self) -> Option<String> {
         let spec = self.spec()?;
         let recorded = spec.zingod.clone()?;
-        let facts = self.facts(&spec, SystemTime::now());
-        let stats = zingod_rules::stats(&spec, &facts);
+        let runner = self.zingod.facts();
         let mut text = String::new();
         text.push_str(&format!("backend: {:?}\n", spec.backend));
         text.push_str(&format!("index folder: {}\n", recorded.dir.display()));
@@ -2281,9 +2281,10 @@ impl Actor {
                 .rpc_cookie_file()
                 .display()
         ));
+        text.push_str(&format!("phase: {:?}\n", runner.phase));
         text.push_str(&format!(
             "status: {}\n",
-            serde_json::to_string_pretty(&stats).unwrap_or_default()
+            serde_json::to_string_pretty(&runner.status).unwrap_or_default()
         ));
         let lines = match &self.zingod.runner {
             Some(runner) => runner.handle.subscribe().await,
