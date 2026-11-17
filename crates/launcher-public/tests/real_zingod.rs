@@ -32,7 +32,7 @@ use launcher_core::{
     logfile::RotatingLogConfig,
     paths::Paths,
     process::ZebradCommand,
-    rpc::RpcClient,
+    rpc::{RpcClient, RpcError},
     supervisor::{self, SupervisorConfig, SupervisorHandle},
     zingod::{ZingodCommand, ZingodConfig, ZingodNetwork},
 };
@@ -76,6 +76,18 @@ fn free_port() -> u16 {
 
 fn loopback(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+}
+
+/// Whether `err` says zebrad isn't ready for a call yet, so the call is made again: its state
+/// holds no block, its RPC refuses the connection, or its cookie isn't there to read. Never a
+/// call that may have reached zebrad, a timeout included: `generate` made twice would mine
+/// twice.
+fn not_ready(err: &RpcError) -> bool {
+    match err {
+        RpcError::Http(err) => err.is_connect(),
+        RpcError::Cookie { .. } => true,
+        err => err.to_string().contains("state is empty"),
+    }
 }
 
 #[ignore = "needs ZEBRAD_BIN and ZINGOD_BIN; run with -- --include-ignored"]
@@ -170,13 +182,23 @@ impl Zebrad {
         RpcClient::new(self.rpc, self.cookie.clone()).unwrap()
     }
 
-    /// Mines `blocks` with `generate`, once zebrad's state holds its genesis block.
+    /// Mines `blocks` with `generate`, once zebrad is ready for it ([`not_ready`]). The mine
+    /// may outlast the client's 10 s request timeout (5,000 blocks did on the aarch64 runner),
+    /// so the call gets the whole `LIMIT`.
     async fn generate(&self, blocks: u64) {
         let hashes: Vec<String> = timeout(LIMIT, async {
             loop {
-                match self.client().call("generate", json!([blocks])).await {
+                let called = match self.client().session().await {
+                    Ok(session) => {
+                        session
+                            .call_timeout("generate", json!([blocks]), LIMIT)
+                            .await
+                    }
+                    Err(err) => Err(err),
+                };
+                match called {
                     Ok(hashes) => return hashes,
-                    Err(err) if err.to_string().contains("state is empty") => {
+                    Err(err) if not_ready(&err) => {
                         tokio::time::sleep(Duration::from_millis(200)).await;
                     }
                     Err(err) => panic!("zebrad mines on Regtest: {err}"),
@@ -184,7 +206,7 @@ impl Zebrad {
             }
         })
         .await
-        .unwrap();
+        .unwrap_or_else(|_| panic!("zebrad didn't mine {blocks} blocks in {LIMIT:?}"));
         assert_eq!(hashes.len() as u64, blocks);
     }
 
