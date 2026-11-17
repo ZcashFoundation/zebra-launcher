@@ -101,10 +101,16 @@ pub fn fields(line: &str) -> Option<Vec<(String, String)>> {
         let key_end = rest.find([' ', '=']).unwrap_or(rest.len());
         let key = &rest[..key_end];
         if !rest[key_end..].starts_with('=') || key.is_empty() {
+            // A word with no key (`=bad`) runs to the next space, so the line always moves on.
+            let word_end = if key.is_empty() {
+                rest.find(' ').unwrap_or(rest.len())
+            } else {
+                key_end
+            };
             let (_, value) = out.last_mut()?;
             value.push(' ');
-            value.push_str(key);
-            rest = &rest[key_end..];
+            value.push_str(&rest[..word_end]);
+            rest = &rest[word_end..];
             continue;
         }
         rest = &rest[key_end + 1..];
@@ -758,5 +764,18 @@ mod tests {
             assert_eq!(redact(&raw), redacted, "{raw}");
         }
         assert!(matches!(redact("ts=1 message=x"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn a_word_with_no_key_joins_the_value_before_it() {
+        assert_eq!(
+            fields("ts=1 =bad level=info"),
+            Some(vec![
+                ("ts".to_string(), "1 =bad".to_string()),
+                ("level".to_string(), "info".to_string()),
+            ])
+        );
+        assert_eq!(fields("ts=1 ="), Some(vec![("ts".to_string(), "1 =".to_string())]));
+        assert_eq!(fields("=bad"), None);
     }
 }
