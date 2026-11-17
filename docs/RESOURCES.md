@@ -1443,6 +1443,11 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - After the scan, the reader reads each member in tree order, a parent before its
      children. A reap between two reads can then hide a child's time for one reading, which
      the never-decreasing total holds, but never count it twice.
+   - A process that is exiting, or a zombie, has no memory map left, and the kernel then gives
+     its `io` and `fd` to root. The reader does not count that as the OS refusing the fields:
+     the member has 0 open files, and its I/O keeps its last values in the fold. (Counting it
+     as a refusal made `reads_this_process` fail now and then, #113, when another test's
+     child was a zombie under the test process.)
    - The fold also covers a member that leaves in the same interval as its parent: it is
      checked against the nearest live ancestor, shallowest first, and growth that its
      departures leave unclaimed carries over to the waiting ones. zebrad running a
