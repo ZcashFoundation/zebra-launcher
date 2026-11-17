@@ -1018,6 +1018,20 @@ mod tests {
         }
         // The earlier transactions were read in the background: from memory now.
         assert!(reads.sources().iter().skip(26).all(|call| call.cached));
+        // A block whose size zebrad does not report (`?explorer=nobi`) is read row by row too:
+        // it may be a full one.
+        let nobi = SynthChain::new(Network::Mainnet, 3_551_000, NOW).with_missing_rows(7);
+        let unreported = nobi.block(BlockId::Height(3_550_007)).unwrap();
+        assert!(unreported.size.is_none() && unreported.tx.len() < 50);
+        let mut reads = Reads::new(&nobi, &mut seen);
+        let page = block_txs(&mut reads, unreported.hash, 0, 25, false).unwrap();
+        assert_eq!(page.read, RowsRead::OneByOne);
+        assert!(
+            reads
+                .sources()
+                .iter()
+                .all(|call| !call.params.ends_with(",3]"))
+        );
     }
 
     #[test]

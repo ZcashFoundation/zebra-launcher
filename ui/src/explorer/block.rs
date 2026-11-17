@@ -694,11 +694,19 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
             </span>
         }
     };
+    // zebrad does not report the size of a block it has no value-pool row for, and such a
+    // block is read row by row in case it is a big one.
+    let sized = page.summary.size.is_some();
     let reading = move || {
         let fees = !store.pending.with(HashSet::is_empty);
         match store.read.get() {
             Some(RowsRead::OneByOne) => Some(format!(
-                "A big block: {} transactions, read from your node as their rows come into view{}.",
+                "{}: {} transactions, read from your node as their rows come into view{}.",
+                if sized {
+                    "A big block"
+                } else {
+                    "A block of a size zebrad does not report"
+                },
                 thousands(u64::from(total)),
                 if fees {
                     "; reading the fees of the rows in view"

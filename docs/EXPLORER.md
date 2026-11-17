@@ -1335,8 +1335,9 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
 - **Spent outputs** have no cache of their own by outpoint: they come from the block at
   verbosity 3, kept whole (reduced) by its hash, or from the earlier transactions, kept as
   transactions. A small block is one of up to 256 transactions and 512 KB, the design's
-  thresholds until the P0 bench measures v3; its body is decoded on the read's task, not in
-  `spawn_blocking`. A big block's rows are read with `getrawtransaction(txid, 1)` without the
+  thresholds until the P0 bench measures v3; a block whose size zebrad does not report (no
+  `BlockInfo` row) counts as big, since it may be a full one of few transactions. A small
+  block's body is decoded on the read's task, not in `spawn_blocking`. A big block's rows are read with `getrawtransaction(txid, 1)` without the
   block hash, so they share the transaction cache with the Transaction page. The earlier
   transactions a page of them spends from are read on the prefetch lane, also when the page
   waits for them, so rows asked for meanwhile and the follower's checks of the tip go first.

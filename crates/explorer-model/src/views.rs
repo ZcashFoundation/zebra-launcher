@@ -29,9 +29,11 @@ pub const RESOLVED_PARENTS: usize = 1_000;
 /// ... and this many for a waiting one.
 pub const RESOLVED_WAITING_PARENTS: usize = 200;
 
-/// Whether `block` is read whole at verbosity 3 rather than row by row: a small one.
+/// Whether `block` is read whole at verbosity 3 rather than row by row: a small one. A block
+/// whose size zebrad does not report (it has no `BlockInfo` row for it) counts as big: it may
+/// be a full one of few large transactions.
 pub fn read_whole(block: &BlockV1) -> bool {
-    block.tx.len() <= WHOLE_BLOCK_TXS && block.size.is_none_or(|size| size <= WHOLE_BLOCK_BYTES)
+    block.tx.len() <= WHOLE_BLOCK_TXS && block.size.is_some_and(|size| size <= WHOLE_BLOCK_BYTES)
 }
 
 /// The earlier transactions `tx` spends from whose outputs are not in `spent` yet, each once,
@@ -931,7 +933,10 @@ mod tests {
             next: None,
         };
         assert!(read_whole(&block(256, Some(512 * 1024))));
-        assert!(read_whole(&block(10, None)), "a size zebrad does not know");
+        assert!(
+            !read_whole(&block(10, None)),
+            "a size zebrad does not know may be large"
+        );
         assert!(!read_whole(&block(257, Some(1_000))));
         assert!(!read_whole(&block(10, Some(600_000))));
     }
