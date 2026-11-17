@@ -1,8 +1,8 @@
 # The bundled sidecars
 
 Zeal ships three zebrads as Tauri sidecars, so a node on any supported channel
-works without a runtime download. From Z1 (proposed, not built yet), Linux
-bundles also carry zingod, for the light client server
+works without a runtime download. Linux bundles also carry zingod, for the
+light client server, which doesn't run it yet
 ([The bundled zingod](#the-bundled-zingod-linux)). The zebrads:
 
 | Channel | Sidecar in `src-tauri/binaries/` | Version | Pinned Zebra commit | Release/snapshot date |
@@ -408,10 +408,12 @@ To bump by hand, or to finish the watcher's pull request:
 
 ## The bundled zingod (Linux)
 
-> **Proposal, 2026-11-16: Z1 in
-> [PUBLIC-SERVICES.md](PUBLIC-SERVICES.md#phases-for-zingod), not built yet.**
-> Facts checked at zingod tag `v1.1.0`; paths under `packages/` are zingod's.
-> Build times and sizes come from research builds on 2026-11-16.
+> **Built in Z1** ([PUBLIC-SERVICES.md](PUBLIC-SERVICES.md#phases-for-zingod)),
+> 2026-11-16: the pins, the build, its CI and the Linux bundles. Nothing runs
+> zingod until Z2 and Z3, whose parts below say so. Facts checked at zingod tag
+> `v1.1.0`; paths under `packages/` are zingod's. Build times and sizes come
+> from builds on 2026-11-16. CI has not run the workflows yet, so the aarch64
+> build is still unverified.
 
 Zeal also bundles zingod, Zingo Labs' light client indexer, as `zeal-zingod`,
 on Linux only. Only the light client server runs it
@@ -425,9 +427,11 @@ on Linux only. Only the light client server runs it
   lowercase commit, an ISO date, and the three files change together.
   `scripts/check-versions.sh` checks their grammar; it uses only bash, grep and
   sed and runs before anything compiles. `fake-zingod` reads `ZINGOD_VERSION`
-  with `include_str!` when it is built, as fake-zebrad reads `ZEBRAD_VERSION`,
-  and a cargo test checks that its `--version` reports it. A launcher-herd test
-  checks that the version is on `TESTED_ZINGOD`.
+  when it is built, through `launcher_types::zingod::version()` (an
+  `include_str!`), as fake-zebrad reads `ZEBRAD_VERSION`, and a cargo test
+  (`crates/launcher-core/tests/fake_zingod.rs`) checks that its `--version`
+  reports the file's version. From Z3, a launcher-herd test checks that the
+  version is on `TESTED_ZINGOD`.
 - **The name.** The `zeal-` prefix keeps the `.deb`'s `/usr/bin/zeal-zingod`
   from shadowing a system `zingod`.
 - **The date** is the tag commit's date in UTC; zingod's CHANGELOG heads the
@@ -448,6 +452,37 @@ it ships from the pinned commit, as it builds Nightly zebrad, and never uses
 the image. Zeal's attestation says where a binary was built, not that Zingo
 Labs released it.
 
+### Where Z1 differs from the design
+
+What was built follows PUBLIC-SERVICES.md's Z1, with these differences:
+
+- The list of licence files and where each comes from is in a third script,
+  `scripts/zingod-licenses.sh`, which `build-zingod.sh` and `bump-zingod.sh`
+  both call. It also writes `README.txt` from the checkout and its
+  `Cargo.lock`, so a bump refreshes it and the build checks it.
+- zingod's checkout holds only the Apache-2.0 notice, so `Apache-2.0.txt` is
+  apache.org's text, checked against that file's sha256. Some dependencies
+  ship the same text (zeroize 1.9.0's `LICENSE-APACHE`, for one), but a check
+  tied to one of them would break whenever it changes.
+- `build-zingod.sh` builds only for the host's own Linux triple, since its
+  checks run the binary, and takes the host from `uname`. It checks the
+  licence folder before the build rather than after, and fixes jemalloc's
+  page and address layout instead of letting its configure probe the build
+  machine ([step 4 below](#how-zingod-is-built)).
+- The workflows install the artifact through `install_zingod` in
+  `scripts/lib.sh`, which also checks the build information's commit, target
+  and binary sha256.
+- `ci.yml`'s gate also covers every other file the build runs or reads
+  (`lib.sh`, `zingod-licenses.sh`, the licence folder, `check-glibc.sh`,
+  `cargo-lock-version.sh`, `select-targets.sh`, `targets.json`, and the
+  `GLIBC_FLOOR` and `CARGO_DENY_*` pins), and runs on pull requests only;
+  `bundle.yml` builds zingod on `main`.
+- The advisory report covers zingod's whole workspace and every target, with
+  an empty configuration.
+- The cache is the already pinned `Swatinem/rust-cache` with `cache-targets`
+  and `cache-bin` off, rather than a new action.
+- `release.yml`'s notes name the zingod version, commit and source archive.
+
 ### Targets for zingod
 
 | Target | zingod | Why |
@@ -458,51 +493,90 @@ Labs released it.
 | `x86_64-pc-windows-msvc` | not bundled | doesn't compile at 1.1.0: `std::os::unix::fs::FileExt` (`packages/zingod-persistence/src/fs/real.rs:7`), `tokio::signal::unix` (`packages/zingod/src/daemon.rs:530`), `MetadataExt` and `statvfs` (`packages/zingod/src/daemon/index_snapshot.rs:13, 224`) and sd-notify 0.5 are used with no `cfg` gate, and jemalloc is untested on MSVC |
 
 jemalloc 5.3.1's configure defaults to 64 KiB pages on aarch64 Linux
-(tikv-jemalloc-sys 0.7.1, `jemalloc/configure.ac:1975-1992`), so a binary built
-on a runner with 4 KiB pages also runs on kernels with 16 KiB pages, such as
-the Raspberry Pi 5's. This is unchecked on hardware.
+(tikv-jemalloc-sys 0.7.1, `jemalloc/configure.ac:1975-1992`), and
+`build-zingod.sh` states the same value, so a binary built on a runner with
+4 KiB pages also runs on kernels with 16 KiB pages, such as the Raspberry Pi
+5's. This is unchecked on hardware.
 
 ### How zingod is built
 
-`scripts/build-zingod.sh` works like `build-zebrad.sh`, with `--commit`,
-`--src-dir`, `--target`, `--out`, `--vendor-archive` and `--dry-run`:
+[`scripts/build-zingod.sh`](../scripts/build-zingod.sh) works like
+`build-zebrad.sh`, with `--commit`, `--src-dir`, `--target`, `--out`,
+`--vendor-archive` and `--dry-run`:
 
 1. Resolve `refs/tags/v<ZINGOD_VERSION>` with `git ls-remote` (the peeled line
    if there is one, else the tag's own) and refuse to go on unless it equals
-   `ZINGOD_COMMIT`. Clone, or reuse `--src-dir`, check out the commit and check
-   `git rev-parse HEAD`.
+   `ZINGOD_COMMIT` (or `--commit`). Fetch exactly that commit, or reuse
+   `--src-dir`, and check that `git rev-parse HEAD` is the commit and no
+   tracked file has changed.
 2. Take the toolchain from the checkout's `rust-toolchain.toml` (1.96.0),
-   through `RUSTUP_TOOLCHAIN`.
+   through `RUSTUP_TOOLCHAIN`. The host triple comes from `uname`, so no other
+   toolchain needs to be installed first.
 3. Run `cargo fetch --locked` first, so a git source that has gone fails early
-   and is named.
-4. Run `cargo build --locked --release -p zingod --bin zingod`. There is
-   nothing to choose: the package has no `[features]`, and the workspace's are
-   test-only. The build sets:
+   and is named. Then check that the committed licence folder equals what
+   `zingod-licenses.sh` gathers from the checkout and its sources
+   ([below](#licences-of-zingod)), before the long build.
+4. Run `cargo build --locked --release -p zingod --bin zingod --target
+   <target>`. There is nothing to choose: the package has no `[features]`, and
+   the workspace's are test-only. The build sets:
    - `SOURCE_DATE_EPOCH` from the commit's time;
    - `CARGO_PROFILE_RELEASE_STRIP=symbols`, since the workspace has no
      `[profile.release]`: 32.0 MB becomes 24.7 MB;
    - `--remap-path-prefix` for the source, `CARGO_HOME`, `RUSTUP_HOME` and
-     `CARGO_TARGET_DIR`. The last one matters: zingod-proto `include!`s
-     generated code from `OUT_DIR`, and a build that remapped only the other
-     three still held one host path;
+     `CARGO_TARGET_DIR`, the last one last, since rustc applies the last
+     prefix that matches and the target folder is inside the checkout by
+     default. It matters: zingod-proto `include!`s generated code from
+     `OUT_DIR`, and a build that remapped only the other three still held one
+     host path;
    - `AWS_LC_SYS_USE_SYSTEM=0`, so aws-lc-sys never links an AWS-LC it finds on
-     the host.
-5. Check the result, and install nothing otherwise:
+     the host;
+   - `JEMALLOC_SYS_WITH_LG_VADDR=48`, `JEMALLOC_SYS_WITH_LG_PAGE` (12 on
+     x86-64, 16 on aarch64) and `JEMALLOC_SYS_WITH_LG_HUGEPAGE=21`, clearing
+     the `<TARGET>_JEMALLOC_SYS_WITH_*` forms that tikv-jemalloc-sys reads
+     first. zingod's global allocator is jemalloc, and without these its
+     configure probes the build machine and compiles the answers in: on
+     x86-64 the CPU's virtual address bits (`jemalloc/configure.ac:510-552`)
+     and the page size, and the huge page size from `/proc/meminfo`
+     (`configure.ac:2050-2061`). A host whose CPU reports 57-bit addresses,
+     as Intel's Xeons from Ice Lake on do, would build a different binary.
+     The values are what a 48-bit x86-64 host and configure's aarch64
+     defaults give: on a 48-bit x86-64 host, with this step's other
+     settings, zingod 1.1.0 built with them was byte-identical to one built
+     with the probes, and one built with `JEMALLOC_SYS_WITH_LG_VADDR=57` was
+     not (2026-11-16).
+5. Check a copy of the result, and install nothing otherwise:
    - `--version` prints `zingod <ZINGOD_VERSION>`;
-   - `generate-config -o <tmp>` exits 0, offline;
-   - `scripts/check-glibc.sh --floor 2.35` passes;
+   - `generate-config -o <tmp>` exits 0, offline, with `HOME` in the scratch
+     folder;
+   - `scripts/check-glibc.sh` passes at `GLIBC_FLOOR` (2.35) from
+     `.github/tool-versions.env`;
    - `ldd` names only libc, libm, libgcc_s, the loader and the vdso;
    - no string in the binary contains `/home/`, `/root/`, `/runner/`,
-     `/github/` or `/__w/`;
-   - the committed licence files equal the ones in the checkout and its
-     sources, and the two that aren't committed, jemalloc's `COPYING` and
-     AWS-LC's `LICENSE`, are copied from the build's own sources into the
-     output ([below](#licences-of-zingod)).
+     `/github/` or `/__w/`.
 
-   The build never runs `start`, which would contact a validator.
-6. With `--vendor-archive <file>`, run `cargo vendor --locked` into a copy of
-   the checkout and pack it as `zingod-src-<ver>.tar.zst`, with its sha256:
-   what a rebuild needs if a fork disappears.
+   The checks run the binary, so the target must be the host's own Linux
+   triple; the script refuses any other. The build never runs `start`, which
+   would contact a validator.
+6. With `--vendor-archive <file>`, which must be named
+   `zingod-src-<ver>.tar.zst`, run `cargo vendor --locked --offline` in a copy
+   of the checkout (from `git archive`, so no `.git`), with the source
+   replacement it prints added to the copy's `.cargo/config.toml`, and pack it
+   with the files sorted, their owners 0 and their times set to
+   `SOURCE_DATE_EPOCH`, and `zstd -19`. Its sha256 goes in `<file>.sha256`.
+   This is what a rebuild needs if a fork disappears: inside it,
+   `JEMALLOC_SYS_WITH_LG_VADDR=48 JEMALLOC_SYS_WITH_LG_PAGE=12
+   JEMALLOC_SYS_WITH_LG_HUGEPAGE=21 cargo build --locked --offline --release
+   -p zingod --bin zingod`, with `JEMALLOC_SYS_WITH_LG_PAGE=16` on aarch64:
+   the `jemalloc_lg_*` values `zingod-build-info.txt` records. At 1.1.0 it is
+   55 MB.
+7. Install the binary at `--out` and, in the same folder, `licenses/` with
+   jemalloc's `COPYING` and AWS-LC's `LICENSE` copied from the build's own
+   sources, and `zingod-build-info.txt`: the version, commit, source URL,
+   target, toolchain, `rustc` and `protoc` versions, the operating system,
+   `SOURCE_DATE_EPOCH`, jemalloc's layout values (`jemalloc_lg_vaddr=`,
+   `jemalloc_lg_page=`, `jemalloc_lg_hugepage=`), the sha256 of the binary,
+   of each copied licence file (`license_sha256_<name>=`) and of the source
+   archive, and, in CI, the run and Zeal's commit.
 
 The build needs:
 
@@ -512,7 +586,8 @@ The build needs:
   and linked statically;
 - `protoc` with the well-known types: Ubuntu 22.04's `protobuf-compiler` 3.12.4
   and `libprotobuf-dev` built it;
-- git and rustup, and `zstd` to pack the source archive.
+- git and rustup, binutils for `objdump` and `strings`, and `zstd` to pack the
+  source archive.
 
 On Linux it needs no cmake, libclang (bindgen comes only through a macOS-only
 dependency), OpenSSL or RocksDB.
@@ -525,9 +600,11 @@ dependency), OpenSSL or RocksDB.
 - **Static musl**, which upstream's image ships, is the other route. It wasn't
   tried here; the glibc build passes the floor, so Zeal uses that.
 - **Cost.** A clean x86-64 build took 44 s on 32 threads (618 s of CPU, 1.9 GB
-  peak memory), and 61 s in the 22.04 container. On a 4-core runner it should
-  take a few minutes (unmeasured), against 30 to 60 minutes for zebrad on macOS
-  and Windows.
+  peak memory), and 61 s in the 22.04 container. `build-zingod.sh` with
+  `--vendor-archive`, from a clean checkout and cargo home in that container,
+  took 110 s on the same machine. On a 4-core runner it should take a few
+  minutes (unmeasured), against 30 to 60 minutes for zebrad on macOS and
+  Windows.
 - **Git sources.** The build pulls five repositories, all at pinned revisions
   on one person's forks: `elicbarbieri/zebra` (`ebabeee5`: zebra-chain,
   zebra-network and zebra-test), and patched librustzcash (`605917a3`), orchard
@@ -539,70 +616,105 @@ dependency), OpenSSL or RocksDB.
 ### zingod in CI
 
 The reusable [`zingod-sidecars.yml`](../.github/workflows/zingod-sidecars.yml)
-workflow takes a `targets` input:
+workflow takes a `targets` input and an `attest` input (true by default). It
+can also be run by hand (Actions → zingod sidecars → Run workflow):
 
-- its first job builds the matrix with `scripts/select-targets.sh --family
-  linux`, and an empty matrix skips the build;
-- each target builds in `ubuntu:22.04` on `ubuntu-24.04` or `ubuntu-24.04-arm`,
-  and caches cargo's registry and git checkouts by commit and target. The bare
-  image has no curl, no CA certificates and no `zstd` command, so the job
-  installs `ca-certificates curl git zstd binutils build-essential
+- its first job checks the pins and builds the matrix with
+  `scripts/select-targets.sh --family linux`, and an empty matrix skips the
+  build;
+- each target builds in `ubuntu:22.04` on `ubuntu-24.04` or `ubuntu-24.04-arm`.
+  The bare image has no curl, no CA certificates and no `zstd` command, so the
+  job installs `ca-certificates curl git zstd binutils build-essential
   protobuf-compiler libprotobuf-dev` with `--no-install-recommends`, then
-  rustup through `zebrad-sidecars.yml`'s pinned, checksummed `rustup-init`
-  step;
-- it runs the checks above. Once, on the x86-64 leg, it runs `cargo deny check
-  advisories` over zingod's `Cargo.lock`, with cargo-deny's release binary
-  pinned by version and sha256 in `.github/tool-versions.env`
-  (`CARGO_DENY_VERSION`), as shellcheck and actionlint are; Zeal's own `deny`
-  job uses a Docker action instead. The findings go in the job's summary and
-  don't fail it (PUBLIC-SERVICES.md's open question 24);
-- it attests provenance with `actions/attest-build-provenance`, for the binary
-  and, on x86-64, the source archive;
+  rustup through a copy of `zebrad-sidecars.yml`'s pinned, checksummed
+  `rustup-init` step. It fetches the pinned commit into `zingod-src` and
+  installs zingod's toolchain before `Swatinem/rust-cache`, which caches only
+  cargo's registry and git checkouts (`cache-targets` and `cache-bin` off),
+  keyed by the commit and the target, so every build starts clean;
+- `build-zingod.sh --src-dir zingod-src` runs the checks above, and the job's
+  summary shows `zingod-build-info.txt`. Once, on the x86-64 leg, it also
+  writes the source archive and runs `cargo deny check advisories` over
+  zingod's `Cargo.lock`: the whole workspace and every target, with an empty
+  configuration, so nothing upstream's `deny.toml` might ignore is left out.
+  cargo-deny's release binary is pinned by version and sha256 in
+  `.github/tool-versions.env` (`CARGO_DENY_VERSION`), as shellcheck and
+  actionlint are; Zeal's own `deny` job uses a Docker action instead. The
+  findings go in the job's summary, with a warning that counts them, and
+  don't fail it (PUBLIC-SERVICES.md's open question 24). On 2026-11-16 the
+  report for 1.1.0 named 15. Nor does a failed report: if cargo-deny can't
+  be downloaded, doesn't match its pin or can't be unpacked, or its output
+  lacks the closing `advisories ok` or `advisories FAILED` line (when the
+  advisory database can't be fetched, for one), the summary and a warning
+  say so instead of "None found.". The step has `continue-on-error` and a
+  10-minute timeout, so the attestation and upload steps after it always
+  run;
+- with `attest`, it attests provenance with `actions/attest-build-provenance`,
+  for the binary and, on x86-64, the source archive;
 - it uploads `zingod-<target triple>`, holding `zeal-zingod-<target triple>`,
-  `licenses/` with the two copied licence files, and `zingod-build-info.txt`
-  (the version, commit, toolchain, protoc version, container, target,
-  `SOURCE_DATE_EPOCH`, the binary's and the licence files' sha256, and the
-  run), and `zingod-src-<ver>`.
+  `licenses/` with the two copied licence files, and `zingod-build-info.txt`,
+  and, from x86-64, `zingod-src-<ver>` with the archive and its `.sha256`.
 
-`bundle.yml` and `release.yml` call it once each, as `sidecars-zingod`. Every
-Linux job that compiles the `zeal` crate needs it, since tauri-build copies
-every `externalBin` at compile time and fails on a missing one: `bundle.yml`'s
-Linux `bundle` legs, and both of `release.yml`'s Linux jobs, the unprivileged
-`build` (`cargo tauri build --no-bundle`, `.github/workflows/release.yml:346`)
-and `bundle_sign` (`:483`). Each adds `sidecars-zingod` to its `needs`,
-downloads the artifact, runs `chmod +x` (artifacts lose the executable bit),
-checks `--version` against `ZINGOD_VERSION`, adds it to its glibc check (both
-release jobs have one) and installs it as
-`src-tauri/binaries/zeal-zingod-<target triple>`. Each also installs the
-artifact's two licence files into `src-tauri/resources/licenses/zingod/` and
-checks them against the sha256 in `zingod-build-info.txt`. The macOS and
-Windows jobs don't download it.
+Two runs of `build-zingod.sh --vendor-archive` in `ubuntu:22.04` containers,
+each from its own temporary checkout, gave byte-identical binaries and source
+archives (2026-11-16), and the archive alone built zingod in a container with
+no network and an empty cargo home. Both runs were on one machine; the fixed
+jemalloc values (step 4) are what keep a build on a machine with another CPU
+the same.
+
+`bundle.yml` and `release.yml` call it once each, as `sidecars-zingod`, with
+`attest: true`. Every Linux job that compiles the `zeal` crate needs it, since
+tauri-build copies every `externalBin` at compile time and fails on a missing
+one ("resource path `binaries/zeal-zingod-<triple>` doesn't exist"):
+`bundle.yml`'s Linux `bundle` legs, and both of `release.yml`'s Linux jobs,
+the unprivileged `build` (`cargo tauri build --no-bundle`) and `bundle_sign`.
+Each adds `sidecars-zingod` to its `needs`, downloads the artifact on Linux
+only, and runs `install_zingod` from `scripts/lib.sh`. That checks the build
+information's commit and target against the pins, and the binary and each
+licence file the build copied against the sha256 `zingod-build-info.txt`
+records, before it installs anything. It then installs the binary as
+`src-tauri/binaries/zeal-zingod-<target triple>` with `chmod +x` (artifacts
+lose the executable bit), checks `--version` against `ZINGOD_VERSION`
+(deleting the binary if it fails), and copies the licence files into
+`src-tauri/resources/licenses/zingod/`, so a failed run leaves no unchecked
+file behind. The binary then joins each job's glibc check.
+The macOS and Windows jobs don't download it.
 
 `bundle.yml` compiles and bundles in one job, so its runs on `main` never
 exercise `release.yml`'s split; the first release candidate that carries
 zingod (`vX.Y.Z-rc.N`, RELEASING.md) does. `release.yml`'s `draft` job also
-needs `sidecars-zingod`, and uploads `zingod-src-<ver>.tar.zst` and its sha256
-to the draft release. `manifest` already needs `draft` and hashes every draft
-asset, so `SHA256SUMS` and the release's attestations cover the archive.
+needs `sidecars-zingod`: its release notes name the zingod version, commit and
+source archive, and once the draft exists it checks `zingod-src-<ver>.tar.zst`
+against its `.sha256` and uploads both. `manifest` already needs `draft` and
+hashes every draft asset, so `SHA256SUMS` and the release's attestations cover
+the archive.
 
-- `ci.yml` runs the workflow on pull requests that change the `ZINGOD_*` pins,
-  `build-zingod.sh` or the workflow. A job that calls a reusable workflow can't
-  have steps, so a `zingod-gate` job diffs the pull request against its base,
-  as `real-zebrad`'s gate step does, and outputs `run`. The `zingod-sidecars`
-  job has `needs: zingod-gate` and `if: needs.zingod-gate.outputs.run ==
-  'true'`. `ci.yml` grants only `contents: read`, and the called jobs declare
-  `id-token: write` and `attestations: write`, so the calling job grants all
-  three itself.
-- `zingod-gate` also says run whenever the contract test runs
+- `ci.yml` runs the workflow on pull requests that change what `zeal-zingod`
+  is built from: the `ZINGOD_*` pins; `build-zingod.sh`, the `lib.sh` it
+  sources and the `check-glibc.sh` it runs; `zingod-licenses.sh`, the
+  `cargo-lock-version.sh` it runs and the licence folder it checks; the
+  workflow, with the `select-targets.sh` and `.github/targets.json` that pick
+  its matrix; or the `GLIBC_FLOOR` and `CARGO_DENY_*` lines of
+  `.github/tool-versions.env`, which the gate finds in the file's diff. On
+  pushes to `main` it doesn't, since `bundle.yml` builds it then.
+  A job that calls a reusable workflow can't have steps, so a `zingod-gate`
+  job diffs the pull request against its base, as `real-zebrad`'s gate step
+  does, and outputs `run`. The `zingod-sidecars` job has `needs: zingod-gate`
+  and `if: needs.zingod-gate.outputs.run == 'true'`. `ci.yml` grants only
+  `contents: read`, and the called jobs declare `id-token: write` and
+  `attestations: write`, so the calling job grants all three itself.
+- From Z2, `zingod-gate` also says run whenever the contract test runs
   (PUBLIC-SERVICES.md's [Tests for zingod](PUBLIC-SERVICES.md#tests-for-zingod)),
   whose `real-zingod` job takes its zingod from this call.
 - The workflow has an `attest` input, true by default, that both attestation
   steps follow. `ci.yml` passes false: a fork's pull request gets no OIDC
   token, and a binary built from an unmerged branch never carries an
   attestation. `bundle.yml` and `release.yml` always attest.
-- `collect-bundles.sh --raw` includes the binary.
-- `smoke-linux.sh` runs `zeal-zingod --version` with the other sidecars, and
-  counts a live `zeal-zingod` as left over.
+- `collect-bundles.sh --raw` includes the binary as `raw/zeal-zingod`, and a
+  development bundle also keeps `zingod-build-info.txt`.
+- `smoke-linux.sh` checks that `zeal-zingod --version` is `zingod
+  <ZINGOD_VERSION>`, that the installed licence folder holds every committed
+  and copied file byte for byte, and counts a live `zeal-zingod` as left over.
+  `bundle.yml`'s `.deb` step checks `/usr/bin/zeal-zingod --version` too.
 - The CI binaries are unsigned, like the zebrad sidecars; a release's
   `SHA256SUMS` and its cosign bundle cover the Linux bundles.
 
@@ -647,12 +759,15 @@ merge in beside `zebra-docs`:
   test jobs don't change.
 - **Every Linux build** of the `zeal` crate needs
   `src-tauri/binaries/zeal-zingod-<triple>`, since tauri-build copies every
-  `externalBin` and fails on a missing one, and the committed licence folder.
-  So on Linux `scripts/dev-sidecar.sh` also builds `fake-zingod`, a
-  launcher-core bin beside `fake-zebrad`, and installs it as
-  `zeal-zingod-<host>`; `ci.yml`'s Linux job already runs that script before
-  clippy.
-- **At runtime**, `sidecar::resolve(paths, Sidecar::Zingod)` finds
+  `externalBin` and fails on a missing one, and the committed licence folder,
+  which it copies to `target/<profile>/licenses/zingod/`. So on Linux
+  `scripts/dev-sidecar.sh` also builds `fake-zingod`, a launcher-core bin
+  beside `fake-zebrad`, and installs it as `zeal-zingod-<host>`; `ci.yml`'s
+  Linux job already runs that script before clippy.
+- **In the bundles** the binary is `/usr/bin/zeal-zingod` in the `.deb` and
+  `usr/bin/zeal-zingod` in the AppImage, and the licences are under the
+  resource folder's `licenses/zingod/`. Nothing in Zeal runs it yet.
+- **At runtime**, from Z3, `sidecar::resolve(paths, Sidecar::Zingod)` finds
   `zeal-zingod` beside the launcher. Inside an AppImage it is first copied to
   `<data>/sidecar/zingod/<launcher version>/`, and the cleanup of other
   versions stays inside that folder.
@@ -681,27 +796,32 @@ Four C libraries are linked statically:
 | zstd 1.5.7 | zstd-sys 2.1.0 | BSD-3-Clause (zstd is BSD-3-Clause OR GPL-2.0; Zeal ships the BSD text) | `zstd/LICENSE`, committed |
 | libsecp256k1 | secp256k1-sys 0.14.1 | MIT. The crate's own `LICENSE` is CC0-1.0 and covers only its Rust wrapper | `depend/secp256k1/COPYING`, committed |
 
-`src-tauri/resources/licenses/zingod/` is committed and refreshed by
-`bump-zingod.sh`. It holds:
+[`src-tauri/resources/licenses/zingod/`](../src-tauri/resources/licenses/zingod/)
+is committed and refreshed by `bump-zingod.sh`.
+[`scripts/zingod-licenses.sh`](../scripts/zingod-licenses.sh) gathers it from a
+checkout and the sources cargo fetched for it, so the list of files and where
+each comes from is in one place:
 
-- zingod's notice, with the full Apache-2.0 text;
-- lightwallet-protocol's `LICENSE`;
-- Zebra's `LICENSE-MIT`, from the `elicbarbieri/zebra` revision the build pins
-  (`ebabeee5`), for `zebra_indexer.proto` and the zebra crates linked in;
-- zstd's `LICENSE` and libsecp256k1's `COPYING`;
-- a `README.txt` that Zeal writes: zingod's name, version and copyright line,
-  the source URL and commit, where the release's source archive is, and where
-  each `.proto` file comes from.
+| File | From |
+| --- | --- |
+| `zingod-LICENSE` | zingod's `LICENSE`, the notice |
+| `Apache-2.0.txt` | the licence's full text, <https://www.apache.org/licenses/LICENSE-2.0.txt>, checked against that file's sha256: zingod's checkout has only the notice |
+| `lightwallet-protocol-LICENSE` | `packages/zingod-proto/lightwallet-protocol/LICENSE` |
+| `zebra-LICENSE-MIT` | `LICENSE-MIT` of the `elicbarbieri/zebra` revision the build pins (`ebabeee5`), for `zebra_indexer.proto` and the zebra-chain and zebra-network crates linked in |
+| `zstd-LICENSE` | zstd-sys's `zstd/LICENSE` |
+| `secp256k1-COPYING` | secp256k1-sys's `depend/secp256k1/COPYING` |
+| `README.txt` | written by `zingod-licenses.sh`: zingod's version and copyright line, the source URL and commit, the release's source archive, where each `.proto` file comes from, and which file covers each C library, at the versions in zingod's `Cargo.lock` |
+| `jemalloc-COPYING`, `aws-lc-LICENSE` | tikv-jemalloc-sys's `jemalloc/COPYING` and aws-lc-sys's `aws-lc/LICENSE`, copied at build time (below) |
 
 jemalloc's `COPYING` and AWS-LC's `LICENSE` aren't committed: their copyright
 lines carry personal contact addresses, which Zeal keeps out of its
 repository. `build-zingod.sh` copies both from the build's own sources into its
 output, and every Linux job that compiles Zeal installs them into the folder,
-where `.gitignore` names them, and checks their sha256. `smoke-linux.sh` checks
-that an installed bundle holds every file. A local build has only the committed
-files, which is fine for a build that is never shipped. `bump-zingod.sh` refuses
-to commit a licence file that holds an email address, and names it, so a file
-that gains one moves to the copied list.
+where `src-tauri/.gitignore` names them, and checks their sha256.
+`smoke-linux.sh` checks that an installed bundle holds every file. A local
+build has only the committed files, which is fine for a build that is never
+shipped. `bump-zingod.sh` refuses to commit a licence file that holds an email
+address, and names it, so a file that gains one moves to the copied list.
 
 Zeal's bundles carry no third-party licences for zebrad today, nor a list of
 the Rust crates linked into either binary; that is a Zeal-wide follow-up
@@ -713,24 +833,33 @@ review stand in for it.
 
 On a Linux host `scripts/dev-sidecar.sh` installs `fake-zingod` as
 `zeal-zingod-<host>`, beside the three fake zebrads; on macOS and Windows it
-installs nothing for zingod. For the real one, run `scripts/build-zingod.sh
---target x86_64-unknown-linux-gnu --out
-src-tauri/binaries/zeal-zingod-x86_64-unknown-linux-gnu` inside `ubuntu:22.04`,
-or download a CI build with `gh run download <run id> -n
-zingod-x86_64-unknown-linux-gnu`. On a newer host `build-zingod.sh` builds
-but installs nothing, since the binary fails the glibc floor. To try zingod
-out there, or to run `real_zingod.rs`, build the checkout with plain cargo
-(`cargo build --locked --release -p zingod --bin zingod`, with `protoc`
-installed) and set `ZINGOD_BIN` to the result; only `build-zingod.sh`'s output
-is ever installed as `zeal-zingod`. Treat the checkout as downloaded code:
-build it only through cargo, with `CARGO_TARGET_DIR` outside the checkout.
+installs nothing for zingod. For the real one, run `scripts/build-zingod.sh`
+inside `ubuntu:22.04` (its default `--out` is
+`src-tauri/binaries/zeal-zingod-<host>`, with `licenses/` and
+`zingod-build-info.txt` beside it there; copy `licenses/*` into
+`src-tauri/resources/licenses/zingod/` for a bundle that has them all), or
+download a CI build with `gh run download <run id> -n
+zingod-x86_64-unknown-linux-gnu` and install it as the workflows do:
+`. scripts/lib.sh && install_zingod <folder> <triple> .`, after defining
+`die`. On a newer host `build-zingod.sh` builds but installs nothing, since the
+binary fails the glibc floor (on Ubuntu 24.04 it needs `GLIBC_2.39`). To try
+zingod out there, or, from Z2, to run `real_zingod.rs`, build the checkout with
+plain cargo (`cargo build --locked --release -p zingod --bin zingod`, with
+`protoc` installed) and set `ZINGOD_BIN` to the result; only
+`build-zingod.sh`'s output is ever installed as `zeal-zingod`. Treat the
+checkout as downloaded code: build it only through cargo, with
+`CARGO_TARGET_DIR` outside the checkout.
 
 ### Bumping ZINGOD_VERSION
 
-`scripts/bump-zingod.sh <ver> <commit>` writes `ZINGOD_VERSION` and
-`ZINGOD_COMMIT`, refreshes the licence folder from a checkout at the commit,
-and runs the version checks; set `ZINGOD_DATE` in the same commit. No watcher
-opens these pull requests yet: upstream's release cadence is unknown. Then:
+[`scripts/bump-zingod.sh`](../scripts/bump-zingod.sh) `<ver> <commit>` fetches
+the commit (or takes a checkout at it with `--src-dir`) and its dependencies,
+refreshes the licence folder through `zingod-licenses.sh`, writes
+`ZINGOD_VERSION` and `ZINGOD_COMMIT`, and runs the version checks. It prints
+the commit's date in UTC: set `ZINGOD_DATE` to it in the same commit. If a
+file it would commit holds an email address, it names the file and writes
+nothing. No watcher opens these pull requests yet: upstream's release cadence
+is unknown. Then:
 
 1. Resolve the tag with `git ls-remote https://github.com/zingolabs/zingod
    "refs/tags/v$VER" "refs/tags/v$VER^{}"`. A `^{}` line, if there is one, is
@@ -747,16 +876,17 @@ opens these pull requests yet: upstream's release cadence is unknown. Then:
    - `rust-toolchain.toml`, `[features]` and `Cargo.lock`'s git sources.
 3. Run the **zingod sidecars** workflow on both Linux targets: every check must
    pass. Read the advisory report.
-4. Capture the fixtures again with `real_zingod.rs`'s capture mode:
+4. From Z2: capture the fixtures again with `real_zingod.rs`'s capture mode:
    `zingod-<ver>-generate.toml`, the log lines, `/status` for each state and
    the `LightdInfo` bytes. `cargo test` fails until the writer and the reader
    agree with them. `generate-config` leaves out keys that default to unset, so
    also check the writer's list of such keys (only `cookie_path` at 1.1.0)
    against `packages/zingod/src/config.rs`.
-5. Update `TESTED_ZINGOD` and `ZINGOD_KNOWS`.
-6. Run `real_zingod.rs` against the Stable zebrad pin (CI does this on the pull
-   request), with `PREV_ZINGOD_BIN` set to the previous pin's build, so an
-   index the old one wrote must open with the new one. Then run **Bundle**.
+5. From Z3: update `TESTED_ZINGOD` and `ZINGOD_KNOWS`.
+6. From Z2: run `real_zingod.rs` against the Stable zebrad pin (CI does this on
+   the pull request), with `PREV_ZINGOD_BIN` set to the previous pin's build,
+   so an index the old one wrote must open with the new one. Then run
+   **Bundle**.
 7. Before a release lists the new version as tested on a network, do the wallet
    runs there; a first Mainnet listing waits for PUBLIC-SERVICES.md's Mainnet
    gate.

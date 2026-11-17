@@ -18,8 +18,9 @@
 #
 # Every bundle type expected for the target must be present exactly once.
 #
-# With --raw, also copies the compiled launcher and all three sidecars into
-# DIR/raw under their runtime names for development bundles.
+# With --raw, also copies the compiled launcher and all three zebrad sidecars
+# into DIR/raw under their runtime names for development bundles, and on Linux
+# zeal-zingod too.
 #
 # Usage: scripts/collect-bundles.sh --target TRIPLE --out DIR [--version X.Y.Z]
 #                                   [--require-updater-sigs] [--raw]
@@ -124,4 +125,13 @@ if [ "${raw}" = true ]; then
         cp "${sidecar}" "${raw_dir}/zeal-zebrad${suffix}${exe}"
         echo "${sidecar#"${repo_root}/"} -> ${raw_dir}/zeal-zebrad${suffix}${exe}"
     done
+    # tauri.linux.conf.json lists zeal-zingod; the other platforms don't bundle it.
+    case "${target}" in
+        *-linux-*)
+            sidecar="${repo_root}/src-tauri/binaries/zeal-zingod-${target}"
+            [ -f "${sidecar}" ] || die "${sidecar} does not exist"
+            cp "${sidecar}" "${raw_dir}/zeal-zingod"
+            echo "${sidecar#"${repo_root}/"} -> ${raw_dir}/zeal-zingod"
+            ;;
+    esac
 fi

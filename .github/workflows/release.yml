@@ -5,9 +5,12 @@
 #   verify       tag == [workspace.package] version, all channel pin checks, and
 #                whether updater artifacts are required (require_updater)
 #   sidecars     three zebrad-sidecars.yml calls: verified/attested stable, beta
-#                and nightly binaries per target at their resolved pins
+#                and nightly binaries per target at their resolved pins; and
+#                sidecars-zingod, zingod-sidecars.yml: the attested zeal-zingod
+#                for both Linux targets and its vendored source archive
 #   docs         zebrad-docs.yml renders all offline documentation after sidecars
-#   draft        creates the draft release once; the matrix jobs upload to it
+#   draft        creates the draft release once, with zingod's source archive;
+#                the matrix jobs upload to it
 #   build        UNPRIVILEGED, no secrets: compiles the app (`--no-bundle`)
 #   bundle_sign  environment `release` (required reviewer), NO caches:
 #                `cargo tauri bundle` packages the compiled app and does the
@@ -183,7 +186,7 @@ jobs:
   # ---------------------------------------------------------------------------
   draft:
     name: Create the draft release
-    needs: [verify, sidecars, sidecars-beta, sidecars-nightly]
+    needs: [verify, sidecars, sidecars-beta, sidecars-nightly, sidecars-zingod]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -200,6 +203,8 @@ jobs:
       BETA_ZEBRAD_COMMIT: ${{ needs.sidecars-beta.outputs.commit }}
       NIGHTLY_ZEBRAD_VERSION: ${{ needs.sidecars-nightly.outputs.version }}
       NIGHTLY_ZEBRAD_COMMIT: ${{ needs.sidecars-nightly.outputs.commit }}
+      ZINGOD_VERSION: ${{ needs.sidecars-zingod.outputs.version }}
+      ZINGOD_COMMIT: ${{ needs.sidecars-zingod.outputs.commit }}
       PRERELEASE: ${{ needs.verify.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -230,6 +235,10 @@ jobs:
             echo "- Stable: ${ZEBRAD_VERSION} (Zebra commit ${ZEBRAD_COMMIT})."
             echo "- Beta: ${BETA_ZEBRAD_VERSION} (Zebra commit ${BETA_ZEBRAD_COMMIT})."
             echo "- Nightly: ${NIGHTLY_ZEBRAD_VERSION} (Zebra commit ${NIGHTLY_ZEBRAD_COMMIT})."
+            echo
+            echo "Linux bundles also carry zingod ${ZINGOD_VERSION} (zingod commit ${ZINGOD_COMMIT}),"
+            echo "built by Zeal from that commit; nothing runs it yet. Its source, with every"
+            echo "dependency vendored, is the asset zingod-src-${ZINGOD_VERSION}.tar.zst."
             echo
             printf '%s\n' "${changes}"
             echo
@@ -287,6 +296,27 @@ jobs:
             echo "html_url=$(jq -r '.[0].html_url' <<< "${found}")"
           } >> "${GITHUB_OUTPUT}"
 
+      # On the draft before anything else, so manifest's SHA256SUMS and
+      # attestations cover it.
+      - name: Download zingod's source archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zingod-src-${{ needs.sidecars-zingod.outputs.version }}
+          path: ${{ runner.temp }}/zingod-src
+
+      - name: Upload zingod's source archive to the draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          UPLOAD_URL: ${{ steps.release.outputs.upload_url }}
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/zingod-src/zingod-src-${ZINGOD_VERSION}.tar.zst"
+          (cd "$(dirname "${archive}")" && sha256sum -c "$(basename "${archive}").sha256")
+          scripts/upload-release-assets.sh --release-id "${RELEASE_ID}" --upload-url "${UPLOAD_URL}" \
+            "${archive}" "${archive}.sha256"
+
   # ---------------------------------------------------------------------------
   # sidecars: all three channels for each target (unsigned; signed later by the
   # bundler), at their exact root pins. After verify, so a bad tag fails before
@@ -325,6 +355,19 @@ jobs:
     with:
       channel: nightly
 
+  # zeal-zingod for both Linux targets and, from x86_64, its source archive;
+  # always attested.
+  sidecars-zingod:
+    name: zingod sidecars
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write # sidecar build provenance
+      attestations: write # sidecar build provenance
+    uses: ./.github/workflows/zingod-sidecars.yml
+    with:
+      attest: true
+
   docs:
     name: Offline Zebra documentation
     needs: [sidecars, sidecars-beta, sidecars-nightly]
@@ -345,7 +388,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: Build (${{ matrix.target }})
-    needs: [verify, sidecars, sidecars-beta, sidecars-nightly, docs]
+    needs: [verify, sidecars, sidecars-beta, sidecars-nightly, sidecars-zingod, docs]
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     timeout-minutes: 90
@@ -400,6 +443,13 @@ jobs:
         with:
           name: zebrad-nightly-${{ matrix.target }}
           path: ${{ runner.temp }}/sidecars/nightly
+      # Linux only: tauri.linux.conf.json lists zeal-zingod.
+      - name: Download the zingod sidecar (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zingod-${{ matrix.target }}
+          path: ${{ runner.temp }}/sidecars/zingod
       - name: Download the offline Zebra documentation
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -439,6 +489,15 @@ jobs:
             done
           done
 
+      - name: Install and check zingod and its licences (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+          # shellcheck disable=SC1091 # install_zingod lives in scripts/lib.sh
+          . scripts/lib.sh
+          install_zingod "${RUNNER_TEMP}/sidecars/zingod" "${TARGET}" .
+
       - name: Check Cargo.lock is up to date
         run: cargo fetch --locked
 
@@ -452,7 +511,8 @@ jobs:
             "target/${TARGET}/release/${APP_BIN}" \
             "src-tauri/binaries/zeal-zebrad-${TARGET}" \
             "src-tauri/binaries/zeal-zebrad-beta-${TARGET}" \
-            "src-tauri/binaries/zeal-zebrad-nightly-${TARGET}"
+            "src-tauri/binaries/zeal-zebrad-nightly-${TARGET}" \
+            "src-tauri/binaries/zeal-zingod-${TARGET}"
 
       - name: Stage the compiled app
         run: |
@@ -482,7 +542,7 @@ jobs:
   # ---------------------------------------------------------------------------
   bundle_sign:
     name: Bundle and sign (${{ matrix.target }})
-    needs: [verify, sidecars, sidecars-beta, sidecars-nightly, docs, draft, build]
+    needs: [verify, sidecars, sidecars-beta, sidecars-nightly, sidecars-zingod, docs, draft, build]
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     environment: release
@@ -544,6 +604,13 @@ jobs:
         with:
           name: zebrad-nightly-${{ matrix.target }}
           path: ${{ runner.temp }}/sidecars/nightly
+      # Linux only: tauri.linux.conf.json lists zeal-zingod.
+      - name: Download the zingod sidecar (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: zingod-${{ matrix.target }}
+          path: ${{ runner.temp }}/sidecars/zingod
       - name: Download the offline Zebra documentation
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -587,6 +654,15 @@ jobs:
             done
           done
 
+      - name: Install and check zingod and its licences (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+          # shellcheck disable=SC1091 # install_zingod lives in scripts/lib.sh
+          . scripts/lib.sh
+          install_zingod "${RUNNER_TEMP}/sidecars/zingod" "${TARGET}" .
+
       # Put the compiled binary where `cargo tauri bundle --target` looks for
       # it, and restore the executable bit that artifacts drop.
       - name: Place the compiled app
@@ -605,7 +681,8 @@ jobs:
             "target/${TARGET}/release/${APP_BIN}" \
             "src-tauri/binaries/zeal-zebrad-${TARGET}" \
             "src-tauri/binaries/zeal-zebrad-beta-${TARGET}" \
-            "src-tauri/binaries/zeal-zebrad-nightly-${TARGET}"
+            "src-tauri/binaries/zeal-zebrad-nightly-${TARGET}" \
+            "src-tauri/binaries/zeal-zingod-${TARGET}"
 
       # --- macOS: App Store Connect API key for notarization ------------------
       - name: Write the App Store Connect API key

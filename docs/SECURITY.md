@@ -50,6 +50,7 @@ checked:
 | tauri-cli (and trunk, in `build` only) | their GitHub releases | sha256 per platform in [`.github/tool-versions.env`](../.github/tool-versions.env) |
 | Artifact Signing client (Windows) | nuget.org | sha256 in `release.yml` |
 | Stable, Beta and Nightly zebrad sidecars | `zebrad-<channel>-<target>` artifacts from `zebrad-sidecars.yml` | Stable and Beta Linux use Zebra's cosign signatures and provenance attestations; their other targets use the pinned release tags. Nightly is built from its exact pinned commit on every target. Every binary is version/commit checked, every Linux binary is glibc checked, and provenance is attested ([SIDECARS.md](SIDECARS.md)) |
+| `zeal-zingod`, Linux only (nothing runs it yet) | `zingod-<target>` artifacts from `zingod-sidecars.yml` (the `sidecars-zingod` job) | zingod publishes no binaries, so it is built from its pinned commit: the `v<ZINGOD_VERSION>` tag must resolve to `ZINGOD_COMMIT`, the build is `--locked` to zingod's `Cargo.lock` (its five git sources at pinned revisions on one person's forks), and `build-zingod.sh` checks the version, the glibc floor, the linked libraries and the binary's strings; provenance is attested. Each job that installs it checks the binary and the two licence files copied at build time against the sha256 its build recorded. The release's vendored source archive, `zingod-src-<ver>.tar.zst`, is in `SHA256SUMS`. The advisories in zingod's `Cargo.lock` are reported, not enforced ([SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)) |
 | Offline Book, Config and Changes HTML | `zebra-docs` artifact from `zebrad-docs.yml` | generated from the exact three channel commits after all sidecar jobs pass; packaged as local resources, not fetched at runtime |
 | AppRun, linuxdeploy (Linux AppImage) | tauri-apps/binary-releases, fetched by tauri-bundler | **nothing**; they never see the updater key (below) |
 | linuxdeploy-plugin-appimage (Linux AppImage) | the moving `continuous` release of linuxdeploy/linuxdeploy-plugin-appimage, fetched by tauri-bundler | **nothing**; if the download fails, linuxdeploy uses its built-in copy; never sees the updater key |
@@ -218,6 +219,8 @@ TODO: exact commands and identities, tested against a real release.
 The bundled Stable and Beta Linux zebrads are verified at build time against Zebra's own
 signatures (`cosign verify-blob` and `gh attestation verify`). Stable and Beta macOS and
 Windows binaries are built from their pinned tags; Nightly is built from its exact pinned
-commit on every target. This repository's CI checks and attests all of them. The offline
+commit on every target. The Linux bundles' `zeal-zingod` is built from zingod's pinned
+commit, since zingod publishes no binaries; its attestation says where it was built, not
+that Zingo Labs released it. This repository's CI checks and attests all of them. The offline
 HTML documentation is generated from the same exact commits and packaged with the app,
 so reading it introduces no runtime download or remote-content trust decision.

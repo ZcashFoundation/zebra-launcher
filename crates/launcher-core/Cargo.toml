@@ -61,5 +61,9 @@ tokio = { workspace = true, features = ["test-util"] }
 name = "fake-zebrad"
 path = "src/bin/fake-zebrad.rs"
 
+[[bin]]
+name = "fake-zingod"
+path = "src/bin/fake-zingod.rs"
+
 [lints]
 workspace = true

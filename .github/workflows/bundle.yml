@@ -3,12 +3,14 @@
 # every push to `main`, weekly, and on dispatch.
 #
 # - sidecars: three zebrad-sidecars.yml calls upload zebrad-<channel>-<triple>
-#   artifacts at the exact channel pins.
+#   artifacts at the exact channel pins; zingod-sidecars.yml (sidecars-zingod)
+#   uploads the attested zingod-<triple> for the Linux targets.
 # - docs: zebrad-docs.yml renders the offline book, config and changes for all
 #   channels after every sidecar job succeeds.
-# - bundle: `cargo tauri build` per target with all sidecars and docs, then on
-#   Linux a glibc floor check, and on Linux x86_64 an install smoke test of the
-#   .deb and the AppImage under Xvfb.
+# - bundle: `cargo tauri build` per target with all sidecars and docs (on
+#   Linux also zeal-zingod and its licences), then on Linux a glibc floor check,
+#   and on Linux x86_64 an install smoke test of the .deb and the AppImage
+#   under Xvfb.
 #
 # Nothing here is signed and no secrets are used: macOS bundles are ad-hoc
 # signed, updater artifacts are disabled, Windows binaries are unsigned. The
@@ -141,6 +143,19 @@ jobs:
       channel: nightly
       targets: ${{ inputs.targets && (contains(inputs.targets, 'x86_64-unknown-linux-gnu') && inputs.targets || format('x86_64-unknown-linux-gnu,{0}', inputs.targets)) || '' }}
 
+  # zeal-zingod for the Linux targets (an empty Linux selection skips it),
+  # always attested here; nothing runs it yet (docs/SIDECARS.md).
+  sidecars-zingod:
+    name: zingod sidecars
+    permissions:
+      contents: read
+      id-token: write # sidecar build provenance
+      attestations: write # sidecar build provenance
+    uses: ./.github/workflows/zingod-sidecars.yml
+    with:
+      targets: ${{ inputs.targets || '' }}
+      attest: true
+
   docs-inputs:
     name: Resolve the stable documentation pin
     needs: sidecars
@@ -211,7 +226,7 @@ jobs:
   # ---------------------------------------------------------------------------
   bundle:
     name: Bundle (${{ matrix.target }})
-    needs: [targets, sidecars, sidecars-beta, sidecars-nightly, docs]
+    needs: [targets, sidecars, sidecars-beta, sidecars-nightly, sidecars-zingod, docs]
     runs-on: ${{ matrix.runner }}
     # Empty for macOS and Windows: the job then runs directly on the runner.
     container: ${{ matrix.container }}
@@ -286,6 +301,16 @@ jobs:
           run-id: ${{ github.run_id }}
           name: zebrad-nightly-${{ matrix.target }}
           path: ${{ runner.temp }}/sidecars/nightly
+
+      # Linux bundles only: tauri.linux.conf.json lists zeal-zingod.
+      - name: Download the zingod sidecar (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          name: zingod-${{ matrix.target }}
+          path: ${{ runner.temp }}/sidecars/zingod
 
       - name: Download the offline Zebra documentation
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -375,6 +400,17 @@ jobs:
             } >> "${GITHUB_STEP_SUMMARY}"
           fi
 
+      # The binary, checked against the zingod pins, and the two licence files
+      # its build copied, checked against the sha256 it recorded.
+      - name: Install and check zingod and its licences (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+          # shellcheck disable=SC1091 # install_zingod lives in scripts/lib.sh
+          . scripts/lib.sh
+          install_zingod "${RUNNER_TEMP}/sidecars/zingod" "${TARGET}" .
+
       # Unsigned: no updater artifacts (they would need TAURI_SIGNING_PRIVATE_KEY),
       # and an ad-hoc signature on macOS so the app opens via "Open Anyway".
       - name: Write the unsigned bundle config
@@ -425,6 +461,7 @@ jobs:
               binaries+=("src-tauri/binaries/zeal-zebrad${suffix}-${TARGET}")
             fi
           done
+          binaries+=("src-tauri/binaries/zeal-zingod-${TARGET}")
           scripts/check-glibc.sh --floor "${GLIBC_FLOOR}" "${binaries[@]}"
 
       - name: Collect bundles
@@ -441,8 +478,8 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-      # collect-bundles.sh --raw has already placed the launcher and all three
-      # runtime-named sidecars in dist/raw. Preserve each channel's build info.
+      # collect-bundles.sh --raw has already placed the launcher and all
+      # runtime-named sidecars in dist/raw. Preserve each sidecar's build info.
       - name: Add the build info (development build)
         if: needs.sidecars.outputs.zebrad_ref != ''
         run: |
@@ -453,6 +490,8 @@ jobs:
             info="${RUNNER_TEMP}/sidecars/${channel}/zebrad-build-info.txt"
             [ ! -f "${info}" ] || cp "${info}" "dist/zebrad-build-info${suffix}.txt"
           done
+          info="${RUNNER_TEMP}/sidecars/zingod/zingod-build-info.txt"
+          [ ! -f "${info}" ] || cp "${info}" dist/zingod-build-info.txt
           ls -lR dist
 
       - name: Upload bundles (development build)
@@ -517,6 +556,10 @@ jobs:
               esac
             fi
           done
+          reported="$(/usr/bin/zeal-zingod --version | sed -n 1p)"
+          echo "/usr/bin/zeal-zingod: ${reported}"
+          expected="zingod $(tr -d '[:space:]' < ZINGOD_VERSION)"
+          [ "${reported}" = "${expected}" ] || { echo "::error::/usr/bin/zeal-zingod is not ${expected}"; exit 1; }
 
       - name: "Smoke: run the .deb install"
         if: steps.smoke.outputs.run == 'true'

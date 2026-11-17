@@ -22,6 +22,7 @@ mod nodes;
 pub mod public;
 mod resources;
 mod zebrad;
+pub mod zingod;
 
 pub use health::{Level, NO_PEERS_FOR, STALE_AFTER, SYNCED_PROGRESS};
 pub use nodes::{

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Install smoke test for a Linux bundle, run by bundle.yml in the ubuntu:22.04
-# container: checks all three channel sidecars and offline documentation, then
-# starts the launcher under Xvfb with a fresh home directory whose first run is
-# complete. After letting it run, checks that it was still running when stopped,
-# that its log says the bundled zebrad started, and that no zebrad is left over.
+# container: checks all three channel sidecars, zeal-zingod, the offline
+# documentation and zingod's licence files, then starts the launcher under Xvfb
+# with a fresh home directory whose first run is complete. After letting it
+# run, checks that it was still running when stopped, that its log says the
+# bundled zebrad started, and that no zebrad or zingod is left over.
 #
 #   --deb      checks the installed package, then runs /usr/bin/zeal-app
 #   --appimage PATH extracts a scratch copy to check its contents, then runs it
@@ -22,8 +23,13 @@ set -euo pipefail
 
 readonly IDENTIFIER="org.zfnd.zeal"
 readonly EXPECTED="zebrad started"
+# The licence files a build copies into the folder, beside the committed ones
+# (scripts/zingod-licenses.sh).
+readonly ZINGOD_COPIED_LICENSES=(jemalloc-COPYING aws-lc-LICENSE)
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/.." && pwd)"
+zingod_version="$(tr -d '[:space:]' < "${repo_root}/ZINGOD_VERSION")"
 
 die() {
     echo "::error::smoke-linux: $*"
@@ -31,7 +37,7 @@ die() {
 }
 
 check_sidecars() {
-    local bin_dir="$1" channel suffix sidecar
+    local bin_dir="$1" channel suffix sidecar reported
     for channel in stable beta nightly; do
         suffix=""
         [ "${channel}" = stable ] || suffix="-${channel}"
@@ -39,6 +45,27 @@ check_sidecars() {
         [ -x "${sidecar}" ] || die "the bundle does not contain executable ${sidecar}"
         echo "Installed sidecar: ${sidecar} ($("${sidecar}" --version | head -n 1))"
     done
+    sidecar="${bin_dir}/zeal-zingod"
+    [ -x "${sidecar}" ] || die "the bundle does not contain executable ${sidecar}"
+    reported="$("${sidecar}" --version | sed -n 1p)"
+    [ "${reported}" = "zingod ${zingod_version}" ] ||
+        die "${sidecar} reports '${reported}', not 'zingod ${zingod_version}'"
+    echo "Installed sidecar: ${sidecar} (${reported})"
+}
+
+# check_zingod_licenses DIR: every licence file of the repository's folder, and
+# the copied ones, is in DIR with the same bytes.
+check_zingod_licenses() {
+    local dir="$1" committed="${repo_root}/src-tauri/resources/licenses/zingod" file name
+    [ -d "${dir}" ] || die "the bundle does not contain zingod's licences at ${dir}"
+    for name in "${ZINGOD_COPIED_LICENSES[@]}"; do
+        [ -f "${committed}/${name}" ] || die "${committed}/${name} was not installed before the bundle was built"
+    done
+    for file in "${committed}/"*; do
+        name="$(basename "${file}")"
+        cmp -s "${file}" "${dir}/${name}" || die "the bundle's ${dir}/${name} is missing or differs"
+    done
+    echo "zingod's licences: $(find "${dir}" -type f | wc -l) files in ${dir}"
 }
 
 check_docs() {
@@ -57,6 +84,9 @@ while [ $# -gt 0 ]; do
             docs_index="$(dpkg -L zeal-app | grep -E '/zebra-docs/stable/book/index\.html$' | head -n 1 || true)"
             [ -n "${docs_index}" ] || die "the .deb did not install the offline documentation"
             check_docs "${docs_index%/stable/book/index.html}"
+            readme="$(dpkg -L zeal-app | grep -E '/licenses/zingod/README\.txt$' | head -n 1 || true)"
+            [ -n "${readme}" ] || die "the .deb did not install zingod's licences"
+            check_zingod_licenses "$(dirname "${readme}")"
             shift
             ;;
         --appimage)
@@ -73,6 +103,9 @@ while [ $# -gt 0 ]; do
             docs_index="$(find "${app_root}" -type f -path '*/zebra-docs/stable/book/index.html' -print -quit)"
             [ -n "${docs_index}" ] || die "the AppImage does not contain the offline documentation"
             check_docs "${docs_index%/stable/book/index.html}"
+            readme="$(find "${app_root}" -type f -path '*/licenses/zingod/README.txt' -print -quit)"
+            [ -n "${readme}" ] || die "the AppImage does not contain zingod's licences"
+            check_zingod_licenses "$(dirname "${readme}")"
             cmd=("${appimage}")
             shift 2
             ;;
@@ -139,12 +172,13 @@ else
     failed=true
 fi
 
-# The launcher stops zebrad when it exits (PDEATHSIG / graceful stop). A
-# zebrad that exited but was orphaned stays a zombie in a container whose PID 1
-# does not reap children; it no longer runs, so only live processes count.
-live_zebrad() {
+# The launcher stops zebrad, and later zingod, when it exits (PDEATHSIG /
+# graceful stop). A sidecar that exited but was orphaned stays a zombie in a
+# container whose PID 1 does not reap children; it no longer runs, so only live
+# processes count.
+live_sidecars() {
     local pid state
-    for pid in $(pgrep -f zeal-zebrad || true); do
+    for pid in $(pgrep -f 'zeal-zebrad|zeal-zingod' || true); do
         state="$(ps -o stat= -p "${pid}" 2>/dev/null || true)"
         case "${state}" in
             "" | Z*) ;;
@@ -153,14 +187,14 @@ live_zebrad() {
     done
 }
 for _ in $(seq 1 15); do
-    [ -z "$(live_zebrad)" ] && break
+    [ -z "$(live_sidecars)" ] && break
     sleep 1
 done
-mapfile -t leftover < <(live_zebrad)
+mapfile -t leftover < <(live_sidecars)
 if [ "${#leftover[@]}" -gt 0 ]; then
-    echo "::error::a zeal-zebrad process outlived the launcher by 15 s"
+    echo "::error::a zeal-zebrad or zeal-zingod process outlived the launcher by 15 s"
     for pid in "${leftover[@]}"; do ps -o pid=,stat=,args= -p "${pid}" || true; done
-    pkill -KILL -f zeal-zebrad || true
+    pkill -KILL -f 'zeal-zebrad|zeal-zingod' || true
     failed=true
 fi
 

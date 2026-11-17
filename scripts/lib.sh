@@ -1,8 +1,10 @@
 # shellcheck shell=bash
-# Helpers shared by the sidecar and version scripts (fetch-zebrad-linux.sh,
-# build-zebrad.sh, dev-sidecar.sh, check-versions.sh, bump-zebrad.sh) and by
-# the `run:` steps of zebrad-sidecars.yml and zebrad-watch.yml. Source it after
-# defining `die MESSAGE...`, which must print the message and exit non-zero.
+# Helpers shared by the sidecar, licence and version scripts
+# (fetch-zebrad-linux.sh, build-zebrad.sh, build-zingod.sh, zingod-licenses.sh,
+# dev-sidecar.sh, check-versions.sh, bump-zebrad.sh, bump-zingod.sh) and by the
+# `run:` steps of the workflows (zebrad-sidecars.yml, zingod-sidecars.yml,
+# zebrad-watch.yml, bundle.yml, release.yml). Source it after defining
+# `die MESSAGE...`, which must print the message and exit non-zero.
 #
 # The functions that print a value are meant for `x="$(fn ...)"` under
 # `set -e`: when they call die inside the command substitution, the assignment
@@ -15,7 +17,10 @@
 #   - a one-off `--version` given to the build and fetch scripts, the `version`
 #     input of zebrad-sidecars.yml, or a beta/nightly pin may carry a
 #     pre-release suffix such as 7.0.0-rc.0 (is_zebrad_version). Beta pins must
-#     have that suffix (is_prerelease_version).
+#     have that suffix (is_prerelease_version);
+#   - the ZINGOD_VERSION pin, the bundled zingod's, is a release like
+#     ZEBRAD_VERSION (is_stable_version); its commit and date use is_full_sha
+#     and is_iso_date, as every channel's do.
 
 # read_pin FILE: prints FILE with all whitespace removed, or nothing if it is
 # missing.
@@ -171,6 +176,17 @@ is_full_sha() {
     printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{40}$'
 }
 
+# sha256_of FILE: prints FILE's sha256 in lowercase hex.
+sha256_of() {
+    local sum
+    if command -v sha256sum >/dev/null 2>&1; then
+        sum="$(sha256sum <"$1")"
+    else
+        sum="$(shasum -a 256 <"$1")"
+    fi
+    printf '%s\n' "${sum%% *}"
+}
+
 # host_triple: prints rustc's host target triple.
 host_triple() {
     command -v rustc >/dev/null 2>&1 || die "rustup/rustc is required"
@@ -193,6 +209,17 @@ check_reported_version() {
             die "binary reports '${reported}', expected 'zebrad $2'"
             ;;
     esac
+}
+
+# check_zingod_version BINARY VERSION: dies, deleting BINARY, unless the first
+# line of `BINARY --version` is exactly `zingod VERSION`.
+check_zingod_version() {
+    local reported
+    reported="$("$1" --version 2>/dev/null | head -n 1)" || reported=""
+    if [ "${reported}" != "zingod $2" ]; then
+        rm -f "$1"
+        die "binary reports '${reported}', expected 'zingod $2'"
+    fi
 }
 
 # zebrad_version_line BINARY: prints the first line of `BINARY --version`, and
@@ -221,4 +248,46 @@ install_atomic() {
         check_reported_version "$2.tmp" "$3"
     fi
     mv -f "$2.tmp" "$2"
+}
+
+# install_zingod ARTIFACT TARGET ROOT: installs the zingod-<TARGET> artifact
+# of zingod-sidecars.yml, downloaded to the folder ARTIFACT, into the checkout
+# ROOT for a Linux build of the app: the binary as
+# src-tauri/binaries/zeal-zingod-<TARGET>, made executable again (artifacts
+# drop the bit) and checked against ROOT's ZINGOD_VERSION and ZINGOD_COMMIT,
+# and each licence file the build copied into
+# src-tauri/resources/licenses/zingod/. The binary and every licence file are
+# checked against the sha256 that zingod-build-info.txt records for them
+# before anything is installed, and a binary that fails the version check is
+# deleted, so a failed run leaves no unchecked file behind. Prints the build
+# information.
+install_zingod() {
+    local from="$1" target="$2" root="$3"
+    local info="$1/zingod-build-info.txt" binary="$1/zeal-zingod-${target}"
+    local sidecar recorded name sha256 got copied=()
+    [ -s "${info}" ] || die "the zingod-${target} artifact has no zingod-build-info.txt"
+    cat "${info}"
+    grep -qx "zingod_commit=$(read_pin "${root}/ZINGOD_COMMIT")" "${info}" ||
+        die "zingod-build-info.txt is not for the pinned commit $(read_pin "${root}/ZINGOD_COMMIT")"
+    grep -qx "target=${target}" "${info}" || die "zingod-build-info.txt is not for ${target}"
+    [ -f "${binary}" ] || die "the zingod-${target} artifact has no zeal-zingod-${target}"
+    recorded="$(sed -n 's/^binary_sha256=//p' "${info}")"
+    [ -n "${recorded}" ] || die "zingod-build-info.txt records no binary_sha256"
+    got="$(sha256_of "${binary}")"
+    [ "${got}" = "${recorded}" ] || die "zeal-zingod-${target} has sha256 ${got}, not the ${recorded} its build recorded"
+    while IFS='=' read -r name sha256; do
+        name="${name#license_sha256_}"
+        [ -f "${from}/licenses/${name}" ] || die "the zingod-${target} artifact has no licenses/${name}"
+        got="$(sha256_of "${from}/licenses/${name}")"
+        [ "${got}" = "${sha256}" ] || die "licenses/${name} has sha256 ${got}, not the ${sha256} its build recorded"
+        copied+=("${name}")
+    done < <(grep '^license_sha256_' "${info}")
+    [ "${#copied[@]}" -gt 0 ] || die "zingod-build-info.txt records no licence file"
+    sidecar="${root}/src-tauri/binaries/zeal-zingod-${target}"
+    install_atomic "${binary}" "${sidecar}"
+    check_zingod_version "${sidecar}" "$(read_pin "${root}/ZINGOD_VERSION")"
+    for name in "${copied[@]}"; do
+        cp "${from}/licenses/${name}" "${root}/src-tauri/resources/licenses/zingod/${name}"
+    done
+    echo "installed zingod $(read_pin "${root}/ZINGOD_VERSION") at ${sidecar}, with ${#copied[@]} copied licence files"
 }

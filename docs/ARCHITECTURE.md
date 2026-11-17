@@ -42,10 +42,11 @@ kept as the historical design record; where the two differ, this file describes 
 
 | Path | Role |
 | --- | --- |
-| `crates/launcher-types` | serde types shared by backend and UI (`Status`, `LogLine`, `Settings`, `NodeStats`, `NodeProgram`, `ZebradChannel`, `NodeDocs`, errors). Builds natively and to wasm; no tokio, no Tauri. |
+| `crates/launcher-types` | serde types shared by backend and UI (`Status`, `LogLine`, `Settings`, `NodeStats`, `NodeProgram`, `ZebradChannel`, `NodeDocs`, the zingod pins, errors). Builds natively and to wasm; no tokio, no Tauri. |
 | `crates/explorer-model` | The block explorer's pure model: zebrad's response shapes, the block ledger and shielded budget, network upgrade heights, the search classifier, the pages' views and a synthetic chain for the mock and tests. serde only; builds natively and to wasm. |
 | `crates/launcher-core` | Logic that does not need Tauri: the node registry and node specs, per-channel sidecar resolution, supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind. |
 | `crates/launcher-core/src/bin/fake-zebrad.rs` | Scripted stand-in for zebrad, used by tests and PR bundle builds. |
+| `crates/launcher-core/src/bin/fake-zingod.rs` | Minimal stand-in for zingod (`--version` and `generate-config`), installed as the development `zeal-zingod` on Linux. |
 | `crates/launcher-herd` | Pure rules for the nodes Zeal runs together: the public services' (the setup's plan, pauses, the front door's mode, evidence ages, the wallet check) and the herd's agreement engine (placement, the fork search, the nodes' and the herd's states, their words). Native and wasm, no I/O; the UI's mock runs it too. |
 | `crates/launcher-gateway` | The front door: the TLS server a public service faces the internet through. tokio, rustls with ring, socket2 and h2 only. |
 | `crates/launcher-public` | The public services without Tauri: the service actor, ACME, dynamic DNS, the network checks, the keychain, the self-tests. |
@@ -54,7 +55,8 @@ kept as the historical design record; where the two differ, this file describes 
 
 Single sources of truth: `[workspace.package] version` in [`Cargo.toml`](../Cargo.toml)
 for the launcher version; `ZEBRAD_VERSION`/`ZEBRAD_COMMIT`/`ZEBRAD_DATE` for Stable and
-the `ZEBRAD_BETA_*` and `ZEBRAD_NIGHTLY_*` root pins for the other channels; and
+the `ZEBRAD_BETA_*` and `ZEBRAD_NIGHTLY_*` root pins for the other channels;
+`ZINGOD_VERSION`/`ZINGOD_COMMIT`/`ZINGOD_DATE` for the zingod bundled on Linux; and
 [`rust-toolchain.toml`](../rust-toolchain.toml) for the toolchain.
 
 ## Nodes
@@ -1095,9 +1097,15 @@ Stable ZEBRAD_VERSION/ZEBRAD_COMMIT     Beta ZEBRAD_BETA_*     Nightly ZEBRAD_NI
        every Linux sidecar: glibc-floor check
 all three -> zebrad-docs.yml -> zebra-docs artifact (Book, Config, Changes at exact pins)
 
+ZINGOD_VERSION/ZINGOD_COMMIT (Linux only; nothing runs it yet)
+  '- zingod-sidecars.yml -> sidecars-zingod: build-zingod.sh from the pinned commit
+       in Ubuntu 22.04 on both Linux targets: tag/commit, version, generate-config,
+       glibc-floor, ldd and strings checks; the licence files; provenance attestation;
+       x86_64: the vendored source archive zingod-src-<ver>.tar.zst
+
 tag v* -> release.yml
-  1. create one draft release; pass its id to the matrix
-  2. unprivileged jobs, no secrets: three sidecar matrices, docs, cargo tauri build --no-bundle
+  1. create one draft release, with zingod's source archive; pass its id to the matrix
+  2. unprivileged jobs, no secrets: four sidecar matrices, docs, cargo tauri build --no-bundle
   3. environment "release" (required reviewer, no caches): cargo tauri bundle,
      codesign + notarization (macOS), Azure Artifact Signing (Windows app and sidecars),
      updater .sig files
@@ -1115,10 +1123,13 @@ CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs, on Linux,
 `scripts/check-versions.sh`, fmt, clippy with the mutex ban, the tests, the UI crate's
 clippy for `wasm32-unknown-unknown` and `trunk build --release`, `cargo deny`, and
 shellcheck and actionlint over the scripts and workflows; clippy and tests on
-`windows-2025` and `macos-15`; and, on pushes to `main` and on pull requests that change
-the stable zebrad pin, the real-zebrad contract tests against the verified release binary.
+`windows-2025` and `macos-15`; on pushes to `main` and on pull requests that change
+the stable zebrad pin, the real-zebrad contract tests against the verified release binary;
+and, on pull requests that change what `zeal-zingod` is built from, `zingod-sidecars.yml`
+without attestation.
 `bundle.yml` builds unsigned bundles with all three real zebrad sidecars and their offline
-documentation for all five targets.
+documentation for all five targets, and on Linux `zeal-zingod` and its licences
+([SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)).
 
 ## Decisions
 

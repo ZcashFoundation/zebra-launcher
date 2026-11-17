@@ -326,8 +326,9 @@ jobs:
             ca-certificates curl git build-essential pkg-config libssl-dev \
             clang libclang-dev cmake binutils unzip
 
-      # Keep this pinned, checksummed bootstrap in sync with setup-tauri. Do
-      # not replace it with a mutable install script piped into a shell.
+      # Keep this pinned, checksummed bootstrap in sync with setup-tauri and
+      # zingod-sidecars.yml. Do not replace it with a mutable install script
+      # piped into a shell.
       - name: Install rustup (Ubuntu 22.04 container)
         if: needs.version.outputs.source == 'true'
         env:

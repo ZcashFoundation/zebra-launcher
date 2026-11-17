@@ -20,6 +20,9 @@
 #      .github/tool-versions.env, equals the `wasm-bindgen` crate in Cargo.lock
 #      (read by scripts/cargo-lock-version.sh): trunk runs the CLI only at
 #      exactly that version. Skipped if nothing pins it.
+#   8. The bundled zingod's pins: ZINGOD_VERSION is MAJOR.MINOR.PATCH with no
+#      leading "v", ZINGOD_COMMIT is a full 40-character lowercase hex SHA and
+#      ZINGOD_DATE is a real ISO calendar date.
 #
 # Runs every check and reports each one, then exits 1 if any failed.
 # Requires: bash, grep, sed.
@@ -199,6 +202,24 @@ else
         fail ".github/tool-versions.env:${wb_pin_line%%:*} wasm-bindgen CLI ${wb_pin} is not the wasm-bindgen crate's ${wb_lock} (Cargo.lock); trunk needs them equal"
     fi
 fi
+
+# 8. The zingod pins (the grammars are decided in lib.sh)
+for pin in VERSION COMMIT DATE; do
+    file="ZINGOD_${pin}"
+    value="$(read_pin "${root}/${file}")"
+    case "${pin}" in
+        VERSION) valid=is_stable_version; grammar="MAJOR.MINOR.PATCH without a leading v" ;;
+        COMMIT) valid=is_full_sha; grammar="a full 40-character lowercase hex SHA" ;;
+        DATE) valid=is_iso_date; grammar="a real ISO calendar date (YYYY-MM-DD)" ;;
+    esac
+    if [ ! -f "${root}/${file}" ]; then
+        fail "${file} is missing"
+    elif "${valid}" "${value}"; then
+        ok "${file} is ${value}"
+    else
+        fail "${file} is '${value}', expected ${grammar}"
+    fi
+done
 
 if [ "${failures}" -gt 0 ]; then
     echo "check-versions: ${failures} check(s) failed" >&2
