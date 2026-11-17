@@ -316,9 +316,19 @@ impl SupervisorHandle {
 
     /// [`Self::start`] with options.
     pub async fn start_with(&self, options: StartOptions) -> Result<(), SupervisorError> {
+        self.send_start(options).await?.await
+    }
+
+    /// Sends a start and returns its answer to wait for: a command sent once this has returned
+    /// is handled after the start, so a [`Self::stop`] then stops what it launched.
+    pub async fn send_start(
+        &self,
+        options: StartOptions,
+    ) -> Result<impl Future<Output = Result<(), SupervisorError>> + Send + 'static, SupervisorError>
+    {
         let (reply, response) = oneshot::channel();
         self.send(Cmd::Start { options, reply }).await?;
-        response.await.map_err(|_| SupervisorError::Closed)?
+        Ok(async move { response.await.map_err(|_| SupervisorError::Closed)? })
     }
 
     /// Stops zebrad (gracefully, then by force after the grace period) and

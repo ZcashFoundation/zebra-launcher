@@ -916,6 +916,28 @@ async fn the_actor_answers_commands_while_a_stale_zebrad_is_terminated() {
     within(handle.shutdown()).await.expect("shutdown");
 }
 
+/// A stop sent once `send_start` has returned is handled after the start, so it stops what the
+/// start launched rather than finding nothing to stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_after_send_start_stops_what_it_launched() {
+    let fx = fixture("ok");
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    let answer = within(handle.send_start(StartOptions::default()))
+        .await
+        .expect("the start is sent");
+    within(handle.stop()).await.expect("stop");
+    // Whether zebrad logged `Starting zebrad` before the stop reached it or not.
+    let _ = within(answer).await;
+    let status = handle.status();
+    assert_eq!(status.phase, Phase::Stopped);
+    assert_eq!(status.pid, None);
+    let exit = status.last_exit.expect("the launched zebrad exited");
+    assert!(exit.requested, "{exit:?}");
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(contains(&history, "zebrad started (pid "));
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_stops_zebrad_and_closes_the_actor() {
     let fx = fixture("ok");
