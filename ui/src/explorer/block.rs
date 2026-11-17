@@ -501,11 +501,13 @@ struct Rows {
     failed: RwSignal<BTreeMap<u32, ExplorerError>>,
 }
 
-/// Reads chunk `chunk` of block `hash`'s rows, then again with their fees when the first answer
-/// came without them. A chunk that failed is forgotten from `asked`, so scrolling asks again,
-/// and its fees are no longer on their way; its failure shows until it is read.
+/// Reads chunk `chunk` of block `hash`'s rows with `call` (the node's explorer), then again
+/// with their fees when the first answer came without them. A chunk that failed is forgotten
+/// from `asked`, so scrolling asks again, and its fees are no longer on their way; its failure
+/// shows until it is read. An answer that comes once the table has gone (its page was left
+/// meanwhile) is dropped, and its fees are not asked for.
 async fn read_rows(
-    node: NodeId,
+    call: impl AsyncFn(ExplorerCall) -> Result<ExplorerReply, ExplorerError>,
     hash: BlockHash,
     chunk: u32,
     trace: bool,
@@ -519,16 +521,19 @@ async fn read_rows(
             limit: CHUNK as u16,
             with_fees,
         };
-        match api::explorer_call(&node, ExplorerCall { request, trace }).await {
+        match call(ExplorerCall { request, trace }).await {
             Ok(reply) => {
                 let ExplorerResponse::BlockTxs(page) = reply.response else {
                     return;
                 };
-                store.rows.try_update(|rows| {
+                let kept = store.rows.try_update(|rows| {
                     for row in page.rows {
                         rows.insert(row.index, row);
                     }
                 });
+                if kept.is_none() {
+                    return;
+                }
                 store.read.try_set(Some(page.read));
                 if let Some(calls) = reply.sources {
                     store.sources.try_update(|all| {
@@ -547,7 +552,8 @@ async fn read_rows(
                 });
                 if store
                     .failed
-                    .with_untracked(|failed| failed.contains_key(&chunk))
+                    .try_with_untracked(|failed| failed.contains_key(&chunk))
+                    == Some(true)
                 {
                     store.failed.try_update(|failed| {
                         failed.remove(&chunk);
@@ -622,7 +628,9 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
             asked.update_value(|asked| {
                 asked.insert(chunk);
             });
-            spawn_local(read_rows(reader.clone(), hash, chunk, trace, store, asked));
+            let node = reader.clone();
+            let call = async move |call| api::explorer_call(&node, call).await;
+            spawn_local(read_rows(call, hash, chunk, trace, store, asked));
         }
         let next = (end - 1) / CHUNK + 1;
         if next * CHUNK < total && !asked.with_value(|asked| asked.contains(&next)) {
@@ -931,9 +939,57 @@ fn Future(future: FutureBlock, nav: NodeExplorer) -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use launcher_types::explorer::PerPool;
+    use std::{
+        cell::Cell,
+        pin::pin,
+        task::{Context, Waker},
+    };
 
-    use super::turnstile_scale;
+    use launcher_types::explorer::{Hash32, PerPool, TxRowPage};
+
+    use super::*;
+
+    #[test]
+    fn rows_answered_after_the_table_has_gone_are_dropped() {
+        for fees_pending in [false, true] {
+            let root = Owner::new();
+            root.set();
+            let table = root.child();
+            let (store, asked) = table.with(|| {
+                let store = Rows {
+                    rows: RwSignal::new(HashMap::new()),
+                    pending: RwSignal::new(HashSet::new()),
+                    read: RwSignal::new(None),
+                    sources: RwSignal::new(None),
+                    failed: RwSignal::new(BTreeMap::new()),
+                };
+                (store, StoredValue::new(HashSet::from([0])))
+            });
+            let calls = Cell::new(0);
+            // The page is left while the node reads; the answer comes all the same.
+            let call = async |_: ExplorerCall| {
+                calls.set(calls.get() + 1);
+                table.cleanup();
+                Ok(ExplorerReply {
+                    chain: None,
+                    response: ExplorerResponse::BlockTxs(TxRowPage {
+                        offset: 0,
+                        total: 4_600,
+                        rows: Vec::new(),
+                        read: RowsRead::OneByOne,
+                        fees_pending,
+                    }),
+                    sources: None,
+                })
+            };
+            let mut reading = pin!(read_rows(call, Hash32([7; 32]), 0, false, store, asked));
+            let ready = reading
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()));
+            assert!(ready.is_ready(), "{fees_pending}");
+            assert_eq!(calls.get(), 1, "no fees asked for a table that has gone");
+        }
+    }
 
     #[test]
     fn the_turnstile_scale_holds_every_bar() {
