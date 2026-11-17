@@ -561,7 +561,9 @@ impl Runner {
             return;
         }
         let plan = self.plan().filter(|_| !self.held);
-        let phase = self.phase();
+        // The phase of the status the facts were just brought up to: a newer exit than the
+        // facts know would be judged on the last exit's evidence.
+        let phase = self.on_zingod_status();
         let facts = self.facts.borrow().clone();
         let Some(plan) = plan else {
             if phase.is_active() {
@@ -838,10 +840,11 @@ impl Runner {
     }
 
     /// Takes zingod's supervisor status into the facts: a new run starts its readings over,
-    /// and a `DiskFull` exit reads the disk at once, as the evidence of what ran out.
-    fn on_zingod_status(&mut self) {
+    /// and a `DiskFull` exit reads the disk at once, as the evidence of what ran out. Returns
+    /// that status's phase.
+    fn on_zingod_status(&mut self) -> Phase {
         let Some(zingod) = &self.zingod else {
-            return;
+            return Phase::Stopped;
         };
         let status = zingod.status.borrow().clone();
         if status.pid.is_some() && status.pid != self.run_pid {
@@ -893,6 +896,7 @@ impl Runner {
             facts.stale = status.stale.clone();
             changed
         });
+        status.phase
     }
 
     fn on_resources(&mut self) {
