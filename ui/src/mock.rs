@@ -32,6 +32,7 @@
 //! | `?children` | zebrad runs a `block_notify_command` in cycles of three resource samples: an `sh` with `notify-block` under it, then also 40 `curl`s, more than a sample lists ("and 11 more"), then `notify-block` alone, orphaned ([`resources::block_notify`]). |
 //! | `?unreadable` | The resource samples report CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk tile "the system does not report them". |
 //! | `?readerpanic` | The resource reader panics 30 s into the first run: the samples stop while zebrad keeps running, so the Resources card says it is not measured until zebrad's next run, which Restart starts ([`resources::reader_panicked`]). |
+//! | `?backfill` | zebrad's run started 45 minutes before the page loaded, and its resource samples and the computer's of the 40 minutes before the load reach the page at once, so the Resources card's charts have history from the start ([`resources::backfill`]). |
 //! | `?leftover` | Removing a node with its chain state deleted takes it off the list but leaves its folder behind, as when the backend cannot delete a file: the error banner names the folder. |
 //! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). Each node's process tree has samples of its own, and the computer has 16 CPUs and 32 GiB ([`resources`]). |
 //! | `?beta=unavailable` | Beta is disabled in the add-node picker and mock `add_node` rejects a Beta draft, even when its pin is newer than Stable. Without this mock-only override, channel availability follows the actual pins. |
@@ -199,6 +200,8 @@ struct Flags {
     unreadable: bool,
     /// `?readerpanic`.
     reader_panic: bool,
+    /// `?backfill`.
+    backfill: bool,
     /// `?leftover`.
     leftover: bool,
     /// `?herd`.
@@ -245,6 +248,7 @@ impl Flags {
             children: flag("children"),
             unreadable: flag("unreadable"),
             reader_panic: flag("readerpanic"),
+            backfill: flag("backfill"),
             leftover: flag("leftover"),
             herd: flag("herd") || flag("agree"),
             agree: value("agree").map(agreement::Agree::parse),
@@ -487,6 +491,9 @@ impl Mock {
             });
         } else if !first_run || flags.running {
             mock.start();
+            if flags.backfill {
+                mock.backfill();
+            }
         }
         let ticker = mock.clone();
         set_interval(move || ticker.tick_stats(), Duration::from_secs(1));
@@ -1156,7 +1163,7 @@ mod tests {
         // Every flag in the module doc's table, combined.
         assert_eq!(
             Flags::parse(
-                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&os=windows&children&unreadable&readerpanic&leftover&herd&agree=fork&beta=unavailable"
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&os=windows&children&unreadable&readerpanic&backfill&leftover&herd&agree=fork&beta=unavailable"
             ),
             Flags {
                 first_run: true,
@@ -1178,6 +1185,7 @@ mod tests {
                 children: true,
                 unreadable: true,
                 reader_panic: true,
+                backfill: true,
                 leftover: true,
                 herd: true,
                 agree: Some(agreement::Agree::Fork),

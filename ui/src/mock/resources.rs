@@ -21,7 +21,9 @@
 //! `?children` gives zebrad a `block_notify_command` that runs in cycles of three samples
 //! ([`block_notify`]), `?unreadable` reports CPU and I/O as refused by the OS, and
 //! `?readerpanic` stops the samples 30 s into the first run while zebrad runs on, as the
-//! backend does after a reader panic ([`reader_panicked`]).
+//! backend does after a reader panic ([`reader_panicked`]). `?backfill` starts zebrad's run
+//! 45 minutes before the page loaded and hands each new listener the samples of the 40
+//! minutes before the load first ([`backfill`]).
 //!
 //! The herd's nodes ([`super::herd`]: `?herd` and the nodes the add-node dialog adds) have
 //! samples of their own ([`NodeSamples`]), with docs/RESOURCES.md's figures where it gives
@@ -97,6 +99,11 @@ const OPENING_SECS: f64 = 10.0;
 
 /// `?readerpanic`: how far into the first run the resource reader panics.
 const READER_PANIC_SECS: f64 = 30.0;
+
+/// `?backfill`: how long before the page loaded zebrad's run started, and how much of it the
+/// samples that reach the page at once cover.
+const BACKFILL_RUN: Duration = Duration::from_secs(45 * 60);
+const BACKFILL: Duration = Duration::from_secs(40 * 60);
 
 /// How long memory climbs while syncing, and the period of the sawtooth after that.
 const CLIMB_SECS: f64 = 30.0 * 60.0;
@@ -515,6 +522,60 @@ thread_local! {
     /// sampler never starts the herd's simulation.
     static HERD_SAMPLES: RefCell<Vec<ArcRwSignal<Option<NodeResources>>>> =
         const { RefCell::new(Vec::new()) };
+    /// `?backfill`: the main zebrad's samples and the computer's from before the page loaded,
+    /// oldest first.
+    static BACKFILLED: RefCell<(Vec<NodeResources>, Vec<MachineResources>)> =
+        const { RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// What `?backfill` hands each new listener first: zebrad's run, `pid` since `started_at`,
+/// sampled every [`INTERVAL`] over the [`BACKFILL`] before `now` while it synced, with the
+/// computer beside it; and the run as its sampler goes on from there. The run's counters count
+/// from the spawn, so the first sample already holds its first minutes.
+pub(super) fn backfill(
+    flags: Flags,
+    pid: u32,
+    started_at: SystemTime,
+    now: SystemTime,
+    computer: Computer,
+) -> (MockTree, Vec<NodeResources>, Vec<MachineResources>) {
+    let mut tree = MockTree::new(1, pid, started_at);
+    let from = now
+        .checked_sub(BACKFILL)
+        .and_then(|from| from.duration_since(started_at).ok())
+        .unwrap_or_default()
+        .as_secs_f64();
+    let to = now
+        .duration_since(started_at)
+        .unwrap_or_default()
+        .as_secs_f64();
+    let step = INTERVAL.as_secs_f64();
+    let (mut nodes, mut machines) = (Vec::new(), Vec::new());
+    let mut run_secs = 0.0;
+    // Up to the last interval before `now`, where the live sampler takes over.
+    while run_secs + step <= to {
+        let state = RunState {
+            run_secs,
+            stopping: false,
+            at_tip: false,
+            scenario: flags.scenario(),
+            count: tree.count,
+        };
+        let at = started_at + Duration::from_secs_f64(run_secs);
+        let sample = tree.sample(at, run_secs, &load(&state), flags);
+        if run_secs >= from {
+            let count = machines.len() as u64 + 1;
+            machines.push(machine(at, count, flags.os, computer, &[&sample]));
+            nodes.push(sample);
+        }
+        run_secs += step;
+    }
+    (tree, nodes, machines)
+}
+
+/// The main zebrad's samples from before the page loaded (`?backfill`), oldest first.
+pub(super) fn backfilled_nodes() -> Vec<NodeResources> {
+    BACKFILLED.with_borrow(|(nodes, _)| nodes.clone())
 }
 
 /// A herd node's resource samples: its runs and its newest sample.
@@ -629,6 +690,40 @@ pub(super) fn machine(
 }
 
 impl super::Mock {
+    /// `?backfill`: the run that [`super::Mock::start`] began started [`BACKFILL_RUN`] ago and
+    /// runs; its samples and the computer's of the [`BACKFILL`] before now wait for the
+    /// listeners ([`backfill`]), and the samplers go on from there.
+    pub(super) fn backfill(&self) {
+        let now = clock::now();
+        let started_at = now.checked_sub(BACKFILL_RUN).unwrap_or(now);
+        let Some(pid) = self.status.with_untracked(|status| status.pid) else {
+            return;
+        };
+        self.status.update(|status| {
+            status.phase = Phase::Running;
+            status.started_at = Some(started_at);
+            status.rpc_addr = "127.0.0.1:8232".parse().ok();
+            status.metrics_addr = "127.0.0.1:9999".parse().ok();
+        });
+        let computer = if self.flags.herd {
+            HERD_COMPUTER
+        } else {
+            ONE_NODE
+        };
+        let (tree, nodes, machines) = backfill(self.flags, pid, started_at, now, computer);
+        // The computer's count goes on, so its first live sample has a busy figure.
+        self.resource_seconds.store(
+            machines.len() as u64 * INTERVAL.as_secs(),
+            Ordering::Relaxed,
+        );
+        self.tree.set(Some(tree));
+        BACKFILLED.with_borrow_mut(|backfilled| *backfilled = (nodes, machines));
+        // The RPC answers at once, as it would have for 45 minutes: as soon as the mock is set
+        // up, since the statistics read the mock's other parts.
+        let mock = self.clone();
+        set_timeout(move || mock.tick_stats(), Duration::ZERO);
+    }
+
     /// Every second: a new run publishes its first sample at once, a running one every
     /// [`INTERVAL`], and a node without a pid publishes `None`, as does a run whose reader
     /// panicked (`?readerpanic`); the computer publishes every [`INTERVAL`], from the page's
@@ -721,9 +816,12 @@ pub async fn get_node_resources() -> Option<NodeResources> {
 }
 
 /// Calls `handler` with every change of the computer's resources, starting with the current
-/// value.
+/// value; with `?backfill`, its samples from before the page loaded come first.
 pub fn on_machine_resources(handler: impl Fn(Option<MachineResources>) + 'static) {
     let machine = mock().machine;
+    for sample in BACKFILLED.with_borrow(|(_, machines)| machines.clone()) {
+        handler(Some(sample));
+    }
     Effect::new(move |_| handler(machine.get()));
 }
 
@@ -1118,6 +1216,32 @@ mod tests {
         // One node's computer could not hold them.
         let small = machine(at, 3, OsFlag::Linux, ONE_NODE, &nodes);
         assert!(small.memory_available_bytes.unwrap() < gib(1.0));
+    }
+
+    #[test]
+    fn the_backfill_covers_the_forty_minutes_before_the_load() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let started_at = now - BACKFILL_RUN;
+        let (tree, nodes, machines) = backfill(Flags::default(), 4242, started_at, now, ONE_NODE);
+        assert_eq!(nodes.len(), 480, "every 5 s for 40 minutes");
+        assert_eq!(machines.len(), nodes.len());
+        assert_eq!(nodes[0].at, now - BACKFILL);
+        assert_eq!(nodes[479].at, now - INTERVAL);
+        assert!(nodes.iter().all(|sample| sample.run == 1));
+        assert!(nodes.windows(2).all(
+            |pair| pair[0].run_secs < pair[1].run_secs && pair[0].cpu_secs <= pair[1].cpu_secs
+        ));
+        // The counters hold the run's first five minutes, and the memory climbs.
+        assert!(nodes[0].cpu_secs > 4.0 * 300.0, "{}", nodes[0].cpu_secs);
+        assert!(nodes[0].memory_bytes < nodes[479].memory_bytes);
+        assert!(
+            machines
+                .iter()
+                .all(|machine| machine.cpu_busy_cores.is_some())
+        );
+        assert_eq!(machines[10].at, nodes[10].at);
+        // The live sampler goes on with the same run.
+        assert_eq!((tree.run, tree.pid, tree.count), (1, 4242, 540));
     }
 
     #[test]

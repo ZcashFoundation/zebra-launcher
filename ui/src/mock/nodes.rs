@@ -191,7 +191,16 @@ pub fn on_metrics(handler: impl Fn(NodeEvent<Option<MetricsSnapshot>>) + 'static
     register(&METRICS, handler);
 }
 
+/// Calls `handler` with every node's resource samples: first, with `?backfill`, the main
+/// node's from before the page loaded, then the live ones.
 pub fn on_node_resources(handler: impl Fn(NodeEvent<Option<NodeResources>>) + 'static) {
+    let main = mock().info.with_untracked(|info| info.id.clone());
+    for sample in super::resources::backfilled_nodes() {
+        handler(NodeEvent {
+            node: main.clone(),
+            value: Some(sample),
+        });
+    }
     register(&RESOURCES, handler);
 }
 

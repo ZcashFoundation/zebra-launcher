@@ -95,7 +95,10 @@ every node command and event carries a node's id, and the mock's zebrad below is
   tile "—" with "the system does not report them". `?readerpanic` makes the resource reader
   panic 30 s into the first run, as the backend's can: the samples stop while zebrad keeps
   running, and the card says it is not measured until zebrad's next run, which Restart
-  starts;
+  starts. The card's three charts (CPU, memory and disk I/O, beside the computer's CPU and
+  memory in use) follow the range control; `?backfill` starts zebrad's run 45 minutes before
+  the page loaded and hands the page its resource samples and the computer's of the 40
+  minutes before the load at once, so the charts have history from the start;
 - several nodes: `?herd` adds five nodes beside the mock's Stable zebrad: on Mainnet, Zakura
   catching up from a snapshot, Zaino reading the Mainnet Zebra, and the zcashd compatibility
   build, stopped; on Testnet, a **Nightly Zebra** and a pruned Zakura at the tip. This makes
