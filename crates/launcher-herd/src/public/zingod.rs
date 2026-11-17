@@ -1189,9 +1189,11 @@ pub fn service_checks(spec: &PublicServiceSpec, facts: &Facts) -> Vec<CheckResul
             )
         }
         (Some(Want::Run(_)), _) => running(CheckId::EndpointOpened),
-        (Some(Want::Stop(Blocked::Failed(_) | Blocked::DiskLow | Blocked::ChainMismatch)), _) => {
+        // The runner's one port move, under way.
+        (Some(Want::Stop(Blocked::Failed(ExitClass::PortInUse))), _) => {
             running(CheckId::EndpointOpened)
         }
+        // Stopped: zingod's failure, the disk or a mismatch says why, beside the index.
         _ => not_run(CheckId::EndpointOpened),
     };
     // What the index waits for, once zingod may start; another check says why it may not.
@@ -2293,6 +2295,23 @@ mod service_tests {
                     ports: vec![18137, 18138],
                 }
             }
+        );
+        zingod(&mut ports).runner.ports_tried = vec![18137];
+        assert_eq!(
+            outcome(&spec, &ports, CheckId::EndpointOpened),
+            CheckOutcome::Running,
+            "the port move is under way"
+        );
+        // A stopped zingod isn't starting: its failure says why.
+        let mut crashed = facts.clone();
+        let runner = &mut zingod(&mut crashed).runner;
+        runner.phase = Phase::Failed {
+            class: ExitClass::Crash,
+        };
+        runner.listening = None;
+        assert_eq!(
+            outcome(&spec, &crashed, CheckId::EndpointOpened),
+            CheckOutcome::NotRun
         );
         // A chain mismatch.
         let mut mismatch = facts.clone();

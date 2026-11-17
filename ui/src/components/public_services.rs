@@ -23,9 +23,9 @@ use crate::{
     public_state::PublicContext,
     public_text::{
         self, BACKEND_CHOICES, IndexerAction, SERVICE_NAME, Tone, cert_needs_retry, cert_text,
-        check_line, check_mark, consent_lines, finding_text, forget_index_label, indexer_actions,
-        kept_index_line, network_name, reach_text, server_footer, server_lines, service_check_line,
-        state_line, step_mark, step_title, use_lines, zingod_choice_note,
+        check_line, check_mark, check_state_word, consent_lines, finding_text, forget_index_label,
+        indexer_actions, kept_index_line, network_name, reach_text, server_footer, server_lines,
+        service_check_line, state_line, step_mark, step_title, use_lines, zingod_choice_note,
     },
 };
 
@@ -388,15 +388,22 @@ fn Checklist(status: Memo<Option<PublicStatus>>) -> impl IntoView {
                             })
                             .collect();
                         let is_current = current.get_untracked() == Some(id);
-                        // zingod's Service step lists every check, as each passes.
-                        let zingod_lines: Vec<(&'static str, String)> = status.with(|s| {
+                        // zingod's Service step lists every check, as each passes, with its
+                        // mark in words for screen readers.
+                        let zingod_lines: Vec<(&'static str, &'static str, String)> = status.with(|s| {
                             s.as_ref()
                                 .filter(|s| s.backend == LightBackend::Zingod)
                                 .filter(|_| id == StepId::Service && step.state != StepState::Waiting)
                                 .map(|s| {
                                     step.checks
                                         .iter()
-                                        .map(|check| (check_mark(&check.outcome), service_check_line(check, s)))
+                                        .map(|check| {
+                                            (
+                                                check_mark(&check.outcome),
+                                                check_state_word(&check.outcome),
+                                                service_check_line(check, s),
+                                            )
+                                        })
                                         .collect()
                                 })
                                 .unwrap_or_default()
@@ -410,9 +417,10 @@ fn Checklist(status: Memo<Option<PublicStatus>>) -> impl IntoView {
                                     <ul class="public-checks public-service-checks">
                                         {zingod_lines
                                             .into_iter()
-                                            .map(|(mark, line)| view! {
+                                            .map(|(mark, word, line)| view! {
                                                 <li>
                                                     <span class="public-mark" aria-hidden="true">{mark}</span>
+                                                    <span class="visually-hidden">{word}</span>
                                                     {line}
                                                 </li>
                                             })

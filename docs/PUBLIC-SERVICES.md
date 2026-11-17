@@ -1179,6 +1179,11 @@ Step 2 with zingod:
  ○ zingod answers the wallet check
 ```
 
+Each mark is said in words for screen readers ("Passed:", "Under way:", "Not checked yet:",
+"Warning:", "Failed:"), and zingod's line follows its state: "Starting zingod 1.1.0, reading
+Zebra · Testnet" while it starts, "zingod 1.1.0 isn't running" while a failure, the disk or a
+mismatch keeps it stopped.
+
 The setup goes on while the index builds, as it does while zebrad syncs; the test on this
 computer and Open wait for it. The status panel's first line follows
 [the table above](#what-can-go-wrong-and-what-the-user-sees), and a **Server** card joins

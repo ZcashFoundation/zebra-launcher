@@ -1133,7 +1133,11 @@ pub fn service_check_line(check: &CheckResult, status: &PublicStatus) -> String 
             _ => "Room for zingod's index".into(),
         },
         CheckId::AtTip => format!("{zebra} is at the tip"),
-        CheckId::EndpointOpened => format!("zingod {version} is running, reading {zebra}"),
+        CheckId::EndpointOpened => match check.outcome {
+            CheckOutcome::Pass => format!("zingod {version} is running, reading {zebra}"),
+            CheckOutcome::Running => format!("Starting zingod {version}, reading {zebra}"),
+            _ => format!("zingod {version} isn't running"),
+        },
         CheckId::IndexReady => "zingod serves at Zebra's tip".into(),
         CheckId::TipMatches => "zingod's tip matches Zebra's".into(),
         CheckId::WalletCheck => "zingod answers the wallet check".into(),
@@ -1153,6 +1157,21 @@ pub fn check_mark(outcome: &CheckOutcome) -> &'static str {
         CheckOutcome::Warn { .. } => "!",
         CheckOutcome::NotRun => "○",
         CheckOutcome::Fail { .. } => "✕",
+    }
+}
+
+/// A check's mark in words, for screen readers, which skip the mark: its state before the
+/// check's line, as [`check_mark`] shows it.
+pub fn check_state_word(outcome: &CheckOutcome) -> &'static str {
+    match outcome {
+        CheckOutcome::Pass => "Passed: ",
+        CheckOutcome::Warn {
+            finding: Finding::Syncing { .. } | Finding::IndexBuilding { .. },
+        }
+        | CheckOutcome::Running => "Under way: ",
+        CheckOutcome::Warn { .. } => "Warning: ",
+        CheckOutcome::NotRun => "Not checked yet: ",
+        CheckOutcome::Fail { .. } => "Failed: ",
     }
 }
 
@@ -1839,6 +1858,62 @@ mod tests {
         let (zebra_public, zebra_yours) = consent_lines(&status, LightBackend::ZebradEndpoint);
         assert_eq!(zebra_public.len(), 3);
         assert_eq!(zebra_yours.len(), 6);
+    }
+
+    /// zingod's Service step words each check by its state, for the eye and for a screen
+    /// reader: a check that hasn't passed never reads as one that has.
+    #[test]
+    fn zingods_check_lines_follow_their_state() {
+        let mut status = base();
+        status.network = Network::Testnet;
+        status.backend = LightBackend::Zingod;
+        let line = |outcome| {
+            let check = CheckResult {
+                id: CheckId::EndpointOpened,
+                outcome,
+                at: None,
+            };
+            format!(
+                "{}{}",
+                check_state_word(&check.outcome),
+                service_check_line(&check, &status)
+            )
+        };
+        let version = launcher_types::zingod::version();
+        assert_eq!(
+            line(CheckOutcome::Pass),
+            format!("Passed: zingod {version} is running, reading Zebra · Testnet")
+        );
+        assert_eq!(
+            line(CheckOutcome::Running),
+            format!("Under way: Starting zingod {version}, reading Zebra · Testnet")
+        );
+        assert_eq!(
+            line(CheckOutcome::NotRun),
+            format!("Not checked yet: zingod {version} isn't running")
+        );
+        assert_eq!(
+            check_state_word(&CheckOutcome::Warn {
+                finding: Finding::IndexBuilding {
+                    served: None,
+                    target: None,
+                    eta_secs: None,
+                }
+            }),
+            "Under way: "
+        );
+        assert_eq!(
+            check_state_word(&CheckOutcome::Warn {
+                finding: Finding::NoHairpin
+            }),
+            "Warning: "
+        );
+        assert_eq!(
+            check_state_word(&CheckOutcome::Fail {
+                finding: Finding::ChainMismatch { at: 7 }
+            }),
+            "Failed: "
+        );
     }
 
     #[test]
