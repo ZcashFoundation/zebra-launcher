@@ -44,12 +44,12 @@ kept as the historical design record; where the two differ, this file describes 
 | --- | --- |
 | `crates/launcher-types` | serde types shared by backend and UI (`Status`, `LogLine`, `Settings`, `NodeStats`, `NodeProgram`, `ZebradChannel`, `NodeDocs`, the zingod pins, errors). Builds natively and to wasm; no tokio, no Tauri. |
 | `crates/explorer-model` | The block explorer's pure model: zebrad's response shapes, the block ledger and shielded budget, network upgrade heights, the search classifier, the pages' views and a synthetic chain for the mock and tests. serde only; builds natively and to wasm. |
-| `crates/launcher-core` | Logic that does not need Tauri: the node registry and node specs, per-channel sidecar resolution, supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind. |
+| `crates/launcher-core` | Logic that does not need Tauri: the node registry and node specs, per-channel sidecar resolution, supervisor actor, process control (unix/windows), log parsing and classifiers, log file, pidfile, restart policy, config, settings, RPC monitor, resource samplers, paths, end-of-support, install kind, and zingod's adapter (`zingod`: the configuration writer, the command line, the reader). |
 | `crates/launcher-core/src/bin/fake-zebrad.rs` | Scripted stand-in for zebrad, used by tests and PR bundle builds. |
-| `crates/launcher-core/src/bin/fake-zingod.rs` | Minimal stand-in for zingod (`--version` and `generate-config`), installed as the development `zeal-zingod` on Linux. |
-| `crates/launcher-herd` | Pure rules for the nodes Zeal runs together: the public services' (the setup's plan, pauses, the front door's mode, evidence ages, the wallet check) and the herd's agreement engine (placement, the fork search, the nodes' and the herd's states, their words). Native and wasm, no I/O; the UI's mock runs it too. |
+| `crates/launcher-core/src/bin/fake-zingod.rs` | Scripted stand-in for zingod: `-c FILE start` with zingod's lines, `/status`, h2c `GetLightdInfo` and `GetLatestBlock`, and its scenarios (`FAKE_ZINGOD_MODE`). Used by the zingod tests and installed as the development `zeal-zingod` on Linux. `fake/chain.rs` holds the block hashes it shares with fake-zebrad. |
+| `crates/launcher-herd` | Pure rules for the nodes Zeal runs together: the public services' (the setup's plan, pauses, the front door's mode, evidence ages, the wallet check, zingod's start, stall, disk and cross-check rules) and the herd's agreement engine (placement, the fork search, the nodes' and the herd's states, their words). Native and wasm, no I/O; the UI's mock runs it too. |
 | `crates/launcher-gateway` | The front door: the TLS server a public service faces the internet through. tokio, rustls with ring, socket2 and h2 only. |
-| `crates/launcher-public` | The public services without Tauri: the service actor, ACME, dynamic DNS, the network checks, the keychain, the self-tests. |
+| `crates/launcher-public` | The public services without Tauri: the service actor, ACME, dynamic DNS, the network checks, the keychain, the self-tests, and the `ZingodRunner`. |
 | `src-tauri` | Thin Tauri 2.12 app: commands, the `Channel` bridge, per-channel sidecar and offline documentation resources, tray, updater, exit flow, capabilities. |
 | `ui` | Leptos CSR crate built by trunk into `ui/dist`. Talks to Tauri through about 100 lines of hand-written `wasm_bindgen` externs to `window.__TAURI__`. |
 
@@ -219,7 +219,15 @@ states.
 
 ## Supervisor
 
-Each node has one actor task that owns its zebrad child. Nothing else touches it.
+Each node has one actor task that owns its zebrad child. Nothing else touches it. The same
+supervisor runs zingod for the light client server: `SupervisorConfig.command` is a
+`Launch` (`Zebrad(ZebradCommand)` or `Zingod(ZingodCommand)`, in `process.rs`), which picks
+the spawner's branch and the `logs::Reader` of the program's output: zebrad's parser,
+detector and classifier, or zingod's (`zingod::logs`: logfmt, `Running` at its gRPC
+`Listening` line, which also sets `Status.lightwalletd_addr`). `push_line` runs the reader's
+`redact` before anything else, so the log file and the ring get the same text: the identity
+for zebrad, every `txid=` value replaced by `[txid]` for zingod. The pid file records the
+`Launch`'s binary, and the launcher's notes name the program.
 
 | Channel | Direction | Carries |
 | --- | --- | --- |
@@ -353,19 +361,28 @@ little). `ExitClass` has these variants:
 | `DbLocked` | panic `Database likely already open` | `Failed`, not retried |
 | `PortInUse` | panic `... already in use` while opening a listener, or the check before the spawn found one of the node's ports held | `Failed`, not retried |
 | `SpawnFailed` | the process could not be started, for example because the sidecar is missing | `Failed`, not retried |
+| `DiskFull` | zingod only: its commit text `index commit failed: disk … full`, or `No space left on device` or `Disk quota exceeded` after an index I/O prefix | `Failed`, not retried; zingod's runner restarts it only when bytes ran out and came back |
+| `IndexBroken` | zingod only: the texts of a manifest or page that can't be read as it is, the page checksum panic, or `(resync required)`; a held lock and any other index I/O error never are | `Failed`, not retried; a rebuild of the index |
 | `Crash` | any other exit the launcher did not ask for: non-zero code, signal or panic | `Backoff`: 1 s doubling to 60 s; `Failed{Crash}` after 5 crashes in 10 min |
 | `Clean` | exit code 0, or a kill by the launcher after the grace period (`detail: "killed by the launcher"`); a non-zero exit or panic during a requested stop keeps its own class and is still not restarted | `Stopped` |
 
 The end-of-support warning (`Your Zebra release is too old`) is a log event
 (`LogEvent::EosWarn`), not an exit class: zebrad keeps running and the UI shows a banner.
-There is no disk-full class; a full disk ends the run as whatever zebrad does then,
-normally `Crash`. The log lines these depend on are pinned by fixtures captured from real
-zebrad; see
+zebrad has no disk-full class; a full disk ends its run as whatever zebrad does then,
+normally `Crash`. zingod's reader classifies its last words, an `Error:` line or a panic,
+as `LogEvent::Failure` with a class, matching whole texts in order: the configuration,
+a taken port, a held lock, a full disk, a damaged index, and `Crash` for anything else. The log lines these depend on are pinned by fixtures captured from real
+zebrad and zingod; see
 [`crates/launcher-core/tests/fixtures/README.md`](../crates/launcher-core/tests/fixtures/README.md).
 
 **Spawn environment.** `zebrad -c <the node's zebrad.toml> start`. Every inherited
 `ZEBRA_*` variable is removed with `env_remove` (never `env_clear`, which would drop
-`PATH`, `HOME`, `SystemRoot` and `LOCALAPPDATA`). `ZEBRA_TRACING__USE_COLOR=false` and
+`PATH`, `HOME`, `SystemRoot` and `LOCALAPPDATA`). zingod is the exception:
+`zeal-zingod -c <config> start` runs with stdin null, at nice 10 (set with `setpriority` in
+the same `pre_exec` as the parent-death signal), and a cleared environment holding only
+`HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME` under `<index dir>/home` and
+`RUST_LOG=zingod=info` (`ZingodCommand::env`), so no `ZINGOD_CONFIG_*`, malformed `RUST_LOG`
+or `NOTIFY_SOCKET` reaches it. It runs on Linux only and starts no program. `ZEBRA_TRACING__USE_COLOR=false` and
 `ZEBRA_TRACING__FORCE_USE_COLOR=false` are forced; `ZEBRA_TRACING__PROGRESS_BAR` and
 `ZEBRA_TRACING__LOG_FILE` are unset.
 
@@ -900,6 +917,24 @@ with a card on the dashboard and a header banner on the node's pages; every sent
 from `ui/src/public_text.rs`, and the mock's `?public=setup`, `serving`, `unconfirmed`,
 `cgnat`, `expiring`, `keychain` and `consent` run launcher-herd's rules over fake facts. What PS1 left for later is
 listed in PUBLIC-SERVICES.md ("PS1 as built").
+
+- **zingod** (Z2 of PUBLIC-SERVICES.md, not wired to the service yet). `ZingodRunner`
+  (`launcher-public/src/zingod.rs`) owns zingod's supervisor (a 30 s stop grace,
+  `<app data>/public/zingod-<network>.pid` with `kill_stale`,
+  `<log dir>/zingod-<network>.log`, the check of `127.0.0.1:<port>` before each spawn) and
+  follows a `watch<Option<ZingodPlan>>`: the configuration, its port, the zebrad run it reads
+  and an attempt. It writes `<app data>/public/zingod-<network>.toml` before every start
+  (`zingod::config`, always with the node's cookie), restarts zingod for a new zebrad run or
+  attempt, moves once to the next free port after `PortInUse`, stops zingod below 10 GB free
+  and starts it again above 20 GB, and after `DiskFull` restarts it only on evidence that
+  covers the failure. It reads `/status` every 5 s (hyper, HTTP/1.1, a new connection, 2 s),
+  the disk every minute, the index's size every 10 minutes (50,000 entries at most, in
+  `spawn_blocking`) and the process tree, and publishes them as a `watch<ZingodFacts>`.
+  Rebuild and Delete come on an mpsc with oneshot replies and empty `indexes/` and `state/`
+  inside the recorded `…/zingod/<network>` folder only (`remove_index`). The rules it and Z3
+  read (`want()`, the restart with each zebrad run, the stall rule, the hysteresis, the
+  cross-check, what `/status` means, `TESTED_ZINGOD`) are in launcher-herd's
+  `public::zingod`.
 
 ## Block explorer
 

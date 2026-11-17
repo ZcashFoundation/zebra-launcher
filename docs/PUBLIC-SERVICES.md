@@ -20,8 +20,8 @@
 > ([Phases for zingod](#phases-for-zingod)): Z1 bundles the pinned, attested binary, which
 > nothing runs yet; Z2 supervises it, with a contract test and no UI; Z3 lets a Linux user choose
 > it for a Testnet light client server; Z4 opens Mainnet after a measured gate; Z5 brings macOS.
-> Z1 is built (2026-11-16; [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)); the others
-> aren't yet.
+> Z1 is built (2026-11-16; [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)), and so is
+> Z2 (2026-11-17; [Z2 as built](#z2-as-built)); the others aren't yet.
 
 The maintainer asked for two optional services that a user can turn on at home. First: "an
 optional DNS seeder, pull in zeeder", and "The DNS seeder should let you expose the port and
@@ -1356,10 +1356,54 @@ the spawner, touches shared code. None of them needs front door v2 (PS2) or MULT
 | Phase | Ships | Needs |
 | --- | --- | --- |
 | **Z1 Bundle** | the `ZINGOD_*` pins; `build-zingod.sh` and `bump-zingod.sh`; `zingod-sidecars.yml` with its checks and attestation; the source archive on each release; `zeal-zingod` and its licences in the Linux bundles; a minimal `fake-zingod` for `dev-sidecar.sh`. Nothing runs it yet. **Built**: [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux) says how, and where it differs from this design | — |
-| **Z2 Supervise** | `Launch` and the zingod reader in the supervisor; the configuration writer; `DiskFull` and `IndexBroken`; the pure rules; the runner; `fake-zingod`'s modes and fake-zebrad's stale-cookie mode; `real_zingod.rs` in CI. No UI | Z1 |
+| **Z2 Supervise** | `Launch` and the zingod reader in the supervisor; the configuration writer; `DiskFull` and `IndexBroken`; the pure rules; the runner; `fake-zingod`'s modes and fake-zebrad's stale-cookie mode; `real_zingod.rs` in CI. No UI. **Built**: [Z2 as built](#z2-as-built) | Z1 |
 | **Z3 Choose (Linux, Testnet)** | the types; the backend on the consent screen and in the setup; the service actor's and the app's wiring; the disk, stall, cross-check and active-upgrade rules; Rebuild, Delete and Forget's box; the Server card, banners and mock flags; `TESTED_ZINGOD` = 1.1.0 with zebrad 7.0.0 on Testnet. Switching an open service means "unavailable" until the index is built | Z2; the Testnet wallet run before the release |
 | **Z4 Mainnet** | the gate below; `TESTED_ZINGOD` gains Mainnet; the disk and memory numbers from measurements; the scheduled-upgrade countdown and pause; the consent's Mainnet line; Share naming the wallets the runs confirmed; switching while Zebra's endpoint keeps serving; the default for new setups, as the maintainer decides | Z3 and the gate |
 | **Z5 macOS** | `zingod-sidecars.yml` on `macos-15` and `macos-15-intel` (Xcode command line tools for jemalloc's `sh` and `make` and libproc's bindgen, protoc); a `tauri.macos.conf.json` with four `externalBin` entries; the contract test on both macOS runners, in `bundle.yml`, where both binaries are already built: `fetch-zebrad-linux.sh` is Linux only and a macOS zebrad takes 30 to 60 minutes to build uncached, so the job takes that run's `zebrad-stable-<triple>` and `zingod-<triple>` artifacts; `kern.maxfilesperproc` checked against zingod's 1,280 | PS3; the build passing |
+
+#### Z2 as built
+
+Built 2026-11-17, with no UI: launcher-core's `zingod` module (the configuration writer, the
+command line and the reader) and `Launch` in the supervisor and the spawner; `DiskFull` and
+`IndexBroken`; launcher-herd's `public::zingod` rules; launcher-public's `ZingodRunner`;
+`fake-zingod`'s modes and fake-zebrad's `getblockhash` and `close-on-wrong-cookie`;
+`real_zingod.rs` and its CI job. Where it differs from the sections above:
+
+- **The start barrier** is the zebrad run's RPC line, not the cookie's time ([When zingod
+  runs](#when-zingod-runs)). The run's identity is its pid and `started_at`: `Status` has no run
+  serial, and the supervisor sets both in the update that clears the run's addresses.
+- **A full disk** restarts zingod by itself only on evidence that covers it ([Disk, memory and
+  the first build](#disk-memory-and-the-first-build)); launcher-core's `free_inodes` reads the
+  inodes beside `free_space`.
+- **The plan** (`ZingodPlan`) carries an `attempt` besides the configuration and zebrad's run.
+  Z3 bumps it for the user's Try again and for the restarts its rules decide (the stall rule,
+  no validator for 30 s); a new attempt starts zingod again after a failure. The runner itself
+  makes the one port move, keeps the disk's hysteresis and applies the `DiskFull` recovery, with
+  the herd's functions that `want()` uses. The moved port is in `ZingodFacts.port`, for Z3 to
+  record in the spec; a new zebrad run or attempt starts again from the plan's port.
+- **Notes**: every note of the supervisor names its program ("zingod exited", "restarting
+  zingod in 1s"), not only the start; zebrad's read as before.
+- **`ZINGOD_KNOWS`** for 1.1.0 lists the 11 upgrades of launcher-herd's `BRANCH_IDS`, NU6.2
+  and NU6.3 included, with zebrad's names.
+- **What `/status` means**: whether a sync is building or catching up is measured against
+  zebrad's height when zingod's target is above it, since that target can be zingod's clock
+  estimate (on Regtest, millions of blocks above the tip).
+- **fake-zingod** reads its settings from its environment or, since Zeal clears zingod's,
+  from `fake-zingod.env` beside its `-c` file. Its h2c answers need `h2`, `http` and `bytes` in
+  launcher-core, already in the tree through launcher-public. launcher-public's runner tests
+  find launcher-core's fakes in their own target folder, where `cargo test --workspace` builds
+  them, and take turns, since each picks free ports.
+- **`real_zingod.rs`** runs every case in one test, which first sets `ZINGOD_CONFIG_NETWORK`
+  in its own environment. Measured there (2026-11-17, x86-64 Linux): a stop takes milliseconds
+  with no connection or with an h2c client that answers zingod's GOAWAY, and zingod's whole
+  10 s drain with one that doesn't; a flipped last written byte of
+  `compact_block/blocks.dat` fails the next start with `<file>: tail page fails its checksum`.
+  Its capture mode wrote the zingod fixtures. The disk-full texts and how `Diverged` reaches
+  stderr are still unconfirmed: fake-zingod plays the texts the code has.
+- **CI**: `real-zingod` runs on both Linux targets with this run's `zingod-<triple>`, and
+  `zingod-gate` now also runs on every push to `main`, so `main` builds zingod there as well
+  as in `bundle.yml`. It runs without `PREV_ZINGOD_BIN`, since there is no previous pin yet. The
+  aarch64 leg, like the aarch64 build, is unverified until CI runs it.
 
 **The Mainnet gate (Z4):**
 

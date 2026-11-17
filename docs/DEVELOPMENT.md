@@ -301,6 +301,12 @@ Re-capture them when the pinned zebrad changes its log wording, normally as part
 5. Run `cargo test -p launcher-core`. A failing classifier test means zebrad changed a
    line the supervisor relies on: update the classifier and `fake-zebrad` together.
 
+The zingod fixtures (`zingod-<version>-*`) come from `real_zingod.rs`'s capture mode instead:
+run it with `ZINGOD_CAPTURE=<folder>` ([zingod](#zingod)), copy the files over the old ones
+and rename them for the new version, then run `cargo test --workspace`. A failing test means
+zingod changed a line, a text or a `/status` shape Zeal reads: update the reader, the
+configuration writer and `fake-zingod` together.
+
 ## Real-zebrad contract tests
 
 `crates/launcher-core/tests/real_zebrad.rs` runs a real zebrad through the supervisor
@@ -340,6 +346,44 @@ ZEBRAD_BIN=/path/to/zebrad cargo test -p launcher-public --test real_light_serve
 launcher-core's `real_zebrad.rs` also checks the endpoint's log line, that an HTTP/1.1
 request to it gets no gRPC answer, and the failure on a taken port. CI's `real-zebrad` job
 runs both.
+
+### zingod
+
+`crates/launcher-public/tests/real_zingod.rs` runs a real zingod against a real zebrad on
+Regtest (docs/PUBLIC-SERVICES.md, "Tests for zingod"): zebrad through the supervisor, zingod
+through `ZingodRunner` with the configuration Zeal writes, and the front door with a test
+certificate. It needs both binaries:
+
+```sh
+ZEBRAD_BIN=/path/to/zebrad ZINGOD_BIN=/path/to/zingod \
+  cargo test -p launcher-public --test real_zingod -- --include-ignored --nocapture
+```
+
+It takes about 40 s. `PREV_ZINGOD_BIN`, the previous pin's zingod, also checks that the index
+it wrote opens with this one; run it so at every `ZINGOD_VERSION` bump.
+`ZINGOD_CAPTURE=<folder>` also writes the zingod fixtures there (see
+[Log fixtures](#log-fixtures)).
+
+For `ZINGOD_BIN`, `scripts/build-zingod.sh` in `ubuntu:22.04` builds the binary Zeal
+ships ([SIDECARS.md](SIDECARS.md#local-development-with-zingod)). On a newer host, build the
+pinned checkout with plain cargo instead, with `protoc` installed and the target folder
+outside the checkout:
+
+```sh
+CARGO_TARGET_DIR=/somewhere/else cargo build --locked --release -p zingod --bin zingod
+```
+
+That binary is for this test and for trying zingod out only: it fails the glibc floor, and
+only `build-zingod.sh`'s output is ever installed as `zeal-zingod`. CI's `real-zingod` job
+runs the test on `ubuntu-24.04` and `ubuntu-24.04-arm` with the zingod its
+`zingod-sidecars` build made and the release zebrad, on pushes to `main` and on pull requests
+that change the pins or zingod's adapter, runner or contract test, or the front door.
+
+The plain `cargo test --workspace` runs the zingod tests against the fakes:
+`launcher-core/tests/fake_zingod.rs`, `supervisor_zingod.rs` and `zingod_env.rs`, and
+launcher-public's `zingod_runner.rs`. The last finds launcher-core's `fake-zingod` and
+`fake-zebrad` in its own target folder, where the workspace build puts them; alone, it needs
+`cargo build -p launcher-core --bins` first.
 
 ## Certificates against Pebble
 
