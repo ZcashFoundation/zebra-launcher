@@ -681,12 +681,14 @@ button.link.ex-link {
   outline-offset: 2px;
 }
 
+/* The columns' widths, the gaps and the padding add up to the rows' least width. The Net
+   column holds two pools' amounts in coins. */
 .ex-vrow {
   display: grid;
-  grid-template-columns: 56px 150px 170px 64px 190px minmax(180px, 1fr) 104px 92px 56px 64px 76px;
+  grid-template-columns: 56px 150px 170px 64px 190px minmax(280px, 1fr) 104px 92px 56px 64px 76px;
   align-items: center;
   column-gap: 10px;
-  min-width: 1210px;
+  min-width: 1422px;
   height: 32px;
   padding: 0 10px;
   box-sizing: border-box;
@@ -711,7 +713,7 @@ button.link.ex-link {
 
 .ex-vbody {
   position: relative;
-  min-width: 1210px;
+  min-width: 1422px;
 }
 
 .ex-vbody .ex-vrow {

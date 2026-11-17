@@ -690,6 +690,14 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
                     .and_then(|row| text::fee_figures(row.fee, &row.actions))
             })
         };
+        let net = move || {
+            let unit = unit();
+            row.with(|row| {
+                row.as_ref()
+                    .map(|row| text::net_text(&row.shielded, unit))
+                    .unwrap_or_default()
+            })
+        };
         view! {
             <span role="gridcell" class="ex-num muted">{move || index.get()}</span>
             <span role="gridcell">
@@ -726,12 +734,8 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
                         .collect_view()
                 }))}
             </span>
-            <span role="gridcell" class="ex-net-cell">
-                {move || {
-                    let unit = unit();
-                    row.with(|row| row.as_ref().map(|row| text::net_text(&row.shielded, unit)))
-                }}
-            </span>
+            // In full on hover too, should it not fit.
+            <span role="gridcell" class="ex-net-cell" title=net>{net}</span>
             <span role="gridcell" class="ex-num">{fee}</span>
             <span role="gridcell" class="ex-num">
                 {move || figures().map(|figures| format!("{} zat", thousands(figures.per_action)))}
