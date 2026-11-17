@@ -187,19 +187,24 @@ impl SynthChain {
             .into_iter()
             .nth(usize::from(index))?
             .tx;
-        let block = self.block_hash(height, branch);
-        let time = self.time(height, branch);
-        if best {
+        self.place(&mut tx, height, branch);
+        Some(tx)
+    }
+
+    /// Where a transaction of the block at `height` on `branch` is, as zebrad reports it: in
+    /// the best chain, or at height -1 in a side chain.
+    fn place(&self, tx: &mut Tx, height: u32, branch: u16) {
+        if self.branch(height) == branch {
             tx.height = Some(i64::from(height));
             tx.confirmations = Some(i64::from(self.tip - height + 1));
         } else {
             tx.height = Some(-1);
             tx.confirmations = Some(0);
         }
-        tx.block_hash = Some(block);
+        let time = self.time(height, branch);
+        tx.block_hash = Some(self.block_hash(height, branch));
         tx.block_time = Some(time);
         tx.time = Some(time);
-        Some(tx)
     }
 
     /// The fee a transaction of the best chain paid, which zebrad does not report and the
@@ -806,9 +811,8 @@ impl SynthChain {
         }
     }
 
-    /// The transactions of the block at `height` on `branch`, coinbase first, built to move
-    /// exactly the value between the block's parent's pools and its own.
-    fn plan(&self, height: u32, branch: u16) -> Vec<Built> {
+    /// The block's coinbase, and what the rest of its plan starts from.
+    fn start(&self, height: u32, branch: u16) -> Start {
         let mut rng = Rng(self.seed(KIND_PLAN, height, branch, 0));
         let parent_branch = self.parent_branch(height, branch);
         let after = self.balances(height, branch);
@@ -873,6 +877,26 @@ impl SynthChain {
         } else {
             coinbase.pay(claim, self.address(rng.below(12)), "pubkeyhash");
         }
+        Start {
+            rng,
+            notes,
+            deltas,
+            fees,
+            coinbase,
+        }
+    }
+
+    /// The transactions of the block at `height` on `branch`, coinbase first, built to move
+    /// exactly the value between the block's parent's pools and its own.
+    fn skeleton(&self, height: u32, branch: u16) -> Vec<Part> {
+        let Start {
+            mut rng,
+            mut notes,
+            deltas,
+            fees,
+            coinbase,
+        } = self.start(height, branch);
+        let active = |upgrade| self.heights.is_active(upgrade, height);
         let mut paid = [0i64; 6];
         paid[Pool::Transparent.index()] = coinbase.outputs.iter().map(|out| out.0).sum();
         for (pool, net_out) in Pool::SHIELDED.into_iter().zip(coinbase.net_out()) {
@@ -1046,11 +1070,22 @@ impl SynthChain {
             let other = rng.below(index as u64 + 1) as usize;
             parts.swap(index, other);
         }
-        let mut built = vec![self.build(coinbase, height, branch, 0, true)];
-        for (index, part) in parts.into_iter().enumerate() {
-            built.push(self.build(part, height, branch, index as u16 + 1, false));
-        }
-        built
+        let mut all = Vec::with_capacity(parts.len() + 1);
+        all.push(coinbase);
+        all.extend(parts);
+        all
+    }
+
+    /// The transactions of the block at `height` on `branch`, coinbase first, built.
+    fn plan(&self, height: u32, branch: u16) -> Vec<Built> {
+        self.skeleton(height, branch)
+            .into_iter()
+            .enumerate()
+            .map(|(index, part)| {
+                let index = index as u16;
+                self.build(part, height, branch, index, index == 0)
+            })
+            .collect()
     }
 
     fn build(&self, part: Part, height: u32, branch: u16, index: u16, coinbase: bool) -> Built {
@@ -1173,6 +1208,16 @@ struct Split {
     /// `(recipient, address, zatoshis)`.
     streams: Vec<(&'static str, String, u64)>,
     lockbox: u64,
+}
+
+/// What a block's plan starts from: its coinbase, and the seeded draws, notes, pool changes
+/// and fees the rest of the plan uses.
+struct Start {
+    rng: Rng,
+    notes: [u32; 3],
+    deltas: [i64; 6],
+    fees: i64,
+    coinbase: Part,
 }
 
 /// A transaction of the synthetic chain, with its fee (which the explorer cannot know without
