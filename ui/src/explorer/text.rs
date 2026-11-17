@@ -1,14 +1,17 @@
 //! The Explorer's words and numbers: amounts in ZEC (TAZ on Testnet), pool movements, block
-//! and transaction sentences, budgets, confirmations, search hints and refusals, and Show
-//! RPC's reads. Pure, tested natively. A hidden amount has no number here: callers show
-//! "hidden" instead.
+//! and transaction sentences, budgets, confirmations, search hints and refusals; a block's
+//! rows and their fees, and Show RPC's reads. Pure, tested natively. A hidden amount
+//! has no number here: callers show "hidden" instead.
 
-use explorer_model::classify::{Classified, Later};
+use explorer_model::{
+    classify::{Classified, Later},
+    zip317,
+};
 use launcher_types::{
     Network, Phase,
     explorer::{
-        BlockSummary, Budget, LedgerCheck, NotFoundHint, PerPool, Pool, ReorgNotice, SecretKind,
-        Shown, SourceCall, TxKind, TxPage, UnknownWhy,
+        BlockSummary, Budget, LedgerCheck, LogicalActions, NotFoundHint, PerPool, Pool, PoolPart,
+        ReorgNotice, SecretKind, Shown, SourceCall, TxKind, TxPage, TxRow, UnknownWhy,
     },
 };
 
@@ -581,6 +584,100 @@ pub fn not_found_text(hint: &NotFoundHint) -> String {
     }
 }
 
+/// A row's flow in a glyph, from where value came to where it went: `t` transparent, `z`
+/// shielded, `cb` a coinbase's new coins. `t → z·t` is shielding with transparent change;
+/// `z → z`, value that stays shielded.
+pub fn flow_glyph(row: &TxRow) -> String {
+    let lost = row.shielded.iter().any(|part| part.net_out > 0);
+    let gained = row.shielded.iter().any(|part| part.net_out < 0);
+    let shielded = !row.shielded.is_empty();
+    let mut from = Vec::new();
+    if matches!(row.kind, TxKind::Coinbase { .. }) {
+        from.push("cb");
+    } else if row.inputs > 0 {
+        from.push("t");
+    }
+    if lost || (from.is_empty() && shielded) {
+        from.push("z");
+    }
+    let mut to = Vec::new();
+    if gained || (row.outputs == 0 && shielded) {
+        to.push("z");
+    }
+    if row.outputs > 0 {
+        to.push("t");
+    }
+    format!("{} → {}", from.join("·"), to.join("·"))
+}
+
+/// What a row moved into or out of each shielded pool: `Ironwood +1.2 · Orchard −1.2001`.
+/// Value that left a pool is negative.
+pub fn net_text(shielded: &[PoolPart], unit: Unit) -> String {
+    shielded
+        .iter()
+        .map(|part| {
+            let into = -part.net_out;
+            let sign = if into > 0 { "+" } else { "" };
+            format!("{} {sign}{}", part.pool.label(), unit.number(into))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// What a fee pays, by ZIP 317's numbers: per logical action due, and against the
+/// conventional fee.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FeeFigures {
+    pub fee: u64,
+    /// The logical actions (zebrad's sum, before the minimum of two).
+    pub logical: u32,
+    /// The actions a fee is due for: at least two.
+    pub paid: u32,
+    pub conventional: u64,
+    /// Zatoshis per action due.
+    pub per_action: u64,
+    /// The fee over the conventional fee.
+    pub multiple: f64,
+    /// zebrad's weight ratio: the multiple, at least a zatoshi counted, capped at 10.
+    pub ratio: f32,
+    pub unpaid: u32,
+}
+
+impl FeeFigures {
+    pub fn new(fee: u64, actions: &LogicalActions) -> Self {
+        let logical = zip317::logical_actions(actions);
+        let paid = zip317::paid_actions(logical);
+        let conventional = zip317::conventional_fee(logical);
+        FeeFigures {
+            fee,
+            logical,
+            paid,
+            conventional,
+            per_action: fee / u64::from(paid),
+            multiple: zip317::multiple(fee, conventional),
+            ratio: zip317::weight_ratio(fee, conventional),
+            unpaid: zip317::unpaid_actions(logical, fee),
+        }
+    }
+}
+
+/// A row's public fee, as figures; `None` while unknown, or for a coinbase.
+pub fn fee_figures(fee: Option<Shown>, actions: &LogicalActions) -> Option<FeeFigures> {
+    match fee {
+        Some(Shown::Public { zat }) => Some(FeeFigures::new(u64::try_from(zat).ok()?, actions)),
+        _ => None,
+    }
+}
+
+/// A multiple of the conventional fee: `1×`, `2.5×`, `250×`.
+pub fn multiple_text(multiple: f64) -> String {
+    if multiple >= 100.0 || (multiple - multiple.round()).abs() < 0.05 {
+        format!("{}×", thousands(multiple.round() as u64))
+    } else {
+        format!("{multiple:.1}×")
+    }
+}
+
 /// A read for Show RPC: `getblock ["3549000",1]`.
 pub fn source_text(call: &SourceCall) -> String {
     format!("{} {}", call.method, call.params)
@@ -608,7 +705,7 @@ pub fn source_cost(call: &SourceCall) -> String {
 #[cfg(test)]
 mod tests {
     use explorer_model::classify::classify_query;
-    use launcher_types::explorer::{BlockLedger, Hash32, LogicalActions, PoolPart, TxStatus};
+    use launcher_types::explorer::{BlockLedger, Hash32, TxStatus};
 
     use super::*;
 
@@ -731,6 +828,90 @@ mod tests {
             "70.6 kB of 2.0 MB"
         );
         assert_eq!(budget_fraction(&Budget::Unknown), None);
+    }
+
+    fn row(kind: TxKind, inputs: u32, outputs: u32, nets: &[(Pool, i64)]) -> TxRow {
+        TxRow {
+            index: 1,
+            txid: Hash32([1; 32]),
+            kind,
+            version: 5,
+            size: Some(2_000),
+            inputs,
+            outputs,
+            shielded: nets
+                .iter()
+                .map(|(pool, net_out)| PoolPart {
+                    pool: *pool,
+                    spends: 0,
+                    outputs: 0,
+                    actions: 2,
+                    joinsplits: 0,
+                    net_out: *net_out,
+                })
+                .collect(),
+            actions: LogicalActions::default(),
+            fee: None,
+        }
+    }
+
+    #[test]
+    fn rows_say_where_value_went() {
+        let shielding = row(
+            TxKind::Shielding {
+                into: vec![Pool::Orchard],
+                transparent_change: true,
+            },
+            2,
+            1,
+            &[(Pool::Orchard, -150_000_000)],
+        );
+        assert_eq!(flow_glyph(&shielding), "t → z·t");
+        assert_eq!(net_text(&shielding.shielded, ZEC), "Orchard +1.5");
+        let shielded = row(
+            TxKind::Shielded {
+                pool: Pool::Orchard,
+                same_receiver: true,
+            },
+            0,
+            0,
+            &[(Pool::Orchard, 10_000)],
+        );
+        assert_eq!(flow_glyph(&shielded), "z → z");
+        let migration = row(
+            TxKind::Migration {
+                from: Pool::Orchard,
+                to: Pool::Ironwood,
+                zat: 100_000_000,
+            },
+            0,
+            0,
+            &[(Pool::Orchard, 100_020_000), (Pool::Ironwood, -100_000_000)],
+        );
+        assert_eq!(flow_glyph(&migration), "z → z");
+        assert_eq!(
+            net_text(&migration.shielded, ZEC),
+            "Orchard -1.0002 · Ironwood +1"
+        );
+        let deshielding = row(
+            TxKind::Deshielding {
+                from: vec![Pool::Sapling],
+            },
+            0,
+            2,
+            &[(Pool::Sapling, 5)],
+        );
+        assert_eq!(flow_glyph(&deshielding), "z → t");
+        assert_eq!(flow_glyph(&row(TxKind::Transparent, 1, 2, &[])), "t → t");
+        let coinbase = row(
+            TxKind::Coinbase {
+                shielded_to: vec![Pool::Ironwood],
+            },
+            1,
+            3,
+            &[(Pool::Ironwood, -20)],
+        );
+        assert_eq!(flow_glyph(&coinbase), "cb → z·t");
     }
 
     #[test]

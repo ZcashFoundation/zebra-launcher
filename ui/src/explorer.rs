@@ -18,6 +18,7 @@ mod search;
 mod state;
 pub mod text;
 mod tx;
+mod virtual_list;
 
 use std::time::{Duration, UNIX_EPOCH};
 

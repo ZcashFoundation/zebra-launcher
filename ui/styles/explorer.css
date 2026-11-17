@@ -663,6 +663,86 @@ button.link.ex-link {
   overflow-wrap: anywhere;
 }
 
+/* A block's transactions on a virtual list: a scroller of fixed height whose rows are slots
+   moved into place, so only the rows in view are in the page. Header and rows share one grid of
+   columns; a narrow page scrolls it sideways. */
+
+.ex-vlist {
+  position: relative;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  contain: strict;
+  font-variant-numeric: tabular-nums;
+}
+
+.ex-vlist:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.ex-vrow {
+  display: grid;
+  grid-template-columns: 56px 150px 170px 64px 190px minmax(180px, 1fr) 104px 92px 56px 64px 76px;
+  align-items: center;
+  column-gap: 10px;
+  min-width: 1210px;
+  height: 32px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.ex-vrow > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ex-vhead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ex-vbody {
+  position: relative;
+  min-width: 1210px;
+}
+
+.ex-vbody .ex-vrow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+.ex-vrow .ex-num {
+  text-align: right;
+}
+
+.ex-vrow .ex-kind {
+  font-size: 12px;
+}
+
+.ex-glyph {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.ex-pools-cell {
+  display: flex;
+  gap: 8px;
+}
+
+.ex-net-cell {
+  font-size: 13px;
+}
+
 /* A hover card: a few facts under the link the pointer or focus rests on. */
 
 .ex-hovercard {
