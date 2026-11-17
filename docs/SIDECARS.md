@@ -464,45 +464,64 @@ the Raspberry Pi 5's. This is unchecked on hardware.
 
 ### How zingod is built
 
-`scripts/build-zingod.sh` works like `build-zebrad.sh`, with `--commit`,
-`--src-dir`, `--target`, `--out`, `--vendor-archive` and `--dry-run`:
+[`scripts/build-zingod.sh`](../scripts/build-zingod.sh) works like
+`build-zebrad.sh`, with `--commit`, `--src-dir`, `--target`, `--out`,
+`--vendor-archive` and `--dry-run`:
 
 1. Resolve `refs/tags/v<ZINGOD_VERSION>` with `git ls-remote` (the peeled line
    if there is one, else the tag's own) and refuse to go on unless it equals
-   `ZINGOD_COMMIT`. Clone, or reuse `--src-dir`, check out the commit and check
-   `git rev-parse HEAD`.
+   `ZINGOD_COMMIT` (or `--commit`). Fetch exactly that commit, or reuse
+   `--src-dir`, and check that `git rev-parse HEAD` is the commit and no
+   tracked file has changed.
 2. Take the toolchain from the checkout's `rust-toolchain.toml` (1.96.0),
-   through `RUSTUP_TOOLCHAIN`.
+   through `RUSTUP_TOOLCHAIN`. The host triple comes from `uname`, so no other
+   toolchain needs to be installed first.
 3. Run `cargo fetch --locked` first, so a git source that has gone fails early
-   and is named.
-4. Run `cargo build --locked --release -p zingod --bin zingod`. There is
-   nothing to choose: the package has no `[features]`, and the workspace's are
-   test-only. The build sets:
+   and is named. Then check that the committed licence folder equals what
+   `zingod-licenses.sh` gathers from the checkout and its sources
+   ([below](#licences-of-zingod)), before the long build.
+4. Run `cargo build --locked --release -p zingod --bin zingod --target
+   <target>`. There is nothing to choose: the package has no `[features]`, and
+   the workspace's are test-only. The build sets:
    - `SOURCE_DATE_EPOCH` from the commit's time;
    - `CARGO_PROFILE_RELEASE_STRIP=symbols`, since the workspace has no
      `[profile.release]`: 32.0 MB becomes 24.7 MB;
    - `--remap-path-prefix` for the source, `CARGO_HOME`, `RUSTUP_HOME` and
-     `CARGO_TARGET_DIR`. The last one matters: zingod-proto `include!`s
-     generated code from `OUT_DIR`, and a build that remapped only the other
-     three still held one host path;
+     `CARGO_TARGET_DIR`, the last one last, since rustc applies the last
+     prefix that matches and the target folder is inside the checkout by
+     default. It matters: zingod-proto `include!`s generated code from
+     `OUT_DIR`, and a build that remapped only the other three still held one
+     host path;
    - `AWS_LC_SYS_USE_SYSTEM=0`, so aws-lc-sys never links an AWS-LC it finds on
      the host.
-5. Check the result, and install nothing otherwise:
+5. Check a copy of the result, and install nothing otherwise:
    - `--version` prints `zingod <ZINGOD_VERSION>`;
-   - `generate-config -o <tmp>` exits 0, offline;
-   - `scripts/check-glibc.sh --floor 2.35` passes;
+   - `generate-config -o <tmp>` exits 0, offline, with `HOME` in the scratch
+     folder;
+   - `scripts/check-glibc.sh` passes at `GLIBC_FLOOR` (2.35) from
+     `.github/tool-versions.env`;
    - `ldd` names only libc, libm, libgcc_s, the loader and the vdso;
    - no string in the binary contains `/home/`, `/root/`, `/runner/`,
-     `/github/` or `/__w/`;
-   - the committed licence files equal the ones in the checkout and its
-     sources, and the two that aren't committed, jemalloc's `COPYING` and
-     AWS-LC's `LICENSE`, are copied from the build's own sources into the
-     output ([below](#licences-of-zingod)).
+     `/github/` or `/__w/`.
 
-   The build never runs `start`, which would contact a validator.
-6. With `--vendor-archive <file>`, run `cargo vendor --locked` into a copy of
-   the checkout and pack it as `zingod-src-<ver>.tar.zst`, with its sha256:
-   what a rebuild needs if a fork disappears.
+   The checks run the binary, so the target must be the host's own Linux
+   triple; the script refuses any other. The build never runs `start`, which
+   would contact a validator.
+6. With `--vendor-archive <file>`, which must be named
+   `zingod-src-<ver>.tar.zst`, run `cargo vendor --locked --offline` in a copy
+   of the checkout (from `git archive`, so no `.git`), with the source
+   replacement it prints added to the copy's `.cargo/config.toml`, and pack it
+   with the files sorted, their owners 0 and their times set to
+   `SOURCE_DATE_EPOCH`, and `zstd -19`. Its sha256 goes in `<file>.sha256`.
+   This is what a rebuild needs if a fork disappears: inside it, `cargo build
+   --locked --offline --release -p zingod --bin zingod`. At 1.1.0 it is 55 MB.
+7. Install the binary at `--out` and, in the same folder, `licenses/` with
+   jemalloc's `COPYING` and AWS-LC's `LICENSE` copied from the build's own
+   sources, and `zingod-build-info.txt`: the version, commit, source URL,
+   target, toolchain, `rustc` and `protoc` versions, the operating system,
+   `SOURCE_DATE_EPOCH`, the sha256 of the binary, of each copied licence file
+   (`license_sha256_<name>=`) and of the source archive, and, in CI, the run
+   and Zeal's commit.
 
 The build needs:
 
@@ -512,7 +531,8 @@ The build needs:
   and linked statically;
 - `protoc` with the well-known types: Ubuntu 22.04's `protobuf-compiler` 3.12.4
   and `libprotobuf-dev` built it;
-- git and rustup, and `zstd` to pack the source archive.
+- git and rustup, binutils for `objdump` and `strings`, and `zstd` to pack the
+  source archive.
 
 On Linux it needs no cmake, libclang (bindgen comes only through a macOS-only
 dependency), OpenSSL or RocksDB.
@@ -525,9 +545,11 @@ dependency), OpenSSL or RocksDB.
 - **Static musl**, which upstream's image ships, is the other route. It wasn't
   tried here; the glibc build passes the floor, so Zeal uses that.
 - **Cost.** A clean x86-64 build took 44 s on 32 threads (618 s of CPU, 1.9 GB
-  peak memory), and 61 s in the 22.04 container. On a 4-core runner it should
-  take a few minutes (unmeasured), against 30 to 60 minutes for zebrad on macOS
-  and Windows.
+  peak memory), and 61 s in the 22.04 container. `build-zingod.sh` with
+  `--vendor-archive`, from a clean checkout and cargo home in that container,
+  took 110 s on the same machine. On a 4-core runner it should take a few
+  minutes (unmeasured), against 30 to 60 minutes for zebrad on macOS and
+  Windows.
 - **Git sources.** The build pulls five repositories, all at pinned revisions
   on one person's forks: `elicbarbieri/zebra` (`ebabeee5`: zebra-chain,
   zebra-network and zebra-test), and patched librustzcash (`605917a3`), orchard

@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Helpers shared by the sidecar, licence and version scripts
-# (fetch-zebrad-linux.sh, build-zebrad.sh, zingod-licenses.sh, dev-sidecar.sh,
-# check-versions.sh, bump-zebrad.sh) and by the `run:` steps of
+# (fetch-zebrad-linux.sh, build-zebrad.sh, build-zingod.sh, zingod-licenses.sh,
+# dev-sidecar.sh, check-versions.sh, bump-zebrad.sh) and by the `run:` steps of
 # zebrad-sidecars.yml and zebrad-watch.yml. Source it after defining
 # `die MESSAGE...`, which must print the message and exit non-zero.
 #
@@ -208,6 +208,17 @@ check_reported_version() {
             die "binary reports '${reported}', expected 'zebrad $2'"
             ;;
     esac
+}
+
+# check_zingod_version BINARY VERSION: dies, deleting BINARY, unless the first
+# line of `BINARY --version` is exactly `zingod VERSION`.
+check_zingod_version() {
+    local reported
+    reported="$("$1" --version 2>/dev/null | head -n 1)" || reported=""
+    if [ "${reported}" != "zingod $2" ]; then
+        rm -f "$1"
+        die "binary reports '${reported}', expected 'zingod $2'"
+    fi
 }
 
 # zebrad_version_line BINARY: prints the first line of `BINARY --version`, and
