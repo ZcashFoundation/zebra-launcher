@@ -680,16 +680,17 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
         }
     });
     let unit = move || prefs.unit(network);
+    // The header is built once, and the table outlives a change of unit: the two labels that
+    // name it follow it, as the cells do.
     let header = move || {
-        let unit = unit();
         view! {
             <span role="columnheader" class="ex-num">"#"</span>
             <span role="columnheader">"Transaction"</span>
             <span role="columnheader">"Kind"</span>
             <span role="columnheader" title="Where value came from and went: t transparent, z shielded, cb a coinbase's new coins">"Flow"</span>
             <span role="columnheader">"Pools"</span>
-            <span role="columnheader" title="What entered (+) or left (−) each shielded pool">{format!("Net ({unit})")}</span>
-            <span role="columnheader" class="ex-num">{format!("Fee ({unit})")}</span>
+            <span role="columnheader" title="What entered (+) or left (−) each shielded pool">{move || format!("Net ({})", unit())}</span>
+            <span role="columnheader" class="ex-num">{move || format!("Fee ({})", unit())}</span>
             <span role="columnheader" class="ex-num" title="Zatoshis per logical action due">"Per action"</span>
             <span role="columnheader" class="ex-num" title="The fee over zebrad's conventional fee">"×"</span>
             <span role="columnheader" class="ex-num" title="ZIP 317's logical actions">"Actions"</span>
