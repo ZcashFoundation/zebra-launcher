@@ -10,9 +10,17 @@ use std::{
 
 use launcher_types::{MachineResources, MemoryPressure, NodeId, VolumeUsage};
 
+use crate::resource_history::GAP;
+
+/// More than this between two readings of a volume is a gap in them, and a newest reading
+/// older than this is stale: three of the sampler's 30 s intervals.
+pub const VOLUME_GAP: Duration = Duration::from_secs(90);
+
 /// A condition with a sustain time and a leave margin: it begins once the readings have stayed
 /// past an entry threshold for the sustain time, and ends only at a reading past a leave
 /// threshold on the other side, so a value that wanders around one threshold does not flap.
+/// Readings further apart than a gap (the computer asleep, or not sampled) are not one run:
+/// what came before the gap counts for nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Episode {
     /// The first reading of the run that began it.
@@ -25,27 +33,40 @@ impl Episode {
     /// The episode going on at the newest of `readings`, oldest first: a reading that `enters`
     /// starts a run, which begins the episode once it has lasted `sustain` (at once for zero);
     /// a reading that neither enters nor is in an episode ends the run; the episode ends at a
-    /// reading that `leaves`. A reading without a value changes nothing.
+    /// reading that `leaves`. A reading without a value changes nothing. A reading more than
+    /// `max_gap` after the one before starts the run afresh, or, in an episode, counts it from
+    /// there.
     pub fn current(
         readings: impl IntoIterator<Item = (SystemTime, Option<f64>)>,
         enters: impl Fn(f64) -> bool,
         leaves: impl Fn(f64) -> bool,
         sustain: Duration,
+        max_gap: Duration,
     ) -> Option<Episode> {
         let mut run: Option<SystemTime> = None;
         let mut on = false;
         let mut newest = None;
+        let mut previous: Option<SystemTime> = None;
         for (at, value) in readings {
             newest = Some(at);
             let Some(value) = value else {
                 continue;
             };
+            let gap = previous
+                .is_some_and(|previous| at.duration_since(previous).unwrap_or_default() > max_gap);
+            previous = Some(at);
             if on {
                 if leaves(value) {
                     on = false;
                     run = None;
+                } else if gap {
+                    // It held before the gap and after it; "for N" leaves the gap out.
+                    run = Some(at);
                 }
             } else if enters(value) {
+                if gap {
+                    run = None;
+                }
                 let since = *run.get_or_insert(at);
                 on = at.duration_since(since).unwrap_or_default() >= sustain;
             } else {
@@ -131,7 +152,7 @@ impl MachineHistory {
     }
 
     /// The episode of the available memory under `enter` of the total for `sustain`, which
-    /// ends above `leave`.
+    /// ends above `leave`. More than [`GAP`] between two samples breaks it, as in the charts.
     pub fn available_below_for(
         &self,
         enter: f64,
@@ -145,6 +166,7 @@ impl MachineHistory {
             |share| share < enter,
             |share| share > leave,
             sustain,
+            GAP,
         )
     }
 
@@ -163,6 +185,7 @@ impl MachineHistory {
             |value| value >= threshold,
             |value| value < threshold,
             sustain,
+            GAP,
         )
     }
 
@@ -176,6 +199,7 @@ impl MachineHistory {
             |share| share > enter,
             |share| share < leave,
             sustain,
+            GAP,
         )
     }
 
@@ -300,6 +324,7 @@ mod tests {
 
     #[test]
     fn episodes_need_their_sustain_time_and_keep_their_leave_margin() {
+        let gap = Duration::from_secs(15);
         let low = |values: &[f64], sustain: u64| {
             let values: Vec<Option<f64>> = values.iter().map(|v| Some(*v)).collect();
             Episode::current(
@@ -307,6 +332,7 @@ mod tests {
                 |v| v < 5.0,
                 |v| v > 7.0,
                 Duration::from_secs(sustain),
+                gap,
             )
         };
         // Under 5 for 10 s: an episode since the first low reading.
@@ -345,11 +371,44 @@ mod tests {
             |v| v < 5.0,
             |v| v > 7.0,
             Duration::from_secs(10),
+            gap,
         );
         assert_eq!(gaps.map(|episode| episode.since), Some(at(0)));
         assert_eq!(
-            Episode::current(readings(&[]), |_| true, |_| false, Duration::ZERO),
+            Episode::current(readings(&[]), |_| true, |_| false, Duration::ZERO, gap),
             None
+        );
+        // Two low readings 8 h apart, the computer asleep between them, are not 8 h of it.
+        let asleep = |values: &[(u64, f64)]| {
+            Episode::current(
+                values.iter().map(|&(secs, v)| (at(secs), Some(v))),
+                |v| v < 5.0,
+                |v| v > 7.0,
+                Duration::from_secs(120),
+                gap,
+            )
+        };
+        assert_eq!(asleep(&[(0, 4.0), (28_800, 4.0)]), None);
+        // After the gap the run starts afresh and needs its sustain time.
+        let awake: Vec<(u64, f64)> = std::iter::once((0, 4.0))
+            .chain((0..=24).map(|i| (28_800 + 5 * i, 4.0)))
+            .collect();
+        assert_eq!(
+            asleep(&awake),
+            Some(Episode {
+                since: at(28_800),
+                until: at(28_920)
+            })
+        );
+        // An episode that held before the gap and holds after it goes on, from the gap.
+        let mut held: Vec<(u64, f64)> = (0..=24).map(|i| (5 * i, 4.0)).collect();
+        held.push((28_800, 6.0));
+        assert_eq!(
+            asleep(&held),
+            Some(Episode {
+                since: at(28_800),
+                until: at(28_800)
+            })
         );
     }
 
@@ -377,12 +436,11 @@ mod tests {
         assert!(history.latest().is_some_and(|m| m.at == at(130)));
 
         let mut mac = MachineHistory::default();
-        for (secs, pressure) in [
-            (0, MemoryPressure::Normal),
-            (5, MemoryPressure::Critical),
-            (35, MemoryPressure::Critical),
-            (65, MemoryPressure::Critical),
-        ] {
+        for (secs, pressure) in std::iter::once((0, MemoryPressure::Normal)).chain(
+            (5..=65)
+                .step_by(5)
+                .map(|secs| (secs, MemoryPressure::Critical)),
+        ) {
             mac.push(&MachineResources {
                 pressure: Some(pressure),
                 ..sample(secs, None)

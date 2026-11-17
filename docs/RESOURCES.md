@@ -1697,10 +1697,16 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      reasons) and `largest_consumer`, which `with_health_input` works out from every node's
      newest sample, of both networks; a node without a run is never the largest.
    - `Episode` has `since` (the first reading of the run that began it) and `until` (the
-     newest reading), and `Episode::current(readings, enters, leaves, sustain)` runs the rule
-     over readings oldest first. The sustain helpers take the entry threshold, the sustain
-     time and the leave threshold and give the episode: `available_below_for`,
-     `pressure_at_least_for` (which ends below its level) and `commit_above_for`.
+     newest reading), and `Episode::current(readings, enters, leaves, sustain, max_gap)` runs
+     the rule over readings oldest first. Readings more than `max_gap` apart (the computer
+     asleep, or not sampled) are not one run: an entering reading after a gap starts the run
+     afresh, and an episode that holds across a gap is counted from the reading after it, so
+     one low reading before a suspend and one after it are never the sustain time. The
+     sustain helpers take the entry threshold, the sustain time and the leave threshold and
+     give the episode: `available_below_for`, `pressure_at_least_for` (which ends below its
+     level) and `commit_above_for`, with the charts' `GAP` (15 s); rules 19 and 21 pass
+     `VOLUME_GAP` (90 s, three of the volume sampler's 30 s intervals), as `VOLUME_INTERVAL`
+     is in launcher-core.
      `MachineHistory` also gains `latest`, `volume_readings(node)` (one per reading, though
      the samples carry each for 30 s) and `any_between` for the exit sentences.
    - Only rule 20 checks the computer sample's age, as designed; rules 19 and 21 read the

@@ -17,7 +17,7 @@ use super::{Action, Facts, Level, STALE_AFTER, Verdict, for_text};
 use crate::{
     charts::byte_rate,
     format::{LOW_SPACE_BYTES, bytes, cores, mem_bytes, mem_of, share, thousands},
-    machine_history::{Episode, MachineHistory, available_share, commit_share},
+    machine_history::{Episode, MachineHistory, VOLUME_GAP, available_share, commit_share},
     metrics_history::names,
     pages::dashboard::resources::{last_run_text, machine_text},
     resource_history::{RATE_WINDOW, ResourceHistory},
@@ -188,6 +188,7 @@ impl Facts<'_> {
             |bytes| bytes < DISK_FULL_BYTES as f64,
             |bytes| bytes > DISK_FULL_CLEARS as f64,
             Duration::ZERO,
+            VOLUME_GAP,
         )
         .is_some()
         {
@@ -208,6 +209,7 @@ impl Facts<'_> {
             |bytes| bytes < threshold as f64,
             |bytes| bytes > (threshold + DISK_LOW_MARGIN) as f64,
             DISK_LOW_FOR,
+            VOLUME_GAP,
         )?;
         Some(Verdict::new(
             Level::Attention,
@@ -343,6 +345,7 @@ impl Facts<'_> {
             |room| room < expected * FIT_MARGIN,
             |room| room > expected * FIT_CLEARS,
             FIT_FOR,
+            VOLUME_GAP,
         )?;
         let volume = resources
             .machine_history
