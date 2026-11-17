@@ -1,1 +1,1 @@
-Error: cannot read validator cookie <DIR>/cd/rpc/.cookie: Is a directory (os error 21)
+Error: cannot read validator cookie <DIR>/cookie-folder/.cookie: Is a directory (os error 21)

@@ -1,21 +1,21 @@
-ts=2026-11-17T02:03:49.354499075Z level=info message=Starting version=1.1.0 component=Zingod
-ts=2026-11-17T02:03:49.354783581Z level=info message="Config loaded" path=<DIR>/r.toml component=Zingod
-ts=2026-11-17T02:03:49.354819611Z level=warn message="In development, not for production mainnet use" component=Zingod
-ts=2026-11-17T02:03:49.354832982Z level=info message="Open-file limit" limit=1048576 component=Zingod
-ts=2026-11-17T02:03:49.355008155Z level=info message=Listening endpoint=127.0.0.1:28137 network=regtest tls=off component=Grpc
-ts=2026-11-17T02:03:49.355563882Z level=info message="State changed" to=provisioning component=Zingod
-ts=2026-11-17T02:03:49.356725371Z level=info message="Validator live" validator=127.0.0.1:28232 was=pending component=Traffic
-ts=2026-11-17T02:03:49.356805161Z level=info message="Chain view configured" validators=1 p2p=false component=ChainView
-ts=2026-11-17T02:03:49.362821027Z level=info message=Commits store=utxo_set path=<DIR>/idx/indexes/utxo_set durability=Barrier component=utxo_set
-ts=2026-11-17T02:03:49.370215625Z level=info message=Commits store=compact_block path=<DIR>/idx/indexes/compact_block durability=Barrier component=compact_block
-ts=2026-11-17T02:03:49.377949439Z level=info message=Commits store=block_hash path=<DIR>/idx/indexes/block_hash durability=PerFile component=block_hash
-ts=2026-11-17T02:03:49.516769947Z level=info message=Commits store=tree_state path=<DIR>/idx/indexes/tree_state durability=Barrier component=tree_state
-ts=2026-11-17T02:03:49.524033402Z level=info message=Commits store=transparent_address path=<DIR>/idx/indexes/transparent_address durability=PerFile component=transparent_address
-ts=2026-11-17T02:03:49.530296317Z level=info message=Commits store=txid_location path=<DIR>/idx/indexes/txid_location durability=PerFile component=txid_location
-ts=2026-11-17T02:03:49.531976496Z level=warn message="Validator tip stale against its own clock (stalled or eclipsed)" validator=127.0.0.1:28232 tip=Some(3) behind=Some(6642565) component=GrpcSnapshot
-ts=2026-11-17T02:03:49.53267923Z level=info message="Header chain anchored" height=0 hash=...3401e327 component=ChainView
-ts=2026-11-17T02:03:49.547838761Z level=info message="Chain tip advanced" height=3 hash=...a84cc906 age=5766d02h finalized_tip=0 component=ZingodNFS
-ts=2026-11-17T02:03:49.54796048Z level=info message="Serving the verified tip" height=3 component=GrpcSnapshot
-ts=2026-11-17T02:03:50.356417331Z level=info message="State changed" from=provisioning to=serving after=1s notes="1 validator on a stale tip" component=Zingod
-ts=2026-11-17T02:03:53.376438123Z level=info message="Shutdown signal received" signal=SIGTERM
-ts=2026-11-17T02:03:53.376968467Z level=info message="Shutdown complete" component=Zingod
+ts=2026-11-17T03:14:16.332506556Z level=info message=Starting version=1.1.0 component=Zingod
+ts=2026-11-17T03:14:16.332799139Z level=info message="Config loaded" path=<DIR>/data/public/zingod-regtest.toml component=Zingod
+ts=2026-11-17T03:14:16.33285649Z level=warn message="In development, not for production mainnet use" component=Zingod
+ts=2026-11-17T03:14:16.3328692Z level=info message="Open-file limit" limit=1048576 component=Zingod
+ts=2026-11-17T03:14:16.333015511Z level=info message=Listening endpoint=127.0.0.1:35743 network=regtest tls=off component=Grpc
+ts=2026-11-17T03:14:16.334551455Z level=info message="State changed" to=provisioning component=Zingod
+ts=2026-11-17T03:14:16.334681031Z level=info message="Validator live" validator=127.0.0.1:33221 was=pending component=Traffic
+ts=2026-11-17T03:14:16.334767747Z level=info message="Chain view configured" validators=1 p2p=false component=ChainView
+ts=2026-11-17T03:14:16.341096231Z level=info message=Commits store=utxo_set path=<DIR>/node/zingod/regtest/indexes/utxo_set durability=Barrier component=utxo_set
+ts=2026-11-17T03:14:16.348760088Z level=info message=Commits store=compact_block path=<DIR>/node/zingod/regtest/indexes/compact_block durability=Barrier component=compact_block
+ts=2026-11-17T03:14:16.352838225Z level=info message=Commits store=block_hash path=<DIR>/node/zingod/regtest/indexes/block_hash durability=PerFile component=block_hash
+ts=2026-11-17T03:14:16.52711858Z level=info message=Commits store=tree_state path=<DIR>/node/zingod/regtest/indexes/tree_state durability=Barrier component=tree_state
+ts=2026-11-17T03:14:16.531558781Z level=info message=Commits store=transparent_address path=<DIR>/node/zingod/regtest/indexes/transparent_address durability=PerFile component=transparent_address
+ts=2026-11-17T03:14:16.537562578Z level=info message=Commits store=txid_location path=<DIR>/node/zingod/regtest/indexes/txid_location durability=PerFile component=txid_location
+ts=2026-11-17T03:14:16.539340724Z level=warn message="Validator tip stale against its own clock (stalled or eclipsed)" validator=127.0.0.1:33221 tip=Some(3) behind=Some(6642622) component=GrpcSnapshot
+ts=2026-11-17T03:14:16.539942489Z level=info message="Header chain anchored" height=0 hash=...3401e327 component=ChainView
+ts=2026-11-17T03:14:16.548805422Z level=info message="Chain tip advanced" height=3 hash=...1c85965b age=5766d03h finalized_tip=0 component=ZingodNFS
+ts=2026-11-17T03:14:16.548847562Z level=info message="Serving the verified tip" height=3 component=GrpcSnapshot
+ts=2026-11-17T03:14:17.334291462Z level=info message="State changed" from=provisioning to=serving after=999ms notes="1 validator on a stale tip" component=Zingod
+ts=2026-11-17T03:14:19.729269692Z level=info message="Shutdown signal received" signal=SIGTERM
+ts=2026-11-17T03:14:19.729783264Z level=info message="Shutdown complete" component=Zingod

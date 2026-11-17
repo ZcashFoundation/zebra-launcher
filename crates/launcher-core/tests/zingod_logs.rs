@@ -36,11 +36,11 @@ fn a_start_and_stop_runs_from_the_grpc_listener() {
         "Shutdown complete",
         "the last line of a clean stop"
     );
-    assert_eq!(
-        events(log, LogStream::Stdout),
-        [LogEvent::IndexerListening {
-            addr: "127.0.0.1:28137".parse().unwrap()
-        }]
+    // The capture picks a free port.
+    let events = events(log, LogStream::Stdout);
+    assert!(
+        matches!(events.as_slice(), [LogEvent::IndexerListening { addr }] if addr.ip().is_loopback()),
+        "{events:?}"
     );
 }
 

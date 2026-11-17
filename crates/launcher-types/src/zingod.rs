@@ -212,17 +212,18 @@ mod tests {
         assert_eq!((syncing.trusted, syncing.answering), (Some(1), Some(0)));
         assert_eq!(syncing.version, "1.1.0");
 
+        // At zebrad's tip of 3 blocks, with zingod's clock estimate as the target: Regtest's
+        // genesis is old.
         let at_tip = parse(fixture!("syncing-tip"));
-        assert_eq!(
-            at_tip.state,
-            IndexerState::Syncing {
-                progress: Some(SyncProgress {
-                    height: 3,
-                    target: Some(6_642_568),
-                    milli_blocks_per_sec: None,
-                })
-            }
-        );
+        let IndexerState::Syncing {
+            progress: Some(progress),
+        } = &at_tip.state
+        else {
+            panic!("{at_tip:?}");
+        };
+        assert_eq!(progress.height, 3);
+        assert!(progress.target.is_some_and(|target| target > 1_000_000));
+        assert_eq!(progress.milli_blocks_per_sec, None);
         assert_eq!((at_tip.served, at_tip.tip), (Some(3), Some(3)));
 
         let serving = parse(fixture!("serving"));
