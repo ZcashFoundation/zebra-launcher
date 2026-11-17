@@ -1,8 +1,8 @@
 # The bundled sidecars
 
 Zeal ships three zebrads as Tauri sidecars, so a node on any supported channel
-works without a runtime download. From Z1 (proposed, not built yet), Linux
-bundles also carry zingod, for the light client server
+works without a runtime download. Linux bundles also carry zingod, for the
+light client server, which doesn't run it yet
 ([The bundled zingod](#the-bundled-zingod-linux)). The zebrads:
 
 | Channel | Sidecar in `src-tauri/binaries/` | Version | Pinned Zebra commit | Release/snapshot date |
@@ -408,10 +408,12 @@ To bump by hand, or to finish the watcher's pull request:
 
 ## The bundled zingod (Linux)
 
-> **Proposal, 2026-11-16: Z1 in
-> [PUBLIC-SERVICES.md](PUBLIC-SERVICES.md#phases-for-zingod), not built yet.**
-> Facts checked at zingod tag `v1.1.0`; paths under `packages/` are zingod's.
-> Build times and sizes come from research builds on 2026-11-16.
+> **Built in Z1** ([PUBLIC-SERVICES.md](PUBLIC-SERVICES.md#phases-for-zingod)),
+> 2026-11-16: the pins, the build, its CI and the Linux bundles. Nothing runs
+> zingod until Z2 and Z3, whose parts below say so. Facts checked at zingod tag
+> `v1.1.0`; paths under `packages/` are zingod's. Build times and sizes come
+> from builds on 2026-11-16. CI has not run the workflows yet, so the aarch64
+> build is still unverified.
 
 Zeal also bundles zingod, Zingo Labs' light client indexer, as `zeal-zingod`,
 on Linux only. Only the light client server runs it
@@ -425,9 +427,11 @@ on Linux only. Only the light client server runs it
   lowercase commit, an ISO date, and the three files change together.
   `scripts/check-versions.sh` checks their grammar; it uses only bash, grep and
   sed and runs before anything compiles. `fake-zingod` reads `ZINGOD_VERSION`
-  with `include_str!` when it is built, as fake-zebrad reads `ZEBRAD_VERSION`,
-  and a cargo test checks that its `--version` reports it. A launcher-herd test
-  checks that the version is on `TESTED_ZINGOD`.
+  when it is built, through `launcher_types::zingod::version()` (an
+  `include_str!`), as fake-zebrad reads `ZEBRAD_VERSION`, and a cargo test
+  (`crates/launcher-core/tests/fake_zingod.rs`) checks that its `--version`
+  reports the file's version. From Z3, a launcher-herd test checks that the
+  version is on `TESTED_ZINGOD`.
 - **The name.** The `zeal-` prefix keeps the `.deb`'s `/usr/bin/zeal-zingod`
   from shadowing a system `zingod`.
 - **The date** is the tag commit's date in UTC; zingod's CHANGELOG heads the
@@ -447,6 +451,31 @@ commits on the runner. There is nothing to verify the way
 it ships from the pinned commit, as it builds Nightly zebrad, and never uses
 the image. Zeal's attestation says where a binary was built, not that Zingo
 Labs released it.
+
+### Where Z1 differs from the design
+
+What was built follows PUBLIC-SERVICES.md's Z1, with these differences:
+
+- The list of licence files and where each comes from is in a third script,
+  `scripts/zingod-licenses.sh`, which `build-zingod.sh` and `bump-zingod.sh`
+  both call. It also writes `README.txt` from the checkout and its
+  `Cargo.lock`, so a bump refreshes it and the build checks it.
+- No file in the checkout or its sources holds the full Apache-2.0 text, so
+  `Apache-2.0.txt` is checked against the sha256 of apache.org's file instead.
+- `build-zingod.sh` builds only for the host's own Linux triple, since its
+  checks run the binary, and takes the host from `uname`. It checks the
+  licence folder before the build rather than after.
+- The workflows install the artifact through `install_zingod` in
+  `scripts/lib.sh`, which also checks the build information's commit, target
+  and binary sha256.
+- `ci.yml`'s gate also covers `lib.sh`, `zingod-licenses.sh` and the licence
+  folder, and runs on pull requests only; `bundle.yml` builds zingod on
+  `main`.
+- The advisory report covers zingod's whole workspace and every target, with
+  an empty configuration.
+- The cache is the already pinned `Swatinem/rust-cache` with `cache-targets`
+  and `cache-bin` off, rather than a new action.
+- `release.yml`'s notes name the zingod version, commit and source archive.
 
 ### Targets for zingod
 

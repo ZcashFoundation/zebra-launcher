@@ -54,7 +54,9 @@ The Tauri build needs all three sidecar files for the host target triple:
 `src-tauri/binaries/zeal-zebrad-<triple>`,
 `zeal-zebrad-beta-<triple>` and `zeal-zebrad-nightly-<triple>` (with `.exe` on
 Windows). This lets Stable, Beta and Nightly nodes run without downloading a
-binary. Binaries are never committed.
+binary. On Linux it also needs `zeal-zingod-<triple>`
+([`tauri.linux.conf.json`](../src-tauri/tauri.linux.conf.json)), which nothing runs
+yet. Binaries are never committed.
 
 - **Fake sidecars:** `scripts/dev-sidecar.sh` (Windows: `scripts/dev-sidecar.ps1`) builds
   `fake-zebrad` and copies it into the channel sidecar locations. It takes no arguments.
@@ -71,6 +73,11 @@ binary. Binaries are never committed.
   pinned commit. The `ZEBRAD_BETA_*` and `ZEBRAD_NIGHTLY_*` pins select the matching
   sidecar names; see [SIDECARS.md](SIDECARS.md). Install all three before a full Tauri
   build, even when exercising only one channel.
+- **Real zingod (Linux):** `scripts/build-zingod.sh` builds the pinned
+  [`ZINGOD_VERSION`](../ZINGOD_VERSION) inside `ubuntu:22.04` and installs it as
+  `zeal-zingod-<triple>`; on a newer host it builds but installs nothing, since the binary
+  fails the glibc floor. See
+  [SIDECARS.md](SIDECARS.md#local-development-with-zingod).
 
 Then, from the repository root:
 
@@ -182,7 +189,7 @@ shellcheck scripts/*.sh docs/observability/*.sh && actionlint   # CI pins their 
 ```
 
 Run `scripts/dev-sidecar.sh` first: the app crate's build script fails without the
-three channel sidecar files. On Linux the app also needs the WebKitGTK packages listed
+three channel sidecar files, and on Linux without `zeal-zingod`. On Linux the app also needs the WebKitGTK packages listed
 above; without them, check everything else with `--exclude zeal`, and the app with
 [`scripts/check-windows.sh`](../scripts/check-windows.sh), which type-checks it for
 Windows (`cargo clippy -p zeal --target x86_64-pc-windows-msvc --all-targets`).

@@ -16,6 +16,10 @@ custody are in [SECURITY.md](SECURITY.md).
   `ZEBRAD_BETA_COMMIT`, `ZEBRAD_BETA_DATE` and corresponding `ZEBRAD_NIGHTLY_*`
   root pins. Each channel's version, full commit and date are released together;
   the complete current values are in [SIDECARS.md](SIDECARS.md).
+- Bundled zingod, Linux only and run by nothing yet: [`ZINGOD_VERSION`](../ZINGOD_VERSION),
+  [`ZINGOD_COMMIT`](../ZINGOD_COMMIT) and [`ZINGOD_DATE`](../ZINGOD_DATE). Zeal builds it
+  from that commit; each release carries its vendored source as
+  `zingod-src-<ver>.tar.zst` ([SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)).
 - Offline node documentation: generated from those exact same Zebra commits and
   packaged with the app. Opening the Book, default configuration or Changes in
   a released app requires no remote network. Every generated HTML page carries
@@ -29,8 +33,9 @@ custody are in [SECURITY.md](SECURITY.md).
 
 1. Check that [`bundle.yml`](../.github/workflows/bundle.yml) passed on `main` in the last
    week for Stable, Beta and Nightly on all five targets, including every sidecar's
-   version/commit and Linux glibc checks and the `zebra-docs` resource build. To run it
-   now: `gh workflow run bundle.yml --ref main`.
+   version/commit and Linux glibc checks, the `zebra-docs` resource build and
+   `sidecars-zingod` on both Linux targets. To run it now:
+   `gh workflow run bundle.yml --ref main`.
 2. Open the release PR:
    - set `[workspace.package] version` in `Cargo.toml`, then run
      `cargo update --workspace` so `Cargo.lock` matches;
@@ -56,12 +61,18 @@ Windows Zebra builds can dominate it. Record timings from the first three-channe
    git push origin v0.2.0
    ```
 
-2. **Wait for the unprivileged jobs.** `verify`, `draft` (creates the draft release),
-   `sidecars`, `sidecars-beta`, `sidecars-nightly`, `build` and the offline documentation
-   job run without secrets. Each sidecar matrix must pass its version/commit checks on all
-   five targets, every Linux sidecar must pass the glibc check, and documentation
-   generation must finish for all three exact pinned commits. The docs job needs all three
-   sidecar jobs, so missing or mismatched channel binaries block the release.
+2. **Wait for the unprivileged jobs.** `verify`, `draft` (creates the draft release and
+   uploads zingod's source archive), `sidecars`, `sidecars-beta`, `sidecars-nightly`,
+   `sidecars-zingod`, `build` and the offline documentation job run without secrets.
+   Each zebrad sidecar matrix must pass its version/commit checks on all five targets,
+   every Linux sidecar must pass the glibc check, and documentation generation must
+   finish for all three exact pinned commits. The docs job needs all three zebrad sidecar
+   jobs, so missing or mismatched channel binaries block the release. `sidecars-zingod`
+   builds `zeal-zingod` on both Linux targets, where `build-zingod.sh` checks the tag
+   against `ZINGOD_COMMIT`, the version, the glibc floor, the linked libraries, the
+   binary's strings and the licence folder; read the advisory report in its x86_64
+   job's summary. The first release candidate that carries zingod is also the first run
+   of `release.yml`'s split with it, since `bundle.yml` compiles and bundles in one job.
 3. **Approve the `release` environment.** In the workflow run, use *Review deployments*,
    then select `release`. The approver must not be the person who pushed the tag;
    self-review is blocked. The five `bundle_sign` jobs then package, sign, notarize and
@@ -80,12 +91,29 @@ Windows Zebra builds can dominate it. Record timings from the first three-channe
    cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
      --certificate-identity "https://github.com/ZcashFoundation/zebra-launcher/.github/workflows/release.yml@refs/tags/$TAG" \
      --certificate-oidc-issuer https://token.actions.githubusercontent.com
-   for f in zeal_* latest.json; do
+   for f in zeal_* zingod-src-* latest.json; do
      gh attestation verify "$f" --repo ZcashFoundation/zebra-launcher \
        --signer-workflow ZcashFoundation/zebra-launcher/.github/workflows/release.yml
    done
    jq '{version, platforms: (.platforms | keys)}' latest.json   # five keys, this version
+   sha256sum -c zingod-src-*.tar.zst.sha256
    ```
+
+   The source archive was also attested where it was built, by `zingod-sidecars.yml`
+   for this tag:
+
+   ```sh
+   gh attestation verify zingod-src-*.tar.zst --repo ZcashFoundation/zebra-launcher \
+     --signer-workflow ZcashFoundation/zebra-launcher/.github/workflows/zingod-sidecars.yml \
+     --source-ref "refs/tags/$TAG"
+   ```
+
+   The same command checks a `zeal-zingod-<triple>` taken from the run's
+   `zingod-<triple>` artifact (`gh run download <run id> -n zingod-<triple>`). In the
+   Linux bundles, `zeal-zingod --version` prints `zingod <ZINGOD_VERSION>`, and the
+   licence folder holds every file of `src-tauri/resources/licenses/zingod/` plus
+   `jemalloc-COPYING` and `aws-lc-LICENSE` (`smoke-linux.sh` checks both in
+   `bundle.yml`).
 
 6. **Smoke-test** each OS with the checklist below.
 7. **Check the updater signatures** (releases with the updater): see
@@ -128,6 +156,10 @@ Windows Zebra builds can dominate it. Record timings from the first three-channe
 - [ ] **Linux deb** (Debian 12): `sudo apt install ./zeal_X.Y.Z_amd64.deb`
       installs, the app starts, and the update setting is Notify-only.
 - [ ] **Linux aarch64**: the AppImage starts and a Stable node reaches Running.
+- [ ] **Linux, both architectures**: the installed `zeal-zingod --version` prints
+      `zingod <ZINGOD_VERSION>` (`/usr/bin/zeal-zingod` from the `.deb`, `usr/bin/` in
+      the extracted AppImage), and `licenses/zingod/` beside the resources holds its
+      `README.txt` and the licence files it names; nothing starts it.
 - [ ] **macOS Apple Silicon and Intel**: the dmg opens; after copying to Applications,
       `spctl -a -vv "/Applications/Zeal.app"` reports
       `source=Notarized Developer ID`. `codesign -dv --verbose=4` on
@@ -271,14 +303,15 @@ it cache-free.
 
 To switch:
 
-1. Delete the `build` job and make `bundle_sign` need `verify`, `draft`, all three
-   sidecar jobs (`sidecars`, `sidecars-beta` and `sidecars-nightly`) and the offline
-   documentation job. The fallback must not drop a channel or bypass the docs job's
-   all-sidecars prerequisite.
+1. Delete the `build` job and make `bundle_sign` need `verify`, `draft`, all four
+   sidecar jobs (`sidecars`, `sidecars-beta`, `sidecars-nightly` and `sidecars-zingod`)
+   and the offline documentation job. The fallback must not drop a channel or bypass the
+   docs job's all-sidecars prerequisite.
 2. In `bundle_sign`, delete the `build-<target>` download-artifact step and the "Place
-   the compiled app" step. Keep all three channel sidecar downloads, the `zebra-docs`
-   resource download and their `chmod +x`/placement steps, and drop `compile: "false"`
-   from `./.github/actions/setup-tauri`.
+   the compiled app" step. Keep all three channel sidecar downloads, the Linux zingod
+   download and its `install_zingod` step, the `zebra-docs` resource download and their
+   `chmod +x`/placement steps, and drop `compile: "false"` from
+   `./.github/actions/setup-tauri`.
 3. In the three "Bundle and sign" steps, replace `cargo tauri bundle` with
    `cargo tauri build`, keeping the same flags, env and throwaway key, for example:
 

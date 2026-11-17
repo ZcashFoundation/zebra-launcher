@@ -20,7 +20,8 @@
 > ([Phases for zingod](#phases-for-zingod)): Z1 bundles the pinned, attested binary, which
 > nothing runs yet; Z2 supervises it, with a contract test and no UI; Z3 lets a Linux user choose
 > it for a Testnet light client server; Z4 opens Mainnet after a measured gate; Z5 brings macOS.
-> None is built yet.
+> Z1 is built (2026-11-16; [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)); the others
+> aren't yet.
 
 The maintainer asked for two optional services that a user can turn on at home. First: "an
 optional DNS seeder, pull in zeeder", and "The DNS seeder should let you expose the port and
@@ -1336,7 +1337,7 @@ the spawner, touches shared code. None of them needs front door v2 (PS2) or MULT
 
 | Phase | Ships | Needs |
 | --- | --- | --- |
-| **Z1 Bundle** | the `ZINGOD_*` pins; `build-zingod.sh` and `bump-zingod.sh`; `zingod-sidecars.yml` with its checks and attestation; the source archive on each release; `zeal-zingod` and its licences in the Linux bundles; a minimal `fake-zingod` for `dev-sidecar.sh`. Nothing runs it yet | — |
+| **Z1 Bundle** | the `ZINGOD_*` pins; `build-zingod.sh` and `bump-zingod.sh`; `zingod-sidecars.yml` with its checks and attestation; the source archive on each release; `zeal-zingod` and its licences in the Linux bundles; a minimal `fake-zingod` for `dev-sidecar.sh`. Nothing runs it yet. **Built**: [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux) says how, and where it differs from this design | — |
 | **Z2 Supervise** | `Launch` and the zingod reader in the supervisor; the configuration writer; `DiskFull` and `IndexBroken`; the pure rules; the runner; `fake-zingod`'s modes and fake-zebrad's stale-cookie mode; `real_zingod.rs` in CI. No UI | Z1 |
 | **Z3 Choose (Linux, Testnet)** | the types; the backend on the consent screen and in the setup; the service actor's and the app's wiring; the disk, stall, cross-check and active-upgrade rules; Rebuild, Delete and Forget's box; the Server card, banners and mock flags; `TESTED_ZINGOD` = 1.1.0 with zebrad 7.0.0 on Testnet. Switching an open service means "unavailable" until the index is built | Z2; the Testnet wallet run before the release |
 | **Z4 Mainnet** | the gate below; `TESTED_ZINGOD` gains Mainnet; the disk and memory numbers from measurements; the scheduled-upgrade countdown and pause; the consent's Mainnet line; Share naming the wallets the runs confirmed; switching while Zebra's endpoint keeps serving; the default for new setups, as the maintainer decides | Z3 and the gate |
