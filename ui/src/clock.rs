@@ -15,6 +15,17 @@ pub fn now_iso() -> String {
     js_sys::Date::new_0().to_iso_string().into()
 }
 
+/// `time` as an ISO 8601 UTC string, like [`now_iso`].
+pub fn iso(time: SystemTime) -> String {
+    let millis = time
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis() as f64)
+        .unwrap_or(0.0);
+    js_sys::Date::new(&JsValue::from_f64(millis))
+        .to_iso_string()
+        .into()
+}
+
 /// `time` in the user's locale, such as `23/10/2026, 18:35:01`.
 pub fn local_string(time: SystemTime) -> String {
     let millis = time

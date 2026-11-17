@@ -251,6 +251,11 @@ pub(super) fn mock_hash(seq: u64) -> String {
         .collect()
 }
 
+/// How many lines of a run's startup sequence are left from line `seq` on.
+pub(super) fn startup_left(seq: u64) -> u64 {
+    (STARTUP_LINES.len() as u64).saturating_sub(seq)
+}
+
 /// The mock's log line `seq` of a run, with the node at `height` (the node statistics' height,
 /// so the log and the RPC agree): a startup sequence, then a steady state where every 20th
 /// line reports progress, every 37th warns, every 101st comes from stderr and the rest is INFO

@@ -71,7 +71,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use launcher_types::{
@@ -85,7 +85,7 @@ use leptos::prelude::*;
 use crate::{clock, format};
 
 use config::SAMPLE_CONFIG;
-use log_lines::sample_line;
+use log_lines::{sample_line, startup_left};
 use metrics::MetricsInput;
 use resources::{MockTree, OsFlag};
 pub use resources::{get_machine_resources, on_machine_resources};
@@ -502,9 +502,10 @@ impl Mock {
                 })
             });
         } else if !first_run || flags.running {
-            mock.start();
             if flags.backfill {
                 mock.backfill();
+            } else {
+                mock.start();
             }
         }
         let ticker = mock.clone();
@@ -577,11 +578,23 @@ impl Mock {
         target: Option<&str>,
         message: String,
     ) {
+        self.push_line_at(stream, level, target, message, clock::now());
+    }
+
+    /// [`Mock::push_line`], stamped `at` rather than now.
+    fn push_line_at(
+        &self,
+        stream: LogStream,
+        level: Option<LogLevel>,
+        target: Option<&str>,
+        message: String,
+        at: SystemTime,
+    ) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let line = LogLine {
             seq,
             stream,
-            timestamp: level.is_some().then(clock::now_iso),
+            timestamp: level.is_some().then(|| clock::iso(at)),
             level,
             spans: None,
             target: target.map(Into::into),
@@ -594,11 +607,17 @@ impl Mock {
     /// Adds a launcher note to the log stream, as the supervisor's `note` does: stamped now,
     /// at INFO, from the supervisor's target.
     fn note(&self, text: impl Into<String>) {
-        self.push_line(
+        self.note_at(clock::now(), text);
+    }
+
+    /// [`Mock::note`], stamped `at`.
+    fn note_at(&self, at: SystemTime, text: impl Into<String>) {
+        self.push_line_at(
             LogStream::Launcher,
             Some(LogLevel::Info),
             Some("launcher_core::supervisor"),
             text.into(),
+            at,
         );
     }
 
@@ -613,16 +632,22 @@ impl Mock {
     }
 
     fn start(&self) {
+        self.start_at(clock::now());
+    }
+
+    /// Starts a run as if zebrad had been spawned at `started_at`: now, or for `?backfill`
+    /// before the page loaded, so the status, the launcher's note and the run agree.
+    fn start_at(&self, started_at: SystemTime) {
         self.generation.fetch_add(1, Ordering::Relaxed);
         let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
         self.status.update(|status| {
             status.phase = Phase::Starting;
             status.pid = Some(pid);
-            status.started_at = Some(clock::now());
+            status.started_at = Some(started_at);
             status.rpc_addr = None;
             status.metrics_addr = None;
         });
-        self.note(format!("zebrad started (pid {pid})"));
+        self.note_at(started_at, format!("zebrad started (pid {pid})"));
         // The run's own lines start after the note, from the startup sequence.
         self.run_first_seq
             .store(self.next_seq.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -871,6 +896,21 @@ impl Mock {
         )
     }
 
+    /// When line `seq_in_run` of the run happened, if that was before the page saw it: a line
+    /// of the startup sequence of a run that began well before its lines flow (`?backfill`'s,
+    /// started before the page loaded) is stamped from the run's start, a line every 200 ms
+    /// as the live mock writes them, so the run begins in the log when its status and the
+    /// launcher's note say. `None` for every other line, which is stamped now.
+    fn backfilled_at(&self, seq_in_run: u64) -> Option<SystemTime> {
+        if startup_left(seq_in_run) == 0 {
+            return None;
+        }
+        let started_at = self.status.with_untracked(|status| status.started_at)?;
+        let at = started_at + Duration::from_millis(200 * seq_in_run);
+        (clock::now().duration_since(at).unwrap_or_default() > Duration::from_secs(60))
+            .then_some(at)
+    }
+
     fn line(&self, seq: u64) -> LogLine {
         let seq_in_run = seq.saturating_sub(self.run_first_seq.load(Ordering::Relaxed));
         // The log tells of the same height the RPC does; before the first poll, the run's start.
@@ -884,7 +924,8 @@ impl Mock {
         LogLine {
             seq,
             stream,
-            timestamp: has_prefix.then(clock::now_iso),
+            timestamp: has_prefix
+                .then(|| clock::iso(self.backfilled_at(seq_in_run).unwrap_or_else(clock::now))),
             level,
             spans: spans.map(Into::into),
             target: target.map(Into::into),
@@ -980,7 +1021,14 @@ fn subscribe_logs(on_batch: impl Fn(Vec<LogLine>) + 'static) {
                 let first_dropped = mock.next_seq.fetch_add(DROPPED, Ordering::Relaxed);
                 batch.push(LogLine::gap_marker(DROPPED, first_dropped + DROPPED - 1));
             }
-            let count = 1 + (js_sys::Math::random() * 3.0) as u64;
+            // A backfilled run's startup happened before the page loaded: it goes in one batch.
+            let next = mock.next_seq.load(Ordering::Relaxed);
+            let seq_in_run = next.saturating_sub(mock.run_first_seq.load(Ordering::Relaxed));
+            let count = if mock.backfilled_at(seq_in_run).is_some() {
+                startup_left(seq_in_run)
+            } else {
+                1 + (js_sys::Math::random() * 3.0) as u64
+            };
             let first = mock.next_seq.fetch_add(count, Ordering::Relaxed);
             batch.extend((first..first + count).map(|seq| mock.line(seq)));
             on_batch(batch);

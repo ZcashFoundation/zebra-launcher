@@ -1672,9 +1672,11 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      card's helpers (the dashboard's `resources` module is crate-visible for that), so the
      summary cannot disagree with the card.
    - `?backfill` also puts the mock's zebrad in Running at once, with the run started 45
-     minutes before the load; its statistics start at the load. The 40 minutes of samples
-     reach each new listener before the live ones. With `?herd` the backfilled computer
-     counts the main zebrad only.
+     minutes before the load (`Mock::start_at`); the launcher's "zebrad started" note and
+     zebrad's startup lines are stamped then (`Mock::backfilled_at`), and the startup lines
+     arrive in one batch, so This run, the Logs page and Uptime agree. Its statistics start
+     at the load. The 40 minutes of samples reach each new listener before the live ones. With
+     `?herd` the backfilled computer counts the main zebrad only.
 5. **Free space and verdicts.**
    - `firstrun::volume`, and volumes in `MachineResources` every 30 s.
    - Rules 19–21, `DISK_RULES` and `MEMORY_RULES`, and `Action::OpenDataFolder`.

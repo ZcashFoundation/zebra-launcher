@@ -801,18 +801,19 @@ pub(super) fn machine(
 }
 
 impl super::Mock {
-    /// `?backfill`: the run that [`super::Mock::start`] began started [`BACKFILL_RUN`] ago and
-    /// runs; its samples and the computer's of the [`BACKFILL`] before now wait for the
-    /// listeners ([`backfill`]), and the samplers go on from there.
+    /// `?backfill`: starts the run [`BACKFILL_RUN`] ago ([`super::Mock::start_at`], so the
+    /// launcher's note is stamped then too) and has it running; its samples and the
+    /// computer's of the [`BACKFILL`] before now wait for the listeners ([`backfill`]), and
+    /// the samplers go on from there.
     pub(super) fn backfill(&self) {
         let now = clock::now();
         let started_at = now.checked_sub(BACKFILL_RUN).unwrap_or(now);
+        self.start_at(started_at);
         let Some(pid) = self.status.with_untracked(|status| status.pid) else {
             return;
         };
         self.status.update(|status| {
             status.phase = Phase::Running;
-            status.started_at = Some(started_at);
             status.rpc_addr = "127.0.0.1:8232".parse().ok();
             status.metrics_addr = "127.0.0.1:9999".parse().ok();
         });
