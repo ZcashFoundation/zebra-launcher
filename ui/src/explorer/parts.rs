@@ -106,7 +106,8 @@ pub fn card_target(route: &ExplorerRoute) -> Option<CardTarget> {
 
 /// Show RPC: the reads an answer took, as the requests named them, while Show RPC is on.
 /// `sources` is `None` while the answer is on its way. A `folded` list opens on request, under
-/// a count of its reads.
+/// a count of its reads. Only the count and the list follow `sources`, so an open list stays
+/// open, and keeps focus, while reads are added to it.
 #[component]
 pub fn RpcCalls(
     #[prop(into)] sources: Signal<Option<Vec<SourceCall>>>,
@@ -115,45 +116,46 @@ pub fn RpcCalls(
     #[prop(optional)] folded: bool,
 ) -> impl IntoView {
     let prefs = Prefs::get();
+    let count = move || {
+        sources.with(|sources| {
+            sources.as_ref().map(|calls| {
+                let cached = calls.iter().filter(|call| call.cached).count();
+                format!(
+                    "{} read{}, {cached} from memory",
+                    calls.len(),
+                    if calls.len() == 1 { "" } else { "s" }
+                )
+            })
+        })
+    };
+    let body = move || match sources.get() {
+        None => view! { <p class="muted">"Reading…"</p> }.into_any(),
+        Some(calls) if calls.is_empty() => view! {
+            <p class="muted">"No reads: the explorer had everything."</p>
+        }
+        .into_any(),
+        Some(calls) => view! {
+            <ol class="ex-rpc-calls">
+                {calls
+                    .into_iter()
+                    .map(|call| {
+                        let cost = text::source_cost(&call);
+                        let failed =
+                            matches!(call.outcome, ReadOutcome::Error | ReadOutcome::NoAnswer);
+                        view! {
+                            <li class:ex-rpc-cached=call.cached class:ex-rpc-failed=failed>
+                                <code>{text::source_text(&call)}</code>
+                                <span class="muted">{cost}</span>
+                            </li>
+                        }
+                    })
+                    .collect_view()}
+            </ol>
+        }
+        .into_any(),
+    };
     move || {
         prefs.rpc.get().then(|| {
-            let count = sources.with(|sources| {
-                sources.as_ref().map(|calls| {
-                    let cached = calls.iter().filter(|call| call.cached).count();
-                    format!(
-                        "{} read{}, {cached} from memory",
-                        calls.len(),
-                        if calls.len() == 1 { "" } else { "s" }
-                    )
-                })
-            });
-            let body = match sources.get() {
-                None => view! { <p class="muted">"Reading…"</p> }.into_any(),
-                Some(calls) if calls.is_empty() => view! {
-                    <p class="muted">"No reads: the explorer had everything."</p>
-                }
-                .into_any(),
-                Some(calls) => view! {
-                    <ol class="ex-rpc-calls">
-                        {calls
-                            .into_iter()
-                            .map(|call| {
-                                let cost = text::source_cost(&call);
-                                view! {
-                                    <li
-                                        class:ex-rpc-cached=call.cached
-                                        class:ex-rpc-failed=matches!(call.outcome, ReadOutcome::Error | ReadOutcome::NoAnswer)
-                                    >
-                                        <code>{text::source_text(&call)}</code>
-                                        <span class="muted">{cost}</span>
-                                    </li>
-                                }
-                            })
-                            .collect_view()}
-                    </ol>
-                }
-                .into_any(),
-            };
             if folded {
                 view! {
                     <details class="ex-rpc">
