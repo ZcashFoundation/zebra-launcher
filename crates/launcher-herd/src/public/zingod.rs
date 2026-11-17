@@ -202,6 +202,9 @@ pub struct ZingodFacts {
     pub stale: Option<StaleProcessInfo>,
     /// The address zingod's `Listening` line named in this run.
     pub listening: Option<SocketAddr>,
+    /// The folder Zeal couldn't create or write zingod's files in before the plan's start, and
+    /// why: zingod doesn't start again until zebrad's run or the attempt changes.
+    pub start_error: Option<(PathBuf, String)>,
 }
 
 impl ZingodFacts {
@@ -903,6 +906,16 @@ pub fn problem(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReason
                     class: ExitClass::DbLocked,
                     detail: FailDetail::Dir {
                         path: zingod.dir.clone(),
+                    },
+                });
+            }
+            // zingod never ran: its log has nothing about it.
+            if let Some((path, error)) = &runner.start_error {
+                return Some(DegradedReason::IndexerFailed {
+                    class: ExitClass::SpawnFailed,
+                    detail: FailDetail::Folder {
+                        path: path.clone(),
+                        error: error.clone(),
                     },
                 });
             }
@@ -2668,6 +2681,24 @@ mod service_tests {
                 DegradedReason::IndexerFailed {
                     class: ExitClass::DbLocked,
                     detail: FailDetail::Dir { path: dir() },
+                },
+            ),
+            (
+                "a folder Zeal can't create",
+                |f| {
+                    let runner = &mut zingod(f).runner;
+                    runner.phase = Phase::Stopped;
+                    runner.status = None;
+                    runner.listening = None;
+                    runner.start_error =
+                        Some((dir().join("home"), "Permission denied (os error 13)".into()));
+                },
+                DegradedReason::IndexerFailed {
+                    class: ExitClass::SpawnFailed,
+                    detail: FailDetail::Folder {
+                        path: dir().join("home"),
+                        error: "Permission denied (os error 13)".into(),
+                    },
                 },
             ),
             (

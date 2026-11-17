@@ -41,6 +41,7 @@
 //! | `zingod-cookie` | zingod can't read zebrad's cookie: it is a folder |
 //! | `zingod-port` | other programs hold zingod's port and the next one |
 //! | `zingod-locked` | another program holds zingod's index |
+//! | `zingod-folder` | Zeal can't create zingod's folder: it isn't the user's to write |
 //! | `zingod-disk` | 6 GB free: zingod waits for disk space |
 //! | `zingod-broken` | zingod's index is damaged |
 //! | `zingod-mismatch` | zingod's tip didn't match zebrad's: stopped until a rebuild |
@@ -121,6 +122,7 @@ pub(crate) enum ZingodFlag {
     Cookie,
     Port,
     Locked,
+    Folder,
     Disk,
     Broken,
     Mismatch,
@@ -131,7 +133,7 @@ pub(crate) enum ZingodFlag {
 }
 
 impl ZingodFlag {
-    const ALL: [(&'static str, ZingodFlag); 26] = [
+    const ALL: [(&'static str, ZingodFlag); 27] = [
         ("zingod-choose", ZingodFlag::Choose),
         ("zingod", ZingodFlag::Serving),
         ("zingod-building", ZingodFlag::Building),
@@ -151,6 +153,7 @@ impl ZingodFlag {
         ("zingod-cookie", ZingodFlag::Cookie),
         ("zingod-port", ZingodFlag::Port),
         ("zingod-locked", ZingodFlag::Locked),
+        ("zingod-folder", ZingodFlag::Folder),
         ("zingod-disk", ZingodFlag::Disk),
         ("zingod-broken", ZingodFlag::Broken),
         ("zingod-mismatch", ZingodFlag::Mismatch),
@@ -694,6 +697,16 @@ impl World {
                     &dir,
                 ),
             ),
+            ZingodFlag::Folder => {
+                let runner = &mut zingod(&mut world).runner;
+                runner.phase = Phase::Stopped;
+                runner.status = None;
+                runner.listening = None;
+                runner.start_error = Some((
+                    index_dir(network).join("home"),
+                    "Permission denied (os error 13)".into(),
+                ));
+            }
             ZingodFlag::Disk => {
                 let zingod = zingod(&mut world);
                 zingod.disk = Some(DiskReading {

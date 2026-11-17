@@ -535,6 +535,7 @@ flag (`?public=<flag>`).
 | zingod can't read zebrad's cookie: the path is a folder, or not readable | `ConfigError` with the cookie text | no restart | "zingod can't read Zebra · Testnet's cookie at /mnt/zebra/testnet/rpc/.cookie: Is a directory (os error 21). [Try again]" | the user's Try again | `zingod-cookie` |
 | zingod's port is taken | the check before the spawn, or `PortInUse` | moves to the next free port, once | "Other programs use ports 18137 and 18138. [Try again]" | the user | `zingod-port` |
 | another program holds the index | `DbLocked`, after the pid file ended Zeal's own leftover | waits | "Another program holds zingod's index in /mnt/zebra/zingod/testnet. [Try again]" | the user | `zingod-locked` |
+| Zeal can't create zingod's folder or write its configuration: the disk isn't the user's to write, is read-only, or isn't mounted | the runner's start fails before the spawn | `IndexerFailed` with `SpawnFailed` and the folder; no start again for the same attempt | "Zeal could not set up zingod's folder /mnt/zebra/zingod/testnet/home: Permission denied (os error 13). Fix its permissions or its disk, then try again. [Try again]" | the user's Try again | `zingod-folder` |
 | the disk fills | free space every 60 s; `DiskFull` | stops zingod below 10 GB free, starts it above 20 GB; after `DiskFull`, starts it again only when bytes ran out and are back, with inodes free | "Waiting for disk space: 6 GB free on /mnt/zebra. zingod starts again above 20 GB." | by itself, or the user's Try again after a quota or inodes ran out | `zingod-disk` |
 | the index is damaged, from another chain or of an older format | `IndexBroken` | no restart | "zingod's index is damaged. Rebuilding it takes hours, and wallets are told to try again meanwhile. [Rebuild]" | the user's Rebuild | `zingod-broken` |
 | zingod serves a block zebrad doesn't have | the tip cross-check | stops zingod | "zingod's chain doesn't match Zebra's at block 4,611,980. [Rebuild]" | the user's Rebuild | `zingod-mismatch` |
@@ -1235,7 +1236,8 @@ DegradedReason: IndexerStarting { waiting: IndexerWait },         // ZebradTip, 
     IndexerFailed { class: ExitClass, detail: FailDetail },
     ChainMismatch { at: u64 }, DiskLow { free_bytes: u64 }
 pub enum FailDetail { None, Ports { tried: Vec<u16> }, Dir { path: PathBuf },
-    OpenFiles { needed: u64, limit: u64 }, Cookie { path: PathBuf, error: String } }
+    OpenFiles { needed: u64, limit: u64 }, Cookie { path: PathBuf, error: String },
+    Folder { path: PathBuf, error: String } }                     // Zeal's own start, before zingod runs
 PauseReason::BuildTooOld { upgrade: String, height: u64 }
 PublicStatus { pub indexer: Option<IndexerStats> }
 pub struct IndexerStats { version, phase: Phase, status: Option<IndexerStatus>, dir, index_bytes,
@@ -1259,7 +1261,9 @@ pub struct IndexerStatus { state, served, tip, target: Option<u64>,
   those.
 - **Failure details.** The panel's lines for a failed zingod name the ports tried, the folder,
   the open-file limit to raise, or the cookie and its error; `FailDetail` carries them from the
-  reader's classification.
+  reader's classification. A folder Zeal can't create or write zingod's files in before the
+  spawn is the runner's own `ZingodFacts.start_error`, as `SpawnFailed` with `Folder`: zingod's
+  log has nothing about it, so the panel offers Try again alone.
 
 The names say "indexer" where the code doesn't depend on zingod, so a node kind can take them
 over.
@@ -1503,7 +1507,7 @@ backend, the Service step's checks and findings, zingod's degraded reasons, `Fai
 `BuildTooOld`, `IndexerStats`); launcher-herd's Service step, `problem()` for every row of the
 failure table, `choice()` and `DEFAULT_BACKEND`; the service actor's wiring of the runner and
 the tip cross-check; the app's sidecar key, commands, exit flow and diagnostics; and the
-screens with the 26 `zingod…` mock flags. Where it differs from the sections above:
+screens with the 27 `zingod…` mock flags. Where it differs from the sections above:
 
 - **The setup's room is a start condition.** A service still being set up doesn't give the
   runner a plan while the index's disk has less than 50 GB free on Testnet (100 GB on Mainnet),

@@ -147,6 +147,11 @@ fn failed_text(class: ExitClass, detail: &FailDetail, status: Option<&PublicStat
             "zingod ran out of room for its index. Free some, then try again.".into()
         }
         (ExitClass::IndexBroken, _) => indexer_text(&DegradedReason::IndexBroken, status),
+        (ExitClass::SpawnFailed, FailDetail::Folder { path, error }) => format!(
+            "Zeal could not set up zingod's folder {}: {error}. Fix its permissions or its disk, \
+             then try again.",
+            path.display()
+        ),
         (ExitClass::SpawnFailed, _) => "Zeal could not start zingod.".into(),
         (ExitClass::Crash, _) => "zingod stopped unexpectedly 5 times in 10 minutes.".into(),
         (ExitClass::Clean | ExitClass::EosHalt, _) => "zingod stopped and waits for you.".into(),
@@ -1151,6 +1156,11 @@ pub fn indexer_actions(why: &DegradedReason) -> &'static [IndexerAction] {
             class: ExitClass::ConfigError,
             detail: FailDetail::None,
         } => &[CopyDiagnostics],
+        // zingod never ran: its log has nothing about the folder.
+        DegradedReason::IndexerFailed {
+            detail: FailDetail::Folder { .. },
+            ..
+        } => &[TryAgain],
         DegradedReason::IndexerFailed {
             class: ExitClass::Crash | ExitClass::SpawnFailed,
             ..
@@ -1597,6 +1607,17 @@ mod tests {
                  Is a directory (os error 21).",
             ),
             (
+                DegradedReason::IndexerFailed {
+                    class: ExitClass::SpawnFailed,
+                    detail: FailDetail::Folder {
+                        path: PathBuf::from("/mnt/zebra/zingod/testnet/home"),
+                        error: "Permission denied (os error 13)".into(),
+                    },
+                },
+                "Zeal could not set up zingod's folder /mnt/zebra/zingod/testnet/home: \
+                 Permission denied (os error 13). Fix its permissions or its disk, then try again.",
+            ),
+            (
                 DegradedReason::ChainMismatch { at: 4_611_980 },
                 "zingod's chain doesn't match Zebra's at block 4,611,980.",
             ),
@@ -1857,6 +1878,17 @@ mod tests {
                 detail: FailDetail::None,
             }),
             &[IndexerAction::CopyDiagnostics]
+        );
+        assert_eq!(
+            indexer_actions(&DegradedReason::IndexerFailed {
+                class: ExitClass::SpawnFailed,
+                detail: FailDetail::Folder {
+                    path: PathBuf::from("/mnt/zebra/zingod/testnet/home"),
+                    error: "Permission denied (os error 13)".into(),
+                },
+            }),
+            &[IndexerAction::TryAgain],
+            "zingod's log has nothing about a folder Zeal couldn't create"
         );
     }
 }

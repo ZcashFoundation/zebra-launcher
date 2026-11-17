@@ -417,6 +417,7 @@ impl ZingodRunner {
             zingod: None,
             started: None,
             stale_for: None,
+            start_failed_for: None,
             starting: false,
             port: None,
             moved: false,
@@ -500,6 +501,9 @@ struct Runner {
     /// again until the key changes, so a process that outlives `SIGKILL` can't make the runner
     /// spin.
     stale_for: Option<(ZebradRun, u64)>,
+    /// The plan's key whose start failed before zingod ran, on a folder Zeal couldn't create or
+    /// write in (`ZingodFacts.start_error`): no start again until the key changes.
+    start_failed_for: Option<(ZebradRun, u64)>,
     /// A start is under way.
     starting: bool,
     /// The port zingod gets, after a move.
@@ -663,7 +667,11 @@ impl Runner {
             }
             return;
         }
-        if !self.disk_read || !facts.disk_allows || self.stale_for == Some(plan.key()) {
+        if !self.disk_read
+            || !facts.disk_allows
+            || self.stale_for == Some(plan.key())
+            || self.start_failed_for == Some(plan.key())
+        {
             return;
         }
         match phase {
@@ -698,7 +706,8 @@ impl Runner {
         }
     }
 
-    fn ensure_supervisor(&mut self, home: &Path) -> io::Result<()> {
+    /// zingod's supervisor for `home`, made once. A failure names the folder it was in.
+    fn ensure_supervisor(&mut self, home: &Path) -> Result<(), (PathBuf, io::Error)> {
         if self.zingod.is_some() {
             return Ok(());
         }
@@ -713,13 +722,15 @@ impl Runner {
         config.pidfile = Some(self.options.pidfile.clone());
         config.log_file = Some(self.options.log.clone());
         config.listeners = listeners_rx;
-        if let Some(parent) = self.options.pidfile.parent() {
-            std::fs::create_dir_all(parent)?;
+        let log_dir = self.options.log.path.parent().map(Path::to_path_buf);
+        for parent in [self.options.pidfile.parent(), log_dir.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            std::fs::create_dir_all(parent).map_err(|err| (parent.to_path_buf(), err))?;
         }
-        if let Some(parent) = self.options.log.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let handle = supervisor::spawn(config)?;
+        // The supervisor opens zingod's log as it starts.
+        let handle = supervisor::spawn(config).map_err(|err| (log_dir.unwrap_or_default(), err))?;
         let resources = ResourceSampler::spawn(handle.watch_probe());
         self.zingod = Some(Zingod {
             status: handle.watch_status(),
@@ -731,23 +742,36 @@ impl Runner {
         Ok(())
     }
 
-    /// Writes the configuration with the current port and starts zingod in a task.
+    /// Writes the configuration with the current port and starts zingod in a task. A folder
+    /// Zeal can't create or write in fails the start for the plan's key ([`Self::start_failed`]).
     async fn start(&mut self, plan: ZingodPlan) {
         let mut config = plan.config.clone();
         if let Some(port) = self.port {
             config.listen.set_port(port);
         }
-        let written = config
+        let home = config.home_dir();
+        let config_dir = self
+            .options
+            .config_file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let prepared = config
             .ensure_dirs()
-            .and_then(|()| config.write(&self.options.config_file));
-        if let Err(err) = written {
-            tracing::warn!(%err, "could not write zingod's configuration");
+            .map_err(|err| (home.clone(), err))
+            .and_then(|()| {
+                config
+                    .write(&self.options.config_file)
+                    .map_err(|err| (config_dir, err))
+            })
+            .and_then(|()| self.ensure_supervisor(&home));
+        if let Err((path, err)) = prepared {
+            self.start_failed(plan.key(), path, &err);
             return;
         }
-        if let Err(err) = self.ensure_supervisor(&config.home_dir()) {
-            tracing::warn!(%err, "could not start zingod's supervisor");
-            return;
-        }
+        self.start_failed_for = None;
+        self.facts
+            .send_if_modified(|facts| facts.start_error.take().is_some());
         let Some(zingod) = &self.zingod else {
             return;
         };
@@ -773,6 +797,18 @@ impl Runner {
             };
             let _ = tx.send(Internal::Started(started)).await;
         });
+    }
+
+    /// A start that failed before zingod ran, on `path`: the runner waits for a new key, and the
+    /// facts name the folder and the error, which is logged once while it stays the same.
+    fn start_failed(&mut self, key: (ZebradRun, u64), path: PathBuf, err: &io::Error) {
+        self.start_failed_for = Some(key);
+        let failure = (path, err.to_string());
+        if self.facts.borrow().start_error.as_ref() != Some(&failure) {
+            tracing::warn!(path = %failure.0.display(), %err, "Zeal could not prepare zingod's start");
+            self.facts
+                .send_modify(|facts| facts.start_error = Some(failure));
+        }
     }
 
     async fn stop(&mut self) {
@@ -853,6 +889,9 @@ impl Runner {
         // A rebuilt index starts from a clean history.
         self.started = None;
         self.stale_for = None;
+        self.start_failed_for = None;
+        self.facts
+            .send_if_modified(|facts| facts.start_error.take().is_some());
         removed
     }
 

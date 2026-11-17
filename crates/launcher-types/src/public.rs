@@ -592,6 +592,8 @@ pub enum FailDetail {
     OpenFiles { needed: u64, limit: u64 },
     /// zebrad's cookie, and why zingod couldn't read it.
     Cookie { path: PathBuf, error: String },
+    /// A folder Zeal couldn't create or write zingod's files in before its start, and why.
+    Folder { path: PathBuf, error: String },
 }
 
 /// Why the front door is closed.
@@ -1590,6 +1592,10 @@ mod tests {
             FailDetail::Cookie {
                 path: PathBuf::from("/mnt/zebra/testnet/rpc/.cookie"),
                 error: "Is a directory (os error 21)".into(),
+            },
+            FailDetail::Folder {
+                path: PathBuf::from("/mnt/zebra/zingod/testnet/home"),
+                error: "Permission denied (os error 13)".into(),
             },
         ];
         for detail in details {
