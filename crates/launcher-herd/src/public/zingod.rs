@@ -221,44 +221,55 @@ pub enum Want {
     Stop(Blocked),
 }
 
+/// The start conditions about the service and zebrad: when they hold, zingod may run for
+/// this zebrad run, under the conditions about zingod itself that [`want`] adds.
+pub fn plan_run(start: &StartFacts) -> Result<ZebradRun, Blocked> {
+    use Blocked::*;
+    if !start.service_on || !start.chosen {
+        return Err(Off);
+    }
+    if !start.consent {
+        return Err(NoConsent);
+    }
+    if !start.tested {
+        return Err(Untested);
+    }
+    if !start.bundled {
+        return Err(NotBundled);
+    }
+    if start.held {
+        return Err(Held);
+    }
+    let Some(zebrad) = &start.zebrad else {
+        return Err(NoZebrad);
+    };
+    if !zebrad.on_network {
+        return Err(OtherNetwork);
+    }
+    if zebrad.rpc_addr.is_none() {
+        return Err(NoRpc);
+    }
+    if zebrad.cookie != Cookie::Present {
+        return Err(NoCookie);
+    }
+    if !zebrad.at_tip_once {
+        return Err(NotAtTip);
+    }
+    if start.chain_mismatch {
+        return Err(ChainMismatch);
+    }
+    Ok(zebrad.run)
+}
+
 /// When zingod runs: every start condition of docs/PUBLIC-SERVICES.md ("When zingod runs"),
 /// the first that fails named.
 pub fn want(start: &StartFacts, zingod: &ZingodFacts) -> Want {
     use Blocked::*;
     let stop = Want::Stop;
-    if !start.service_on || !start.chosen {
-        return stop(Off);
-    }
-    if !start.consent {
-        return stop(NoConsent);
-    }
-    if !start.tested {
-        return stop(Untested);
-    }
-    if !start.bundled {
-        return stop(NotBundled);
-    }
-    if start.held {
-        return stop(Held);
-    }
-    let Some(zebrad) = &start.zebrad else {
-        return stop(NoZebrad);
+    let run = match plan_run(start) {
+        Ok(run) => run,
+        Err(blocked) => return stop(blocked),
     };
-    if !zebrad.on_network {
-        return stop(OtherNetwork);
-    }
-    if zebrad.rpc_addr.is_none() {
-        return stop(NoRpc);
-    }
-    if zebrad.cookie != Cookie::Present {
-        return stop(NoCookie);
-    }
-    if !zebrad.at_tip_once {
-        return stop(NotAtTip);
-    }
-    if start.chain_mismatch {
-        return stop(ChainMismatch);
-    }
     match &zingod.phase {
         Phase::Failed {
             class: ExitClass::DiskFull,
@@ -284,7 +295,7 @@ pub fn want(start: &StartFacts, zingod: &ZingodFacts) -> Want {
     if !start.upgrades_known {
         return stop(UpgradeUnknown);
     }
-    Want::Run(zebrad.run)
+    Want::Run(run)
 }
 
 /// Bytes in a GB.
