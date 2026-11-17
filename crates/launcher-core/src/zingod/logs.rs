@@ -31,7 +31,7 @@ pub const TXID: &str = "[txid]";
 /// `packages/zingod-sync/src/follower.rs:143`, the same one at
 /// `packages/zingod-nfs/src/nfs.rs:118`), and its panic hook aborts. The supervisor classes the
 /// exit `Crash`, as any panic, with `requested` set; a stop Zeal asked for that ends in it is
-/// still a stop (docs/PUBLIC-SERVICES.md, "Stop").
+/// still a stop (docs/PUBLIC-SERVICES.md, "How Zeal runs zingod").
 pub const SIGTERM_RACE: &str = "header sync publishes the verified chain until cancel";
 
 /// `raw` with the value of every `txid=` replaced by [`TXID`]: a logfmt value, quoted or not,

@@ -461,8 +461,8 @@ impl Cases {
                          zingod v1.1.0's assert! at packages/zingod-sync/src/follower.rs:143 \
                          (the same one is at packages/zingod-nfs/src/nfs.rs:118), where header \
                          sync's chain watch closes before the follower sees the cancel. Zeal \
-                         takes it as the stop it asked for (docs/PUBLIC-SERVICES.md, \"Stop\"). \
-                         zingod said: {}",
+                         takes it as the stop it asked for (docs/PUBLIC-SERVICES.md, \"How Zeal \
+                         runs zingod\"). zingod said: {}",
                         launcher_types::zingod::version(),
                         zingod
                             .panic_line()

@@ -719,8 +719,8 @@ mod tests {
     }
 
     /// A stop Zeal asked for is a stop however zingod ended it: zingod 1.1.0 can abort on
-    /// `SIGTERM` (docs/PUBLIC-SERVICES.md, "Stop"), and the supervisor then reports `Stopped`
-    /// with the panic kept in the exit. zingod may start again at once.
+    /// `SIGTERM` (docs/PUBLIC-SERVICES.md, "How Zeal runs zingod"), and the supervisor then
+    /// reports `Stopped` with the panic kept in the exit. zingod may start again at once.
     #[test]
     fn a_requested_stop_that_aborted_doesnt_keep_zingod_stopped() {
         let (start, mut zingod) = ready();
