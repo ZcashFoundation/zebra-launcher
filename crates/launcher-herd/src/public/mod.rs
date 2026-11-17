@@ -18,11 +18,11 @@ pub mod zingod;
 use std::{net::SocketAddr, time::SystemTime};
 
 use launcher_types::{
-    Network, Phase,
+    Network, NetworkUpgrade, Phase,
     public::{
-        CertStatus, DnsStatus, Evidence, FirewallInfo, GatewayMode, GatewayStats, LightStats,
-        LightdInfo, LocalTestProblem, NetFacts, PublicServiceSpec, PublicState, PublicStatus,
-        StepId, WalletProblem,
+        CertStatus, DnsStatus, Evidence, FirewallInfo, GatewayMode, GatewayStats, LightBackend,
+        LightStats, LightdInfo, LocalTestProblem, NetFacts, PublicServiceSpec, PublicState,
+        PublicStatus, StepId, WalletProblem,
     },
 };
 
@@ -61,6 +61,10 @@ pub struct Facts {
     pub phase: Phase,
     /// The light wallet endpoint zebrad logged as opened.
     pub endpoint: Option<SocketAddr>,
+    /// The network upgrades zebrad lists, from its details: zingod's upgrade gate.
+    pub upgrades: Vec<NetworkUpgrade>,
+    /// zingod, while it is bundled here or was chosen; `None` otherwise.
+    pub zingod: Option<zingod::IndexerFacts>,
     /// zebrad's last start failed because the endpoint's port was taken.
     pub endpoint_port_taken: bool,
     /// Writing the endpoint into `zebrad.toml` and restarting zebrad failed, with why.
@@ -115,6 +119,8 @@ impl Facts {
             network,
             phase: Phase::Stopped,
             endpoint: None,
+            upgrades: Vec::new(),
+            zingod: None,
             endpoint_port_taken: false,
             endpoint_error: None,
             height: None,
@@ -161,7 +167,8 @@ pub fn state(
             why: NotAvailable::NotOnThisSystem,
         };
     }
-    if !facts.zebrad_tested() {
+    // With zingod, the pair is the Service step's check and an open service's degraded reason.
+    if spec.backend == LightBackend::ZebradEndpoint && !facts.zebrad_tested() {
         return PublicState::NotAvailable {
             why: NotAvailable::UntestedZebrad {
                 version: facts.zebrad_version.clone().unwrap_or_default(),
@@ -246,7 +253,13 @@ pub fn status(spec: &PublicServiceSpec, facts: &Facts, paused_since: SystemTime)
         net: facts.net.clone(),
         dns: facts.dns.clone(),
         light: Some(LightStats {
-            endpoint: facts.endpoint,
+            endpoint: match spec.backend {
+                LightBackend::ZebradEndpoint => facts.endpoint,
+                LightBackend::Zingod => facts
+                    .zingod
+                    .as_ref()
+                    .and_then(|zingod| zingod.runner.listening),
+            },
             height: facts.height,
             tip: facts.tip,
             info: facts
@@ -264,8 +277,8 @@ pub fn status(spec: &PublicServiceSpec, facts: &Facts, paused_since: SystemTime)
             .map(|name| share::share(name, spec.external_port)),
         zebrad_version: facts.zebrad_version.clone(),
         backend: spec.backend,
-        zingod_choice: Default::default(),
-        indexer: None,
+        zingod_choice: zingod::choice(facts, spec.network),
+        indexer: zingod::stats(spec, facts),
         state,
     }
 }

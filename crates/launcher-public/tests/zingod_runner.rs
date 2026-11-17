@@ -359,6 +359,7 @@ async fn a_cookie_older_than_the_recorded_start_still_starts_zingod() {
         zebrad,
         chain_mismatch: false,
         upgrades_known: true,
+        space: true,
     };
     let idle = ZingodFacts {
         disk_allows: true,

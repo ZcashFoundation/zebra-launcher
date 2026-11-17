@@ -8,8 +8,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use launcher_types::{
     Phase,
     public::{
-        CheckId, CheckOutcome, CheckResult, DnsProvider, Finding, OpenError, PublicServiceSpec,
-        Step, StepId, StepState, WanKind,
+        CheckId, CheckOutcome, CheckResult, DnsProvider, Finding, LightBackend, OpenError,
+        PublicServiceSpec, Step, StepId, StepState, WanKind,
     },
 };
 
@@ -55,7 +55,11 @@ fn needs_user(finding: &Finding) -> bool {
 
 /// A finding that only time resolves.
 fn waits(finding: &Finding) -> bool {
-    matches!(finding, Finding::TipNotSettled { .. })
+    match finding {
+        Finding::TipNotSettled { .. } | Finding::IndexBuilding { .. } => true,
+        Finding::IndexerProblem { why } => super::zingod::problem_waits(why),
+        _ => false,
+    }
 }
 
 /// The state its checks give a step.
@@ -96,7 +100,7 @@ pub fn plan(spec: &PublicServiceSpec, facts: &Facts) -> Vec<Step> {
         .into_iter()
         .map(|id| {
             let checks = checks(id, spec, facts);
-            let state = step_state(&checks);
+            let state = step_state(&counted(id, spec, &checks));
             Step { id, state, checks }
         })
         .collect();
@@ -118,6 +122,28 @@ pub fn plan(spec: &PublicServiceSpec, facts: &Facts) -> Vec<Step> {
     steps
 }
 
+/// The checks that decide a step's state. zingod's tip and wallet checks wait for its index,
+/// as the test on this computer and Open do, so the setup goes on while the index builds.
+fn counted(id: StepId, spec: &PublicServiceSpec, checks: &[CheckResult]) -> Vec<CheckResult> {
+    let index_ready = checks
+        .iter()
+        .any(|check| check.id == CheckId::IndexReady && check.outcome == CheckOutcome::Pass);
+    let waits_for_index = |check: &CheckResult| {
+        matches!(check.id, CheckId::TipMatches | CheckId::WalletCheck)
+            && matches!(check.outcome, CheckOutcome::NotRun)
+    };
+    checks
+        .iter()
+        .filter(|check| {
+            id != StepId::Service
+                || spec.backend != LightBackend::Zingod
+                || index_ready
+                || !waits_for_index(check)
+        })
+        .cloned()
+        .collect()
+}
+
 fn checks(id: StepId, spec: &PublicServiceSpec, facts: &Facts) -> Vec<CheckResult> {
     match id {
         StepId::Consent => consent(spec, facts),
@@ -127,7 +153,7 @@ fn checks(id: StepId, spec: &PublicServiceSpec, facts: &Facts) -> Vec<CheckResul
         StepId::Port => port(spec, facts),
         StepId::Firewall => firewall(spec, facts),
         StepId::Certificate => certificate(facts),
-        StepId::LocalTest => local_test(facts),
+        StepId::LocalTest => local_test(spec, facts),
         StepId::Open => open(spec, facts),
         StepId::KeepRunning | StepId::Share => {
             if spec.opened {
@@ -158,6 +184,9 @@ fn consent(spec: &PublicServiceSpec, facts: &Facts) -> Vec<CheckResult> {
 }
 
 fn service(spec: &PublicServiceSpec, facts: &Facts) -> Vec<CheckResult> {
+    if spec.backend == LightBackend::Zingod {
+        return super::zingod::service_checks(spec, facts);
+    }
     let tested = if facts.zebrad_tested() {
         pass(CheckId::ZebradTested)
     } else {
@@ -443,7 +472,13 @@ fn certificate(facts: &Facts) -> Vec<CheckResult> {
     vec![staging, production]
 }
 
-fn local_test(facts: &Facts) -> Vec<CheckResult> {
+fn local_test(spec: &PublicServiceSpec, facts: &Facts) -> Vec<CheckResult> {
+    // The test goes through the front door to zingod: it waits for the index.
+    if spec.backend == LightBackend::Zingod
+        && let Some(waiting) = super::zingod::wait_for_index(spec, facts, CheckId::LocalTest)
+    {
+        return vec![waiting];
+    }
     let result = match &facts.local_test {
         None => running(CheckId::LocalTest),
         Some(checked) => match &checked.result {
@@ -473,10 +508,14 @@ fn open(spec: &PublicServiceSpec, facts: &Facts) -> Vec<CheckResult> {
             },
         )
     };
+    // Wallets would see zingod's "try again" until its index is built.
+    let index = (spec.backend == LightBackend::Zingod && !spec.opened)
+        .then(|| super::zingod::wait_for_index(spec, facts, CheckId::IndexReady))
+        .flatten();
     // Only an open front door can be reached through the public address, so the hairpin
     // test joins the step once the service is open.
     if !spec.opened {
-        return vec![settled];
+        return [Some(settled), index].into_iter().flatten().collect();
     }
     let hairpin = match &facts.hairpin {
         Some(checked) if checked.result => {
@@ -519,6 +558,12 @@ pub fn open_gates(spec: &PublicServiceSpec, facts: &Facts) -> Result<(), OpenErr
         return Err(refuse(
             Some(CheckId::TipSettled),
             "zebrad must stay at the tip for 10 minutes before the service opens",
+        ));
+    }
+    if spec.backend == LightBackend::Zingod && !super::zingod::ready(spec, facts) {
+        return Err(refuse(
+            Some(CheckId::IndexReady),
+            "zingod must serve within 2 blocks of zebrad before the service opens",
         ));
     }
     Ok(())

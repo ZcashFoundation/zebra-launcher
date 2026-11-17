@@ -51,11 +51,14 @@ pub fn tip_settled(facts: &Facts) -> bool {
         .is_some_and(|since| facts.now.duration_since(since).unwrap_or_default() >= TIP_SETTLED)
 }
 
-/// Whether zebrad's light wallet endpoint should exist now: the service is switched on, the
-/// consent covers it (an open service pauses for it otherwise), the launcher runs zebrad on the service's network, and no pause waits
-/// for the user. Other automatic pauses keep the endpoint, so a resume needs no restart.
+/// Whether zebrad's light wallet endpoint should exist now: zebrad's endpoint is the backend,
+/// the service is switched on, the consent covers it (an open service pauses for it
+/// otherwise), the launcher runs zebrad on the service's network, and no pause waits for the
+/// user. Other automatic pauses keep the endpoint, so a resume needs no restart. With zingod
+/// as the backend zebrad has no endpoint: only one plaintext loopback port exists.
 pub fn wants_endpoint(spec: &PublicServiceSpec, facts: &Facts) -> bool {
-    spec.switch_on
+    spec.backend == launcher_types::public::LightBackend::ZebradEndpoint
+        && spec.switch_on
         && spec.consent_current()
         && spec.network == facts.network
         && facts.held.is_none()
@@ -137,6 +140,9 @@ mod tests {
             ..facts.clone()
         };
         assert!(!wants_endpoint(&spec, &untested));
+        spec.backend = launcher_types::public::LightBackend::Zingod;
+        spec.consent.as_mut().unwrap().backend = spec.backend;
+        assert!(!wants_endpoint(&spec, &facts), "zingod takes its place");
     }
 
     #[test]
