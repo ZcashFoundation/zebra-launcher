@@ -1109,7 +1109,10 @@ network sees it come from Zeal's node, as with zebrad's endpoint.
 #### Removing zingod's index
 
 - **"Turn off and forget"** gains "Delete zingod's index (41 GB in /mnt/zebra/zingod/testnet)",
-  ticked: the index holds nothing of the user's and rebuilds from zebrad's chain.
+  ticked: the index holds nothing of the user's and rebuilds from zebrad's chain. The switch-off
+  is saved before the index goes, and what can't be removed is listed with what stays public
+  (`StillPublic.index_left`) rather than failing the forget, so the service can't resume at
+  the next launch.
 - **Switching back to Zebra's built-in server** stops zingod and keeps the index, so switching
   again is quick; the panel shows its size with [Delete].
 - **Rebuild and Delete** stop zingod, then remove `indexes/` and `state/` inside the recorded
@@ -1546,7 +1549,8 @@ screens with the 27 `zingod…` mock flags. Where it differs from the sections a
 - **Rebuild and Delete.** Rebuild is refused unless zingod is the backend, Delete while it is.
   Both run the runner's removal, which waits for zingod's stop, then `remove_index` on the
   recorded folder again, for an index the runner never had a plan for. Forget's box does the
-  same before the runner ends.
+  same before the runner ends, after it saved the switch-off; a removal that fails leaves the
+  forget to finish, naming what is left.
 - **Zeal's exit**: `PublicServices::shutdown` closes the front door and leaves zingod running;
   `stop_indexer` then stops it, beside the registry's shutdown, under the larger cap.
 - **The front door before zingod stops.** The actor puts the front door in `Unavailable` before

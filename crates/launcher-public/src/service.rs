@@ -2073,21 +2073,30 @@ impl Actor {
         // Closed until the service is gone, even if a write below fails.
         self.held = Some(launcher_types::public::PauseReason::ByYou);
         self.stop_children();
-        // zingod stops once the front door is closed; its index goes only once it has.
+        // zingod stops once the front door is closed.
         self.zingod.plan.send_replace(None);
-        if remove_index && let Some(recorded) = &spec.zingod {
-            self.delete_index_in(&recorded.dir).await?;
+        // The switch-off is saved before anything else can fail, so the service can't resume
+        // at the next launch.
+        self.update_spec(|spec| {
+            spec.switch_on = false;
+            spec.backend_port = None;
+        })
+        .await?;
+        // The index goes once zingod has stopped. What can't be removed is reported, not a
+        // reason to keep the service.
+        let mut index_left = None;
+        if remove_index
+            && let Some(recorded) = &spec.zingod
+            && let Err(err) = self.delete_index_in(&recorded.dir).await
+        {
+            tracing::warn!(target: "zeal::public", %err, "zingod's index was not removed");
+            index_left = Some(err);
         }
         if let Some(runner) = self.zingod.runner.take() {
             runner.handle.shutdown().await;
         }
         self.zingod.forget_history();
         self.zingod.disk = None;
-        self.update_spec(|spec| {
-            spec.switch_on = false;
-            spec.backend_port = None;
-        })
-        .await?;
         // The endpoint must be gone before the spec is: once it is, the key is the user's.
         let node = self.node_rx.borrow().id.clone();
         self.host
@@ -2141,6 +2150,7 @@ impl Actor {
             },
             name: spec.name,
             token_left,
+            index_left,
         })
     }
 

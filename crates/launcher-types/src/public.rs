@@ -1377,6 +1377,10 @@ pub struct StillPublic {
     /// The DuckDNS token was to be deleted, and the keychain refused, so it may still be there.
     #[serde(default)]
     pub token_left: bool,
+    /// zingod's index was to be deleted, and some of it couldn't be: what Zeal said, naming
+    /// each path left.
+    #[serde(default)]
+    pub index_left: Option<String>,
 }
 
 #[cfg(test)]

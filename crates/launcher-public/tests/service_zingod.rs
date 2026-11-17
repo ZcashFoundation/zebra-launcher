@@ -586,3 +586,34 @@ async fn a_rebuild_that_cant_remove_the_index_still_starts_zingod() {
     .await;
     s.finish().await;
 }
+
+/// "Turn off and forget" goes through when zingod's index can't be removed: the switch-off is
+/// saved first, the service is gone, and what is left is reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forget_goes_through_when_the_index_cant_be_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = setup("serving").await;
+    s.choose_zingod().await;
+    s.wait_for("zingod serving", index_ready).await;
+    let index = s.index_dir();
+    let mode = |mode| std::fs::set_permissions(&index, std::fs::Permissions::from_mode(mode));
+    mode(0o555).unwrap();
+    if std::fs::write(index.join("probe"), b"").is_ok() {
+        // Root writes there anyway: nothing to see.
+        mode(0o755).unwrap();
+        s.finish().await;
+        return;
+    }
+    let still = s.services.forget(false, true).await;
+    mode(0o755).unwrap();
+    let still = still.expect("the forget goes through");
+    assert!(
+        still
+            .index_left
+            .as_deref()
+            .is_some_and(|left| left.contains("indexes")),
+        "{still:?}"
+    );
+    assert!(s.settings.current().public.light_server().is_none());
+    s.finish().await;
+}

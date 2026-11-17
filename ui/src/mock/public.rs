@@ -41,7 +41,7 @@
 //! | `zingod-cookie` | zingod can't read zebrad's cookie: it is a folder |
 //! | `zingod-port` | other programs hold zingod's port and the next one |
 //! | `zingod-locked` | another program holds zingod's index |
-//! | `zingod-folder` | Zeal can't create zingod's folder: it isn't the user's to write |
+//! | `zingod-folder` | Zeal can't create zingod's folder: it isn't the user's to write, so Forget leaves the index |
 //! | `zingod-disk` | 6 GB free: zingod waits for disk space |
 //! | `zingod-broken` | zingod's index is damaged |
 //! | `zingod-mismatch` | zingod's tip didn't match zebrad's: stopped until a rebuild |
@@ -1225,13 +1225,26 @@ pub async fn open_public_service() -> Result<(), OpenError> {
 
 pub async fn forget_public_service(
     remove_token: bool,
-    _remove_index: bool,
+    remove_index: bool,
 ) -> Result<StillPublic, String> {
     let public = public();
     let (spec, locked) = public
         .world
         .with_untracked(|world| world.spec.clone().map(|spec| (spec, world.keychain_locked)))
         .ok_or("no light client server is set up")?;
+    // `zingod-folder`: zingod's folder isn't the user's to write, so its index stays too.
+    let unwritable = public.world.with_untracked(|world| {
+        world
+            .zingod
+            .as_ref()
+            .is_some_and(|zingod| zingod.runner.start_error.is_some())
+    });
+    let index_left = (remove_index && unwritable).then(|| {
+        format!(
+            "could not remove {}: Permission denied (os error 13)",
+            index_dir(network()).join("indexes").display()
+        )
+    });
     public.update(|world| *world = World::empty());
     Ok(StillPublic {
         forward: spec
@@ -1244,6 +1257,7 @@ pub async fn forget_public_service(
         },
         name: spec.name,
         token_left: remove_token && locked,
+        index_left,
     })
 }
 

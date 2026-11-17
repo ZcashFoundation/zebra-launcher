@@ -1206,6 +1206,11 @@ fn Forget(
                                 .to_owned(),
                         );
                     }
+                    if let Some(left) = still.index_left {
+                        lines.push(format!(
+                            "Zeal could not delete all of zingod's index, so it may still take room: {left}. Delete what is left by hand."
+                        ));
+                    }
                     left.set(Some(lines));
                     public.refresh();
                 }
