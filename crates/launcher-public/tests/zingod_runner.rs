@@ -27,7 +27,7 @@ use launcher_core::{
     policy::RestartPolicy,
     process::ZebradCommand,
     supervisor::{self, SupervisorConfig, SupervisorHandle},
-    zingod::{ZingodCommand, ZingodConfig, ZingodNetwork},
+    zingod::{ZingodCommand, ZingodConfig, ZingodNetwork, logs::SIGTERM_RACE},
 };
 use launcher_herd::public::zingod::{
     Blocked, DiskFullKind, DiskReading, StartFacts, Want, ZebradRun, ZingodFacts, want,
@@ -440,6 +440,34 @@ async fn a_zingod_that_ignores_sigterm_is_killed_after_the_grace() {
     let exit = facts.last_exit.unwrap();
     assert_eq!(exit.class, ExitClass::Clean);
     assert_eq!(exit.detail.as_deref(), Some("killed by the launcher"));
+    setup.finish().await;
+}
+
+/// A stop Zeal asked for is a stop however zingod ends it: zingod 1.1.0 can abort on `SIGTERM`
+/// (`logs::SIGTERM_RACE`). The facts keep the exit, and the same attempt starts zingod again
+/// at once, more times than a crash loop allows: a crash loop would wait for a new attempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_requested_stop_that_aborts_is_a_stop_not_a_crash() {
+    let setup = setup("ok", "abort-on-sigterm", |_| {}).await;
+    let mut last = None;
+    for round in 0..=fast().max_crashes {
+        setup.give_plan(0);
+        setup.facts_until("zingod running", running).await;
+        setup.plan.send_replace(None);
+        let facts = setup
+            .facts_until("zingod stopped", |f| {
+                f.phase == Phase::Stopped && f.last_exit.as_ref().map(|exit| exit.at) != last
+            })
+            .await;
+        let exit = facts.last_exit.unwrap();
+        last = Some(exit.at);
+        assert_eq!(
+            (exit.code, exit.class, exit.requested),
+            (None, ExitClass::Crash, true),
+            "round {round}: {exit:?}"
+        );
+        assert_eq!(exit.detail.as_deref(), Some(SIGTERM_RACE), "round {round}");
+    }
     setup.finish().await;
 }
 

@@ -718,6 +718,23 @@ mod tests {
         }
     }
 
+    /// A stop Zeal asked for is a stop however zingod ended it: zingod 1.1.0 can abort on
+    /// `SIGTERM` (docs/PUBLIC-SERVICES.md, "Stop"), and the supervisor then reports `Stopped`
+    /// with the panic kept in the exit. zingod may start again at once.
+    #[test]
+    fn a_requested_stop_that_aborted_doesnt_keep_zingod_stopped() {
+        let (start, mut zingod) = ready();
+        zingod.phase = Phase::Stopped;
+        zingod.last_exit = Some(ExitInfo {
+            code: None,
+            class: ExitClass::Crash,
+            detail: Some("header sync publishes the verified chain until cancel".into()),
+            at: at(7),
+            requested: true,
+        });
+        assert_eq!(want(&start, &zingod), Want::Run(RUN));
+    }
+
     /// The barrier is this run's RPC line, never the cookie's time: a cookie written before the
     /// supervisor recorded the run's start still lets zingod start, once the run logged its
     /// endpoint.
