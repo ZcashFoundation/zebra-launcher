@@ -23,6 +23,12 @@ use super::{Dash, Icon};
 
 /// The verdict rules that drive the Peers tile's warning tone, so tile and verdict agree.
 pub const PEER_RULES: [u8; 2] = [8, 12];
+/// The verdict rules that drive the Disk tile's: the disk almost full or low (19), and the
+/// chain that may not fit (21).
+pub const DISK_RULES: [u8; 2] = [19, 21];
+/// The verdict rule that drives the Resources card's Memory tile's: the computer's memory
+/// nearly exhausted or low (20).
+pub const MEMORY_RULES: [u8; 1] = [20];
 
 /// What the freshness sentence says and whether it warns.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -344,11 +350,14 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
         }
     });
 
-    // Disk: the state database's size from the metrics page, its growth over the range.
+    // Disk: the state database's size from the metrics page and its growth over the range; the
+    // warning tone follows the verdict's disk rules.
     let disk_bytes = Memo::new(move |_| dash.metrics.get().and_then(|facts| facts.disk_bytes));
     let disk_value = Signal::derive(move || disk_bytes.get().map_or_else(|| "—".to_owned(), bytes));
     let disk_tone = Signal::derive(move || {
-        if disk_bytes.get().is_none() {
+        if running.get() && dash.verdict.with(|v| DISK_RULES.contains(&v.rule)) {
+            Tone::Warning
+        } else if disk_bytes.get().is_none() {
             Tone::Muted
         } else {
             stopped_tone(Tone::Normal)
@@ -566,6 +575,15 @@ mod tests {
         assert_eq!(
             disk_detail(Some(0), Range::Hour1),
             "0 bytes in the last hour"
+        );
+        // The tiles take their tones from the verdict's rules: the disk's and the memory's.
+        assert_eq!(DISK_RULES, [19, 21]);
+        assert_eq!(MEMORY_RULES, [20]);
+        assert!(
+            DISK_RULES
+                .iter()
+                .chain(&MEMORY_RULES)
+                .all(|rule| !PEER_RULES.contains(rule))
         );
         assert_eq!(
             peers_detail(Some((4, 8)), Some(6), Range::Hour1),

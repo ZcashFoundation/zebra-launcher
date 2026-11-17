@@ -15,7 +15,7 @@ use launcher_types::{
     StaleProcessInfo, Status, UpdateInfo, UpdateState, eos_within,
 };
 pub use launcher_types::{Level, NO_PEERS_FOR, STALE_AFTER};
-pub use resources::ResourceInput;
+pub use resources::{ResourceInput, largest_consumer};
 
 use crate::{
     charts::{eta_text, percent_1},
@@ -82,6 +82,8 @@ pub enum Action {
     CancelUpdate,
     OpenLogsFolder,
     OpenReleases,
+    /// Open the node's data folder, to free space or move it.
+    OpenDataFolder,
 }
 
 impl Action {
@@ -100,6 +102,7 @@ impl Action {
             Action::CancelUpdate => "Cancel",
             Action::OpenLogsFolder => "Open logs folder",
             Action::OpenReleases => "Open the releases page",
+            Action::OpenDataFolder => "Open data folder",
         }
     }
 
@@ -116,7 +119,8 @@ impl Action {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
     pub level: Level,
-    /// The rule that fired, 1 to 18 in the specification's order (0 while nothing is loaded).
+    /// The rule that fired: 1 to 18 in the specification's order, 19 to 21 the resource rules
+    /// of docs/RESOURCES.md (0 while nothing is loaded).
     pub rule: u8,
     /// The condition, such as `At the chain tip` or `Sync stalled`.
     pub headline: String,
@@ -209,10 +213,14 @@ pub fn health_verdict(input: &HealthInput<'_>) -> Verdict {
         Phase::Starting => return facts.starting(),
         Phase::Running => {}
     }
-    // 7 to 16: what can be wrong while running, cause before symptom; then 17 and 18,
+    // 19 and 20 first: a full disk or exhausted memory is what makes the RPC go quiet and the
+    // sync stall. Then 7 to 16, what can be wrong while running, cause before symptom, with
+    // 21, a forward-looking warning like the end of support, before 16; then 17 and 18,
     // running as it should.
     facts
-        .rpc_silent()
+        .disk_low()
+        .or_else(|| facts.memory_low())
+        .or_else(|| facts.rpc_silent())
         .or_else(|| facts.no_peers())
         .or_else(|| facts.stalled())
         .or_else(|| facts.quiet_at_tip())
@@ -221,6 +229,7 @@ pub fn health_verdict(input: &HealthInput<'_>) -> Verdict {
         .or_else(|| facts.slow())
         .or_else(|| facts.recent_errors())
         .or_else(|| facts.restarted_after_crash())
+        .or_else(|| facts.chain_may_not_fit())
         .or_else(|| facts.eos_warning())
         .unwrap_or_else(|| facts.running())
 }
@@ -1234,12 +1243,13 @@ mod tests {
 
     use launcher_types::{
         EosInfo, ExitInfo, LogLevel, LogLine, LogStream, MachineResources, MetricFamily,
-        MetricKind, MetricSample, NodeResources, Platform, ProcessUsage, UpdateHealthFailure,
-        UpdateMode,
+        MetricKind, MetricSample, NodeInfo, NodeResources, Platform, ProcessUsage,
+        UpdateHealthFailure, UpdateMode,
     };
 
     use super::*;
     use crate::{machine_history::MachineHistory, resource_history::ResourceHistory};
+    use launcher_types::{MemoryPressure, NodeId};
 
     /// 2026-10-23 19:00:00 UTC: the run started.
     const START: u64 = 1_792_782_000;
@@ -1395,6 +1405,8 @@ mod tests {
         metrics_history: MetricsHistory,
         insights: Insights,
         update: Option<UpdateInfo>,
+        info: NodeInfo,
+        largest_consumer: bool,
         resources: Option<NodeResources>,
         resource_history: ResourceHistory,
         machine: Option<MachineResources>,
@@ -1417,6 +1429,8 @@ mod tests {
                 metrics_history: MetricsHistory::default(),
                 insights: insights(&[tracing_started(0, 1)]),
                 update: Some(update(UpdateState::Idle)),
+                info: crate::node_state::placeholder(),
+                largest_consumer: true,
                 resources: None,
                 resource_history: ResourceHistory::default(),
                 machine: None,
@@ -1459,6 +1473,8 @@ mod tests {
                 insights: &self.insights,
                 update: self.update.as_ref(),
                 resources: ResourceInput {
+                    info: &self.info,
+                    largest_consumer: self.largest_consumer,
                     node: self.resources.as_ref(),
                     history: &self.resource_history,
                     machine: self.machine.as_ref(),
@@ -1567,7 +1583,51 @@ mod tests {
         }
     }
 
+    /// The volume that holds this node's data, read `measured` seconds after the start, with
+    /// `free` bytes of 1 TB free.
+    fn volume(measured: u64, free: u64) -> launcher_types::VolumeUsage {
+        launcher_types::VolumeUsage {
+            label: "/mnt/zcash".into(),
+            total_bytes: 1_000_000_000_000,
+            free_bytes: free,
+            nodes: vec![NodeId::new("zebrad-mainnet").unwrap()],
+            measured_at: t(measured),
+        }
+    }
+
     impl Scene {
+        /// The computer every 5 s from `from` to `to` seconds after the start, as `edit` makes
+        /// each sample from [`computer`] with 4.7 GiB available.
+        fn machine_with(&mut self, from: u64, to: u64, edit: impl Fn(u64, &mut MachineResources)) {
+            for secs in (from..=to).step_by(5) {
+                let mut machine = computer(secs, 5_046_586_573);
+                edit(secs, &mut machine);
+                self.machine_history.push(&machine);
+                self.machine = Some(machine);
+            }
+        }
+
+        /// The syncing node polled on to `to` seconds after the start, looked at then.
+        fn until(&mut self, to: u64) {
+            let last = self.history.latest().expect("a syncing scene");
+            let from = last.at.duration_since(t(0)).unwrap().as_secs() + 5;
+            let mut height = last.height;
+            for secs in (from..=to).step_by(5) {
+                height += 8;
+                self.history.push(&stats(secs, height, 12));
+            }
+            self.stats = Some(stats(to, height, 12));
+            self.now = t(to);
+        }
+
+        /// Its volume read every 30 s from `from` to `to`, with `free(secs)` bytes free.
+        fn disk(&mut self, from: u64, to: u64, free: impl Fn(u64) -> u64) {
+            self.machine_with(from, to, |secs, machine| {
+                let measured = secs / 30 * 30;
+                machine.volumes = vec![volume(measured, free(measured))];
+            });
+        }
+
         /// zebrad's samples and the computer's every 5 s from `from` to `to` seconds after the
         /// start, the computer with `available` bytes available.
         fn sampled(&mut self, from: u64, to: u64, available: u64) {
@@ -2420,6 +2480,234 @@ mod tests {
         // A progress line from before this run says nothing about it.
         scene.status.started_at = Some(t(600));
         assert_eq!(scene.verdict().reason, "12 peers · RPC answered just now");
+    }
+
+    #[test]
+    fn rule_19_disk_full_and_disk_space_low() {
+        // 1.4 GB free on one reading: a problem at once.
+        let mut scene = Scene::syncing(1200);
+        scene.disk(1170, 1200, |_| 1_400_000_000);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (19, Level::Problem));
+        assert_eq!(verdict.headline, "Disk almost full");
+        assert_eq!(
+            verdict.reason,
+            "1.4 GB free on the disk with this node's data (/mnt/zcash). zebrad stops when a write fails; free some space or move the data folder."
+        );
+        assert_eq!(verdict.actions, vec![Action::OpenDataFolder]);
+        assert_eq!(Action::OpenDataFolder.label(), "Open data folder");
+        // 2.5 GB is inside the margin; above 3 GB it clears, and the low space shows, since
+        // it has been under 20 GB for long enough.
+        scene.disk(1205, 1205, |_| 2_500_000_000);
+        scene.until(1205);
+        assert_eq!(scene.verdict().level, Level::Problem);
+        scene.disk(1230, 1230, |_| 3_500_000_000);
+        scene.until(1230);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (19, Level::Attention));
+        assert_eq!(verdict.headline, "Disk space low");
+        assert_eq!(
+            verdict.reason,
+            "3.5 GB free of 1,000.0 GB on the disk with this node's data (/mnt/zcash) for 1 min. zebrad stops when a write fails."
+        );
+
+        // Low space needs a minute: 15 GB on one reading is not enough.
+        let mut scene = Scene::syncing(1200);
+        scene.disk(1100, 1200, |secs| {
+            if secs < 1200 {
+                25_000_000_000
+            } else {
+                15_000_000_000
+            }
+        });
+        assert_eq!(scene.verdict().rule, 17);
+        scene.disk(1205, 1260, |_| 15_000_000_000);
+        scene.until(1260);
+        assert_eq!(scene.verdict().rule, 19);
+        // 20.5 GB is inside the margin of 1 GB; 21.5 GB clears it.
+        scene.disk(1265, 1290, |_| 20_500_000_000);
+        scene.until(1290);
+        assert_eq!(scene.verdict().rule, 19);
+        scene.disk(1295, 1320, |_| 21_500_000_000);
+        scene.until(1320);
+        assert_eq!(scene.verdict().rule, 17);
+
+        // Another node's volume says nothing about this one.
+        let mut scene = Scene::syncing(1200);
+        scene.machine_with(1170, 1200, |secs, machine| {
+            let mut other = volume(secs, 1_400_000_000);
+            other.nodes = vec![NodeId::new("zebrad-testnet").unwrap()];
+            machine.volumes = vec![other];
+        });
+        assert_eq!(scene.verdict().rule, 17);
+    }
+
+    #[test]
+    fn rule_20_memory_nearly_exhausted_and_low() {
+        const AVAILABLE_4: u64 = 644_245_094; // 0.6 GiB of 16: 4 %
+        const AVAILABLE_9: u64 = 1_546_188_227; // 1.44 GiB: 9 %
+        let mut scene = Scene::syncing(1200);
+        scene.sampled(1000, 1200, AVAILABLE_4);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (20, Level::Problem));
+        assert_eq!(verdict.headline, "Memory nearly exhausted");
+        assert_eq!(
+            verdict.reason,
+            "This computer has 0.6 of 16 GiB available (4 %) for 3 min; Zebra · Mainnet uses 6.1 GiB of it"
+        );
+        assert!(verdict.actions.is_empty(), "the node uses under half of it");
+        // A node that uses half the memory or more is offered a restart (zebra#9699).
+        scene.resources.as_mut().unwrap().memory_bytes = 9 << 30;
+        assert_eq!(scene.verdict().actions, vec![Action::Restart]);
+        // Only the node that uses the most memory carries it.
+        scene.largest_consumer = false;
+        assert_eq!(scene.verdict().rule, 17);
+        scene.largest_consumer = true;
+        // A computer sample older than 30 s says nothing.
+        scene.now = t(1231);
+        assert_ne!(scene.verdict().rule, 20);
+
+        // Under 10 % for 5 min, and under 5 % for less than 2: low.
+        let mut scene = Scene::syncing(1200);
+        scene.sampled(800, 1140, AVAILABLE_9);
+        scene.sampled(1145, 1200, AVAILABLE_4);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (20, Level::Attention));
+        assert_eq!(verdict.headline, "Memory low");
+        assert!(verdict.reason.contains("for 6 min"), "{}", verdict.reason);
+        // Above 12 % it clears.
+        scene.sampled(1205, 1205, 2_147_483_648);
+        scene.now = t(1205);
+        assert_eq!(scene.verdict().rule, 17);
+
+        // macOS: the pressure level, not the estimate of what is available.
+        let mut scene = Scene::syncing(1200);
+        scene.sampled(1000, 1200, AVAILABLE_4);
+        scene.machine_history = MachineHistory::default();
+        scene.machine_with(1100, 1200, |secs, machine| {
+            machine.pressure = Some(if secs >= 1130 {
+                MemoryPressure::Critical
+            } else {
+                MemoryPressure::Warning
+            });
+        });
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (20, Level::Problem));
+        assert_eq!(
+            verdict.reason,
+            "macOS reports critical memory pressure for 1 min; Zebra · Mainnet uses 6.1 GiB of it"
+        );
+        scene.machine_history = MachineHistory::default();
+        scene.machine_with(1100, 1200, |_, machine| {
+            machine.memory_available_bytes = Some(AVAILABLE_4);
+            machine.pressure = Some(MemoryPressure::Normal);
+        });
+        assert_eq!(scene.verdict().rule, 17, "normal pressure");
+
+        // Windows: the commit charge too.
+        let mut scene = Scene::syncing(1200);
+        scene.sampled(1000, 1200, 5_046_586_573);
+        scene.resources.as_mut().unwrap().committed_bytes = Some(7 << 30);
+        scene.machine_history = MachineHistory::default();
+        scene.machine_with(1000, 1200, |_, machine| {
+            machine.commit_bytes = Some(23 << 30);
+            machine.commit_limit_bytes = Some(24 << 30);
+        });
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (20, Level::Problem));
+        assert_eq!(
+            verdict.reason,
+            "Windows has committed 23 of 24 GiB (96 %) for 3 min; Zebra · Mainnet commits 7 GiB of it"
+        );
+    }
+
+    #[test]
+    fn the_largest_consumer_carries_the_memory_verdict() {
+        let id = |text: &str| NodeId::new(text).unwrap();
+        let memory = [
+            (id("zebrad-mainnet"), Some(6 << 30)),
+            (id("zakura-mainnet"), Some(9 << 30)),
+            (id("zcashd-mainnet"), None),
+            (id("zebrad-testnet"), Some(9 << 30)),
+        ];
+        assert!(largest_consumer(&id("zakura-mainnet"), &memory));
+        assert!(
+            !largest_consumer(&id("zebrad-testnet"), &memory),
+            "the first of equals"
+        );
+        assert!(!largest_consumer(&id("zebrad-mainnet"), &memory));
+        assert!(!largest_consumer(&id("zcashd-mainnet"), &memory));
+        assert!(!largest_consumer(&id("zebrad-mainnet"), &[]));
+    }
+
+    #[test]
+    fn rule_21_the_chain_may_not_fit() {
+        let state = (names::DISK_BYTES, 248_300_000_000.0);
+        let mut scene = Scene::syncing(1200);
+        scene.metrics = Some(metrics(1200, &[state]));
+        scene.disk(1100, 1200, |_| 40_000_000_000);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (21, Level::Attention));
+        assert_eq!(verdict.headline, "The chain may not fit");
+        assert_eq!(
+            verdict.reason,
+            "Mainnet needs about 300 GB. This node holds 248.3 GB and its disk has 40.0 GB free."
+        );
+        assert_eq!(verdict.actions, vec![Action::OpenDataFolder]);
+        // 75 GB more is inside the margin; 85 GB clears it.
+        scene.disk(1205, 1230, |_| 75_000_000_000);
+        scene.until(1230);
+        assert_eq!(scene.verdict().rule, 21);
+        scene.disk(1235, 1260, |_| 85_000_000_000);
+        scene.until(1260);
+        assert_eq!(scene.verdict().rule, 17);
+        // Not for one reading.
+        let mut scene = Scene::syncing(1200);
+        scene.metrics = Some(metrics(1200, &[state]));
+        scene.disk(1200, 1200, |_| 40_000_000_000);
+        assert_eq!(scene.verdict().rule, 17);
+        // Not at the tip, nor on Testnet.
+        let mut scene = Scene::at_tip(1200);
+        scene.metrics = Some(metrics(1200, &[state]));
+        scene.disk(1100, 1200, |_| 40_000_000_000);
+        assert_eq!(scene.verdict().rule, 18);
+        let mut scene = Scene::syncing(1200);
+        scene.metrics = Some(metrics(1200, &[state]));
+        scene.disk(1100, 1200, |_| 40_000_000_000);
+        scene.info.network = launcher_types::Network::Testnet;
+        assert_eq!(scene.verdict().rule, 17);
+    }
+
+    #[test]
+    fn disk_full_beats_rpc_silent_and_the_fit_comes_after_a_crash() {
+        // The RPC has been quiet for 3 min, and the disk is full: the disk is the cause.
+        let mut scene = Scene::syncing(1020);
+        scene.stats = None;
+        scene.now = t(1200);
+        assert_eq!(scene.verdict().rule, 7);
+        scene.disk(1170, 1200, |_| 1_400_000_000);
+        assert_eq!(scene.verdict().rule, 19);
+        // Exhausted memory beats a stall too.
+        let mut scene = Scene::syncing(1020);
+        scene.stats = None;
+        scene.now = t(1200);
+        scene.sampled(1000, 1200, 644_245_094);
+        assert_eq!(scene.verdict().rule, 20);
+        // The chain that may not fit comes after a restart from a crash, before the end of
+        // support's warning.
+        let mut scene = Scene::syncing(1200);
+        scene.metrics = Some(metrics(1200, &[(names::DISK_BYTES, 248_300_000_000.0)]));
+        scene.disk(1100, 1200, |_| 40_000_000_000);
+        scene.stats.as_mut().unwrap().eos = Some(EosInfo {
+            block_height: 3_160_000,
+            estimated_time: t(1200 + 10 * 86_400),
+        });
+        assert_eq!(scene.verdict().rule, 21);
+        scene.status.last_exit = Some(ExitInfo {
+            at: t(0) - Duration::from_secs(60),
+            ..exit(ExitClass::Crash, Some(101), 0, false)
+        });
+        assert_eq!(scene.verdict().rule, 15);
     }
 
     #[test]

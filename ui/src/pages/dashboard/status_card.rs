@@ -63,6 +63,7 @@ pub fn action_verb(action: &Action) -> &'static str {
         Action::CancelUpdate => "cancel the update",
         Action::OpenLogsFolder => "open the logs folder",
         Action::OpenReleases => "open the releases page",
+        Action::OpenDataFolder => "open the data folder",
         Action::ShowInLogs(_)
         | Action::OpenConfigure
         | Action::ResetConfig
@@ -171,6 +172,10 @@ fn run_action(dash: Dash, action: Action, busy: RwSignal<bool>, failure: Transie
             Action::CancelUpdate => api::cancel_update().await,
             Action::OpenLogsFolder => api::open_path(OpenTarget::LogDir, None).await,
             Action::OpenReleases => api::open_path(OpenTarget::ReleasesPage, None).await,
+            Action::OpenDataFolder => {
+                let node = state.node_untracked().id();
+                api::open_path(OpenTarget::DataDir, Some(&node)).await
+            }
             Action::ShowInLogs(_)
             | Action::OpenConfigure
             | Action::ResetConfig

@@ -3,8 +3,9 @@
 //! Disk or I/O, Processes) with one-minute rates, three charts over the dashboard's range, the
 //! table of the tree's processes, and a line about the computer. The card stays hidden until
 //! the node's first sample; a stopped node shows its last run, never live-looking numbers, and
-//! a running node whose sampler stopped says it is not measured until the next run. No figure
-//! here takes a warning tone. The sentences are pure functions, tested natively.
+//! a running node whose sampler stopped says it is not measured until the next run. Only the
+//! Memory tile takes a tone: the warning while the verdict's memory rule holds
+//! ([`MEMORY_RULES`]). The sentences are pure functions, tested natively.
 
 use std::time::SystemTime;
 
@@ -23,7 +24,7 @@ use crate::{
     resource_history::{ChartKind, ProcessRate, RATE_WINDOW, RunSummary, SparkKind},
 };
 
-use super::Dash;
+use super::{Dash, tiles::MEMORY_RULES};
 
 /// The card's subtitle: `zebrad and the processes it started · every 5 s`. On Windows the job
 /// holds every process the node starts, so it says `every process`; on Unix a process that
@@ -409,6 +410,19 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
             .get()
             .map_or_else(|| "—".to_owned(), |sample| mem_bytes(sample.memory_bytes))
     });
+    // The warning tone follows the verdict's memory rule, so tile and verdict agree.
+    let memory_tone = Signal::derive(move || {
+        if !live.get() {
+            Tone::Muted
+        } else if dash
+            .verdict
+            .with(|verdict| MEMORY_RULES.contains(&verdict.rule))
+        {
+            Tone::Warning
+        } else {
+            Tone::Normal
+        }
+    });
     let memory_detail = Signal::derive(move || {
         if !live.get() {
             return String::new();
@@ -558,7 +572,7 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                                 value=memory_value
                                 detail=memory_detail
                                 spark=spark(SparkKind::Memory)
-                                tone=tone
+                                tone=memory_tone
                             />
                             <StatTile
                                 label=platform.io_label()

@@ -27,7 +27,7 @@ use crate::{
         updates::CheckForUpdate,
     },
     format::{local_date_short, relative, thousands},
-    health::{HealthInput, Level, ResourceInput, Verdict, health_verdict},
+    health::{HealthInput, Level, ResourceInput, Verdict, health_verdict, largest_consumer},
     metrics_history::{MetricsHistory, names},
     node_state::NodeState,
     stats_history::{Field, Sample},
@@ -186,18 +186,35 @@ pub(crate) fn with_health_input<R>(
 }
 
 /// Runs `f` with the selected node's resource facts and the computer's, borrowed from the
-/// state, as [`with_health_input`] does.
+/// state, as [`with_health_input`] does. Every node's newest memory, of both networks, says
+/// whether the selected node is the one that uses the most.
 fn with_resource_input<R>(state: AppState, f: impl FnOnce(ResourceInput<'_>) -> R) -> R {
     let node = state.node();
-    node.resources.with(|sample| {
-        node.resource_history.with(|history| {
-            state.machine.with(|machine| {
-                state.machine_history.with(|machine_history| {
-                    f(ResourceInput {
-                        node: sample.as_ref(),
-                        history,
-                        machine: machine.as_ref(),
-                        machine_history,
+    let memory: Vec<_> = state.nodes.with(|nodes| {
+        nodes
+            .iter()
+            .map(|node| {
+                let bytes = node
+                    .resources
+                    .with(|sample| sample.as_ref().map(|sample| sample.memory_bytes));
+                (node.id(), bytes)
+            })
+            .collect()
+    });
+    node.info.with(|info| {
+        let largest = largest_consumer(&info.id, &memory);
+        node.resources.with(|sample| {
+            node.resource_history.with(|history| {
+                state.machine.with(|machine| {
+                    state.machine_history.with(|machine_history| {
+                        f(ResourceInput {
+                            info,
+                            largest_consumer: largest,
+                            node: sample.as_ref(),
+                            history,
+                            machine: machine.as_ref(),
+                            machine_history,
+                        })
                     })
                 })
             })

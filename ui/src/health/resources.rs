@@ -1,22 +1,84 @@
 //! What the node's processes and the computer use, in the verdict's input and in the copied
-//! summary (docs/RESOURCES.md). The sentences come from the Resources card's own helpers, so
-//! the summary cannot disagree with the card.
+//! summary (docs/RESOURCES.md): the rules for a full disk (19), low memory (20) and a chain
+//! that may not fit (21), and the summary's lines, which come from the Resources card's own
+//! helpers so they cannot disagree with the card.
+//!
+//! Only these facts raise a verdict, each with a sustain time and a leave margin
+//! ([`Episode`]); CPU, I/O and the node's own memory never do.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use launcher_types::{MachineResources, NodeResources};
+use launcher_types::{
+    MachineResources, MemoryPressure, Network, NodeId, NodeInfo, NodeKind, NodeResources,
+};
 
+use super::{Action, Facts, Level, STALE_AFTER, Verdict, for_text};
 use crate::{
     charts::byte_rate,
-    format::{cores, mem_bytes, share, thousands},
-    machine_history::MachineHistory,
+    format::{LOW_SPACE_BYTES, bytes, cores, mem_bytes, mem_of, share, thousands},
+    machine_history::{Episode, MachineHistory, available_share, commit_share},
+    metrics_history::names,
     pages::dashboard::resources::{last_run_text, machine_text},
     resource_history::{RATE_WINDOW, ResourceHistory},
 };
 
+/// Rule 19's problem: under this much free on the node's data volume, on one reading, since
+/// the next write may fail; it clears above [`DISK_FULL_CLEARS`].
+pub const DISK_FULL_BYTES: u64 = 2_000_000_000;
+pub const DISK_FULL_CLEARS: u64 = 3_000_000_000;
+/// Rule 19's warning: under [`DISK_LOW_SHARE`] of the volume or [`DISK_LOW_BYTES`], whichever
+/// is less, for [`DISK_LOW_FOR`]; it clears [`DISK_LOW_MARGIN`] above that.
+pub const DISK_LOW_SHARE: f64 = 0.05;
+pub const DISK_LOW_BYTES: u64 = 20_000_000_000;
+pub const DISK_LOW_FOR: Duration = Duration::from_secs(60);
+pub const DISK_LOW_MARGIN: u64 = 1_000_000_000;
+/// Rule 20's problem (Linux, Windows): under this share of the memory available for
+/// [`MEMORY_OUT_FOR`]; it clears above [`MEMORY_OUT_CLEARS`].
+pub const MEMORY_OUT_SHARE: f64 = 0.05;
+pub const MEMORY_OUT_CLEARS: f64 = 0.07;
+pub const MEMORY_OUT_FOR: Duration = Duration::from_secs(2 * 60);
+/// Rule 20's warning (Linux, Windows): under this share for [`MEMORY_LOW_FOR`]; it clears above
+/// [`MEMORY_LOW_CLEARS`].
+pub const MEMORY_LOW_SHARE: f64 = 0.10;
+pub const MEMORY_LOW_CLEARS: f64 = 0.12;
+pub const MEMORY_LOW_FOR: Duration = Duration::from_secs(5 * 60);
+/// Rule 20 on macOS: the pressure level for this long.
+pub const PRESSURE_FOR: Duration = Duration::from_secs(60);
+/// Rule 20 on Windows too: the commit charge above this share of its limit for
+/// [`MEMORY_OUT_FOR`]; it clears under [`COMMIT_FULL_CLEARS`].
+pub const COMMIT_FULL_SHARE: f64 = 0.95;
+pub const COMMIT_FULL_CLEARS: f64 = 0.93;
+/// Rule 21: a syncing Mainnet zebrad's free space and state together under the chain's
+/// expected size ([`LOW_SPACE_BYTES`]) times this for [`FIT_FOR`]; it clears above
+/// [`FIT_CLEARS`] times it.
+pub const FIT_MARGIN: f64 = 1.05;
+pub const FIT_CLEARS: f64 = 1.10;
+pub const FIT_FOR: Duration = Duration::from_secs(60);
+
+/// Whether `node` uses the most memory among the nodes with a run (`memory`, the newest
+/// sample of each, `None` without a run; the first of equals). The memory verdict goes only
+/// on that node, of either network.
+pub fn largest_consumer(node: &NodeId, memory: &[(NodeId, Option<u64>)]) -> bool {
+    memory
+        .iter()
+        .filter_map(|(id, bytes)| Some((id, (*bytes)?)))
+        .fold(
+            None,
+            |best: Option<(&NodeId, u64)>, (id, bytes)| match best {
+                Some((_, top)) if top >= bytes => best,
+                _ => Some((id, bytes)),
+            },
+        )
+        .is_some_and(|(id, _)| id == node)
+}
+
 /// The resource facts the verdict and the summary read, borrowed.
 #[derive(Clone, Copy)]
 pub struct ResourceInput<'a> {
+    /// The node: its id names its volume, its name the reasons'.
+    pub info: &'a NodeInfo,
+    /// It uses the most memory of the nodes with a run ([`largest_consumer`]).
+    pub largest_consumer: bool,
     /// The node's newest sample, `None` while it has no run.
     pub node: Option<&'a NodeResources>,
     /// The node's samples since the launcher opened.
@@ -91,4 +153,215 @@ impl ResourceInput<'_> {
         }
         parts.join(" · ")
     }
+}
+
+impl Facts<'_> {
+    fn resources(&self) -> &ResourceInput<'_> {
+        &self.input.resources
+    }
+
+    /// The free space readings of the node's volume as an episode's readings.
+    fn free_readings(&self) -> Vec<(SystemTime, Option<f64>)> {
+        let resources = self.resources();
+        resources
+            .machine_history
+            .volume_readings(&resources.info.id)
+            .iter()
+            .map(|volume| (volume.measured_at, Some(volume.free_bytes as f64)))
+            .collect()
+    }
+
+    // Rule 19.
+    pub(super) fn disk_low(&self) -> Option<Verdict> {
+        let resources = self.resources();
+        let readings = resources
+            .machine_history
+            .volume_readings(&resources.info.id);
+        let newest = *readings.last()?;
+        let free = self.free_readings();
+        let place = format!("the disk with this node's data ({})", newest.label);
+        if Episode::current(
+            free.iter().copied(),
+            |bytes| bytes < DISK_FULL_BYTES as f64,
+            |bytes| bytes > DISK_FULL_CLEARS as f64,
+            Duration::ZERO,
+        )
+        .is_some()
+        {
+            return Some(Verdict::new(
+                Level::Problem,
+                19,
+                "Disk almost full",
+                format!(
+                    "{} free on {place}. zebrad stops when a write fails; free some space or move the data folder.",
+                    bytes(newest.free_bytes)
+                ),
+                vec![Action::OpenDataFolder],
+            ));
+        }
+        let threshold = ((newest.total_bytes as f64 * DISK_LOW_SHARE) as u64).min(DISK_LOW_BYTES);
+        let episode = Episode::current(
+            free,
+            |bytes| bytes < threshold as f64,
+            |bytes| bytes > (threshold + DISK_LOW_MARGIN) as f64,
+            DISK_LOW_FOR,
+        )?;
+        Some(Verdict::new(
+            Level::Attention,
+            19,
+            "Disk space low",
+            format!(
+                "{} free of {} on {place} {}. zebrad stops when a write fails.",
+                bytes(newest.free_bytes),
+                bytes(newest.total_bytes),
+                for_text(self.ago(episode.since))
+            ),
+            vec![Action::OpenDataFolder],
+        ))
+    }
+
+    // Rule 20.
+    pub(super) fn memory_low(&self) -> Option<Verdict> {
+        let resources = self.resources();
+        if !resources.largest_consumer {
+            return None;
+        }
+        let history = resources.machine_history;
+        let machine = history.latest()?;
+        if self.ago(machine.at) > STALE_AFTER {
+            return None;
+        }
+        let total = machine.memory_total_bytes;
+        let name = &resources.info.name;
+        let node_memory = resources.node.map(|node| node.memory_bytes);
+        let uses = node_memory.map_or_else(String::new, |memory| {
+            format!("; {name} uses {} of it", mem_bytes(memory))
+        });
+        let available = |episode: Episode| {
+            let available = machine.memory_available_bytes.unwrap_or(0);
+            format!(
+                "This computer has {} available ({}) {}{uses}",
+                mem_of(available, total),
+                share(available_share(machine).unwrap_or(0.0)),
+                for_text(self.ago(episode.since))
+            )
+        };
+        let pressure = |episode: Episode| {
+            let level = machine.pressure.unwrap_or(MemoryPressure::Normal);
+            format!(
+                "macOS reports {} memory pressure {}{uses}",
+                level.as_str(),
+                for_text(self.ago(episode.since))
+            )
+        };
+        let commit = |episode: Episode| {
+            let committed = resources.node.and_then(|node| node.committed_bytes);
+            let commits = committed.map_or_else(String::new, |bytes| {
+                format!("; {name} commits {} of it", mem_bytes(bytes))
+            });
+            format!(
+                "Windows has committed {} ({}) {}{commits}",
+                mem_of(
+                    machine.commit_bytes.unwrap_or(0),
+                    machine.commit_limit_bytes.unwrap_or(0)
+                ),
+                share(commit_share(machine).unwrap_or(0.0)),
+                for_text(self.ago(episode.since))
+            )
+        };
+        // macOS's available figure is an estimate, so its verdicts follow the pressure level.
+        let macos = machine.pressure.is_some();
+        let problem = if macos {
+            history
+                .pressure_at_least_for(MemoryPressure::Critical, PRESSURE_FOR)
+                .map(pressure)
+        } else {
+            history
+                .available_below_for(MEMORY_OUT_SHARE, MEMORY_OUT_FOR, MEMORY_OUT_CLEARS)
+                .map(available)
+                .or_else(|| {
+                    history
+                        .commit_above_for(COMMIT_FULL_SHARE, MEMORY_OUT_FOR, COMMIT_FULL_CLEARS)
+                        .map(commit)
+                })
+        };
+        let (level, headline, reason) = match problem {
+            Some(reason) => (Level::Problem, "Memory nearly exhausted", reason),
+            None => {
+                let low = if macos {
+                    history
+                        .pressure_at_least_for(MemoryPressure::Warning, PRESSURE_FOR)
+                        .map(pressure)
+                } else {
+                    history
+                        .available_below_for(MEMORY_LOW_SHARE, MEMORY_LOW_FOR, MEMORY_LOW_CLEARS)
+                        .map(available)
+                };
+                (Level::Attention, "Memory low", low?)
+            }
+        };
+        // zebra#9699: a zebrad that grew to most of a computer's memory while syncing needs
+        // much less after a restart.
+        let restart = node_memory.is_some_and(|memory| memory.saturating_mul(2) >= total);
+        let actions = if restart {
+            vec![Action::Restart]
+        } else {
+            Vec::new()
+        };
+        Some(Verdict::new(level, 20, headline, reason, actions))
+    }
+
+    // Rule 21.
+    pub(super) fn chain_may_not_fit(&self) -> Option<Verdict> {
+        let resources = self.resources();
+        let info = resources.info;
+        if info.kind != NodeKind::Zebrad || info.network != Network::Mainnet {
+            return None;
+        }
+        if self.latest?.at_tip() {
+            return None;
+        }
+        let state = self.metric_count(names::DISK_BYTES)?;
+        let history = self.input.metrics_history;
+        let readings = resources
+            .machine_history
+            .volume_readings(&info.id)
+            .iter()
+            .map(|volume| {
+                let state = history
+                    .value_at(names::DISK_BYTES, volume.measured_at)
+                    .unwrap_or(state as f64);
+                (volume.measured_at, Some(volume.free_bytes as f64 + state))
+            })
+            .collect::<Vec<_>>();
+        let expected = LOW_SPACE_BYTES as f64;
+        Episode::current(
+            readings,
+            |room| room < expected * FIT_MARGIN,
+            |room| room > expected * FIT_CLEARS,
+            FIT_FOR,
+        )?;
+        let volume = resources
+            .machine_history
+            .volume_readings(&info.id)
+            .last()
+            .copied()?;
+        Some(Verdict::new(
+            Level::Attention,
+            21,
+            "The chain may not fit",
+            format!(
+                "Mainnet needs about {}. This node holds {} and its disk has {} free.",
+                bytes_round(LOW_SPACE_BYTES),
+                bytes(state),
+                bytes(volume.free_bytes)
+            ),
+            vec![Action::OpenDataFolder],
+        ))
+    }
+}
+
+/// A size in whole decimal units: `300 GB`.
+fn bytes_round(value: u64) -> String {
+    bytes(value).replace(".0 ", " ")
 }

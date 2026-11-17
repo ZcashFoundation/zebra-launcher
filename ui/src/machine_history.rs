@@ -1,13 +1,84 @@
 //! A short history of the computer's samples (docs/RESOURCES.md): its CPU busy over the last
-//! minute, for the Resources card's footer, and its figures beside a node's in the card's
-//! charts. Pure Rust, tested natively.
+//! minute, for the Resources card's footer; its figures beside a node's in the card's charts;
+//! and how long its memory and its volumes have been low, with the leave margins the verdict's
+//! rules need ([`Episode`]). Pure Rust, tested natively.
 
 use std::{
     collections::VecDeque,
     time::{Duration, SystemTime},
 };
 
-use launcher_types::MachineResources;
+use launcher_types::{MachineResources, MemoryPressure, NodeId, VolumeUsage};
+
+/// A condition with a sustain time and a leave margin: it begins once the readings have stayed
+/// past an entry threshold for the sustain time, and ends only at a reading past a leave
+/// threshold on the other side, so a value that wanders around one threshold does not flap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Episode {
+    /// The first reading of the run that began it.
+    pub since: SystemTime,
+    /// The newest reading.
+    pub until: SystemTime,
+}
+
+impl Episode {
+    /// The episode going on at the newest of `readings`, oldest first: a reading that `enters`
+    /// starts a run, which begins the episode once it has lasted `sustain` (at once for zero);
+    /// a reading that neither enters nor is in an episode ends the run; the episode ends at a
+    /// reading that `leaves`. A reading without a value changes nothing.
+    pub fn current(
+        readings: impl IntoIterator<Item = (SystemTime, Option<f64>)>,
+        enters: impl Fn(f64) -> bool,
+        leaves: impl Fn(f64) -> bool,
+        sustain: Duration,
+    ) -> Option<Episode> {
+        let mut run: Option<SystemTime> = None;
+        let mut on = false;
+        let mut newest = None;
+        for (at, value) in readings {
+            newest = Some(at);
+            let Some(value) = value else {
+                continue;
+            };
+            if on {
+                if leaves(value) {
+                    on = false;
+                    run = None;
+                }
+            } else if enters(value) {
+                let since = *run.get_or_insert(at);
+                on = at.duration_since(since).unwrap_or_default() >= sustain;
+            } else {
+                run = None;
+            }
+        }
+        Some(Episode {
+            since: run.filter(|_| on)?,
+            until: newest?,
+        })
+    }
+}
+
+/// A pressure level as a number, for [`Episode::current`].
+fn level(pressure: MemoryPressure) -> f64 {
+    match pressure {
+        MemoryPressure::Normal => 0.0,
+        MemoryPressure::Warning => 1.0,
+        MemoryPressure::Critical => 2.0,
+    }
+}
+
+/// The share of a computer's memory available: `None` without the figure.
+pub fn available_share(machine: &MachineResources) -> Option<f64> {
+    let available = machine.memory_available_bytes?;
+    (machine.memory_total_bytes > 0).then(|| available as f64 / machine.memory_total_bytes as f64)
+}
+
+/// The commit charge as a share of its limit (Windows): `None` elsewhere.
+pub fn commit_share(machine: &MachineResources) -> Option<f64> {
+    let (commit, limit) = (machine.commit_bytes?, machine.commit_limit_bytes?);
+    (limit > 0).then(|| commit as f64 / limit as f64)
+}
 
 /// How many samples are kept: four hours of the sampler's 5-second readings, like the node's
 /// [`crate::resource_history::MAX_SAMPLES`].
@@ -52,6 +123,79 @@ impl MachineHistory {
         let sample = self.samples.get(after.checked_sub(1)?)?;
         let age = at.duration_since(sample.at).unwrap_or_default();
         (age <= within).then_some(sample)
+    }
+
+    /// The newest sample.
+    pub fn latest(&self) -> Option<&MachineResources> {
+        self.samples.back()
+    }
+
+    /// The episode of the available memory under `enter` of the total for `sustain`, which
+    /// ends above `leave`.
+    pub fn available_below_for(
+        &self,
+        enter: f64,
+        sustain: Duration,
+        leave: f64,
+    ) -> Option<Episode> {
+        Episode::current(
+            self.samples
+                .iter()
+                .map(|sample| (sample.at, available_share(sample))),
+            |share| share < enter,
+            |share| share > leave,
+            sustain,
+        )
+    }
+
+    /// The episode of macOS's memory pressure at `at_least` or above for `sustain`, which ends
+    /// at a lower level.
+    pub fn pressure_at_least_for(
+        &self,
+        at_least: MemoryPressure,
+        sustain: Duration,
+    ) -> Option<Episode> {
+        let threshold = level(at_least);
+        Episode::current(
+            self.samples
+                .iter()
+                .map(|sample| (sample.at, sample.pressure.map(level))),
+            |value| value >= threshold,
+            |value| value < threshold,
+            sustain,
+        )
+    }
+
+    /// The episode of Windows' commit charge above `enter` of its limit for `sustain`, which
+    /// ends under `leave`.
+    pub fn commit_above_for(&self, enter: f64, sustain: Duration, leave: f64) -> Option<Episode> {
+        Episode::current(
+            self.samples
+                .iter()
+                .map(|sample| (sample.at, commit_share(sample))),
+            |share| share > enter,
+            |share| share < leave,
+            sustain,
+        )
+    }
+
+    /// The readings of the volume that holds `node`'s data folder, oldest first: one per
+    /// reading, though the samples carry each for 30 s.
+    pub fn volume_readings(&self, node: &NodeId) -> Vec<&VolumeUsage> {
+        let mut readings: Vec<&VolumeUsage> = Vec::new();
+        for volume in self
+            .samples
+            .iter()
+            .filter_map(|sample| sample.volume_of(node))
+        {
+            if readings
+                .last()
+                .is_none_or(|last| last.measured_at < volume.measured_at)
+            {
+                readings.push(volume);
+            }
+        }
+        readings
     }
 
     /// The logical CPUs the computer kept busy over the last `span`: the mean of its samples'
@@ -129,6 +273,171 @@ mod tests {
         assert_eq!(history.busy_cores(minute, at(70)), Some(11.0 / 3.0));
         assert_eq!(history.busy_cores(minute, at(120)), Some(4.5));
         assert_eq!(history.busy_cores(minute, at(500)), None, "nothing recent");
+    }
+
+    /// Readings every 5 s from 0 s on.
+    fn readings(values: &[Option<f64>]) -> Vec<(SystemTime, Option<f64>)> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| (at(5 * i as u64), *value))
+            .collect()
+    }
+
+    #[test]
+    fn episodes_need_their_sustain_time_and_keep_their_leave_margin() {
+        let low = |values: &[f64], sustain: u64| {
+            let values: Vec<Option<f64>> = values.iter().map(|v| Some(*v)).collect();
+            Episode::current(
+                readings(&values),
+                |v| v < 5.0,
+                |v| v > 7.0,
+                Duration::from_secs(sustain),
+            )
+        };
+        // Under 5 for 10 s: an episode since the first low reading.
+        assert_eq!(
+            low(&[9.0, 4.0, 4.5, 3.0], 10),
+            Some(Episode {
+                since: at(5),
+                until: at(15)
+            })
+        );
+        // Not long enough yet.
+        assert_eq!(low(&[9.0, 9.0, 4.0, 4.5], 10), None);
+        // A reading of 6 inside the margin breaks a run that has not begun an episode...
+        assert_eq!(low(&[4.0, 6.0, 4.0, 4.0], 10), None);
+        // ...but not one that has.
+        assert_eq!(
+            low(&[4.0, 4.0, 4.0, 6.0, 6.5], 10),
+            Some(Episode {
+                since: at(0),
+                until: at(20)
+            })
+        );
+        // Past the leave threshold it ends, and needs its sustain time again.
+        assert_eq!(low(&[4.0, 4.0, 4.0, 7.5, 4.0], 10), None);
+        // No sustain: the first reading begins it.
+        assert_eq!(
+            low(&[9.0, 1.0], 0),
+            Some(Episode {
+                since: at(5),
+                until: at(5)
+            })
+        );
+        // A reading without a value changes nothing.
+        let gaps = Episode::current(
+            readings(&[Some(4.0), None, Some(4.0)]),
+            |v| v < 5.0,
+            |v| v > 7.0,
+            Duration::from_secs(10),
+        );
+        assert_eq!(gaps.map(|episode| episode.since), Some(at(0)));
+        assert_eq!(
+            Episode::current(readings(&[]), |_| true, |_| false, Duration::ZERO),
+            None
+        );
+    }
+
+    fn memory(secs: u64, available_gib: f64) -> MachineResources {
+        MachineResources {
+            memory_available_bytes: Some((available_gib * (1u64 << 30) as f64) as u64),
+            ..sample(secs, Some(1.0))
+        }
+    }
+
+    #[test]
+    fn memory_episodes() {
+        let mut history = MachineHistory::default();
+        // 16 GiB: 0.6 GiB is under 5 %, 1.0 GiB is 6.25 %, 1.2 GiB is 7.5 %.
+        for secs in (0..=120).step_by(5) {
+            history.push(&memory(secs, 0.6));
+        }
+        let two_min = Duration::from_secs(120);
+        let problem = |history: &MachineHistory| history.available_below_for(0.05, two_min, 0.07);
+        assert_eq!(problem(&history).map(|e| e.since), Some(at(0)));
+        history.push(&memory(125, 1.0));
+        assert!(problem(&history).is_some(), "inside the leave margin");
+        history.push(&memory(130, 1.2));
+        assert_eq!(problem(&history), None, "above 7 %");
+        assert!(history.latest().is_some_and(|m| m.at == at(130)));
+
+        let mut mac = MachineHistory::default();
+        for (secs, pressure) in [
+            (0, MemoryPressure::Normal),
+            (5, MemoryPressure::Critical),
+            (35, MemoryPressure::Critical),
+            (65, MemoryPressure::Critical),
+        ] {
+            mac.push(&MachineResources {
+                pressure: Some(pressure),
+                ..sample(secs, None)
+            });
+        }
+        let minute = Duration::from_secs(60);
+        assert_eq!(
+            mac.pressure_at_least_for(MemoryPressure::Critical, minute)
+                .map(|e| e.since),
+            Some(at(5))
+        );
+        assert!(
+            mac.pressure_at_least_for(MemoryPressure::Warning, minute)
+                .is_some()
+        );
+        mac.push(&MachineResources {
+            pressure: Some(MemoryPressure::Warning),
+            ..sample(70, None)
+        });
+        assert_eq!(
+            mac.pressure_at_least_for(MemoryPressure::Critical, minute),
+            None
+        );
+        assert!(
+            mac.pressure_at_least_for(MemoryPressure::Warning, minute)
+                .is_some(),
+            "still at warning or above"
+        );
+
+        let mut windows = MachineHistory::default();
+        for secs in (0..=120).step_by(5) {
+            windows.push(&MachineResources {
+                commit_bytes: Some(96),
+                commit_limit_bytes: Some(100),
+                ..sample(secs, None)
+            });
+        }
+        assert!(windows.commit_above_for(0.95, two_min, 0.93).is_some());
+        assert_eq!(windows.commit_above_for(0.97, two_min, 0.93), None);
+        assert_eq!(
+            history.commit_above_for(0.95, two_min, 0.93),
+            None,
+            "not Windows"
+        );
+    }
+
+    #[test]
+    fn a_nodes_volume_readings_come_once_each() {
+        let node = NodeId::new("zebrad-mainnet").unwrap();
+        let other = NodeId::new("zebrad-testnet").unwrap();
+        let volume = |measured: u64, free: u64| VolumeUsage {
+            label: "/".into(),
+            total_bytes: 1_000_000_000_000,
+            free_bytes: free,
+            nodes: vec![node.clone()],
+            measured_at: at(measured),
+        };
+        let mut history = MachineHistory::default();
+        for secs in (0..60).step_by(5) {
+            let measured = secs / 30 * 30;
+            history.push(&MachineResources {
+                volumes: vec![volume(measured, 1000 - measured)],
+                ..sample(secs, None)
+            });
+        }
+        let readings = history.volume_readings(&node);
+        let free: Vec<u64> = readings.iter().map(|volume| volume.free_bytes).collect();
+        assert_eq!(free, vec![1000, 970]);
+        assert!(history.volume_readings(&other).is_empty());
     }
 
     #[test]
