@@ -687,6 +687,25 @@ short; the panel and zebrad's Stop and Restart say so.
   shorten the drain (measured, despite the comment at `daemon.rs:526`), so Zeal sends one. The
   stop grace is 30 s (proposal), then `SIGKILL` to the process group. A killed zingod reopens its
   indexes by checking each file's length, tail page and `.crc` (`docs/running.md:291-295`).
+- **An abort on `SIGTERM`**, a known upstream issue in zingod 1.1.0. The drain can end in a panic
+  and an abort instead of exit 0: `assert!(cancel.is_cancelled(), "header sync publishes the
+  verified chain until cancel")` at `packages/zingod-sync/src/follower.rs:143` (the same one is at
+  `packages/zingod-nfs/src/nfs.rs:118`) fires when header sync's chain watch closes before the
+  follower sees the cancel, and the panic hook aborts (`packages/zingod/src/main.rs:36-38`). The
+  contract test hit it once on x86_64, 285 ms into a stop with no connection open, and the same
+  case exited 0 on aarch64: a race in zingod's drain. Zeal can't fix it, and takes the exit as
+  the stop it asked for:
+  - the supervisor keeps it, with no exit code, `Crash`, the assertion as its detail and
+    `requested` set, in the status and in zingod's log beside the panic report;
+  - it ends the stop in `Stopped`, as any stop Zeal asked for, before the crash count, so it
+    starts no backoff and counts toward no crash loop;
+  - the runner and `want()` judge the phase, not the exit, so zingod starts again at once when it
+    should run, and nothing on the panel calls it a failure;
+  - like a kill, the abort leaves what the indexes had made durable, and zingod reopens them as
+    above.
+
+  fake-zingod's `abort-on-sigterm` plays it for the supervisor's and the runner's tests, and the
+  contract test accepts it with a note ([Tests for zingod](#tests-for-zingod)).
 - **Restarts** after a `Crash` use the supervisor's backoff: 1 s doubling to 60 s, and failed
   after 5 crashes in 10 minutes. zingod never restarts inside its process, and expects a
   supervisor to (`packages/zingod/src/main.rs:90-93`).
@@ -820,6 +839,9 @@ deletes hours of index.
 - How `Diverged` reaches stderr wasn't reproduced, so the rule matches `(resync required)`
   anywhere in the last lines.
 - The contract test captures the corruption texts by flipping a byte in a tail page.
+- An exit during a stop Zeal asked for gets its class too, with `requested` set, but the stop
+  still ends in `Stopped`: "Then" waits for an exit nobody asked for, such as the next start's.
+  zingod 1.1.0's abort on `SIGTERM` is one ([How Zeal runs zingod](#how-zeal-runs-zingod)).
 - zebrad's classifier doesn't change.
 
 #### Health of zingod
@@ -1290,7 +1312,10 @@ over.
     HTTP/1.1 from captured JSON and `GetLightdInfo` and `GetLatestBlock` over h2c, and stops on
     `SIGTERM`;
   - plays, through `FAKE_ZINGOD_MODE`: syncing then serving, stuck, a wrong tip hash, no
-    validator answering, each classified exit, an abort, and a `SIGTERM` it ignores;
+    validator answering, each classified exit, an abort, 1.1.0's abort on `SIGTERM`, and a
+    `SIGTERM` it ignores. With the abort on `SIGTERM`, the supervisor's test stops zingod more
+    times than the crash loop allows, each stop ending `Stopped`, and the runner's test starts it
+    again on the same attempt each time;
   - reads the cookie once and again only after a 401, as 1.1.0 does. `fake-zebrad` gains a mode
     that closes the connection on a wrong cookie, as 7.0.0 does, so the fast tests prove that the
     restart on a new zebrad run is what brings zingod back;
@@ -1315,7 +1340,10 @@ over.
   - a `GetBlockRange` streams to a slow client, on loopback and through the front door;
   - after a zebrad restart zingod's polls fail with the stale cookie, and the rule brings it back
     within 60 s;
-  - `SIGTERM` exits 0 within the grace, with and without an open connection;
+  - `SIGTERM` ends zingod within the grace, with and without an open connection: with exit 0, or
+    with 1.1.0's [abort on `SIGTERM`](#how-zeal-runs-zingod), for which it prints a note naming
+    the assertion and zingod's panic line, so a later zingod's run shows whether it still
+    happens;
   - a second zingod on the index gets `DbLocked`, a taken port `PortInUse`, an unknown key
     `ConfigError`, and a flipped tail-page byte `IndexBroken`;
   - a `SIGKILL` mid-build reopens and serves;
