@@ -1,8 +1,8 @@
 # The bundled sidecars
 
 Zeal ships three zebrads as Tauri sidecars, so a node on any supported channel
-works without a runtime download. Linux bundles also carry zingod, for the
-light client server, which doesn't run it yet
+works without a runtime download. Linux bundles also carry zingod, which the
+light client server runs as its second backend on Testnet
 ([The bundled zingod](#the-bundled-zingod-linux)). The zebrads:
 
 | Channel | Sidecar in `src-tauri/binaries/` | Version | Pinned Zebra commit | Release/snapshot date |
@@ -413,7 +413,8 @@ To bump by hand, or to finish the watcher's pull request:
 > **Built in Z1** ([PUBLIC-SERVICES.md](PUBLIC-SERVICES.md#phases-for-zingod)),
 > 2026-11-16: the pins, the build, its CI and the Linux bundles. Z2 (2026-11-17)
 > runs it in tests only, through the supervisor and the light client server's
-> runner; the app runs it from Z3. The parts below say which phase each is. Facts checked at zingod tag
+> runner; the app runs it from Z3 (2026-11-17), when the user chooses it for a
+> Testnet light client server. The parts below say which phase each is. Facts checked at zingod tag
 > `v1.1.0`; paths under `packages/` are zingod's. Build times and sizes come
 > from builds on 2026-11-16. CI has not run the workflows yet, so the aarch64
 > build is still unverified.
@@ -776,7 +777,8 @@ merge in beside `zebra-docs`:
   Linux job already runs that script before clippy.
 - **In the bundles** the binary is `/usr/bin/zeal-zingod` in the `.deb` and
   `usr/bin/zeal-zingod` in the AppImage, and the licences are under the
-  resource folder's `licenses/zingod/`. Nothing in Zeal runs it yet.
+  resource folder's `licenses/zingod/`. From Z3 the light client server runs it
+  when the user chooses it, on Testnet.
 - **At runtime**, from Z3, `sidecar::resolve(paths, Sidecar::Zingod)` finds
   `zeal-zingod` beside the launcher. Inside an AppImage it is first copied to
   `<data>/sidecar/zingod/<launcher version>/`, and the cleanup of other

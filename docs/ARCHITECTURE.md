@@ -848,15 +848,18 @@ each node ── status, stats (best), spec ── a tip or phase changed ──
 
 ## Public services
 
-The light client server of [PUBLIC-SERVICES.md](PUBLIC-SERVICES.md), phase PS1: zebrad's own
-light wallet endpoint, reachable from the internet only through Zeal's TLS front door. Linux
-only, experimental, off until the user sets it up.
+The light client server of [PUBLIC-SERVICES.md](PUBLIC-SERVICES.md): reachable from the
+internet only through Zeal's TLS front door, with one of two backends (`LightBackend`, the
+consent screen's choice): zebrad's own light wallet endpoint (PS1, the default,
+`DEFAULT_BACKEND`), or zingod, bundled on Linux and offered on Testnet (Z3). Linux only,
+experimental, off until the user sets it up.
 
 ```text
 phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (launcher-gateway, own runtime and thread)
                                             │ name (SNI) and ALPN checked, limits, Let's Encrypt certificate
-                                            ▼ the same HTTP/2 frames, on loopback
-                                        zebrad 127.0.0.1:9067 (rpc.lightwalletd_listen_addr, only while on)
+                                            ▼ the same HTTP/2 frames, on loopback, to the backend
+                     zebrad 127.0.0.1:9067 (rpc.lightwalletd_listen_addr, only while on)
+                  or zingod 127.0.0.1:18137 (ZingodSpec.port) ──JSON-RPC, zebrad's cookie──▶ zebrad
 ```
 
 - **The spec** is `launcher.json`'s `public.services` (no secrets). `set_settings` keeps the
@@ -892,6 +895,32 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   for zebrad's next start, and holds the service until the user resumes. At launch
   `prepare_launch` drops the endpoint before the first ensure when the service does not
   resume. The front door connects to the address zebrad logged (`Status.lightwalletd_addr`).
+  `EndpointHost::apply` restarts zebrad only when `config::ensure` says it changed the file.
+- **zingod as the backend** (Z3). Choosing it (`StepAnswer::Backend`, refused unless
+  launcher-herd's `choice` offers it: bundled, offered on the network, a tested pair) records
+  a `ZingodSpec` in the spec through the settings actor: port 18137 (8137 on Mainnet) or the
+  next free one, and `<first node data>/zingod/<network>`, kept after switching back. A
+  consent covers one backend (`Consent.backend`), so the other one asks again, and a spec or
+  consent without `backend` reads as zebrad's endpoint. While zingod is the backend
+  `LightwalletdKey::for_public` gives `Absent` and `wants_endpoint` is false, so choosing it
+  removes zebrad's endpoint with one zebrad restart. The actor keeps a `ZingodRunner` while
+  the spec records zingod's folder and gives it a plan while `plan_run` allows: switched on
+  with consent, a tested pair, bundled, no pause that waits for the user, zebrad on the
+  service's network with this run's RPC line and cookie and at the tip once in this run, no
+  chain mismatch, every active upgrade known, and room for a setup's first build (50 GB on
+  Testnet, counting what is built). It bumps the plan's attempt for Try again
+  (`run_public_checks(Service)`), the stall rule's one restart and no validator for 30 s
+  (once per zebrad run), records a port the runner moved to, reads the index folder's disk
+  itself every minute, and runs the tip cross-check (zingod's `GetLatestBlock`, hash
+  reversed, against zebrad's `getblockhash` through `RpcClient`) at most once a minute while
+  zingod serves; three mismatches over 3 minutes stop zingod until a rebuild. The front
+  door's upstream is zingod's port, the light monitor's endpoint zingod's only once it serves,
+  and the front door goes `Unavailable` before the actor stops zingod itself. Every zingod
+  problem is `Degraded` (the front door stays up in `Unavailable`) except zebrad stopping
+  (`BackingStopped`) and an active upgrade zingod doesn't know (`BuildTooOld`), which pause.
+  Rebuild and Delete stop zingod and remove `indexes/` and `state/` in the recorded folder;
+  "Turn off and forget" does with `remove_index`. Diagnostics end with zingod's status, its
+  files' paths and its last 200 redacted lines.
 - **The front door** (`launcher-gateway`) reads the certificate, a pending TLS-ALPN-01
   challenge and its mode from `watch`es at every handshake. `ChallengeOnly` answers only ALPN
   `acme-tls/1` for the name; `LocalOnly` adds service connections from loopback; `Open` serves
@@ -912,18 +941,24 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   new name starts with staging and nothing proven; the month's upload). A name change drops
   the old name's entry, and "Turn off and forget" drops them all.
 - **Gates.** "Open to the internet" (`open_public_service`) re-runs every gate in the actor;
-  before it the front door serves Let's Encrypt and this computer only. Quitting closes the
-  front door before zebrad stops.
+  before it the front door serves Let's Encrypt and this computer only; with zingod, Open and
+  the test on this computer wait for its index. Quitting closes the front door within 5 s,
+  then stops zingod (`stop_indexer`) beside the nodes under the larger of the two caps.
 
 The commands are `get_public_status`, `check_connection`, `begin_public_setup`,
 `set_public_switch`, `answer_public_step`, `run_public_checks`, `open_public_service`,
-`forget_public_service` and `open_signup`. The UI's screens are in Settings → Public services,
-with a card on the dashboard and a header banner on the node's pages; every sentence comes
-from `ui/src/public_text.rs`, and the mock's `?public=setup`, `serving`, `unconfirmed`,
-`cgnat`, `expiring`, `keychain` and `consent` run launcher-herd's rules over fake facts. What PS1 left for later is
-listed in PUBLIC-SERVICES.md ("PS1 as built").
+`forget_public_service` (with `remove_index`), `rebuild_public_index`, `delete_public_index`
+and `open_signup`; `open_path`'s `ZingodLog` opens `<log dir>/zingod-<network>.log`. The UI's
+screens are in Settings → Public services, with a card on the dashboard and a header banner
+on the node's pages: the consent screen's choice of server (`RadioChoice`), zingod's Service
+step with each check, the Server card, "Server software…" and Forget's box for the index;
+the zebrad strip says "zingod reads this node". Every sentence comes from
+`ui/src/public_text.rs`, and the mock's `?public=setup`, `serving`, `unconfirmed`, `cgnat`,
+`expiring`, `keychain`, `consent` and the 26 `zingod…` flags run launcher-herd's rules over
+fake facts, zingod's from its captured `/status` answers. What PS1 and Z3 left for later is
+listed in PUBLIC-SERVICES.md ("PS1 as built", "Z3 as built").
 
-- **zingod** (Z2 of PUBLIC-SERVICES.md, not wired to the service yet). `ZingodRunner`
+- **zingod's runner** (Z2 of PUBLIC-SERVICES.md; the service actor drives it since Z3). `ZingodRunner`
   (`launcher-public/src/zingod.rs`) owns zingod's supervisor (a 30 s stop grace,
   `<app data>/public/zingod-<network>.pid` with `kill_stale`,
   `<log dir>/zingod-<network>.log`, the check of `127.0.0.1:<port>` before each spawn) and
@@ -942,10 +977,15 @@ listed in PUBLIC-SERVICES.md ("PS1 as built").
   Rebuild and Delete come on an mpsc with oneshot replies and empty `indexes/` and `state/`
   inside the recorded `…/zingod/<network>` folder only (`remove_index`), once a start under
   way has ended and whatever it launched has stopped. The runner sends each start from the
-  actor with `SupervisorHandle::send_start`, so a stop it sends next is handled after it. The rules it and Z3
-  read (`want()`, the restart with each zebrad run, the stall rule, the hysteresis, the
-  cross-check, what `/status` means, `TESTED_ZINGOD`) are in launcher-herd's
-  `public::zingod`.
+  actor with `SupervisorHandle::send_start`, so a stop it sends next is handled after it. The rules it and the actor
+  read (`want()` and `plan_run()`, the restart with each zebrad run, the stall rule, the
+  hysteresis, the cross-check, what `/status` means, `TESTED_ZINGOD`, the Service step's
+  checks, `problem()`) are in launcher-herd's `public::zingod`.
+- **zingod's files**: `<app data>/public/zingod-<network>.toml` (rewritten before every
+  start) and `.pid`, `<log dir>/zingod-<network>.log`, the index in
+  `<first node data>/zingod/<network>/` (`indexes/`, `state/`, `home/`), and in an AppImage
+  the binary's copy in `<app data>/sidecar/zingod/<Zeal version>/`
+  (`sidecar::resolve(paths, Sidecar::Zingod)`).
 
 ## Block explorer
 
@@ -1143,7 +1183,7 @@ Stable ZEBRAD_VERSION/ZEBRAD_COMMIT     Beta ZEBRAD_BETA_*     Nightly ZEBRAD_NI
        every Linux sidecar: glibc-floor check
 all three -> zebrad-docs.yml -> zebra-docs artifact (Book, Config, Changes at exact pins)
 
-ZINGOD_VERSION/ZINGOD_COMMIT (Linux only; nothing runs it yet)
+ZINGOD_VERSION/ZINGOD_COMMIT (Linux only; the light client server's zingod backend)
   '- zingod-sidecars.yml -> sidecars-zingod: build-zingod.sh from the pinned commit
        in Ubuntu 22.04 on both Linux targets: tag/commit, version, generate-config,
        glibc-floor, ldd and strings checks; the licence files; provenance attestation;

@@ -55,8 +55,8 @@ The Tauri build needs all three sidecar files for the host target triple:
 `zeal-zebrad-beta-<triple>` and `zeal-zebrad-nightly-<triple>` (with `.exe` on
 Windows). This lets Stable, Beta and Nightly nodes run without downloading a
 binary. On Linux it also needs `zeal-zingod-<triple>`
-([`tauri.linux.conf.json`](../src-tauri/tauri.linux.conf.json)), which nothing runs
-yet. Binaries are never committed.
+([`tauri.linux.conf.json`](../src-tauri/tauri.linux.conf.json)), which the light
+client server runs when zingod is its backend. Binaries are never committed.
 
 - **Fake sidecars:** `scripts/dev-sidecar.sh` (Windows: `scripts/dev-sidecar.ps1`) builds
   `fake-zebrad` and copies it into the channel sidecar locations. It takes no arguments.
@@ -64,8 +64,10 @@ yet. Binaries are never committed.
   with the `FAKE_ZEBRAD_MODE` environment variable (`ok`, `crash`, `config-error`,
   `eos-warn`, `eos-halt`, `port-in-use`, `db-locked`, `hang-on-signal`, `stderr-flood`,
   `non-utf8`), which it inherits from the launcher. On a Linux host the script also
-  installs `fake-zingod` as `zeal-zingod-<triple>`; it answers only `--version` and
-  `generate-config`, and nothing runs it yet.
+  installs `fake-zingod` as `zeal-zingod-<triple>`, which a light client server on zingod
+  runs in `cargo tauri dev`: its `FAKE_ZINGOD_MODE` scenarios come from
+  `fake-zingod.env` beside `<app data>/public/zingod-<network>.toml`, since Zeal clears
+  zingod's environment.
 - **Real zebrads:** Stable uses [`ZEBRAD_VERSION`](../ZEBRAD_VERSION),
   [`ZEBRAD_COMMIT`](../ZEBRAD_COMMIT) and [`ZEBRAD_DATE`](../ZEBRAD_DATE). Stable and
   Beta are fetched on Linux with `scripts/fetch-zebrad-linux.sh` or built with

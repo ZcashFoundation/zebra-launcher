@@ -162,6 +162,56 @@ page** instead.
 If zebrad rejects an edited config, the launcher restores the previous file, restarts
 zebrad, and shows zebrad's error. Fix the key named in the error and save again.
 
+## Light client server on zingod
+
+With zingod as the light client server's backend (Linux, Testnet; docs/PUBLIC-SERVICES.md),
+Settings → Public services says what zingod waits for on its first line, with a button for
+the fix. Wallets are told to try again meanwhile: the front door stays up, so the certificate
+still renews. zingod's own log is `zingod-<network>.log` in the logs folder ("Open the log").
+
+### zingod failed
+
+- **"zingod stopped unexpectedly 5 times in 10 minutes"**: Zeal stopped restarting it. Open the
+  log for its last lines, then press Try again. "Copy diagnostics" in Settings includes
+  zingod's status and its last 200 lines.
+- **"zingod refused the settings Zeal wrote"**: zingod rejected the configuration Zeal writes
+  before every start, a bug in Zeal. Copy the diagnostics and report it; Try again doesn't
+  help until a Zeal update.
+- **"zingod needs 1,280 open files"**: the open-file limit Zeal runs under is too low for
+  zingod's 256 connections. Raise the hard limit (`LimitNOFILE=` in a systemd unit, or
+  `nofile` in `/etc/security/limits.conf`, then sign in again), restart Zeal, then press Try
+  again.
+- **"Other programs use ports 18137 and 18138"**: zingod moved to the next port once and that
+  one was taken too. Free one (`ss -ltnp 'sport = :18137'`), then press Try again.
+- **"Another program holds zingod's index"**: a second zingod, often one an earlier Zeal left
+  behind, holds the index's lock. Stop it (`pgrep -a zeal-zingod`), then press Try again.
+- **"zingod's index is damaged"** or **"zingod's chain doesn't match Zebra's"**: press
+  Rebuild…. It deletes the index in the folder shown and builds it again from Zebra's chain,
+  which takes hours.
+- **"zingod is stuck at block …"**: Zeal restarted zingod once already. Open the log; it goes
+  on by itself once zingod moves.
+
+### zingod can't read Zebra's cookie
+
+"zingod can't read Zebra · Testnet's cookie at <path>: <error>" means the cookie zebrad writes
+at every start exists but can't be read: the path is a folder, or its permissions keep zingod
+out. zingod runs as you, like zebrad. Check the path (`ls -ld <path>`), remove a folder that
+took the cookie's name, or fix the permissions, then press Try again. A missing or empty
+cookie is no error: zingod waits for zebrad to write it.
+
+### zingod and a full disk
+
+zingod's index sits beside Zebra's chain, in `<data dir>/zingod/<network>`. Below 10 GB free on
+that disk Zeal stops zingod, before an index commit can fail, and starts it again above 20 GB:
+"Waiting for disk space: 6.0 GB free … zingod starts again above 20.0 GB". zebrad usually
+shares the disk, so free space there, or move the data dir to a larger drive.
+
+When zingod itself ran out of room, Zeal starts it again by itself only when free space was
+low then and is back above 20 GB. If the disk shows free space but zingod still ran out, a quota
+or the filesystem's inodes are the cause (`quota -s`, `df -i`): free some, then press Try
+again. A setup on zingod waits before the first build until the disk has 50 GB free on Testnet,
+counting the part of the index already built.
+
 ## Observability stack (Prometheus and Grafana)
 
 The optional Prometheus and Grafana stack in [`observability/`](observability/README.md)
