@@ -709,10 +709,17 @@ fn lock(dir: &Path) -> Result<nix::fcntl::Flock<std::fs::File>, String> {
     )
 }
 
-/// zingod doesn't run on Windows; the fake takes no lock there.
+/// zingod doesn't run on Windows; the fake opens `dir/LOCK` there but takes no lock.
 #[cfg(not(unix))]
-fn lock(dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|err| format!("manifest io: {err}"))
+fn lock(dir: &Path) -> Result<std::fs::File, String> {
+    let io = |err: std::io::Error| format!("manifest io: {err}");
+    std::fs::create_dir_all(dir).map_err(io)?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("LOCK"))
+        .map_err(io)
 }
 
 /// Logs zingod's `State changed` lines as `/status` moves.
