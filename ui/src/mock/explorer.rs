@@ -490,6 +490,7 @@ fn answer(
             };
             Ok(ExplorerResponse::Tx(Box::new(views::tx_page(
                 &tx,
+                &[],
                 rules_height,
                 heights,
             ))))

@@ -7,6 +7,8 @@
 //! - [`ledger`]: what a block did to the value pools, and whether it adds up.
 //! - [`views`]: the pages of `launcher_types::explorer` built from the shapes.
 //! - [`classify`]: what a search query is, refused secrets first.
+//! - [`zip317`]: logical actions, the conventional fee and the weight ratio, as zebrad counts
+//!   them.
 //! - [`synth`]: a deterministic chain in zebrad's shapes, for the mock and the tests.
 //!
 //! See docs/EXPLORER.md.
@@ -19,6 +21,7 @@ pub mod shapes;
 pub mod synth;
 pub mod upgrades;
 pub mod views;
+pub mod zip317;
 
 /// Zatoshis in one ZEC.
 pub const ZAT_PER_ZEC: i64 = 100_000_000;

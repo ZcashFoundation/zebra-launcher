@@ -288,6 +288,7 @@ async fn tx(context: &Context, txid: TxId) -> Result<ExplorerResponse, ExplorerE
     };
     Ok(ExplorerResponse::Tx(Box::new(views::tx_page(
         &tx,
+        &[],
         rules_height,
         &context.heights,
     ))))

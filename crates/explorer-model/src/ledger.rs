@@ -186,7 +186,9 @@ mod tests {
     use launcher_types::explorer::Hash32;
 
     use super::*;
-    use crate::shapes::{Actions, Count, PoolValue, ScriptPubKey, TreeSize, Trees, TxIn, TxOut};
+    use crate::shapes::{
+        Actions, Count, HexLen, PoolValue, ScriptPubKey, TreeSize, Trees, TxIn, TxOut,
+    };
 
     fn heights() -> UpgradeHeights {
         UpgradeHeights::defaults(Network::Mainnet)
@@ -234,10 +236,13 @@ mod tests {
             txid: Hash32([9; 32]),
             height: None,
             confirmations: None,
+            fee: None,
             vin: vec![TxIn {
                 coinbase: Some("03".into()),
                 txid: None,
                 vout: None,
+                script_sig: None,
+                prevout: None,
             }],
             vout: vec![TxOut {
                 value_zat: transparent,
@@ -245,6 +250,7 @@ mod tests {
                 script: ScriptPubKey {
                     kind: "pubkeyhash".into(),
                     addresses: None,
+                    hex: HexLen(25),
                 },
             }],
             sapling_spends: Count(0),

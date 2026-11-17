@@ -583,7 +583,7 @@ pub fn not_found_text(hint: &NotFoundHint) -> String {
 #[cfg(test)]
 mod tests {
     use explorer_model::classify::classify_query;
-    use launcher_types::explorer::{BlockLedger, Hash32, PoolPart, TxStatus};
+    use launcher_types::explorer::{BlockLedger, Hash32, LogicalActions, PoolPart, TxStatus};
 
     use super::*;
 
@@ -743,6 +743,15 @@ mod tests {
                 },
             ],
             fee: Some(Shown::Public { zat: 4_000 }),
+            actions: LogicalActions {
+                orchard_actions: 2,
+                ironwood_actions: 2,
+                ..LogicalActions::default()
+            },
+            unresolved: 0,
+            resolvable: false,
+            burns_fees: false,
+            coinbase: None,
         };
         assert_eq!(
             tx_sentence(&page, ZEC),

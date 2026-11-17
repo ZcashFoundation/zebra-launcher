@@ -26,8 +26,8 @@ use launcher_types::{
 use crate::{
     ledger::burned_share,
     shapes::{
-        Actions, BestBlock, BlockV1, Count, Header, JoinSplit, PoolValue, ScriptPubKey, Stream,
-        Subsidy, TreeSize, Trees, Tx, TxIn, TxOut,
+        Actions, BestBlock, BlockV1, Count, Header, HexLen, JoinSplit, PoolValue, ScriptPubKey,
+        Stream, Subsidy, TreeSize, Trees, Tx, TxIn, TxOut,
     },
     upgrades::{Upgrade, UpgradeHeights},
 };
@@ -1064,6 +1064,8 @@ impl SynthChain {
                 )),
                 txid: None,
                 vout: None,
+                script_sig: None,
+                prevout: None,
             }]
         } else {
             (0..part.inputs)
@@ -1075,6 +1077,8 @@ impl SynthChain {
                         coinbase: None,
                         txid: Some(self.txid(spent, self.branch(spent), 0)),
                         vout: Some(0),
+                        script_sig: None,
+                        prevout: None,
                     }
                 })
                 .collect()
@@ -1089,6 +1093,7 @@ impl SynthChain {
                 script: ScriptPubKey {
                     kind: (*kind).to_owned(),
                     addresses: Some(vec![address.clone()]),
+                    hex: HexLen(25),
                 },
             })
             .collect();
@@ -1132,6 +1137,7 @@ impl SynthChain {
             txid: self.txid(height, branch, index),
             height: None,
             confirmations: None,
+            fee: None,
             vin,
             vout,
             sapling_spends: Count(part.sapling.0),

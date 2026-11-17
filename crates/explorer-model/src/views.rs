@@ -2,16 +2,16 @@
 //! and the browser mock both build their replies here, so the two cannot disagree.
 
 use launcher_types::explorer::{
-    BlockDetails, BlockPage, BlockSummary, FutureBlock, OutPoint, Pool, PoolPart, RewardSplit,
-    RewardStream, Shown, TxInput, TxKind, TxOutput, TxPage, TxStatus, TxidPage, UnknownWhy,
-    UpgradeCountdown,
+    BlockDetails, BlockLedger, BlockPage, BlockSummary, Card, CoinbaseClaim, FutureBlock, OutPoint,
+    Pool, PoolPart, RewardSplit, RewardStream, Shown, SpentOutput, TxInput, TxKind, TxOutput,
+    TxPage, TxRow, TxStatus, TxidPage, UnknownWhy, UpgradeCountdown,
 };
 
 use crate::{
     ledger::{block_ledger, ledger_check},
-    shapes::{BlockV1, Subsidy, Tx},
+    shapes::{BlockV1, Prevout, Subsidy, Tx, TxOut},
     upgrades::{Upgrade, UpgradeHeights},
-    zec_to_zat,
+    zec_to_zat, zip317,
 };
 
 /// The most transaction ids one page holds.
@@ -247,23 +247,131 @@ pub fn shielded_parts(tx: &Tx) -> Vec<PoolPart> {
     shielded
 }
 
-/// The Transaction page, without the values of the outputs its inputs spend. `rules_height`
-/// is as for [`tx_kind`].
-pub fn tx_page(tx: &Tx, rules_height: u32, heights: &UpgradeHeights) -> TxPage {
-    let net = tx.net_out();
-    let shielded = shielded_parts(tx);
+/// An output as the input that spends it sees it.
+fn spent_output(output: &TxOut, height: Option<u32>, coinbase: bool) -> SpentOutput {
+    SpentOutput {
+        zat: u64::try_from(output.value_zat).unwrap_or(0),
+        address: output
+            .script
+            .addresses
+            .as_ref()
+            .and_then(|addresses| addresses.first().cloned()),
+        script: output.script.kind.clone(),
+        height,
+        coinbase,
+    }
+}
+
+/// The output a `prevout` of `getblock` at verbosity 3 describes.
+pub fn spent_from_prevout(prevout: &Prevout) -> SpentOutput {
+    SpentOutput {
+        zat: u64::try_from(prevout.value_zat).unwrap_or(0),
+        address: prevout
+            .script
+            .addresses
+            .as_ref()
+            .and_then(|addresses| addresses.first().cloned()),
+        script: prevout.script.kind.clone(),
+        height: Some(prevout.height),
+        coinbase: prevout.generated,
+    }
+}
+
+/// Output `vout` of `parent`, as read with `getrawtransaction`.
+pub fn spent_from_parent(parent: &Tx, vout: u32) -> Option<SpentOutput> {
+    let output = parent.vout.iter().find(|output| output.n == vout)?;
+    let height = parent
+        .height
+        .filter(|height| *height >= 0)
+        .and_then(|height| u32::try_from(height).ok());
+    Some(spent_output(output, height, parent.is_coinbase()))
+}
+
+/// The outputs `tx`'s inputs spend, as far as `getblock` at verbosity 3 gave them.
+pub fn spent_from_v3(tx: &Tx) -> Vec<Option<SpentOutput>> {
+    tx.vin
+        .iter()
+        .map(|input| input.prevout.as_ref().map(spent_from_prevout))
+        .collect()
+}
+
+/// The fee of `tx`, given the outputs its inputs spend (`spent`, one per input, in order):
+/// what goes in less what comes out. Public once every input's value is known; `None` for a
+/// coinbase.
+pub fn tx_fee(tx: &Tx, spent: &[Option<SpentOutput>]) -> Option<Shown> {
+    if tx.is_coinbase() {
+        return None;
+    }
+    let shielded: i64 = tx.net_out().iter().sum();
+    let mut inputs = 0i64;
+    for index in 0..tx.vin.len() {
+        match spent.get(index).and_then(Option::as_ref) {
+            Some(output) => inputs += i64::try_from(output.zat).unwrap_or(i64::MAX),
+            None => {
+                // zebrad's own fee, when verbosity 3 found every spent output.
+                return Some(match tx.fee {
+                    Some(zat) => Shown::Public { zat },
+                    None => Shown::Unknown {
+                        why: UnknownWhy::InputValues,
+                    },
+                });
+            }
+        }
+    }
+    Some(Shown::Public {
+        zat: inputs + shielded - tx.transparent_out(),
+    })
+}
+
+/// One row of a block's transaction table: `tx` at `index`, with the outputs its inputs
+/// spend as far as they are known. `rules_height` is as for [`tx_kind`].
+pub fn tx_row(
+    tx: &Tx,
+    index: u32,
+    spent: &[Option<SpentOutput>],
+    rules_height: u32,
+    heights: &UpgradeHeights,
+) -> TxRow {
+    TxRow {
+        index,
+        txid: tx.txid,
+        kind: tx_kind(tx, rules_height, heights),
+        version: tx.version,
+        size: tx.size.and_then(|size| u32::try_from(size).ok()),
+        inputs: u32::try_from(tx.vin.len()).unwrap_or(u32::MAX),
+        outputs: u32::try_from(tx.vout.len()).unwrap_or(u32::MAX),
+        shielded: shielded_parts(tx),
+        actions: zip317::parts(tx),
+        fee: tx_fee(tx, spent),
+    }
+}
+
+/// The Transaction page, with the outputs its inputs spend as far as they are known
+/// (`spent`, one per input, in order). `rules_height` is as for [`tx_kind`]. The caller
+/// sets [`TxPage::resolvable`] and, for a coinbase, [`TxPage::coinbase`].
+pub fn tx_page(
+    tx: &Tx,
+    spent: &[Option<SpentOutput>],
+    rules_height: u32,
+    heights: &UpgradeHeights,
+) -> TxPage {
     let coinbase = tx.is_coinbase();
-    let fee = if coinbase {
-        None
-    } else if tx.vin.is_empty() {
-        // No transparent inputs: every zatoshi going in is public.
-        Some(Shown::Public {
-            zat: net.iter().sum::<i64>() - tx.transparent_out(),
+    let inputs: Vec<TxInput> = tx
+        .vin
+        .iter()
+        .enumerate()
+        .map(|(index, input)| TxInput {
+            prevout: input
+                .txid
+                .zip(input.vout)
+                .map(|(txid, vout)| OutPoint { txid, vout }),
+            spent: spent.get(index).cloned().flatten(),
         })
+        .collect();
+    let unresolved = if coinbase {
+        0
     } else {
-        Some(Shown::Unknown {
-            why: UnknownWhy::InputValues,
-        })
+        inputs.iter().filter(|input| input.spent.is_none()).count() as u32
     };
     TxPage {
         txid: tx.txid,
@@ -273,16 +381,7 @@ pub fn tx_page(tx: &Tx, rules_height: u32, heights: &UpgradeHeights) -> TxPage {
         size: tx.size.and_then(|size| u32::try_from(size).ok()),
         lock_time: tx.lock_time,
         expiry_height: tx.expiry_height.filter(|height| *height != 0),
-        inputs: tx
-            .vin
-            .iter()
-            .map(|input| TxInput {
-                prevout: input
-                    .txid
-                    .zip(input.vout)
-                    .map(|(txid, vout)| OutPoint { txid, vout }),
-            })
-            .collect(),
+        inputs,
         outputs: tx
             .vout
             .iter()
@@ -297,8 +396,52 @@ pub fn tx_page(tx: &Tx, rules_height: u32, heights: &UpgradeHeights) -> TxPage {
                 script: output.script.kind.clone(),
             })
             .collect(),
-        shielded,
-        fee,
+        shielded: shielded_parts(tx),
+        fee: tx_fee(tx, spent),
+        actions: zip317::parts(tx),
+        unresolved,
+        resolvable: false,
+        burns_fees: heights.is_active(Upgrade::Nu7, rules_height),
+        coinbase: None,
+    }
+}
+
+/// What a block's coinbase claimed, from the block's ledger and its subsidy (zatoshis).
+pub fn coinbase_claim(ledger: &BlockLedger, subsidy: Option<u64>) -> CoinbaseClaim {
+    CoinbaseClaim {
+        subsidy,
+        fees: ledger.fees,
+        burned: ledger.burned,
+        lockbox: ledger.deltas.map(|deltas| deltas.get(Pool::Lockbox)),
+    }
+}
+
+/// A block's hover card.
+pub fn block_card(block: &BlockV1) -> Card {
+    Card::Block {
+        height: block.height.unwrap_or(0),
+        hash: block.hash,
+        time: block
+            .time
+            .map_or(0, |time| u64::try_from(time).unwrap_or(0)),
+        tx_count: u32::try_from(block.tx.len()).unwrap_or(u32::MAX),
+        size: block.size.and_then(|size| u32::try_from(size).ok()),
+    }
+}
+
+/// A transaction's hover card. `rules_height` is as for [`tx_kind`].
+pub fn tx_card(tx: &Tx, rules_height: u32, heights: &UpgradeHeights) -> Card {
+    Card::Tx {
+        txid: tx.txid,
+        kind: tx_kind(tx, rules_height, heights),
+        status: tx_status(tx),
+        inputs: u32::try_from(tx.vin.len()).unwrap_or(u32::MAX),
+        outputs: u32::try_from(tx.vout.len()).unwrap_or(u32::MAX),
+        pools: shielded_parts(tx)
+            .into_iter()
+            .map(|part| part.pool)
+            .collect(),
+        size: tx.size.and_then(|size| u32::try_from(size).ok()),
     }
 }
 
@@ -372,7 +515,7 @@ mod tests {
     use launcher_types::{Network, explorer::Hash32};
 
     use super::*;
-    use crate::shapes::{Actions, Count, JoinSplit, ScriptPubKey, TxIn, TxOut};
+    use crate::shapes::{Actions, Count, HexLen, JoinSplit, ScriptPubKey, ScriptSig, TxIn};
 
     fn heights() -> UpgradeHeights {
         UpgradeHeights::defaults(Network::Mainnet)
@@ -383,6 +526,7 @@ mod tests {
             txid: Hash32([1; 32]),
             height: Some(3_550_000),
             confirmations: Some(3),
+            fee: None,
             vin: Vec::new(),
             vout: Vec::new(),
             sapling_spends: Count(0),
@@ -406,6 +550,8 @@ mod tests {
             coinbase: None,
             txid: Some(Hash32([3; 32])),
             vout: Some(0),
+            script_sig: Some(ScriptSig { hex: HexLen(107) }),
+            prevout: None,
         }
     }
 
@@ -416,6 +562,7 @@ mod tests {
             script: ScriptPubKey {
                 kind: "pubkeyhash".into(),
                 addresses: Some(vec!["t1x".into()]),
+                hex: HexLen(25),
             },
         }
     }
@@ -515,6 +662,8 @@ mod tests {
                 coinbase: Some("03".into()),
                 txid: None,
                 vout: None,
+                script_sig: None,
+                prevout: None,
             }],
             vout: vec![output(100)],
             ironwood: actions(2, -20),
@@ -542,7 +691,7 @@ mod tests {
             }],
             ..tx()
         };
-        let page = tx_page(&deshielding, 3_550_000, &heights);
+        let page = tx_page(&deshielding, &[], 3_550_000, &heights);
         assert_eq!(page.expiry_height, None, "0 is no expiry");
         assert_eq!(page.shielded.len(), 2);
         assert_eq!(page.shielded[0].pool, Pool::Sprout);
@@ -565,7 +714,7 @@ mod tests {
             vout: vec![output(1)],
             ..tx()
         };
-        let page = tx_page(&spending, 3_550_000, &heights);
+        let page = tx_page(&spending, &[], 3_550_000, &heights);
         assert_eq!(
             page.fee,
             Some(Shown::Unknown {
@@ -573,6 +722,8 @@ mod tests {
             })
         );
         assert_eq!(page.inputs[0].prevout.map(|out| out.vout), Some(0));
+        assert_eq!(page.unresolved, 1);
+        assert!(page.burns_fees, "3,550,000 is past NU7");
         let waiting = Tx {
             height: None,
             block_hash: None,
@@ -584,6 +735,102 @@ mod tests {
             ..tx()
         };
         assert!(matches!(tx_status(&side), TxStatus::SideChain { .. }));
+    }
+
+    fn spent(zat: u64) -> SpentOutput {
+        SpentOutput {
+            zat,
+            address: Some("t1y".into()),
+            script: "pubkeyhash".into(),
+            height: Some(3_549_000),
+            coinbase: true,
+        }
+    }
+
+    #[test]
+    fn fees_come_from_the_spent_outputs() {
+        let heights = heights();
+        // Two inputs of 60 and 50 shield 100 into Ironwood, with 7 of change: a fee of 3.
+        let shielding = Tx {
+            vin: vec![
+                input(),
+                TxIn {
+                    vout: Some(1),
+                    ..input()
+                },
+            ],
+            vout: vec![output(7)],
+            ironwood: actions(2, -100),
+            ..tx()
+        };
+        let both = [Some(spent(60)), Some(spent(50))];
+        assert_eq!(tx_fee(&shielding, &both), Some(Shown::Public { zat: 3 }));
+        let page = tx_page(&shielding, &both, 3_550_000, &heights);
+        assert_eq!(page.unresolved, 0);
+        assert_eq!(page.inputs[1].spent, Some(spent(50)));
+        // One value missing: unknown, unless zebrad's verbosity 3 gave the fee.
+        let one = [Some(spent(60)), None];
+        assert_eq!(
+            tx_fee(&shielding, &one),
+            Some(Shown::Unknown {
+                why: UnknownWhy::InputValues
+            })
+        );
+        assert_eq!(tx_page(&shielding, &one, 3_550_000, &heights).unresolved, 1);
+        let with_fee = Tx {
+            fee: Some(3),
+            ..shielding.clone()
+        };
+        assert_eq!(tx_fee(&with_fee, &one), Some(Shown::Public { zat: 3 }));
+        // The row counts the same.
+        let row = tx_row(&shielding, 4, &both, 3_550_000, &heights);
+        assert_eq!(row.index, 4);
+        assert_eq!((row.inputs, row.outputs), (2, 1));
+        assert_eq!(row.fee, Some(Shown::Public { zat: 3 }));
+        assert_eq!(row.shielded.len(), 1);
+        assert_eq!(row.actions.ironwood_actions, 2);
+        assert_eq!(row.actions.in_bytes, 2 * 148);
+        assert_eq!(zip317::logical_actions(&row.actions), 2 + 2);
+        // A coinbase pays no fee.
+        let coinbase = Tx {
+            vin: vec![TxIn {
+                coinbase: Some("03aabbcc".into()),
+                txid: None,
+                vout: None,
+                script_sig: None,
+                prevout: None,
+            }],
+            vout: vec![output(100)],
+            ..tx()
+        };
+        assert_eq!(tx_fee(&coinbase, &[]), None);
+        assert_eq!(tx_page(&coinbase, &[], 3_550_000, &heights).unresolved, 0);
+    }
+
+    #[test]
+    fn spent_outputs_read_alike_from_a_parent_and_from_verbosity_3() {
+        let parent = Tx {
+            vout: vec![output(5), TxOut { n: 1, ..output(9) }],
+            ..tx()
+        };
+        let from_parent = spent_from_parent(&parent, 1).expect("output 1");
+        assert_eq!(from_parent.zat, 9);
+        assert_eq!(from_parent.height, Some(3_550_000));
+        assert!(!from_parent.coinbase);
+        assert_eq!(spent_from_parent(&parent, 2), None);
+        let prevout = Prevout {
+            generated: false,
+            height: 3_550_000,
+            value_zat: 9,
+            script: output(9).script,
+        };
+        assert_eq!(spent_from_prevout(&prevout), from_parent);
+        // A parent still in the mempool has no height.
+        let waiting = Tx {
+            height: None,
+            ..parent
+        };
+        assert_eq!(spent_from_parent(&waiting, 0).unwrap().height, None);
     }
 
     #[test]
