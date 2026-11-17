@@ -30,6 +30,10 @@ tokio = { workspace = true, features = [
     "fs",
 ] }
 tracing = { workspace = true }
+# fake-zingod's h2c answers only; the same versions launcher-public uses.
+bytes = "1"
+h2 = "0.4"
+http = "1"
 
 [target.'cfg(unix)'.dependencies]
 # "feature": sysconf (CLK_TCK and _NPROCESSORS_ONLN), for the Linux resource reader.

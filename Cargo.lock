@@ -2596,8 +2596,11 @@ name = "launcher-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "bytes",
  "dirs",
  "explorer-model",
+ "h2",
+ "http",
  "launcher-herd",
  "launcher-types",
  "libc",
