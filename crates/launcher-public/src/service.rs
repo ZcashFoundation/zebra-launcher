@@ -2206,9 +2206,10 @@ impl Actor {
         .await
     }
 
-    /// Rebuild (`restart`) or Delete: the front door goes `Unavailable`, zingod stops, and its
-    /// index and state go from the recorded folder; a rebuild starts it again under a new
-    /// attempt.
+    /// Rebuild (`restart`) or Delete: zingod stops, and its index and state go from the recorded
+    /// folder; a rebuild puts the front door in `Unavailable` first, and starts zingod again
+    /// under a new attempt. Delete comes after switching back to zebrad's endpoint, which the
+    /// front door serves meanwhile: its mode stays the rules'.
     async fn remove_zingod_index(&mut self, restart: bool) -> Result<(), String> {
         let spec = self.spec().ok_or("no light client server is set up")?;
         let recorded = spec.zingod.ok_or("zingod has no index here")?;
@@ -2218,7 +2219,9 @@ impl Actor {
         if !restart && spec.backend == LightBackend::Zingod {
             return Err("zingod serves the light client server: switch back to Zebra's built-in server first".into());
         }
-        self.door_unavailable();
+        if restart {
+            self.door_unavailable();
+        }
         let removed = self.delete_index_in(&recorded.dir).await;
         self.zingod.forget_history();
         self.zingod.disk_due = None;

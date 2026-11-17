@@ -1546,8 +1546,9 @@ screens with the 26 `zingod…` mock flags. Where it differs from the sections a
 - **Zeal's exit**: `PublicServices::shutdown` closes the front door and leaves zingod running;
   `stop_indexer` then stops it, beside the registry's shutdown, under the larger cap.
 - **The front door before zingod stops.** The actor puts the front door in `Unavailable` before
-  every stop it decides: a plan that goes, Rebuild, Delete, a new attempt, a mismatch, a new
-  backend. For a restart of a running zingod, `IndexerFacts.restarting` holds while zingod runs
+  every stop it decides: a plan that goes, Rebuild, a new attempt, a mismatch, a new backend.
+  Delete comes only after switching back, while the front door serves zebrad's endpoint, so it
+  leaves the front door's mode to the rules. For a restart of a running zingod, `IndexerFacts.restarting` holds while zingod runs
   for an earlier attempt than the actor's: the runner's facts name the attempt each start was
   for (`ZingodFacts.started_attempt`), so a stop and start that fall between two looks still
   end it. The rules read it as zingod starting, so neither the look that asked for the restart
