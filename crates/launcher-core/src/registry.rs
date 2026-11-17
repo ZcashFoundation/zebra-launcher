@@ -228,14 +228,16 @@ pub struct NodeHandle {
     pub log_generation: Arc<AtomicU64>,
 }
 
-/// The first node's spec, status and statistics, following the node list: when the first node
-/// leaves it, they follow the node that is first then. The light client server serves from
-/// the first node and reads it through these.
+/// The first node's spec, status, statistics and details, following the node list: when the
+/// first node leaves it, they follow the node that is first then. The light client server
+/// serves from the first node and reads it through these; zingod's upgrade gate reads the
+/// network upgrades in the details.
 #[derive(Debug)]
 pub struct FirstNode {
     pub spec: watch::Receiver<NodeSpec>,
     pub status: watch::Receiver<launcher_types::Status>,
     pub stats: watch::Receiver<Option<NodeStats>>,
+    pub details: watch::Receiver<Option<NodeDetails>>,
 }
 
 /// Why a node did not start.
@@ -457,15 +459,18 @@ impl RegistryHandle {
         let (spec_tx, spec) = watch::channel(node.spec());
         let (status_tx, status) = watch::channel(node.supervisor.status());
         let (stats_tx, stats) = watch::channel(node.stats.borrow().clone());
+        let (details_tx, details) = watch::channel(node.details.borrow().clone());
         let mut nodes = self.watch_nodes();
         tokio::spawn(async move {
             loop {
                 let mut spec_rx = node.watch_spec();
                 let mut status_rx = node.supervisor.watch_status();
                 let mut stats_rx = node.stats.clone();
+                let mut details_rx = node.details.clone();
                 spec_tx.send_replace(spec_rx.borrow_and_update().clone());
                 status_tx.send_replace(status_rx.borrow_and_update().clone());
                 stats_tx.send_replace(stats_rx.borrow_and_update().clone());
+                details_tx.send_replace(details_rx.borrow_and_update().clone());
                 node = loop {
                     tokio::select! {
                         changed = nodes.changed() => {
@@ -487,6 +492,9 @@ impl RegistryHandle {
                         Ok(()) = stats_rx.changed() => {
                             stats_tx.send_replace(stats_rx.borrow_and_update().clone());
                         }
+                        Ok(()) = details_rx.changed() => {
+                            details_tx.send_replace(details_rx.borrow_and_update().clone());
+                        }
                         () = spec_tx.closed() => return,
                     }
                 };
@@ -496,6 +504,7 @@ impl RegistryHandle {
             spec,
             status,
             stats,
+            details,
         })
     }
 

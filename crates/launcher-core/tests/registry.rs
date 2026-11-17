@@ -1282,6 +1282,13 @@ async fn the_first_nodes_watches_follow_the_node_that_is_first() {
     within(follow.status.wait_for(|status| status.phase.is_active()))
         .await
         .expect("the new first node's status");
+    within(follow.details.wait_for(|details| {
+        details
+            .as_ref()
+            .is_some_and(|details| !details.upgrades.is_empty())
+    }))
+    .await
+    .expect("its details, with the network upgrades zingod's gate reads");
     // The removed node's closed watches end nothing: changes of the new first node come
     // through.
     within(other.supervisor.stop()).await.expect("stop");
