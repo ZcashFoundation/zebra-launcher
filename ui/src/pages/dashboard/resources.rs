@@ -196,13 +196,13 @@ pub fn idle_line(
 
 /// The line about the computer: `This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB
 /// available · swap 0.3 of 2 GiB`, with the commit charge on Windows and the memory pressure
-/// on macOS.
-pub fn machine_text(machine: &MachineResources) -> String {
+/// on macOS. `busy` is the CPUs it kept busy over the last minute.
+pub fn machine_text(machine: &MachineResources, busy: Option<f64>) -> String {
     let cpus = match machine.logical_cpus {
         1 => "1 CPU".to_owned(),
         n => format!("{n} CPUs"),
     };
-    let cpu = match machine.cpu_busy_cores {
+    let cpu = match busy {
         Some(busy) if machine.logical_cpus > 0 => format!(
             "{cpus}, {} busy",
             share(busy / f64::from(machine.logical_cpus))
@@ -581,9 +581,15 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                             </div>
                         </Show>
                         {move || {
+                            let now = state.now.get();
+                            let busy = state
+                                .machine_history
+                                .with(|history| history.busy_cores(RATE_WINDOW, now));
                             machine.with(|machine| {
                                 machine.as_ref().map(|machine| {
-                                    view! { <p class="muted dash-resources-line">{machine_text(machine)}</p> }
+                                    view! {
+                                        <p class="muted dash-resources-line">{machine_text(machine, busy)}</p>
+                                    }
                                 })
                             })
                         }}
@@ -793,7 +799,7 @@ mod tests {
             pressure: None,
         };
         assert_eq!(
-            machine_text(&machine),
+            machine_text(&machine, Some(6.5)),
             "This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB available · swap 0.3 of 2 GiB"
         );
         let first = MachineResources {
@@ -803,7 +809,7 @@ mod tests {
             ..machine.clone()
         };
         assert_eq!(
-            machine_text(&first),
+            machine_text(&first, None),
             "This computer: 8 CPUs · 16 GiB, 4.7 GiB available · no swap"
         );
         let windows = MachineResources {
@@ -814,7 +820,7 @@ mod tests {
             ..machine.clone()
         };
         assert_eq!(
-            machine_text(&windows),
+            machine_text(&windows, Some(6.5)),
             "This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB available · committed 14.1 of 24 GiB"
         );
         let mac = MachineResources {
@@ -822,9 +828,9 @@ mod tests {
             ..machine
         };
         assert!(
-            machine_text(&mac).ends_with(" · swap 0.3 of 2 GiB · memory pressure normal"),
+            machine_text(&mac, None).ends_with(" · swap 0.3 of 2 GiB · memory pressure normal"),
             "{}",
-            machine_text(&mac)
+            machine_text(&mac, None)
         );
     }
 
