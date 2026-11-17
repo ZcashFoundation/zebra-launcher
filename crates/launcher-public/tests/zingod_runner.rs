@@ -536,6 +536,62 @@ async fn setup_quota() -> Setup {
     setup("ok", "disk-quota", |_| {}).await
 }
 
+/// A second `DiskFull` under the same plan waits for its own evidence: a quota after bytes ran
+/// out and came back isn't restarted on the first failure's reading.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_full_disk_waits_for_its_own_evidence() {
+    let setup = setup("ok", "disk-full", |options| {
+        options.disk_every = Duration::from_millis(700);
+    })
+    .await;
+    setup.disk.set(30 * GB);
+    setup.give_plan(0);
+    setup.facts_until("zingod running", running).await;
+    setup.disk.set(5 * GB);
+    setup
+        .facts_until("the full disk", |f| {
+            f.disk_full
+                .is_some_and(|e| e.kind == DiskFullKind::Unstated)
+        })
+        .await;
+    setup
+        .settings("FAKE_ZINGOD_MODE=disk-quota\nFAKE_ZINGOD_POLL_MS=50\nFAKE_ZINGOD_FAIL_MS=300\n");
+    setup.disk.set(25 * GB);
+    setup
+        .facts_until("the quota", |f| {
+            f.phase
+                == Phase::Failed {
+                    class: ExitClass::DiskFull,
+                }
+                && f.disk_full.is_some_and(|e| e.kind == DiskFullKind::Quota)
+        })
+        .await;
+    setup
+        .facts_stay("a quota needs the user", Duration::from_millis(800), |f| {
+            matches!(f.phase, Phase::Failed { .. })
+        })
+        .await;
+    assert_eq!(
+        starts(&setup).await,
+        2,
+        "the bytes' restart, and none on the quota"
+    );
+    setup.finish().await;
+}
+
+/// How many times zingod was started.
+async fn starts(setup: &Setup) -> usize {
+    let history = timeout(LIMIT, setup.runner.subscribe())
+        .await
+        .unwrap()
+        .expect("zingod ran")
+        .history;
+    history
+        .iter()
+        .filter(|line| line.message.starts_with("zingod started (pid "))
+        .count()
+}
+
 /// After `PortInUse` zingod moves to the next free port, once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_taken_port_moves_zingod_once() {

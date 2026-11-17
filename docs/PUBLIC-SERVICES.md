@@ -1374,7 +1374,9 @@ command line and the reader) and `Launch` in the supervisor and the spawner; `Di
   serial, and the supervisor sets both in the update that clears the run's addresses.
 - **A full disk** restarts zingod by itself only on evidence that covers it ([Disk, memory and
   the first build](#disk-memory-and-the-first-build)); launcher-core's `free_inodes` reads the
-  inodes beside `free_space`.
+  inodes beside `free_space`. Every exit clears the evidence of the one before, and a reading
+  counts only for the exit it was taken after, so a second `DiskFull` waits for the user until
+  its own reading arrives.
 - **The plan** (`ZingodPlan`) carries an `attempt` besides the configuration and zebrad's run.
   Z3 bumps it for the user's Try again and for the restarts its rules decide (the stall rule,
   no validator for 30 s); a new attempt starts zingod again after a failure. The runner itself

@@ -305,7 +305,9 @@ enum Internal {
         status: Option<IndexerStatus>,
     },
     Disk(Option<DiskReading>),
+    /// The disk just after the `DiskFull` exit at `at`.
     FailedDisk {
+        at: SystemTime,
         kind: DiskFullKind,
         reading: Option<DiskReading>,
     },
@@ -749,7 +751,11 @@ impl Runner {
                         disk_allows(facts.disk_allows, reading.map(|reading| reading.free_bytes));
                 });
             }
-            Internal::FailedDisk { kind, reading } => {
+            Internal::FailedDisk { at, kind, reading } => {
+                // A later exit has come since: this reading isn't its evidence.
+                if Some(at) != self.last_exit_at {
+                    return;
+                }
                 self.facts.send_modify(|facts| {
                     facts.disk_full = Some(DiskFullEvidence {
                         kind,
@@ -788,12 +794,17 @@ impl Runner {
             .filter(|exit| Some(exit.at) != self.last_exit_at);
         if let Some(exit) = new_exit {
             self.last_exit_at = Some(exit.at);
+            // An earlier exit's evidence doesn't cover this one: until this exit's reading
+            // arrives, the recovery waits for the user.
+            self.facts
+                .send_if_modified(|facts| facts.disk_full.take().is_some());
             if exit.class == ExitClass::DiskFull {
                 let kind = exit
                     .detail
                     .as_deref()
                     .and_then(disk_full_kind)
                     .unwrap_or(DiskFullKind::Unstated);
+                let at = exit.at;
                 let dir = self.index_dir();
                 let disk = self.options.disk.clone();
                 let tx = self.internal_tx.clone();
@@ -805,10 +816,8 @@ impl Runner {
                             .flatten(),
                         None => None,
                     };
-                    let _ = tx.send(Internal::FailedDisk { kind, reading }).await;
+                    let _ = tx.send(Internal::FailedDisk { at, kind, reading }).await;
                 });
-            } else {
-                self.facts.send_modify(|facts| facts.disk_full = None);
             }
         }
         self.facts.send_if_modified(|facts| {
