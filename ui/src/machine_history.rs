@@ -198,6 +198,20 @@ impl MachineHistory {
         readings
     }
 
+    /// Whether a sample taken from `from` to `to` passes `test`.
+    pub fn any_between(
+        &self,
+        from: SystemTime,
+        to: SystemTime,
+        test: impl Fn(&MachineResources) -> bool,
+    ) -> bool {
+        let start = self.samples.partition_point(|sample| sample.at < from);
+        self.samples
+            .range(start..)
+            .take_while(|sample| sample.at <= to)
+            .any(test)
+    }
+
     /// The logical CPUs the computer kept busy over the last `span`: the mean of its samples'
     /// figures there, each over its own interval. `None` without such a figure in the span.
     pub fn busy_cores(&self, span: Duration, now: SystemTime) -> Option<f64> {
@@ -438,6 +452,8 @@ mod tests {
         let free: Vec<u64> = readings.iter().map(|volume| volume.free_bytes).collect();
         assert_eq!(free, vec![1000, 970]);
         assert!(history.volume_readings(&other).is_empty());
+        assert!(history.any_between(at(10), at(20), |m| m.at == at(15)));
+        assert!(!history.any_between(at(10), at(20), |m| m.at == at(25)));
     }
 
     #[test]

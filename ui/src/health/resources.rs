@@ -9,7 +9,8 @@
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
-    MachineResources, MemoryPressure, Network, NodeId, NodeInfo, NodeKind, NodeResources,
+    ExitClass, ExitInfo, MachineResources, MemoryPressure, Network, NodeId, NodeInfo, NodeKind,
+    NodeResources,
 };
 
 use super::{Action, Facts, Level, STALE_AFTER, Verdict, for_text};
@@ -54,6 +55,8 @@ pub const COMMIT_FULL_CLEARS: f64 = 0.93;
 pub const FIT_MARGIN: f64 = 1.05;
 pub const FIT_CLEARS: f64 = 1.10;
 pub const FIT_FOR: Duration = Duration::from_secs(60);
+/// The exit sentences look this far back from an exit.
+pub const BEFORE_EXIT: Duration = Duration::from_secs(60);
 
 /// Whether `node` uses the most memory among the nodes with a run (`memory`, the newest
 /// sample of each, `None` without a run; the first of equals). The memory verdict goes only
@@ -359,6 +362,60 @@ impl Facts<'_> {
             vec![Action::OpenDataFolder],
         ))
     }
+}
+
+impl Facts<'_> {
+    /// What the computer's history says about an exit the user did not ask for, from the
+    /// minute before it (rules 2, 3 and 15): memory almost out when a signal ended the node
+    /// (the Linux OOM killer and macOS jetsam send `SIGKILL`), Windows' commit charge near its
+    /// limit at a crash, and under 2 GB free on the node's disk at a crash.
+    pub(super) fn exit_context(&self, exit: &ExitInfo) -> Option<String> {
+        if exit.requested || exit.class == ExitClass::Clean {
+            return None;
+        }
+        let resources = self.resources();
+        let history = resources.machine_history;
+        let from = exit.at.checked_sub(BEFORE_EXIT).unwrap_or(exit.at);
+        let mut sentences = Vec::new();
+        let memory_out = |machine: &MachineResources| {
+            available_share(machine).is_some_and(|share| share < MEMORY_OUT_SHARE)
+                || machine.pressure == Some(MemoryPressure::Critical)
+        };
+        if sigkill(exit) && history.any_between(from, exit.at, memory_out) {
+            sentences.push(
+                "the computer was almost out of memory just before; the system may have stopped it"
+                    .to_owned(),
+            );
+        }
+        let commit_full = |machine: &MachineResources| {
+            commit_share(machine).is_some_and(|share| share > COMMIT_FULL_SHARE)
+        };
+        if history.any_between(from, exit.at, commit_full) {
+            sentences.push("Windows was almost out of memory to commit just before".to_owned());
+        }
+        let disk = history
+            .volume_readings(&resources.info.id)
+            .into_iter()
+            .rev()
+            .find(|volume| volume.measured_at <= exit.at);
+        if let Some(volume) = disk.filter(|volume| volume.free_bytes < DISK_FULL_BYTES) {
+            sentences.push(format!(
+                "only {} was free on its disk",
+                bytes(volume.free_bytes)
+            ));
+        }
+        (!sentences.is_empty()).then(|| sentences.join(" · "))
+    }
+}
+
+/// Whether `SIGKILL` ended the run, as the OOM killer and jetsam send it: no exit code, and the
+/// supervisor's detail names signal 9 (it names the signal when zebrad logged no reason).
+fn sigkill(exit: &ExitInfo) -> bool {
+    exit.code.is_none()
+        && exit
+            .detail
+            .as_deref()
+            .is_none_or(|detail| detail == "killed by signal 9")
 }
 
 /// A size in whole decimal units: `300 GB`.

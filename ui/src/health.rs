@@ -468,6 +468,7 @@ impl<'a> Facts<'a> {
             ),
             None => for_text(self.phase_for()),
         });
+        parts.extend(exit.and_then(|exit| self.exit_context(exit)));
         let actions = match class {
             ExitClass::ConfigError => vec![Action::OpenConfigure, Action::ResetConfig],
             ExitClass::EosHalt => Vec::new(),
@@ -521,6 +522,9 @@ impl<'a> Facts<'a> {
         parts.push(restart);
         if let Some(detail) = detail {
             parts.push(first_line(detail).to_owned());
+        }
+        if let Some(exit) = &self.status().last_exit {
+            parts.extend(self.exit_context(exit));
         }
         Verdict::new(
             level,
@@ -851,6 +855,10 @@ impl<'a> Facts<'a> {
         if let Some(detail) = detail {
             reason.push_str(" · ");
             reason.push_str(first_line(detail));
+        }
+        if let Some(context) = self.exit_context(exit) {
+            reason.push_str(" · ");
+            reason.push_str(&context);
         }
         Some(Verdict::new(
             Level::Attention,
@@ -2676,6 +2684,94 @@ mod tests {
         scene.disk(1100, 1200, |_| 40_000_000_000);
         scene.info.network = launcher_types::Network::Testnet;
         assert_eq!(scene.verdict().rule, 17);
+    }
+
+    #[test]
+    fn exits_say_what_the_computer_was_short_of() {
+        const AVAILABLE_4: u64 = 644_245_094;
+        // Killed by signal 9 while the computer had 4 % available.
+        let killed = ExitInfo {
+            code: None,
+            detail: Some("killed by signal 9".into()),
+            ..exit(ExitClass::Crash, None, 1100, false)
+        };
+        let mut scene = Scene::syncing(1200);
+        scene.status.phase = Phase::Failed {
+            class: ExitClass::Crash,
+        };
+        scene.status.last_exit = Some(killed.clone());
+        scene.machine_with(1040, 1100, |_, machine| {
+            machine.memory_available_bytes = Some(AVAILABLE_4)
+        });
+        let verdict = scene.verdict();
+        assert_eq!(verdict.rule, 2);
+        assert_eq!(
+            verdict.reason,
+            "killed by signal 9 · exited 1 min ago (killed by a signal) · the computer was almost out of memory just before; the system may have stopped it"
+        );
+        // Another signal, an exit code, a stop that was asked for, or memory that was short
+        // only before the minute: nothing.
+        scene.status.last_exit = Some(ExitInfo {
+            detail: Some("killed by signal 15".into()),
+            ..killed.clone()
+        });
+        assert!(!scene.verdict().reason.contains("memory"));
+        scene.status.last_exit = Some(ExitInfo {
+            code: Some(101),
+            ..killed.clone()
+        });
+        assert!(!scene.verdict().reason.contains("memory"));
+        scene.status.last_exit = Some(ExitInfo {
+            requested: true,
+            ..killed.clone()
+        });
+        assert!(!scene.verdict().reason.contains("memory"));
+        scene.status.last_exit = Some(ExitInfo {
+            at: t(1200),
+            ..killed.clone()
+        });
+        assert!(!scene.verdict().reason.contains("memory"));
+
+        // A crash in backoff, with Windows' commit charge at its limit and the disk full.
+        let mut scene = Scene::syncing(1200);
+        scene.status.phase = Phase::Backoff {
+            until: t(1210),
+            crashes: 1,
+        };
+        scene.status.last_exit = Some(ExitInfo {
+            detail: None,
+            ..exit(ExitClass::Crash, Some(101), 1190, false)
+        });
+        scene.machine_with(1150, 1190, |secs, machine| {
+            machine.commit_bytes = Some(97);
+            machine.commit_limit_bytes = Some(100);
+            machine.volumes = vec![volume(secs / 30 * 30, 1_200_000_000)];
+        });
+        let verdict = scene.verdict();
+        assert_eq!(verdict.rule, 3);
+        assert_eq!(
+            verdict.reason,
+            "restarting in 10 s · Windows was almost out of memory to commit just before · only 1.2 GB was free on its disk"
+        );
+
+        // Restarted after such a crash.
+        let mut scene = Scene::syncing(1200);
+        scene.status.started_at = Some(t(5));
+        scene.status.last_exit = Some(ExitInfo {
+            detail: None,
+            ..exit(ExitClass::Crash, Some(101), 0, false)
+        });
+        scene.machine_with(0, 0, |_, machine| {
+            machine.volumes = vec![volume(0, 1_200_000_000)];
+        });
+        // Space was freed since.
+        scene.disk(1150, 1200, |_| 50_000_000_000);
+        let verdict = scene.verdict();
+        assert_eq!(verdict.rule, 15);
+        assert_eq!(
+            verdict.reason,
+            "zebrad crashed 20 min ago · only 1.2 GB was free on its disk"
+        );
     }
 
     #[test]
