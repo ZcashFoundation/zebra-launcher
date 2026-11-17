@@ -13,6 +13,15 @@
 > **PS1 is built** (Linux, experimental): see [PS1 as built](#ps1-as-built) for what landed,
 > what moved to a point release and where the code differs from this design.
 
+> **zingod replaces Zaino as the planned backend (proposal, 2026-11-16).** No Zaino release
+> follows NU7, and Zingo Labs now maintain zingod, a fork of Zaino that does. Zeal bundles it on
+> Linux as the light client server's second backend
+> ([zingod as the backend](#zingod-as-the-backend)), in phases Z1 to Z5
+> ([Phases for zingod](#phases-for-zingod)): Z1 bundles the pinned, attested binary, which
+> nothing runs yet; Z2 supervises it, with a contract test and no UI; Z3 lets a Linux user choose
+> it for a Testnet light client server; Z4 opens Mainnet after a measured gate; Z5 brings macOS.
+> None is built yet.
+
 The maintainer asked for two optional services that a user can turn on at home. First: "an
 optional DNS seeder, pull in zeeder", and "The DNS seeder should let you expose the port and
 direct your domain name to your server at home so other nodes can bootstrap". Then: "Add a
@@ -21,8 +30,11 @@ and serve their own light client server from their home server". Asked which ser
 answered: "Zaino specifically".
 
 So the light client server starts as zebrad's own light-wallet endpoint, served from the
-zebrad Zeal already runs, and becomes [Zaino](https://github.com/zingolabs/zaino), run by Zeal
-as a node that reads an archive node of the user's herd, once a Zaino release can follow NU7.
+zebrad Zeal already runs. [Zaino](https://github.com/zingolabs/zaino) was to replace it once a
+Zaino release could follow NU7. None has, and Zingo Labs now maintain
+[zingod](https://github.com/zingolabs/zingod), their fork of Zaino, which follows NU7: Zeal
+bundles it on Linux as the light client server's second backend
+([zingod as the backend](#zingod-as-the-backend)).
 The seeder is [zeeder](https://github.com/ZcashFoundation/zeeder), HERD.md's seeder kind, in a
 public mode. lightwalletd appears only as a note.
 
@@ -31,13 +43,14 @@ Three upstream facts shape the plan (checked 2026-11-03):
 - **Zaino can't follow NU7 yet.** Every release up to 0.10.2 stops at the block before NU7's
   activation (Mainnet height 3,543,405, about 2026-11-05) and retries forever (zaino#1731).
   The fix, zaino#1655 "Feat: NU7", is open with `mergeable_state: blocked`, and there is no
-  release candidate.
+  release candidate. (2026-11-16: still no Zaino release follows NU7; Zingo Labs moved to
+  zingod, which does.)
 - **zebrad 7.0.0 serves light wallets itself, and follows NU7.** Its
   `[rpc] lightwalletd_listen_addr` starts a gRPC server inside zebrad that implements the
   lightwalletd protocol, in plaintext and without authentication, and that upstream calls
   experimental. So the first phase serves wallets from it, on loopback behind Zeal's TLS front
-  door, with no extra binary; Zaino replaces it once a Zaino release with NU7 passes Zeal's
-  tests: Testnet first, then Mainnet.
+  door, with no extra binary; zingod joins it as a second backend once it passes Zeal's tests:
+  Testnet first, then Mainnet.
 - **zeeder can't run beside a zebrad on its network's default port.** Its crawler always
   binds `[::]:8233` (Testnet `[::]:18233`), with no setting, and zebra-network panics when the
   port is taken (`ZcashNetwork::network_config`, zeeder `src/config.rs` at v1.8.0). Until
@@ -121,7 +134,7 @@ which gate the release on each network.
 
 - Two optional services, each off until the user turns it on, each with one switch and a
   guided setup that checks every step and shows the fix first when a step fails.
-- Only the service is reachable. zebrad's light-wallet endpoint, Zaino, zebrad's RPC and
+- Only the service is reachable. zebrad's light-wallet endpoint, zingod, zebrad's RPC and
   Zallet stay on loopback; the only internet-facing listeners are Zeal's TLS front door and
   zeeder's DNS port; no plaintext leaves the computer.
 - Less exposure is one click and acts at once; more takes the guided steps, and the backend
@@ -171,10 +184,10 @@ the UI), a small TLS server of Zeal's own that runs inside the app
 limits and forwards the decrypted bytes to that port. No other binary is involved, and the
 endpoint follows NU7 with zebrad.
 
-Zaino takes zebrad's place behind the same front door once a Zaino release follows NU7 and
-passes Zeal's tests ([Later: Zaino](#later-zaino-as-the-backend)); wallets keep the name, the
-port and the certificate. PS1 ships the first part on Linux; front door v2, macOS, Zaino and
-Windows follow ([Phases](#phases)).
+zingod, bundled on Linux, can take zebrad's place behind the same front door once it passes
+Zeal's tests ([zingod as the backend](#zingod-as-the-backend)); wallets keep the name, the port
+and the certificate. PS1 ships the first part on Linux; zingod, front door v2, macOS and Windows
+follow ([Phases](#phases)).
 
 ### What zebrad's endpoint serves
 
@@ -325,6 +338,9 @@ leg between the front door and zebrad needs packet capture, that is root.
 Only zebrad can close the gap for local programs, with an authenticated or Unix-socket
 listener; it has neither (an upstream ask, [Phases](#phases)).
 
+With zingod as the backend, its port also answers HTTP/1.1, for `/status` and `/readyz` only
+([The front door for zingod](#the-front-door-for-zingod)).
+
 ### How Zeal runs it
 
 - **Which zebrad.** In PS1, the bundled zebrad 7.0.0 that Zeal runs today, on its network;
@@ -408,10 +424,10 @@ no server field is unconfirmed), and Nighthawk is no longer maintained. So the s
 - **to pass Zodl's check**: `SdkSynchronizer.validateServerEndpoint` compares `chainName`,
   `saplingActivationHeight`, and `consensusBranchId` with the SDK's branch at the server's
   height, so a server stuck before NU7 fails it (inferred). Zeal runs the same check;
-- **the methods wallets call**, all of which zebrad 7.0.0's endpoint serves, as does Zaino
-  0.10.2: `GetLightdInfo`, `GetLatestBlock`, `GetBlockRange`, `GetTreeState`, `GetSubtreeRoots`,
-  `GetTransaction`, `SendTransaction`, `GetMempoolStream`, `GetAddressUtxosStream`,
-  `GetTaddressTxids` or `GetTaddressTransactions`.
+- **the methods wallets call**, all of which zebrad 7.0.0's endpoint serves, as do Zaino
+  0.10.2 and zingod 1.1.0: `GetLightdInfo`, `GetLatestBlock`, `GetBlockRange`,
+  `GetTreeState`, `GetSubtreeRoots`, `GetTransaction`, `SendTransaction`, `GetMempoolStream`,
+  `GetAddressUtxosStream`, `GetTaddressTxids` or `GetTaddressTransactions`.
 
 Share says three things out loud: Zodl's Automatic mode broadcasts transactions to every
 bundled server, and only Manual uses just the chosen one (`ServerSelectionPolicy.kt`); the
@@ -431,194 +447,950 @@ of support (`zebrad/src/components/sync/end_of_support.rs:53-60, 71-73`): a zebr
 doesn't know a Testnet upgrade stays at the block before it, and the tip watch keeps the front
 door `Unavailable` until a Zeal update.
 
-### Later: Zaino as the backend
+### Zaino
 
-Zaino stays the server the maintainer chose. It takes zebrad's place behind the same front door
-once a Zaino release follows NU7 and passes the gate below (PS5); the archive's
-`lightwalletd_listen_addr` is then removed, and wallets keep the name, the port and the
-certificate. Facts checked at tag `zainod-0.10.2` (`5ced0ae8`) on 2026-11-03.
+Zaino was the backend this design planned (PS5). No Zaino release follows NU7: every release up
+to 0.10.2 stops at the block before its activation (zaino#1731). Zingo Labs, who made Zaino, no
+longer work on it; they forked it as zingod, which follows NU7, so Zeal bundles zingod instead
+([below](#zingod-as-the-backend)). Much of the Zaino plan carries over: the upgrade gate, the
+restart with the backing zebrad, the exit classes, the stall rule and the loopback-only rules. A
+zainod the user picks stays possible as a program of MULTI-NODE.md's Zaino kind, for this
+computer only. The Zaino facts used here were checked at tag `zainod-0.10.2` (`5ced0ae8`) on
+2026-11-03.
 
-**NU7.** 0.10.2 can't follow it: its `zcash_protocol` 0.10 has a placeholder NU7 branch id, so
-it can't parse a block carrying `0x77190ad9`, and stops at the block before activation (#1731,
-reproduced on Regtest); on Testnet, past NU7 at 4,465,026, it is presumably stuck too
-(inferred). The fix, #1655 (head `aaf8122a`, updated 2026-11-02, `mergeable_state: blocked`,
-no release candidate), moves to zebra-chain 15 and `zcash_protocol` 0.11, refuses to start on a
-validator branch the build doesn't know, and adds `GetStandardFee`; it is marked breaking,
-which suggests 0.11.0 (unconfirmed). First syncs are fragile anyway: 0.10.2's `GetSubtreeRoots`
-fetches a block per subtree root (1,128 Sapling and 770 Orchard on Mainnet, #1665) under the
-stream cap (#1537); they failed or crawled on a public Zaino, on zcash-devtool and on a
-Raspberry Pi.
+### zingod as the backend
 
-**The gate.** The pin moves only with a tagged release containing #1655, the contract test
-(`real_zainod.rs`: a Regtest zebrad with NU7 at height 10, as in #1731, the pinned zainod and
-the front door) and the Testnet wallet run; Mainnet follows after two weeks on Testnet with no
-pause caused by Zaino. Whatever its version, Zeal compiles in the upgrades each tested version
-knows and reads the scheduled and active ones from the archive's `getblockchaininfo`: a build
-that doesn't know an active upgrade isn't started ("This Zaino doesn't know NU7, which is
-active: it would stop at block 3,543,404"); one that doesn't know an upgrade due within 7 days
-can't be public, and an open server pauses at activation minus one, so wallets get an error
-instead of a frozen chain; a countdown shows from 14 days; untested versions run locally only.
-`GetLightdInfo`'s `consensusBranchId` must equal the archive's `consensus.chaintip`. A pure
-**stall rule** calls Zaino stuck when its tip hasn't moved for 2 minutes while the archive
-advanced 4 blocks or more, when it sits at the block before an upgrade the archive has
-activated, or when it logs `invalid consensus branch id`; the front door then says
-"unavailable".
+> **Proposal, 2026-11-16.** Facts checked at zingod tag `v1.1.0` (commit
+> `bfce8b2b433578054dec82928d2707e523ec75b7`), Zebra `v7.0.0` and Zeal `main` at `95a0b5b`.
+> Paths under `packages/` and `docs/` in a zingod citation are zingod's. A "research run" is a
+> run of zingod 1.1.0, built from that tag, during this design. "Unconfirmed" marks what the
+> phase that relies on it checks first; "proposal" marks a starting value.
 
-**The binary.** Recommendation: Zeal bundles `zeal-zainod`, built by its own CI from a pinned
-tag. It revises MULTI-NODE.md's non-goal "Building or downloading binaries other than the
-bundled zebrad", so it is the maintainer's call. Upstream publishes no binaries for any OS
-(GitHub releases carry no assets, the latest is 0.10.1, 2026-09-29; 0.10.2 is a tag, a
-crates.io release and an amd64 Docker image; the planned rewrite drops crates.io). A local
-build tells every wallet its builder's login: `zaino-state/build.rs` sets `BUILD_USER` from
-`whoami::username()` with no override, and `GetLightdInfo` returns it, where a CI build says
-`runner` (Zeal asks upstream for a `ZAINO_BUILD_USER` override). And a non-expert can't build
-Zaino.
+Zingo Labs forked Zaino as [zingod](https://github.com/zingolabs/zingod), "a Zcash indexer
+written in Rust" (its README; Apache-2.0), announced on the Zcash forum on 2026-11-06.
+zingod 1.1.0 follows NU7; its tag's commit is dated 2026-11-10 in UTC, which `ZINGOD_DATE`
+records, while its CHANGELOG heads the release 2026-11-09. Zeal bundles it on Linux as `zeal-zingod`
+([SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)) and offers it as the light client
+server's second backend, beside zebrad's endpoint. The user picks one on the consent screen; the
+front door, the name, the port and the certificate are the same for both.
 
-- The build follows SIDECARS.md: `ZAINOD_VERSION` and `ZAINOD_COMMIT` pins checked by
-  `scripts/check-versions.sh`; a `zainod-sidecars.yml` with Zaino's pinned toolchain (1.96.0),
-  `cargo build --locked --release -p zainod --features prometheus`, `SOURCE_DATE_EPOCH` from the
-  tag, `ZAINO_GIT_COMMIT_ID` and `ZAINO_GIT_BRANCH` set, paths remapped, stripped and attested;
-  a smoke test of `--version` and `generate-config`; never the `no_tls_use_unencrypted_traffic`
-  or `allow_unencrypted_public_json_rpc_bind` features. Licence Apache-2.0: Zaino's `LICENSE` is
-  the short Apache notice and there is no `NOTICE` file, so the bundle carries the notice and
-  the licence text.
-- Linux x86-64 and aarch64 first; macOS once the CI build and the contract test pass (Zaino's
-  CI is Linux-only; a macOS fix merged in #1267; unconfirmed); Windows later: Zaino handles only
-  Ctrl-C there, and LMDB's preallocation there is unconfirmed.
-- Per-platform sidecars go in Tauri's platform config files, which merge by JSON Merge Patch
-  (RFC 7396) and replace arrays, so `tauri.linux.conf.json` (which exists) lists every Linux
-  `externalBin`, zebrad's included.
-- A zainod the user picks (`File(path)`) still works locally. It can be public only when its
-  version is on Zeal's tested list and the user has accepted the `buildUser` wallets see.
-
-**What backs it.** An archive on the same network and computer: any zebrad 7, or a Zakura
-archive (reported working over RPC with Zakura 1.6.0 by zeckyapp/rock-it; unconfirmed for
-1.8.0). Never a pruned node: restores (`GetBlockRange`), old transactions (`GetTransaction`)
-and 0.10.2's `GetSubtreeRoots`, which calls `getblock` at each subtree's end height, all read
-old blocks, and without those roots a Zodl wallet never gets past startup.
-`NodeKind::Zaino.uses()` becomes `[Zebrad, Zakura]`, and HERD.md's `dependency_ok` refuses a
-pruned one. A pure `pick_backing(network, herd)`, run again when the herd changes, prefers an
-archive that isn't Zallet's backend, because Zaino without its own index turns every wallet
-read into an RPC call to its archive; then the explorer's source (HERD.md's
-`explorer_source`, once HERD H6 has landed), the bundled zebrad, the one nearest the tip.
-With only the wallet's archive, Zaino uses it and says so ("Wallets that use your server will
-share Zebra · Mainnet with your own wallet. It stays correct, but may sync more slowly when
-many people connect").
-With none: "Zaino needs a node that keeps the whole chain" and
-[Add a Zebra node (about 400 GB)]. The archive keeps Zeal's managed RPC: loopback
-`rpc.listen_addr`, `enable_cookie_auth = true`, a known `cookie_dir`.
-
-**How Zeal runs it.**
-
-- `zeal-zainod start -c <app data>/nodes/<id>/zainod.toml`, in the node's folder, with every
-  `ZAINO_*` variable removed: the environment overrides the file (`load_config_with_env`), and
-  the prefix also covers the rewrite's `ZAINO_CONFIG_*`.
-- **Start** once the archive's RPC answers and `<cookie_dir>/.cookie` exists: Zaino refuses to
-  load without it. **Stop**: SIGTERM, graceful since 0.10.1. On macOS, which has no PDEATHSIG,
-  a crashed Zeal leaves zainod running until the next launch finds it by its pidfile; nothing
-  outside can reach it, because the front door died with Zeal.
-- **Restart with the archive.** zebrad writes a fresh cookie at every start
-  (`zebra-rpc/src/server/cookie.rs` at v7.0.0), and Zaino reads it once, when it builds its RPC
-  client (`auth_from_parts` in `zaino-rpc/src/probe.rs`, and the comment on `rpc_client` in
-  `zaino-state/src/chain_index/validator_source.rs`). So when the archive's pid changes, Zeal
-  stops Zaino, waits for the RPC and the cookie, and starts it again: a new adapter flag,
-  `restart_with_dependency`, in MULTI-NODE.md's dependency rules. The front door stays up and
-  says "unavailable" meanwhile. A cookie path wins over `validator_user` and
-  `validator_password` (`auth_from_parts`), so Zeal writes only the path.
-- **Health**: Zeal's gRPC client over h2c on loopback, `GetLatestBlock` every 10 s and
-  `GetLightdInfo` every 10 min, plus the log's `Zaino status check`, `sync_to_height` and the
-  NU7 stall line (`… invalid consensus branch id`).
-
-Zaino prints `Error: <message>` and exits 1 for every error, so the adapter classifies by the
-message:
-
-| Zaino's last line | Class |
-| --- | --- |
-| `TLS required when connecting to external addresses.` | `ConfigError`, and a Zeal bug: Zeal never writes a public bind |
-| `Zaino may only connect to Zebra with private IP addresses.` | `ConfigError` |
-| `Validator cookie authentication is enabled, but cookie path … does not exist.` | `WaitingForDependency` (new): neither a crash nor `Failed`; "waiting for Zebra · Mainnet" |
-| `gRPC bind failed: …` | `PortInUse` |
-| `Configuration parsing failed` | `ConfigError`: "This Zaino reads a different configuration than Zeal writes" |
-| LMDB `MapFull`, `Cannot allocate memory` | `ResourceLimit` (new, deterministic), with Zaino's own index only |
-| a refusal to start on an unknown upgrade (after #1655; message unconfirmed) | `TooOld` (new, deterministic) |
-| anything else | `Crash`, with today's backoff |
-
-**The managed `zainod.toml`.** Zaino 0.10.2 refuses unknown keys only at the top level and in
-`[storage.database]` (`deny_unknown_fields` on `ZainodConfig` and `DatabaseConfig`).
-`[grpc_settings]`, `[validator_settings]`, `[service]` and `[storage]` ignore them, and
-`[validator_settings]` also fills a missing key from its default, so a misspelt or renamed
-`validator_cookie_path` leaves Zaino on user and password `xxxxxx` with no parse error. Zeal
-writes exactly these keys (checked in `zainod/src/config.rs` and `zaino-common/src/config/` at
-the tag), the pinned checks below cover each one, and the Zaino adapter rewrites the file
-before every zainod start:
-
-```toml
-# Managed by Zeal: rewritten at every start.
-backend = "rpc"                     # never "direct": its zebra-state 13 reader can't open zebrad 7's database
-network = "Mainnet"                 # or "Testnet"; Zaino's default is Testnet, so it is always written
-ephemeral_finalised_state = true    # no index of Zaino's own at first
-metrics_endpoint = "127.0.0.1:9998" # assigned; a build without `prometheus` accepts the key and ignores it
-
-[grpc_settings]
-listen_address = "127.0.0.1:8137"   # assigned, loopback only; never a [grpc_settings.tls] table
-
-[validator_settings]
-validator_jsonrpc_listen_address = "127.0.0.1:8232"   # the archive's managed RPC port
-validator_cookie_path = "<archive's cookie_dir>/.cookie"
-
-[service]
-timeout = 900                       # 0.10.2 caps a whole stream at 4 × timeout: 60 min
-channel_size = 32
-
-[storage.database]
-path = "<app data>/nodes/<id>/data" # explicit: the XDG default suits neither macOS nor Windows
-size = 64                           # GB of LMDB map; the 384 default fails on small machines
+```text
+phone wallet ──TLS, ALPN h2──▶ router :443 ──▶ [::]:8443      the front door, unchanged
+                                                 ▼ the same HTTP/2 frames, plaintext, on loopback
+                                       zingod 127.0.0.1:18137     zeal-zingod, run by the light client server
+                                                 │ JSON-RPC every second, zebrad's cookie, loopback
+                                                 ▼
+                                       zebrad 127.0.0.1:18232     the registry's first node, the whole chain
+  zingod's index: <that node's data folder>/zingod/testnet/     about 71 GB on Mainnet
 ```
 
-- **Left out**: `[json_server_settings]` (Zaino's JSON-RPC stays off), the validator user and
-  password, `zebra_db_path`, and `donation_address` unless the user sets one in Share.
-- **The timeout**: the default 30 gives streams 120 s (`zaino-state/src/indexer.rs`, lines 676
-  and 859), which a Mainnet wallet's first sync runs into (#1537). 900 also lengthens unary
-  calls, which front door v2's deadlines bound.
-- **Pinned**: a test runs `generate-config` at the pinned version and fails if a key Zeal
-  writes is missing from it, except the keys whose default is `None`, which the TOML serializer
-  leaves out (`metrics_endpoint`, `validator_settings.validator_cookie_path`,
-  `donation_address`); those are checked against the config structs at the tag, the top-level
-  two are refused at start if unknown, and `real_zainod.rs` confirms that Zaino authenticated
-  to the archive with the cookie. Whether ephemeral mode reads `[storage.database]` is
-  unconfirmed.
-- **The rewrite** (merged and reverted in #1678 and #1684, proposed again as #1688 to #1709; its
-  changesets are unreleased) replaces the file: `network = "mainnet"`, one
-  `[[trusted_validators]]` with `jsonrpc_address` and `cookie_path`, `[serve]
-  grpc_listen_address`, `[metrics] listen_address`. It drops `ephemeral_finalised_state` and
-  always keeps indexes of its own, so it needs a disk budget and a first sync, under HERD.md's
-  heavy-job gate. Its `[grpc]` limits include `max_connections_per_ip` (32) and
-  `max_streams_per_connection` (8): every front-door connection comes from 127.0.0.1, so Zeal
-  sets the first above the front door's connection cap and the second at least as high as the
-  front door's streams per connection. Zeal never uses its `trusted_proxies` (a PROXY-protocol
-  header with each client's address). The adapter picks its writer by schema (`V0_10` or
-  `V0_11`) from `--version`, with a fixture each.
-- **No index of Zaino's own, at first.** With `ephemeral_finalised_state = true` Zaino is ready
-  in about a minute and uses no disk, and every read goes to the archive (rock-it's findings):
-  a restore from an old birthday becomes one `getblock` per block, which front door v2's
-  per-method limits keep from starving the owner's wallet. "Build Zaino's own index" is a later
-  opt-in on Linux or macOS and local disk only: LMDB runs with `MDB_NOSYNC`, so a hard kill or a
-  network filesystem can corrupt it (#1299). It used 43 GB at height 1.77M on 0.10.1 (#1193;
-  the full size is undocumented), takes two to three days on a Raspberry Pi 5, and its write
-  budgets are scaled to memory (2, 4 or 8 GiB for 8, 16, or 32+ GB; proposal).
+**Not a node.** zingod isn't in the registry, the sidebar or `MAX_NODES`, and has no Configure
+page. The light client server's actor owns it, as it owns the front door, and runs it only while
+the service is on with zingod chosen. One owner keeps the order local: the front door goes
+`Unavailable` before zingod stops, and opens only once zingod serves. MULTI-NODE.md's kind
+adapter doesn't exist yet; zingod can become a node kind when it does (phase 5), reusing the
+pieces below.
 
-**What it needs from the front door.** Zaino's own TLS isn't used: it reads its certificate
-once, at spawn (`get_valid_tls` in `zaino-serve/src/server/config.rs`, called from
-`server/grpc.rs`), so every renewal would restart Zaino and drop every wallet; it can't answer
-TLS-ALPN-01; and its server sets no limits (`Server::builder()` with no connection, stream,
-timeout or keep-alive settings). It accepts a plaintext bind on any RFC 1918 address
-(`is_private_listen_addr`, `zainod/src/config.rs`), so a router forward to `192.168.x.y:8137`
-would serve plaintext to the internet: a non-loopback `grpc_settings.listen_address`, a
-`[grpc_settings.tls]` table, `[json_server_settings]` and a non-loopback `metrics_endpoint` are
-managed keys that Zeal refuses, as it refuses zebrad's non-loopback RPC today (ARCHITECTURE.md,
-"Config protocol"). And because 0.10.2 pins h2 0.4.15 and serves its own extension on the same
-port ([limits](#the-light-client-servers-limits)), Zaino faces the internet only through front
-door v2 (PS2).
+#### Choosing the backend
+
+| | Zebra's built-in server (PS1) | zingod 1.1.0 |
+| --- | --- | --- |
+| Serves | once zebrad is at the tip | once its index reaches zebrad's tip: "about an hour on NVMe" for a first build (its README), unmeasured on a desktop; its Mainnet live test allows 48 h |
+| Disk beside zebrad's | none | 71.3 GB on Mainnet at height 3,544,662 (Zingo Labs' snapshot manifest, read 2026-11-16); Testnet unmeasured |
+| Protocol | v0.3.6 with Ironwood's fields: no transparent compact data, no `GetStandardFee`, an empty `lightwalletProtocolVersion` | v0.6.0: transparent `poolTypes`, `vin` and `vout`, `CompactTx.fee`, `GetStandardFee`, `upgradeName` and `upgradeHeight` (at the pin an empty name and height 0 on Mainnet and Testnet: 1.1.0 knows no upgrade after NU7, which is active on both) |
+| Zingo wallets | zingolib's pepper-sync refuses a server whose `lightwalletProtocolVersion` is empty or below v0.5.0 (`crates/pepper-sync/src/client.rs` at `zingolib_v8.0.0` and at `dev`, `0a39640`); which zingolib Zingo mobile 3.0.0 and Zingo PC 2.0.27 ship is unconfirmed | pass that check |
+| Not served | `Ping` | `Ping`, `GetBlockNullifiers` (removed from its proto), gRPC reflection |
+| Limits of its own | 20 streams a connection | connections, streams, read lanes, request sizes, timeouts, connection age ([below](#the-front-door-for-zingod)) |
+| Upstream says | experimental | "In development, not for production mainnet use", logged at every start (`packages/zingod/src/daemon.rs:80`) |
+| Platforms | Linux (PS1) | Linux; macOS never built; Windows doesn't compile at 1.1.0 |
+
+**The default stays Zebra's built-in server**, one constant in launcher-herd
+(`DEFAULT_BACKEND`): it serves as soon as zebrad is at the tip, needs no extra disk and has
+PS1's tests behind it. Zingo wallets are the reason to pick zingod, and its card says so once the
+wallet runs confirm it. Which backend new setups get once Mainnet opens is the maintainer's call
+(question 19). A light client server set up before this change keeps zebrad's endpoint: a spec
+without `backend` reads as `ZebradEndpoint`.
+
+#### What can go wrong, and what the user sees
+
+This table is the design; the sections after it say how each line works. Each row has a mock
+flag (`?public=<flag>`).
+
+| What goes wrong | How Zeal knows | What Zeal does | The status panel says | Comes back | Flag |
+| --- | --- | --- | --- | --- | --- |
+| The index is being built: the first start, or after Rebuild | `/status` is `syncing` | `IndexBuilding`; the test on this computer and Open wait | "Building zingod's index: block 1,204,331 of 4,612,000 (26 %), about 5 h left" | by itself, once zingod serves within 2 blocks of Zebra | `zingod-building` |
+| zebrad restarts: an update, a configuration change, a crash | zebrad's pid or start time changes | stops zingod; starts it once the new run's RPC is open, its cookie written and zebrad at the tip | "Catching up · zingod restarts with Zebra" | by itself | `zingod-restarting` |
+| zebrad isn't at the tip yet in this run | zebrad's height and its estimate of the tip | `IndexerStarting { waiting: ZebradTip }`; doesn't start zingod | "Waiting for Zebra · Testnet to reach the tip: zingod starts then" | by itself | `zingod-waiting` |
+| zingod is starting: it opens and checks its index before it serves | `/status` is `provisioning` | `IndexerStarting { waiting: Boot }`; waits | "Catching up · zingod is starting" | by itself | `zingod-booting` |
+| zebrad stops, fails or halts | zebrad's phase | stops zingod; PS1's `BackingStopped` pause | PS1's line | when zebrad runs again | `zingod-nozebra` |
+| zingod can't reach zebrad | `/status` `chain.validators.answering` is 0 for 30 s | `IndexerDown`; restarts zingod once per zebrad run | "Catching up · zingod can't reach Zebra · Testnet" | by itself | `zingod-unreachable` |
+| zingod reports `down`, or doesn't answer | `/status`, or three reads without an answer | `IndexerDown`, with zingod's reason | "zingod is down: <zingod's message>" | by itself, or as a crash | `zingod-down` |
+| zingod falls behind | its served height against zebrad's | `IndexBehind` | "Catching up · zingod is 12 blocks behind Zebra" | by itself, within 2 | `zingod-behind` |
+| zingod stalls | the stall rule | restarts it once, then `IndexerStuck` | "zingod is stuck at block 4,611,002; Zebra is at 4,611,019. [Open the log]" | by itself, when it moves | `zingod-stuck` |
+| zingod crashes | `Crash` | `IndexerStarting { waiting: Backoff }`; starts it again after the supervisor's backoff | "Catching up · zingod stopped unexpectedly, and Zeal is starting it again" | by itself | `zingod-backoff` |
+| zingod keeps crashing | 5 crashes in 10 minutes | `IndexerFailed`; no restart | "zingod stopped unexpectedly 5 times in 10 minutes. [Open the log] [Try again]" | the user's Try again | `zingod-crashloop` |
+| zingod refuses Zeal's configuration | `ConfigError` | no restart | "zingod refused the settings Zeal wrote. This is a bug in Zeal: [Copy diagnostics]" | a Zeal update | `zingod-config` |
+| zingod can't read zebrad's cookie: the path is a folder, or not readable | `ConfigError` with the cookie text | no restart | "zingod can't read Zebra · Testnet's cookie at /mnt/zebra/testnet/rpc/.cookie: Is a directory (os error 21). [Try again]" | the user's Try again | `zingod-cookie` |
+| zingod's port is taken | the check before the spawn, or `PortInUse` | moves to the next free port, once | "Other programs use ports 18137 and 18138. [Try again]" | the user | `zingod-port` |
+| another program holds the index | `DbLocked`, after the pid file ended Zeal's own leftover | waits | "Another program holds zingod's index in /mnt/zebra/zingod/testnet. [Try again]" | the user | `zingod-locked` |
+| the disk fills | free space every 60 s; `DiskFull` | stops zingod below 10 GB free, starts it above 20 GB | "Waiting for disk space: 6 GB free on /mnt/zebra. zingod starts again above 20 GB." | by itself | `zingod-disk` |
+| the index is damaged, from another chain or of an older format | `IndexBroken` | no restart | "zingod's index is damaged. Rebuilding it takes hours, and wallets are told to try again meanwhile. [Rebuild]" | the user's Rebuild | `zingod-broken` |
+| zingod serves a block zebrad doesn't have | the tip cross-check | stops zingod | "zingod's chain doesn't match Zebra's at block 4,611,980. [Rebuild]" | the user's Rebuild | `zingod-mismatch` |
+| an upgrade zingod doesn't know is active | zebrad's upgrades against `ZINGOD_KNOWS` | doesn't start zingod; `BuildTooOld` | "zingod 1.1.0 doesn't know NU8, which is active. Wallets that use your server see an error until Zeal updates zingod." | a Zeal update | `zingod-tooold` |
+| an upgrade zingod doesn't know is scheduled (Z4) | the same | no opening within 7 days of it; a countdown from 14 days; `BuildTooOld` at activation minus one | "zingod 1.1.0 doesn't know NU8, which activates at block 4,700,000 in about 5 days. From then until Zeal updates zingod, wallets that use your server see an error." | a Zeal update | `zingod-upgrade` |
+| Mainnet before Z4, or an untested pair at setup | `TESTED_ZINGOD` | the choice is disabled | "zingod is being tested on Testnet first" | a Zeal update | `zingod-mainnet` |
+| a set-up zingod meets an untested pair: the node's channel or zebrad's pin changed | `TESTED_ZINGOD` | `IndexerUntested`; doesn't start zingod | "zingod 1.1.0 isn't tested with Zebra 7.1.0-alpha.0 on Testnet yet. Wallets that use your server are told to try again until Zeal updates zingod, or Zebra · Testnet runs a tested version." | a Zeal update, or a tested zebrad | `zingod-untested` |
+| no `zeal-zingod` on this system | `Options.zingod_binary` is `None` | the choice is disabled | "zingod runs on Linux only for now" | — | `zingod-absent` |
+
+A failed wallet check stays PS1's `WalletCheckFailed`. Two lines close the front door: PS1's
+`BackingStopped` and the pause for an upgrade zingod doesn't know (`gateway_mode` closes it for
+every `Paused`). Every other zingod problem is `Degraded`, so the front door stays up in
+`Unavailable` and TLS-ALPN-01 renewals go on through a long build, stall or rebuild.
+
+#### Which zebrad zingod reads
+
+PS1's node: the registry's first node (`RegistryHandle::follow_first`), on the service's
+network. zingod fetches every block from genesis from its validator and answers `GetTransaction`
+with the validator's `getrawtransaction` (`docs/running.md:112-120`;
+`packages/zingod-grpc/src/routes/transactions.rs:64-88`), so the validator must keep the whole
+chain; every zebrad 7 does (HERD.md). zingod reads zebrad's managed RPC: the address zebrad
+logged for this run (`Status.rpc_addr`) and the cookie at `NodePaths::rpc_cookie_file()`. Zeal
+always writes `cookie_path`, so zingod's own lookup (`<cache dir>/zebra/.cookie`) never runs.
+
+- **Tested pairs.** `TESTED_ZINGOD` in launcher-herd lists each zingod version with the zebrad
+  versions and networks it passed with: in Z3, 1.1.0 with zebrad 7.0.0 on Testnet; Z4 adds
+  Mainnet once its gate passes. Any other pair disables the choice at setup. For a light client
+  server already set up with zingod it is `IndexerUntested`, a `Degraded` reason, so the front
+  door stays up in `Unavailable` and renewals go on; PS1's `NotAvailable` would close it. One
+  launcher-herd test checks that the bundled `ZINGOD_VERSION` is on the list, and another that
+  the Stable `ZEBRAD_VERSION` is listed with it for each network zingod is offered on, so a pin
+  bump can't leave the pair untested without a failing test.
+- **One network, one source.** zingod doesn't check its validator's network: in a research run,
+  set to `network = "mainnet"` against a Regtest zebrad, it anchored on the Regtest genesis and
+  reported `serving` with `chain.network` `mainnet`. So Zeal writes zingod's `network`, the
+  validator's address and its cookie from the same `NodeSpec`, starts zingod only after zebrad's
+  `getblockchaininfo` chain matches the service's network, and cross-checks the served tip while
+  it runs ([Health of zingod](#health-of-zingod)).
+
+#### When zingod runs
+
+A pure rule, `public::zingod::want(facts)` in launcher-herd, says whether zingod should run;
+the runner brings the process in line at every change and every 10 s. zingod runs when all of
+these hold:
+
+1. The service is on, its consent covers zingod, zingod is the chosen backend, the pair is
+   tested, `zeal-zingod` is bundled, and no pause waits for the user.
+2. zebrad runs on the service's network, and this run has logged its RPC endpoint
+   (`Status.rpc_addr`).
+3. zebrad's cookie exists, isn't empty, and was written at or after this run's `started_at`.
+4. zebrad has been at the tip, within 2 blocks, once in this run.
+5. No zingod failure waits for the user: a refused configuration, an unreadable cookie, a
+   damaged index, a chain mismatch, a crash loop, a taken port or a held lock.
+6. The index's disk has more than the low mark free, and the upgrade gate allows it.
+
+**One zingod run per zebrad run.** zebrad writes a new cookie at every start. zingod reads its
+cookie at the first request and again only after a 401 or 403
+(`packages/zingod-source/src/rpc/client.rs:175-195, 238-243`). zebrad 7.0.0, and Zeal's Beta
+(`9889683`) and Nightly (`7ae1a82`) pins, close the connection on a wrong cookie without an HTTP
+answer (`zebra-rpc/src/server/http_request_compatibility.rs:225-227` at `v7.0.0`). In a research run
+against 7.0.0, zingod's polls failed for the rest of the run once zebrad came back; against a
+zebrad that answers 401, zingod recovered in 7 s. The 401 is Zebra commit `a1bf8a7e89`, first
+released in 7.1.0. So when zebrad's pid or start time changes, Zeal stops zingod and starts it
+again under the rule above. The rule stays after a 7.1.0 pin: zebrad's restart already made the
+server unavailable, so the extra restart costs little.
+
+**Why the RPC line.** zebrad 7.0.0 logs `RPC auth cookie written to disk` just before
+`Opened RPC endpoint at` (fixtures `zebrad-7.0.0-lightwalletd-start-shutdown.stdout.log`, lines
+56-57, and `zebrad-7.0.0-regtest-start-shutdown.stdout.log`, lines 57-58), and the supervisor
+clears `Status.rpc_addr` at every spawn (`crates/launcher-core/src/supervisor/actor.rs:532,
+779`). So once `rpc_addr` is set, this run's cookie is on disk; the time check is the backstop. A
+zingod started on the previous run's cookie would never recover.
+
+**Why the tip.** zingod can index only what zebrad has, and a first build beside a syncing zebrad
+doubles the heavy work. The wait applies after every zebrad restart too, where it is usually
+short; the panel and zebrad's Stop and Restart say so.
+
+| When | zingod |
+| --- | --- |
+| zebrad's run changes | stopped; started again under the rule |
+| zebrad stops, fails or halts | stopped; PS1's `BackingStopped` pause |
+| switched off, a pause only the user ends, a network change, "Turn off and forget", the other backend chosen | stopped; the index stays |
+| any other automatic pause (the name, the LAN address, a VPN, the cap) | keeps running, so a resume serves at once, as PS1 keeps zebrad's endpoint |
+| less than 10 GB free on the index's disk | stopped with `SIGTERM`, so the indexes commit; started again above 20 GB |
+| zingod exits on its own | [zingod's exits](#zingods-exits) |
+| Zeal quits | the front door closes first, within its 5 s cap (`src-tauri/src/exit.rs:108-111`); then zingod's stop runs beside the nodes', under the larger of the registry's cap and zingod's |
+
+#### How Zeal runs zingod
+
+- **The supervisor.** launcher-core's supervisor runs zingod as it runs zebrad: the spawner
+  thread with the process group and `PR_SET_PDEATHSIG(SIGTERM)`, the pid file with its executable
+  check (`kill_stale` ends a `zeal-zingod` an earlier Zeal left), the log ring and the rotating
+  file, the restart policy, the check of the port before the spawn and the process-tree probe.
+  The change is made in place, in one behaviour commit, with no code moves:
+  - `SupervisorConfig.command` (`crates/launcher-core/src/supervisor.rs:64`) becomes
+    `Launch { Zebrad(ZebradCommand), Zingod(ZingodCommand) }`. `From<ZebradCommand>` keeps
+    `SupervisorConfig::new(command)` as it is, and `Launch` has accessors: `binary()`,
+    `stop_is_graceful()` (used at `supervisor.rs:243`) and `zebrad_mut()`, an
+    `Option<&mut ZebradCommand>`.
+  - The callers that read or change the command's fields change mechanically in the same commit:
+    `src-tauri/src/lib.rs:296` (the registry's customize closure), and in launcher-core's tests
+    `registry.rs:118, 245`, `supervisor.rs:187, 263, 302, 772, 822` and `real_zebrad.rs:364`.
+    zebrad's tests change only in how they reach the command; their assertions stay as they are.
+  - The spawner: `Spawner::spawn`, `SpawnRequest` and `spawn_here`
+    (`crates/launcher-core/src/process.rs:237-322`) take a `Launch`. zebrad's branch is
+    today's: `-c <config> start`, the `ZEBRA_*` variables removed, the colour variables forced
+    off and the stdin-close pairing checked. zingod's branch gets `-c <config> start`, stdin null,
+    a cleared environment with its five variables (below), and no
+    stdin-close argument. `unix::prepare` takes a nice value and sets it in the same `pre_exec`
+    as the parent-death signal.
+  - The actor (`supervisor/actor.rs`): the spawn (`:456`) passes the `Launch`; the pid file
+    records `Launch::binary()` (`:509`); the "started" note names the program, "zingod started
+    (pid N)" (`:536`); and the detector, the line parser, the exit classifier and `Running` at
+    `Starting zebrad` go through a reader that `Launch` picks.
+  - Redaction before the file: `push_line` (`:825-830`) writes the raw line to the rotating file
+    before `parse_line` runs. So the reader also has a `redact` step, the identity for zebrad,
+    and `push_line` runs it first and hands the redacted text to both `log_file.write_line` and
+    the parser.
+- **The command.** `zeal-zingod -c <config> start` (`-c` is global,
+  `packages/zingod/src/cli.rs:15-54`), with stdin null and nice 10, as this document planned for
+  Zaino: zebrad gets the CPU first during the build, when zingod otherwise uses every core (rayon,
+  merges paced at 200 MiB/s).
+- **The environment is cleared**, an exception to ARCHITECTURE.md's "never `env_clear`", as
+  WALLET.md makes for Zallet. That rule keeps `PATH`, `HOME`, `SystemRoot` and `LOCALAPPDATA`
+  for zebrad on Windows; zingod runs on Linux only, and with `[snapshot]` off it starts no
+  program, so it needs no `PATH`. Zeal sets only `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and
+  `XDG_CACHE_HOME`, under `<index dir>/home`, and `RUST_LOG=zingod=info`. That keeps out:
+  - `ZINGOD_CONFIG_*`, which zingod matches without regard to case, which win over the file, and
+    of which an unknown one fails the load (`packages/zingod/src/config.rs:732-752`);
+  - a malformed `RUST_LOG`, which makes zingod exit 2;
+  - `NOTIFY_SOCKET`, so zingod never tells a service manager Zeal runs under that it is ready;
+  - allocator settings.
+
+  With every path set, zingod wrote nothing under `HOME` in the research runs.
+- **Running** starts at zingod's `Listening` line with `component=Grpc`
+  (`packages/zingod/src/daemon.rs:161`), never `component=Admin`. By then the configuration has
+  loaded, the open-file limit was raised and the port is bound; boot comes after. The line's
+  `endpoint` becomes the supervisor's `Status.lightwalletd_addr`, the field the front door and the
+  light monitor already follow.
+- **Stop.** On `SIGTERM` zingod closes its listener, sends GOAWAY, waits up to `[grpc]
+  shutdown_grace_secs` (10 s) for open connections, commits its indexes and exits 0. Measured:
+  0.05 s with no connection, 10 s with one idle h2c connection. A second `SIGTERM` doesn't
+  shorten the drain (measured, despite the comment at `daemon.rs:526`), so Zeal sends one. The
+  stop grace is 30 s (proposal), then `SIGKILL` to the process group. A killed zingod reopens its
+  indexes by checking each file's length, tail page and `.crc` (`docs/running.md:291-295`).
+- **Restarts** after a `Crash` use the supervisor's backoff: 1 s doubling to 60 s, and failed
+  after 5 crashes in 10 minutes. zingod never restarts inside its process, and expects a
+  supervisor to (`packages/zingod/src/main.rs:90-93`).
+
+| What | Where |
+| --- | --- |
+| Configuration | `<app data>/public/zingod-<network>.toml`, written whole before every start |
+| Pid file | `<app data>/public/zingod-<network>.pid` (zingod writes none) |
+| Log | `<log dir>/zingod-<network>.log`, rotated like `zebrad.log`, never mixed into zebrad's |
+| Index | `<index dir>/indexes/`: `compact_block`, `block_hash`, `tree_state`, `transparent_address` and `txid_location`, with `utxo_set` beside `compact_block` |
+| State | `<index dir>/state`, for zingod's hold and overload markers, which Zeal doesn't use |
+| Home | `<index dir>/home`, empty |
+| Binary | `zeal-zingod` beside Zeal; in an AppImage, copied to `<app data>/sidecar/zingod/<Zeal version>/` |
+
+`<index dir>` is `<the first node's data folder>/zingod/<network>`: the disk the user picked for
+chain data, and zingod asks for local storage beside its validator. The spec records it when
+zingod is first chosen (`ZingodSpec.dir`), so a later data-folder change doesn't orphan the index,
+and the panel names it. The network is in the path because an index built for one network refuses
+to open on another.
+
+#### The managed zingod.toml
+
+Every table of zingod's configuration refuses unknown keys (`deny_unknown_fields`), and one
+unknown key fails the load. So Zeal writes only keys the pinned version has, sets every path,
+and rewrites the file before every start. A test checks that every key Zeal writes is in
+`generate-config` output captured from the pin, or on a short list of keys that the pin reads
+but doesn't print, because they default to unset. At 1.1.0 that list holds only
+`[[trusted_validators]] cookie_path` (`packages/zingod/src/config.rs:89`, default `None` at
+`:114`); each bump checks the list again. Another test checks that the Mainnet and Testnet files
+always set `cookie_path` to `NodePaths::rpc_cookie_file()`. Without it, a loopback validator gets
+zingod's default lookup (`config.rs:145-148`), `<cache dir>/zebra/.cookie`, which under Zeal's
+`XDG_CACHE_HOME` doesn't exist, so zingod would send no credentials and log no error that names
+the cause. Two keys whose values are today's defaults, `validator_client` and
+`[p2p] enabled`, are written anyway, so a changed default can't turn their features on. In
+research runs this file without those two, `max_streams_per_connection` and `[grpc.overload]`
+loaded, booted and stopped with exit 0, with Mainnet and with Testnet values; all four are keys
+of 1.1.0's `generate-config` output, and the contract test boots the whole file. For Testnet:
+
+```toml
+# Managed by Zeal: rewritten before every start.
+network = "testnet"                       # from the serving node's spec; lowercase ("Testnet" is refused)
+validator_client = "legacy_rpc"           # JSON-RPC; "grpc" needs Zingo's zebra fork
+
+[[trusted_validators]]
+jsonrpc_address = "127.0.0.1:18232"       # the RPC address zebrad logged for this run
+cookie_path = "<node data>/rpc/.cookie"   # NodePaths::rpc_cookie_file()
+
+[serve]
+grpc_listen_address = "127.0.0.1:18137"   # ZingodSpec.port; loopback with no tls key: plaintext h2c
+state_dir = "<index dir>/state"
+
+[grpc]
+max_connections = 256                     # every front-door client is 127.0.0.1 to zingod,
+max_connections_per_ip = 256              # so the per-address cap is the total
+max_streams_per_connection = 16           # zingod's default is 100; front door v2's planned 16
+
+[grpc.overload]
+cpu_pressure_percent = 0                  # off: zingod reads its cgroup's PSI, which it likely
+io_pressure_percent = 0                   # shares with zebrad and Zeal (unconfirmed)
+
+[p2p]
+enabled = false
+
+[index.compact_block]
+path = "<index dir>/indexes/compact_block"
+# and the same for block_hash, tree_state, transparent_address and txid_location
+```
+
+- **Mainnet**: `network = "mainnet"`, the node's RPC port (8232 for the first node) and port
+  8137.
+- **Ports**: 8137 on Mainnet and 18137 on Testnet (proposal; zingod's own default is 8137), or the
+  next free one above, checked when written and kept in `ZingodSpec.port`. They differ from
+  zebrad's endpoint ports (9067, 19067), so both can listen during Z4's switch.
+- **Open files**: zingod raises its soft limit to the hard one, and refuses to start unless
+  `max_connections` plus 1,024 fits: 1,280 here, 5,120 with its default
+  (`packages/zingod/src/daemon/fd_limit.rs`).
+- **All five indexes on**: between them, librustzcash and pepper-sync call every indexed method
+  (`docs/client-requirements.md`); with an index off, its methods answer `UNIMPLEMENTED`.
+- **Left out, and so off:**
+  - `[serve] tls`: unset keeps zingod's loopback-only rule for plaintext. `"off"` would allow
+    plaintext on any address, and `self_signed` or certificate files would break forwarding,
+    since the front door speaks plaintext to its upstream.
+  - `trusted_proxies`: front door v1 sends no PROXY header.
+  - `[metrics]`: the admin listener has no authentication, its metrics name the validator, and
+    zingod's example puts it on 127.0.0.1:9999, zebrad's metrics port.
+  - `[snapshot]`: it downloads indexes from Zingo Labs' server through `aria2c` from `PATH`.
+  - `indexer_address`: zebrad's push streams. The bundled zebrad 7.0.0 has the indexer gRPC
+    server, which stays off until `rpc.indexer_listen_addr` is set: it logs "configure an
+    indexer_listen_addr to start the indexer RPC server" (fixture
+    `zebrad-7.0.0-lightwalletd-start-shutdown.stdout.log`, line 58), and
+    `zebrad/src/commands/start.rs:557-573` starts it with no feature gate (WALLET.md, "What
+    `indexer` does"). MULTI-NODE.md's `indexer` feature is zebra-state's spending index, which
+    Zallet needs, not this server. Leaving the key out is a choice, not an unknown: it would
+    cost one more loopback port and managed key, and zingod polls every second without it.
+  - the validator's user and password.
+- **Regtest**, for the contract test only: `network = "regtest"`. There zingod's boot waits for
+  the validator's first answer, and only there may `[sync] finalised_depth` go below 1,000
+  (`packages/zingod/src/config.rs:436-440`). A test checks that the Mainnet and Testnet files
+  never carry a Regtest-only value.
+
+#### zingod's exits
+
+zingod prints `Error: <message>` on stderr and exits 1 for a start failure, exits 2 for a
+malformed `RUST_LOG` or a runtime that couldn't start, and aborts (SIGABRT) on any panic
+(`packages/zingod/src/main.rs:33-56`). Its reader (`launcher-core/src/zingod/logs.rs`)
+classifies the last lines:
+
+An index that fails to open has no prefix of its own: `OpenIndex` prints its `StoreError`
+through transparent variants (`packages/zingod/src/error.rs:25-26`), and the held lock comes as
+`Error: manifest io: <dir>/LOCK is held by another process`. So the reader matches whole texts,
+in this order, and a rule never matches "an index that refuses to open" by prefix: that would
+class a held lock, or a refused permission at open, as `IndexBroken` and offer a Rebuild that
+deletes hours of index.
+
+| zingod's output | Class | Then |
+| --- | --- | --- |
+| `Error: configuration error: …` (exit 1); `Error: RUST_LOG: …` or `Error: tokio runtime: …` (exit 2) | `ConfigError` | no restart: zingod refused what Zeal wrote, a bug in Zeal |
+| `… grpc.max_connections = 256 needs 1280 open files … and the limit is …` | `ConfigError` | no restart; the panel names the limit to raise |
+| `Error: cannot read validator cookie <path>: <error>` | `ConfigError` | no restart; the panel names the path and the error. zingod starts with a missing or empty cookie and retries each request (`packages/zingod-source/src/endpoint.rs:154-160`; `CHANGELOG.md:35-38`), so this means the path exists and can't be read: a folder, or a permission. Restarting can't fix it |
+| `Error: binding the gRPC listener: Address already in use (os error 98)` | `PortInUse` | the next free port, once; then the user |
+| `… <dir>/LOCK is held by another process`, matched before every index text below | `DbLocked` | the user: the pid file already ended Zeal's own leftover |
+| `<index> index commit failed: disk <dir> full`, a panic, then an abort; or `No space left on device (os error 28)` or `Disk quota exceeded (os error 122)` after `index io:`, `manifest io:`, `page io:` or `segment io:` | `DiskFull` (new, deterministic) | waits for space ([Disk](#disk-memory-and-the-first-build)) |
+| `ManifestError`'s texts (`packages/zingod-persistence/src/manifest.rs:58-79`): `MANIFEST slot does not start with the zingod manifest magic`, `MANIFEST checksum mismatch`, `MANIFEST is … bytes, not this build's two-slot layout`, `MANIFEST body claims … bytes, … present`, ``directory holds `…`, expected `…` ``, `directory holds format …, this build reads format …`, ``directory was built for `…`, opened for `…` `` and `… holds data but the directory has no MANIFEST`; `PageError`'s (`pages.rs:171-177`): `… is … bytes, the durable state needs …`, `…: tail page fails its checksum` and `…: page checksums differ from the digest the manifest committed`; the panic `… page …: checksum mismatch (on-disk corruption: …)` (`pages.rs:540`); and `(resync required)` (`FollowError::Diverged`, `packages/zingod-sync/src/follower.rs:33-36`) | `IndexBroken` (new, deterministic) | the user's Rebuild |
+| any other `index io:`, `manifest io:`, `page io:` or `segment io:` text, such as a refused permission or an I/O error | `Crash` | backoff; never Rebuild |
+| anything else: exit 1 or 2, a signal, another panic | `Crash` | backoff |
+
+- The configuration, port, lock and cookie texts were captured from the binary in research runs.
+- The disk-full commit text comes from the code (`packages/zingod-persistence/src/error.rs:50-52`;
+  `packages/zingod-sync/usage.md:117`), and the one at open is the system's error after the
+  prefix; both stay unconfirmed until captured.
+- How `Diverged` reaches stderr wasn't reproduced, so the rule matches `(resync required)`
+  anywhere in the last lines.
+- The contract test captures the corruption texts by flipping a byte in a tail page.
+- zebrad's classifier doesn't change.
+
+#### Health of zingod
+
+zingod answers `GET /status` and `GET /readyz` on its gRPC port, over HTTP/1.1 or h2, from
+process start, 10 at once per connection and then one a second
+(`packages/zingod-grpc/src/health.rs`). While zingod runs, the runner reads `/status` every 5 s,
+one request per new HTTP/1.1 connection with a 2 s timeout, through hyper's client, already a
+launcher-public dependency. It keeps the answer as an `IndexerStatus` (the state, the detail,
+`chain.network`, `chain.tip`, `chain.served`, the validator counts, the alarms and
+`build.version`), parsed with unknown fields ignored and pinned to captured answers. `/readyz`
+answers 503 through a whole first sync, so Zeal doesn't read it.
+
+| zingod says | Zeal |
+| --- | --- |
+| `provisioning` | `IndexerStarting { waiting: Boot }` |
+| `syncing`, `detail {height, target, blocks_per_sec}` | `IndexBuilding { served, target, eta_secs }`, with the ETA from `blocks_per_sec` once zingod has a rate (it can be `null`); the panel says "Catching up", with no ETA, once fewer than 1,000 blocks remain (proposal) |
+| `syncing` with a `null` detail: no sync target yet (`packages/zingod/src/health.rs:263-267`) | `IndexBuilding` with no numbers: "Building zingod's index", and "an hour or more"; never `NoAnswer` |
+| `serving`, `degraded` | ready, under the rules below; zingod's `degraded` (a fresh tip no validator vouches for) keeps serving, as zingod intends |
+| `down`, `detail {reason, message}` | `IndexerDown`, with zingod's reason and message |
+| `held` | `IndexerDown`: Zeal never runs `zingod hold` |
+| no answer, three reads in a row | `IndexerDown`, "zingod isn't answering" |
+
+- **`syncing` at the tip.** zingod also says `syncing` while zebrad's mempool is off and no
+  validator's is on (`packages/zingod-grpc-snapshot/src/grpc_snapshot.rs:128-151`;
+  `docs/running.md:165`), which zingod's docs say lasts minutes after each catch-up. zingod
+  restarts with every zebrad run, so this follows every zebrad restart: `served` is at or near
+  `target`, and the panel shows PS1's "Catching up · wallets are told to try again", with no
+  ETA. The front door stays `Unavailable` until zingod says `serving`; the wallet runs record how
+  long that takes. So `IndexerStatus` keeps the syncing detail as an `Option`, with
+  `blocks_per_sec` an `Option` inside it, and captured fixtures cover both a `null` detail and
+  this state.
+- **Can't reach zebrad**: `chain.validators.answering` is 0 for 30 s. zingod's own state can't
+  say this in time: a booted zingod stays `serving` until its tip is stale, 24 target spacings,
+  about 10 minutes at NU7's 25 s, and only then reports `tip_unvouched`
+  (`docs/running.md:170-171`; `STALE_TIP_BLOCKS = 24` at
+  `packages/zingod-chainview/src/alarm_thresholds.rs:9`, used by
+  `packages/zingod-grpc-snapshot/src/grpc_snapshot.rs:154-163`). `no_validator_reachable` appears
+  only while zingod starts and waits for a validator (`readiness` in
+  `packages/zingod/src/health.rs`), which it doesn't do on Mainnet or Testnet. The documented
+  reason `tip_stale` doesn't exist in the code, so the panel shows zingod's own message for any
+  reason it doesn't know. Zeal restarts zingod once per zebrad run on this, since a missed cookie
+  change looks the same.
+- **Behind**: once ready, zingod is behind under `BackingBehind`'s constants. `served` 10 or more
+  blocks below zebrad's height at once, or more than 2 for 10 minutes, is `IndexBehind`. zingod
+  polls every second, so at the tip it should trail by about a block (unmeasured; the wallet runs
+  record it).
+- **The stall rule** (pure): `served` unchanged for 5 minutes while zebrad is 4 or more blocks
+  ahead, or 15 minutes during a build, since the indexes publish in steps. Zeal restarts zingod
+  once; if it stays stuck, `IndexerStuck` holds until it moves. An upgrade zingod doesn't know
+  would look like this ([Upgrades of zingod](#upgrades-of-zingod)).
+- **The tip cross-check**: at most once a minute while zingod is ready, the light monitor calls
+  `GetLatestBlock` on loopback and compares the hash at the served height (sent in internal byte
+  order, so reversed) with zebrad's `getblockhash` at that height, asked through launcher-core's
+  RPC client with zebrad's cookie. Three different answers in a
+  row, spanning at least 3 minutes, are `ChainMismatch`: zingod stops and Rebuild is offered. A
+  reorg clears sooner, and a height zebrad doesn't have yet is skipped. `/status` `chain.tip`
+  can't do this job: it is the tip the validator vouches for, so it always equals zebrad's. The
+  same-spec rule prevents the known cause, and zingod's own `Diverged` exit catches an index that
+  no longer extends the chain; the cross-check is the cheap backstop.
+- **The wallet check** is unchanged: Zodl's chain name, Sapling height and branch id at zingod's
+  `blockHeight`, and `blockHeight` within 2 of zebrad's height. zingod takes its schedule from its
+  `zcash_protocol` fork (`605917a3`; `packages/zingod-primitives/src/protocol.rs:26-38`), whose
+  heights and branch ids equal launcher-herd's `BRANCH_IDS`, `MAINNET_HEIGHTS` and
+  `TESTNET_HEIGHTS`. The light monitor follows zingod's endpoint only once `/status` says ready;
+  before that `IndexReady` is the failing check, and the test on this computer and Open wait.
+- **What opens the front door**: `serving` or `degraded`, within 2 blocks of zebrad, with the
+  wallet check and the cross-check clean. Everything else is `Unavailable`.
+
+#### The front door for zingod
+
+Unchanged. Its upstream is `127.0.0.1:<ZingodSpec.port>`. zingod reads the first bytes
+(hyper-util's `auto` builder), sees the HTTP/2 preface the front door forwards and serves h2c; in
+plaintext it checks neither `:authority` nor ALPN. Its pings every 30 s keep a live connection
+from tripping the front door's 10 minute idle timer, and its GOAWAYs after 30 minutes of age or
+idleness come before the front door's 2 hour cut. This is read from the code; the contract test
+confirms it through the front door.
+
+**v1 is enough for zingod** (open question 17, answered again). The reasons Zaino 0.10.2 needed
+v2 don't hold for zingod 1.1.0:
+
+- it pins h2 0.4.20 (`Cargo.lock:1554-1555`), past 0.4.16, which fixed RUSTSEC-2026-0258;
+- its port serves only `CompactTxStreamer`, `GET /status` and `GET /readyz`: no reflection, no
+  extension service, no gRPC-web;
+- it sets limits of its own (`packages/zingod-grpc/src/limits.rs`):
+
+| | zebrad 7.0.0's endpoint | zingod 1.1.0 as Zeal writes it |
+| --- | --- | --- |
+| Connections | none | 256 |
+| Streams per connection | 20 | 16 |
+| Request bodies | 4 MiB | 64 KiB; `SendTransaction` 2 MB + 1 KiB; all within 30 s |
+| Reads | nothing per method | 64 point, 32 range and 4 scan reads at once; adaptive work streams |
+| Stalled clients | 60 s, then the stream ends `OK` | 300 s unread closes the connection; 300 s silent ends the stream `UNAVAILABLE` |
+| Connection age | none (the front door's 2 h) | GOAWAY at 30 minutes ±10 %, with 10 minutes' grace; the same after 30 minutes idle |
+| Deadlines | none | `grpc-timeout` honoured |
+
+What v1 still can't do:
+
+- **Tell one client from another.** Every client reaches zingod as 127.0.0.1, so the front door's
+  per-address caps (8 connections, 2 new a second, a burst of 16) are the only per-client limits.
+  One address can take the 32 range lanes with long `GetBlockRange` calls and slow everyone else:
+  lanes queue, they don't refuse. Front door v2's per-address method limits (PS2) close that
+  gap. zingod's PROXY protocol isn't used: trusting 127.0.0.1 would make every loopback caller,
+  Zeal's own checks included, send a header within 5 s or be dropped
+  (`packages/zingod-grpc/src/proxy_protocol.rs`).
+- **Hide `/status` and `/readyz`.** Both reach the internet over h2. zingod's docs call `/status`
+  safe for the open internet (`docs/running.md:196-202`): it gives the state and its detail, the
+  network, the tips, the validator counts, the alarms, the version and the indexes, and no
+  validator address, peer, disk or mempool. On a home server two of these say more than they
+  seem to:
+  - while zingod is `serving`, the detail is its gRPC egress over the last closed UTC 10-minute
+    window, `{start, mbps}`: Mbit/s to 3 significant figures, shown as 0 under 0.1 Mbit/s, about
+    7.5 MB a window (`packages/zingod/src/telemetry/egress.rs:1-21`;
+    `packages/zingod/src/health.rs:406-414`). `/readyz` carries the same. On a server used mostly
+    by its owner, anyone who polls `https://<name>/status` learns when and how much it sends: each
+    time the owner's phone syncs, for example;
+  - an alarm can say that the validator's release reaches its end of service within a week
+    (`packages/zingod-grpc-snapshot/src/report.rs:64-67`), which dates the zebrad behind it.
+
+  The consent says so ([zingod in the UI](#zingod-in-the-ui)), and v2's allow-list drops both
+  paths.
+
+**The loopback port.** Unlike zebrad's endpoint, zingod's port answers HTTP/1.1, but only for
+`GET /status` and `/readyz`; any other path gets a 404
+(`packages/zingod-grpc/src/health.rs:120-131`), so no gRPC method can be reached over HTTP/1.1,
+and browsers don't speak h2c. zingod sends no CORS headers and checks no `Host`, so a page on
+this computer that rebinds a name of its own to 127.0.0.1 could read `/status`. As with zebrad's
+endpoint, any local program can call every method without a password, and the consent says so.
+The contract test sends an HTTP/1.1 `POST` to a gRPC path and expects a 404.
+
+**zebrad's endpoint while zingod serves: removed.** `LightwalletdKey::for_public` gives `Absent`
+while zingod is the backend, so only one plaintext loopback port exists (two during Z4's switch).
+`config::ensure` reports whether it changed the file, and `EndpointHost::apply` restarts zebrad
+only when it did: choosing zingod restarts zebrad once, to drop its endpoint.
+
+#### What wallets see from zingod
+
+`GetLightdInfo` makes no validator call (`packages/zingod-grpc/src/routes/info.rs:53-68`). It
+reports vendor `zingod`, version `1.1.0`, `lightwalletProtocolVersion` `v0.6.0`, the chain
+(`main` or `test`), the served tip as `blockHeight` and the verified best as `estimatedHeight`.
+`gitCommit`, `branch`, `buildDate`, `buildUser`, `zcashdBuild`, `zcashdSubversion` and
+`donationAddress` stay empty, so Zaino's builder-login leak doesn't exist here, and Share offers
+no donation address. `upgradeName` and `upgradeHeight` name the next upgrade above the served
+height, and are empty and 0 when there is none (`routes/info.rs:47-51, 65-66`). 1.1.0's
+schedules end at NU7 (the `zcash_protocol` fork `605917a3`,
+`components/zcash_protocol/src/consensus.rs:557-569, 591-603`), so on Mainnet and Testnet
+wallets get an empty name and height 0 until a zingod knows a later upgrade.
+
+zingod implements 19 methods (`packages/zingod-grpc/src/service.rs:48-68`), every one in
+[What wallets need](#what-wallets-need) among them. Besides the protocol rows above, a wallet may
+hit:
+
+- `OUT_OF_RANGE` at the end of a `GetBlockRange` that reaches past zingod's tip;
+- `UNAVAILABLE` for mempool calls while zebrad's mempool is off (zebrad's endpoint says
+  `INTERNAL`);
+- height 0 for an unmined or orphaned transaction, and `NOT_FOUND` from `GetTransaction` when
+  zebrad lacks the transaction;
+- `RESOURCE_EXHAUSTED` for an address walk past 100,000 rows;
+- a 64 KiB request cap, so `GetTaddressBalance` with more than about 1,500 addresses fails, where
+  zebrad allows 10,000.
+
+Whether Zodl's `validateServerEndpoint` or Zkool react to vendor `zingod`, to an empty
+`zcashdBuild`, or to an empty `upgradeName` with `upgradeHeight` 0 is unconfirmed. The wallet runs
+check it before Share names a wallet for zingod. How wallets read the spelling of a named
+upgrade matters only once a zingod knows a scheduled one, in Z4's upgrade window; the wallet runs
+for that zingod check it.
+
+#### Disk, memory and the first build
+
+- **Size.** Zingo Labs' Mainnet index snapshot at height 3,544,662 is 71.3 GB installed
+  (`snapshots.zingolabs.dev/zingod-snapshot-1.0.0/manifest.json`, read 2026-11-16):
+  `compact_block` 31.2 GB, `transparent_address` 25.5, `tree_state` 6.8, `utxo_set` 6.2,
+  `txid_location` 1.4 and `block_hash` 0.13. It grows with the chain. Testnet's size is neither
+  documented nor measured.
+- **Before the first build** the Service step needs 100 GB free on Mainnet and 50 GB on Testnet
+  on the index's disk (proposals, set from Z3's and Z4's measurements). It warns, without
+  refusing, on a network filesystem: zingod reads its indexes through mmap and asks for local
+  storage.
+- **While it runs** the runner reads the free space every 60 s. Below 10 GB it stops zingod with
+  `SIGTERM`, before a commit can fail, since a failed commit panics; above 20 GB it starts zingod
+  again (proposals). zebrad usually shares the disk, so the stop leaves it room too. The index's
+  size comes from a walk every 10 minutes, capped at 50,000 entries.
+- **Memory.** No RSS figure exists. From the code: about 674 MiB of index write buffers, up to
+  256 MiB of queue per index that lags, and the non-finalized blocks in RAM; 1 to 2 GiB is
+  likely. The Service step warns below 8 GB of RAM (proposal), and the wallet runs measure the
+  peak.
+- **Time.** The README's "about an hour on NVMe" assumes the validator on the same host; the
+  Mainnet live test allows 48 hours and uses Zingo's own zebra fork. Nothing is measured for
+  `legacy_rpc` against a stock zebrad on a desktop, so the UI estimates from the observed rate,
+  and says "an hour or more" until it has one.
+- **Load on zebrad.** zingod polls every second (`getblockchaininfo`, `getrawmempool true`,
+  `getblockhash`), and fetches the first build's blocks over up to 32 connections of the 100 that
+  zebrad's RPC admits for every client; Zeal's monitor and the explorer share the rest.
+
+#### Privacy with zingod
+
+With `[p2p]` and `[snapshot]` off, zingod talks only to the zebrad Zeal names, over loopback
+JSON-RPC. It makes no DNS lookup (the address is an IP literal), sends no telemetry and checks
+for no updates; its daemon code has no remote URL. Every wallet transaction goes to that zebrad
+as `sendrawtransaction`, after a `checkadmission` that stock zebrad answers with -32601, so the
+network sees it come from Zeal's node, as with zebrad's endpoint.
+
+- **Logs.** At `zingod=info` zingod logs no client address
+  (`packages/zingod-grpc/src/transport.rs:252-349`). It logs a `Serving` summary with counts once
+  a minute, and each minute's first failed and first unavailable request with its method. It
+  logs the txid of a transaction that wasn't accepted, at WARN
+  (`packages/zingod-chainview/src/submit/driver.rs`), so Zeal's reader replaces every `txid=`
+  value with `[txid]` before the line reaches the ring or the file: `push_line` redacts before
+  it writes ([How Zeal runs zingod](#how-zeal-runs-zingod)).
+- **Diagnostics** carry zingod's `/status`, its configuration (paths only; the cookie is a path)
+  and the last 200 of its redacted lines.
+- **Never turned on**:
+  - `[p2p]`, which would add about 8 peers from DNS seeders with a `/Zingod:1.1.0/` user agent
+    from the home address, push wallet transactions to them, and compete with zebrad for peers
+    that allow one connection per address;
+  - `[snapshot]`;
+  - `[metrics]`;
+  - a debug `RUST_LOG`.
+
+#### Resources and logs of zingod
+
+- **Resources.** The supervisor's process-tree probe feeds a `ResourceSampler`, as for nodes, so
+  the panel shows zingod's CPU, memory and disk I/O on Linux.
+- **Logs.** zingod logs logfmt on stdout, without colour off a terminal: `ts=… level=… message=…
+  component=…`, with no target. Zeal's reader takes `ts`, `level` and `message`, uses `component`
+  as the target, and keeps the other keys. The supervisor keeps its 10,000-line ring and always
+  drains stdout, which zingod writes synchronously. The panel shows the last error line and
+  "Open the log"; a live log view comes later.
+
+#### Upgrades of zingod
+
+- **zingod.** Each Zeal release bundles one pinned zingod; the next start runs the new one on the
+  existing index. An index in a format it can't open is `IndexBroken`, "from an older zingod",
+  with Rebuild, and the release notes say so. A pin moves with the checklist in SIDECARS.md.
+- **The network.** zingod compiles in the Mainnet and Testnet schedules from its `zcash_protocol`
+  fork: NU7 at 3,543,405 on Mainnet and 4,465,026 on Testnet, and nothing after. A transaction
+  with a branch id the build doesn't know fails to parse
+  (`packages/zingod-source/src/decode.rs:128-139`), so indexing would stop at the activation
+  height (inferred from the code, not exercised), and each upgrade after NU7 needs a new zingod
+  and a Zeal release. So, as this document planned for Zaino:
+  - `ZINGOD_KNOWS` in launcher-herd lists the upgrades each tested zingod knows (Overwinter to
+    NU7 for 1.1.0), compared with zebrad's `NodeDetails.upgrades`, which `follow_first` then also
+    hands out;
+  - an active upgrade zingod doesn't know: zingod isn't started, and the service pauses
+    (`BuildTooOld`) until a Zeal update (Z3);
+  - a scheduled one: no opening within 7 days of it, a countdown from 14 days, and a pause at
+    activation minus one, so wallets get an error instead of a frozen chain (Z4). Days come from
+    zebrad's heights and the target spacing.
+- **zebrad.** zingod needs Zebra 7.0.0 or later (its CHANGELOG). When zebrad reaches its end of
+  support it stops, which stops zingod: PS1's `BackingStopped`.
+
+#### Removing zingod's index
+
+- **"Turn off and forget"** gains "Delete zingod's index (41 GB in /mnt/zebra/zingod/testnet)",
+  ticked: the index holds nothing of the user's and rebuilds from zebrad's chain.
+- **Switching back to Zebra's built-in server** stops zingod and keeps the index, so switching
+  again is quick; the panel shows its size with [Delete].
+- **Rebuild and Delete** stop zingod, then remove `indexes/` and `state/` inside the recorded
+  folder, in a blocking task, naming anything they can't remove. They have their own path rules:
+  `delete_node_data` refuses any folder not named `state`
+  (`crates/launcher-core/src/firstrun.rs:420`). Deletion waits for zingod's stop, since its
+  `LOCK` files hold the folders.
+- **The first node** can't be removed while a light client server is set up
+  (`NodeError::ServesPublic`), so the index never goes with its data folder unasked.
+- **UNINSTALL.md** names the folder.
+
+#### zingod in the UI
+
+The consent screen gains the choice before the tick, because what becomes public depends on it:
+
+```text
+Which server answers wallets?
+ (•) Zebra's built-in server · experimental
+     Serves as soon as Zebra · Testnet is at the tip, with no extra disk.
+     Sends no transparent data; newer Zingo releases refuse it.
+ ( ) zingod 1.1.0, by Zingo Labs · experimental · bundled with Zeal
+     The current light wallet protocol, with transparent data and fees.
+     Builds its own index first, which can take hours, and needs 50 GB free on
+     /mnt/zebra (412 GB free).
+```
+
+On Mainnet before Z4 the second choice is disabled, with "zingod is being tested on Testnet
+first"; without `zeal-zingod`, "zingod runs on Linux only for now". The Zingo sentence ships only
+once the wallet runs confirm it. With zingod chosen, the first, second and last lines below take
+the place of PS1's software line, its "experimental" line and its port line, and the index and
+status lines join the list. PS1's Zebra port line also shows, but only during Z4's switch, when
+both ports are open:
+
+- "every wallet that connects is told it is zingod 1.1.0";
+- "zingod is experimental: Zingo Labs say it is in development and not for production Mainnet
+  use. They publish no binaries, so Zeal builds it from their source";
+- "zingod keeps its own index of the chain on /mnt/zebra, about 71 GB on Mainnet";
+- "while it serves, your server's status page is public: its state, its version, its block
+  heights and how much it sent in each 10 minutes";
+- "while the light client server is switched on, including during setup and automatic pauses,
+  programs on this computer can use zingod's port without a password. Web pages in a browser
+  can't use its wallet methods, but they can read its public status".
+
+The consent records the backend (`Consent.backend`), so choosing the other one later asks again;
+a "Server software…" button beside "Turn off and forget…" does that. The panel has no menu as
+built (`ui/src/components/public_services.rs:879` is a plain button), so Z3 adds none.
+`CONSENT_VERSION` doesn't change, so no open service pauses for this release.
+
+Step 2 with zingod:
+
+```text
+ ✓ Zebra · Testnet 7.0.0 with zingod 1.1.0 is a pair Zeal tested
+ ✓ zingod knows every upgrade Zebra · Testnet lists
+ ✓ 412 GB free on /mnt/zebra: zingod's index needs 50 GB here
+ ✓ Zebra · Testnet is at the tip
+ ✓ zingod 1.1.0 is running, reading Zebra · Testnet
+ ● Building zingod's index: block 1,204,331 of 4,612,000 (26 %), about 5 h left
+     Wallets can't use your server until this is done. Quitting Zeal pauses it, and it
+     goes on where it stopped.
+ ○ zingod's tip matches Zebra's
+ ○ zingod answers the wallet check
+```
+
+The setup goes on while the index builds, as it does while zebrad syncs; the test on this
+computer and Open wait for it. The status panel's first line follows
+[the table above](#what-can-go-wrong-and-what-the-user-sees), and a **Server** card joins
+Reachability, Certificate and Use:
+
+```text
+ ┌ Server ───────────────────────────┐
+ │ zingod 1.1.0 · serving            │
+ │ block 4,612,019 · Zebra 4,612,019 │
+ │ index 18.4 GB in /mnt/zebra       │
+ │ 1.4 GB memory · 3 % CPU           │
+ │ [Open the log]  [Rebuild…]        │
+ └───────────────────────────────────┘
+ Zebra at block 4,612,019 · zingod 127.0.0.1:18137 · front door running
+```
+
+- The dashboard card and the banner on the node's pages show the same first line; the sidebar's
+  facts don't change.
+- The serving zebrad's header says "zingod reads this node", and its Stop and Restart say "zingod
+  restarts with Zebra and waits for it to reach the tip: wallets are told to try again
+  meanwhile".
+- Every sentence comes from typed facts in `ui/src/public_text.rs`; the choice uses
+  `RadioChoice`.
+- **Mock flags** (`ui/src/mock/public.rs`, listed in `ui/src/mock.rs` and ui/README.md):
+  `?public=zingod-choose` (the consent screen with both choices), `zingod` (serving),
+  `zingod-building-early` (`syncing` with a `null` detail), `zingod-catchup` (`syncing` at the
+  tip while zebrad's mempool is off) and the flag of each row in
+  [the table above](#what-can-go-wrong-and-what-the-user-sees). Each builds
+  facts from captured `/status` answers and runs launcher-herd's real rules. Screenshots come
+  from the headless-Chromium workflow.
+
+#### Types and commands for zingod
+
+```rust
+// launcher_types::public
+pub enum LightBackend { #[default] ZebradEndpoint, Zingod }      // snake_case on the wire
+PublicServiceSpec {
+    #[serde(default)] pub backend: LightBackend,
+    #[serde(default)] pub zingod: Option<ZingodSpec>,            // kept after switching back
+    // backend_port stays zebrad's endpoint port
+}
+pub struct ZingodSpec { pub port: u16, pub dir: PathBuf }          // recorded when first chosen
+Consent { #[serde(default)] pub backend: LightBackend }           // a consent covers one backend
+StepAnswer::Backend { backend: LightBackend }
+CheckId: ZingodTested, UpgradesKnown, IndexSpace, IndexReady, TipMatches
+                                // beside ZebradTested, AtTip, EndpointOpened and WalletCheck
+Finding: UntestedZingod { version: String, zebrad: String, network: Network },
+    UpgradeUnknown { upgrade: String, height: Option<u64> },
+    IndexSpace { path: PathBuf, free_bytes: u64, need_bytes: u64 },
+    NetworkFilesystem { path: PathBuf },                          // a Warn
+    LowMemory { total_bytes: u64, want_bytes: u64 },              // a Warn
+    IndexBuilding { served: Option<u64>, target: Option<u64>, eta_secs: Option<u64> },
+                                                                  // a Warn, like zebrad's Syncing
+    ChainMismatch { at: u64 }, IndexerPortTaken { ports: Vec<u16> }
+DegradedReason: IndexerStarting { waiting: IndexerWait },         // ZebradTip, Boot, Backoff
+    IndexBuilding { served: Option<u64>, target: Option<u64>, eta_secs: Option<u64> },
+    IndexBehind { blocks: u64 },
+    IndexerDown { why: DownReason },                              // Zingod { reason, message }, NoAnswer, NoValidator
+    IndexerUntested { version: String, zebrad: String, network: Network },
+    IndexerStuck { at: u64, zebrad_at: u64 }, IndexBroken,
+    IndexerFailed { class: ExitClass, detail: FailDetail },
+    ChainMismatch { at: u64 }, DiskLow { free_bytes: u64 }
+pub enum FailDetail { None, Ports { tried: Vec<u16> }, Dir { path: PathBuf },
+    OpenFiles { needed: u64, limit: u64 }, Cookie { path: PathBuf, error: String } }
+PauseReason::BuildTooOld { upgrade: String, height: u64 }
+PublicStatus { pub indexer: Option<IndexerStats> }
+pub struct IndexerStats { version, phase: Phase, status: Option<IndexerStatus>, dir, index_bytes,
+    free_bytes, resources: Option<IndexerResources>, last_exit: Option<ExitInfo> }
+pub struct IndexerResources { rss_bytes: u64, cpu_millicores: u32, read_bytes: u64,
+    written_bytes: u64 }                                          // integers only
+pub struct IndexerStatus { state, served, tip, target: Option<u64>,
+    milli_blocks_per_sec: Option<u64>, network, trusted, answering, alarms, version }
+                                                                  // zingod's /status, parsed
+// launcher_types: ExitClass gains DiskFull and IndexBroken, both deterministic
+```
+
+- **Findings.** A check that fails or warns carries its facts only in its `Finding`, and
+  `CheckOutcome::Running` has none, so each sentence of the Service step has a variant above:
+  the untested pair, the unknown upgrade, the free and needed space, the network-filesystem and
+  memory warnings, the build's progress, a mismatch at a height and the ports tried. Each has a
+  sentence in `public_text.rs` and a serde round-trip test.
+- **`Eq` stays.** `PublicStatus` and launcher-herd's `Facts` derive `Eq`, and `NodeResources` and
+  zingod's `blocks_per_sec` are floats. So the runner turns the `ResourceSampler`'s figures into
+  integers (`IndexerResources`) and the rate into milli-blocks a second, and herd facts carry only
+  those.
+- **Failure details.** The panel's lines for a failed zingod name the ports tried, the folder,
+  the open-file limit to raise, or the cookie and its error; `FailDetail` carries them from the
+  reader's classification.
+
+The names say "indexer" where the code doesn't depend on zingod, so a node kind can take them
+over.
+
+- **The runner.** `ZingodRunner` (`launcher-public/src/zingod.rs`), a child of the service actor,
+  owns zingod's supervisor (stop grace 30 s, the pid file, the log). It takes a
+  `watch<Option<ZingodPlan>>` (the configuration, the port and zebrad's run) and acts on every
+  change, so nothing is lost or replayed. Rebuild and Delete come on an mpsc, each with a oneshot
+  reply. It publishes a `watch<ZingodFacts>`: the supervisor's status, the `IndexerStatus`, the
+  resources, the free space, the index's size and since when it stalled. No locks; zingod's own
+  `std::sync::Mutex` stays inside its process.
+- **The service actor** adds the runner's facts, runs `want()` and the new rules, picks the front
+  door's upstream and the light monitor's endpoint by backend, and stops zingod after the front
+  door goes `Unavailable`.
+- **Options** gains the launcher's `Paths` and `zingod_binary: Option<PathBuf>`, `None` where no
+  `zeal-zingod` is bundled. `src-tauri/src/sidecar.rs`'s `resolve` takes a `Sidecar` key,
+  `Zebrad(channel)` or `Zingod`, changed in place, with the AppImage copy-out per key.
+- **Commands**: `rebuild_public_index` and `delete_public_index` are new;
+  `forget_public_service` gains `remove_index`; `open_path` opens zingod's log. Each goes in
+  `COMMANDS` in `src-tauri/build.rs` and in `capabilities/main.json`, and the actor checks it
+  again. "Try again" is `run_public_checks(Service)`, which clears a failure that waits for the
+  user.
+- **The exit flow** (`src-tauri/src/exit.rs`): the front door closes first, as today; then
+  zingod's stop and the registry's run side by side under the larger cap.
+- **Diagnostics**: `copy_diagnostics` adds zingod's status, configuration and log tail.
+
+#### Tests for zingod
+
+- **Pure rules** (launcher-herd, native and wasm): `want()` over tables of facts, each condition
+  turned off alone; one zingod run per zebrad run; the stall rule's two windows and its single
+  restart; the disk hysteresis; the cross-check's three in a row; every `/status` state mapped;
+  the Service step's checks for both backends; a consent for one backend not covering the other;
+  `DEFAULT_BACKEND`; `TESTED_ZINGOD` holding the bundled `ZINGOD_VERSION` with the Stable
+  `ZEBRAD_VERSION`; the upgrade gate; `gateway_mode` keeping the front door up for every zingod
+  problem but `BackingStopped` and `BuildTooOld`, an untested pair included.
+- **The adapter** (launcher-core):
+  - the configuration for both networks against a golden file, every key present in
+    `tests/fixtures/zingod-1.1.0-generate.toml` or on the list of unprinted keys
+    (`cookie_path`), `cookie_path` always set to the node's cookie, every path absolute, and no
+    Regtest-only value on Mainnet or Testnet;
+  - the environment: a fake that prints its own sees only the five variables, so
+    `ZINGOD_CONFIG_SYNC__CONCURRENCY`, `zingod_config_x`, `NOTIFY_SOCKET` and a bad `RUST_LOG`
+    never reach the child;
+  - the logfmt reader; `Running` at `Listening` with `component=Grpc`, not `Admin`;
+  - each exit class, from captured lines, with the held lock classed `DbLocked` and a refused
+    permission at open `Crash`, never `IndexBroken`;
+  - the txid redaction, read back from both the ring and the log file's contents;
+  - zebrad's lines reaching the file unchanged.
+- **The runner against fakes** (launcher-public, under `tokio::time::pause`). `fake-zingod`, a
+  launcher-core bin beside `fake-zebrad`:
+  - reads its `-c` file and refuses an unknown key with zingod's `unknown field` message;
+  - binds `grpc_listen_address`, prints zingod's lines, answers `/status` and `/readyz` over
+    HTTP/1.1 from captured JSON and `GetLightdInfo` and `GetLatestBlock` over h2c, and stops on
+    `SIGTERM`;
+  - plays, through `FAKE_ZINGOD_MODE`: syncing then serving, stuck, a wrong tip hash, no
+    validator answering, each classified exit, an abort, and a `SIGTERM` it ignores;
+  - reads the cookie once and again only after a 401, as 1.1.0 does. `fake-zebrad` gains a mode
+    that closes the connection on a wrong cookie, as 7.0.0 does, so the fast tests prove that the
+    restart on a new zebrad run is what brings zingod back;
+  - reports `ZINGOD_VERSION`, read with `include_str!`, which a cargo test checks
+    (`check-versions.sh` runs before anything compiles, so it can't).
+
+  `fake-zebrad` answers only five methods today (`crates/launcher-core/src/bin/fake-zebrad.rs:856`),
+  so Z2 also teaches it `getblockhash`: a hash derived from the height, up to its tip, and an
+  error above it. fake-zingod's `GetLatestBlock` sends the same hash in its normal modes and a
+  different one in the wrong-hash mode.
+- **The service actor against fakes** (Z3, launcher-public, under `tokio::time::pause`), for the
+  tip cross-check: three different hashes over 3 minutes give `ChainMismatch` and stop zingod;
+  one or two, as in a reorg, clear; a height above fake-zebrad's tip is skipped.
+- **Contract** (`crates/launcher-public/tests/real_zingod.rs`, ignored by default like
+  `real_light_server.rs`; `ZEBRAD_BIN`, `ZINGOD_BIN`). A Regtest zebrad through the supervisor,
+  the real `zeal-zingod` through the runner with Zeal's configuration, and the real front door with
+  a test certificate. It checks that:
+  - `/status` reaches `serving`;
+  - `GetLightdInfo` says `zingod`, `v0.6.0` and `regtest` (zingod's name for Regtest; zebrad says
+    `test`);
+  - `GetLatestBlock` equals zebrad's height and hash;
+  - a `GetBlockRange` streams to a slow client, on loopback and through the front door;
+  - after a zebrad restart zingod's polls fail with the stale cookie, and the rule brings it back
+    within 60 s;
+  - `SIGTERM` exits 0 within the grace, with and without an open connection;
+  - a second zingod on the index gets `DbLocked`, a taken port `PortInUse`, an unknown key
+    `ConfigError`, and a flipped tail-page byte `IndexBroken`;
+  - a `SIGKILL` mid-build reopens and serves;
+  - an HTTP/1.1 `POST` to a gRPC path gets a 404;
+  - a `ZINGOD_CONFIG_NETWORK` in the test's environment doesn't reach zingod, and nothing is
+    written outside the configured folders.
+
+  Its capture mode writes the fixtures. CI runs it on pushes to `main` and on pull requests that
+  change `ZINGOD_*`, `ZEBRAD_VERSION`, `ZEBRAD_COMMIT`, zingod's adapter or runner, or the front
+  door. Where its binaries come from:
+  - **zingod.** `build-zingod.sh` installs nothing that fails the 2.35 glibc floor, a build on
+    the `ubuntu-24.04` runner itself needs `GLIBC_2.39`, and the runner has no `protoc`. So the
+    test takes zingod from `ci.yml`'s `zingod-sidecars` call (`attest: false`), which builds in
+    `ubuntu:22.04`; `zingod-gate` says run for these changes too. A binary built there runs on
+    the 24.04 host.
+  - **zebrad**, from `fetch-zebrad-linux.sh --target <triple>` on the host, which keeps cosign,
+    gh and its checks there, as `real-zebrad` does.
+  - **Both Linux targets.** The `real-zingod` job needs `zingod-sidecars` and runs on
+    `ubuntu-24.04` and `ubuntu-24.04-arm`, each leg with its target's `zingod-<triple>`. The
+    aarch64 leg is what the Mainnet gate's first item needs.
+
+  To settle when it is written (unconfirmed): whether a Regtest chain reaches `serving`, and
+  whether the pinned zebrad's `generate` mines the blocks the test needs.
+- **Wallet runs** (RELEASING.md), on a real home connection, before zingod is offered on a
+  network: Zingo through a scripted `zingo-cli` (a new wallet, an old birthday, a send with a
+  memo), which zebrad's endpoint can't serve; Zodl and Zkool by hand, where builds for the network
+  exist. Each run records the index build time, its size, zingod's peak memory, zebrad's CPU under
+  zingod's polls, the first wallet sync, the tip lag and the bytes sent.
+
+#### Phases for zingod
+
+These replace PS5. Each is one pull request or a short series, with its tests, mock flags and
+screenshots, and ARCHITECTURE.md updated for what landed. Z1 and Z2 change nothing users see and
+can land beside the explorer, herd and resources work; only Z2's `Launch`, in the supervisor and
+the spawner, touches shared code. None of them needs front door v2 (PS2) or MULTI-NODE phase 5.
+
+| Phase | Ships | Needs |
+| --- | --- | --- |
+| **Z1 Bundle** | the `ZINGOD_*` pins; `build-zingod.sh` and `bump-zingod.sh`; `zingod-sidecars.yml` with its checks and attestation; the source archive on each release; `zeal-zingod` and its licences in the Linux bundles; a minimal `fake-zingod` for `dev-sidecar.sh`. Nothing runs it yet | — |
+| **Z2 Supervise** | `Launch` and the zingod reader in the supervisor; the configuration writer; `DiskFull` and `IndexBroken`; the pure rules; the runner; `fake-zingod`'s modes and fake-zebrad's stale-cookie mode; `real_zingod.rs` in CI. No UI | Z1 |
+| **Z3 Choose (Linux, Testnet)** | the types; the backend on the consent screen and in the setup; the service actor's and the app's wiring; the disk, stall, cross-check and active-upgrade rules; Rebuild, Delete and Forget's box; the Server card, banners and mock flags; `TESTED_ZINGOD` = 1.1.0 with zebrad 7.0.0 on Testnet. Switching an open service means "unavailable" until the index is built | Z2; the Testnet wallet run before the release |
+| **Z4 Mainnet** | the gate below; `TESTED_ZINGOD` gains Mainnet; the disk and memory numbers from measurements; the scheduled-upgrade countdown and pause; the consent's Mainnet line; Share naming the wallets the runs confirmed; switching while Zebra's endpoint keeps serving; the default for new setups, as the maintainer decides | Z3 and the gate |
+| **Z5 macOS** | `zingod-sidecars.yml` on `macos-15` and `macos-15-intel` (Xcode command line tools for jemalloc's `sh` and `make` and libproc's bindgen, protoc); a `tauri.macos.conf.json` with four `externalBin` entries; the contract test on both macOS runners, in `bundle.yml`, where both binaries are already built: `fetch-zebrad-linux.sh` is Linux only and a macOS zebrad takes 30 to 60 minutes to build uncached, so the job takes that run's `zebrad-stable-<triple>` and `zingod-<triple>` artifacts; `kern.maxfilesperproc` checked against zingod's 1,280 | PS3; the build passing |
+
+**The Mainnet gate (Z4):**
+
+1. `real_zingod.rs` passes on both Linux targets at the pins: both legs of Z2's `real-zingod`
+   job.
+2. A Testnet light client server ran on zingod for 14 days on a home server, with no pause, crash
+   loop or stall caused by zingod, and the Testnet wallet runs passed through the front door.
+3. A Mainnet first build was measured on a desktop (the time, the peak memory, the index's size
+   and zebrad's CPU), and the disk and memory numbers above were set from it.
+4. The Mainnet wallet runs pass.
+5. The maintainer confirms v1 for Mainnet with zingod.
+
+**Switching while serving (Z4).** Zebra's endpoint keeps serving on its port while zingod builds
+on its own. Once zingod has served within 2 blocks for 10 minutes with every check clean, the
+front door's upstream moves to zingod (a mode change, so open connections close and wallets
+reconnect). Then zebrad's key goes, with one zebrad restart and zingod's after it: about a minute
+of "unavailable", measured in Z4. Back to Zebra reverses it; the index stays until deleted.
+
+**Later**, each its own pull request:
+
+- Windows, after upstream's portability changes.
+- zingod as a registry node kind, with MULTI-NODE phase 5: the `Launch` reader becomes its
+  adapter, `IndexerStatus` its status, and `RegistryHandle::follow(id)` its link to the zebrad it
+  reads.
+- A live log view (`subscribe_public_logs` over `bridge::forward_logs`).
+- PROXY v2 from the front door, with `trusted_proxies = ["127.0.0.1/32"]` and v2 `LOCAL` headers
+  on Zeal's own probes, so zingod's per-address limits see each client.
+- zebrad's push streams (`indexer_address`), with `rpc.indexer_listen_addr` as one more managed
+  loopback key, once the contract test covers them.
+- A per-index rebuild from `zingod verify`, and choosing the index's folder.
+- A weekly fetch-and-advisory run, and a watcher for zingod releases.
+- No restart with zebrad for zebrad 7.1.0 and later.
+
+#### Upstream asks for zingod
+
+- Release binaries with signed checksums or attestations, and annotated tags. The image's
+  revision label names the release commit's parent.
+- A setting that leaves the egress figure out of `/status` and `/readyz`, or one that answers
+  health only on the admin listener: on a home server the egress tells when the owner syncs.
+- Read the cookie again when a request fails with no HTTP answer: zebrad before 7.1.0 closes the
+  connection instead of answering 401.
+- Windows portability: `cfg` gates for `std::os::unix` (`FileExt`, `MetadataExt`), `statvfs`,
+  `tokio::signal::unix` and sd-notify; jemalloc off MSVC; directory fsync.
+- macOS in CI.
+- A second signal that ends the drain, as the comment at `daemon.rs:526` says.
+- Docs: `tip_stale` in `docs/running.md`, which the code reports as `tip_unvouched`, and the index
+  default in `config.rs:322`'s comment.
+- A `NOTICE` file and the full licence text.
+- A Testnet index size.
+- Fork dependencies on refs that can't disappear, or mirrors of them.
 
 ### lightwalletd
 
@@ -811,11 +1583,11 @@ Tests assert each one:
 2. **Less exposure is one click; more is the guided steps**, and opening re-runs every gate in
    the backend at that moment.
 3. **Nothing reaches the light client backend before "Open to the internet"** (zebrad's
-   endpoint, or Zaino from PS5): until then the front door answers only Let's Encrypt's
+   endpoint, or zingod): until then the front door answers only Let's Encrypt's
    challenge and this computer. zeeder answers the internet only after its own Open.
 4. **No public listener outlives Zeal.** The front door runs inside Zeal's process, so it
-   closes when Zeal exits or crashes, on every system. zebrad's endpoint listens on loopback
-   only, and on Linux PDEATHSIG ends zebrad with Zeal. zeeder has no stop on stdin close, so
+   closes when Zeal exits or crashes, on every system. zebrad's endpoint and zingod listen on
+   loopback only, and on Linux PDEATHSIG ends both with Zeal. zeeder has no stop on stdin close, so
    its public mode starts on Linux, where PDEATHSIG ends it. Router mappings are deleted on
    pause and quit, and recorded so a crash's leftovers go at the next start.
 5. **"Reachable from the internet" needs evidence**, shown with its source and age.
@@ -850,8 +1622,8 @@ and Next stays disabled until the gates pass.
    runs), assigns the endpoint's loopback port and restarts zebrad with it. Gates: the zebrad
    is on Zeal's tested list (in PS1, the bundled 7.0.0); zebrad logged
    `Opened lightwalletd gRPC endpoint at` with the assigned address; `GetLightdInfo` answers on
-   loopback with zebrad's chain and branch id. From PS5 the step adds and starts the Zaino node
-   instead, with Zaino's gates ([Later: Zaino](#later-zaino-as-the-backend)). The setup goes on
+   loopback with zebrad's chain and branch id. With zingod chosen the step starts zingod instead,
+   with its own checks ([zingod in the UI](#zingod-in-the-ui)). The setup goes on
    while zebrad syncs ("Zebra · Mainnet is 82 % synced. Wallets can use your server once it
    reaches the tip, in about 9 hours"). Seeder: Zeal reuses the census node or adds one. Gates:
    `zeal-zeeder` exists here; it knows every upgrade the bundled zebrad schedules; the crawler
@@ -911,10 +1683,10 @@ and Next stays disabled until the gates pass.
    `GetLightdInfo` and `GetLatestBlock` through it. Gates: Zodl's checks (chain name; Sapling
    activation 419,200 on Mainnet, 280,000 on Testnet; the branch id for that height); a height
    within 2 of zebrad's. The step shows what wallets will be told: vendor, version, Zebra's
-   build and subversion (with Zaino, also its build user and any donation address).
+   build and subversion (with zingod, its vendor and version, and no build user).
 9. **Open to the internet**, the only button that makes a service public. The backend re-runs
    every gate and refuses with the failing one (`OpenError { check }`). Light client server:
-   zebrad is at the tip for 10 minutes (with Zaino, Zaino within 2 blocks of its archive too);
+   zebrad is at the tip for 10 minutes (with zingod, zingod within 2 blocks of zebrad too);
    the front door goes to `Open`; then the **hairpin test**, a TLS connection from this
    computer to the WAN address, which can't run earlier because a hairpinned connection arrives
    from a LAN address. Success proves the forward; failure proves nothing (no NAT loopback),
@@ -932,9 +1704,7 @@ and Next stays disabled until the gates pass.
     for the seeder).
 11. **Share.** Light client server: Zodl `zec.example.com:443` (Custom, Manual mode), Zingo and
     Zkool `https://zec.example.com:443`, with the real external port, Copy buttons and a QR
-    code; with Zaino, optionally a donation address, a validated unified address every wallet
-    sees, with the warning that it links the server to that wallet (zebrad's endpoint has no
-    field for one). Seeder: the
+    code; no donation address, since neither zebrad's endpoint nor zingod sends one. Seeder: the
     `initial_mainnet_peers` line for nodes elsewhere, the duties, "not for Zebra's default
     list".
 
@@ -1059,7 +1829,7 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
   the bare address gets no certificate (DNS and the logs still link them).
 - **Files**: accounts in `<app data>/public/acme/`, and per name
   `<app data>/public/certs/<name>/` (`cert.pem`, `key.pem`, `ari.json`, `attempts.json`), so
-  running the setup again, or moving the service to Zaino, orders nothing. Keys are 0600 on
+  running the setup again, or switching the server software, orders nothing. Keys are 0600 on
   Unix and under the per-user AppData ACL on Windows, a key others can read is refused, and
   every write is atomic.
 - **Expiry**: the panel shows the days left and the next window; a banner 14 days before expiry
@@ -1074,7 +1844,7 @@ No-IP isn't offered: free names need a manual confirmation every 30 days.
 | --- | --- | --- | --- | --- |
 | light client server, TLS-ALPN-01 | 443 (9067 with DNS-01, PS6) | 8443 (`PublicTls`) | TCP | the front door, in Zeal, on `[::]`, IPv6-only off through `socket2` (Windows defaults to on) |
 | zebrad's light-wallet endpoint | never | loopback `127.0.0.1:9067`, Testnet `:19067` (`Grpc`), only while the service is on | TCP | zebrad |
-| Zaino gRPC, metrics (PS5) | never | `127.0.0.1:8137`, `:9998` | TCP | zainod |
+| zingod gRPC, `/status`, `/readyz` | never | loopback `127.0.0.1:8137`, Testnet `:18137` (`ZingodSpec.port`), only while zingod runs for the service | TCP | zingod |
 | DNS seeder | 53 | 1053 (`Dns`) | UDP, TCP | zeeder on the LAN address |
 | zeeder metrics, health | never | assigned loopback ports | TCP | zeeder |
 | zeeder crawler | never (#106) | 8233 or 18233, HERD.md's fixed claim | TCP | zeeder |
@@ -1179,9 +1949,9 @@ Zeal shows each step before the system asks, and never elevates without a click.
 
 | Watch | Every | When it fails | Comes back |
 | --- | --- | --- | --- |
-| zebrad's branch id by `GetLightdInfo`, every 10 min (with Zaino also: within 2 blocks of its archive and not stuck, by `GetLatestBlock` every 10 s) | 10 min; 10 s with Zaino | `Degraded`: the front door says "unavailable" | by itself, after 5 min caught up |
-| zebrad (with Zaino, its archive) running and at the tip | on change | `Degraded` while it restarts or catches up: 10 or more blocks behind at once, more than 2 only after 10 min, since zebrad's estimate of the tip grows by one every 75 s after the tip block's time and an ordinary gap between blocks puts it 3 ahead; paused if stopped or halted at end of support | by itself, as soon as it is within 2 |
-| an upgrade the serving software doesn't know, at activation minus one | each block | paused (`BuildTooOld`): zeeder, and Zaino from PS5; on Mainnet zebrad halts at its end of support instead; on Testnet zebrad never halts (`zebrad/src/components/sync/end_of_support.rs:53-60`), so one that doesn't know the upgrade stays at the block before it, and the tip watch keeps the front door `Unavailable` until a Zeal update brings a newer zebrad | after a Zeal update |
+| zebrad's branch id by `GetLightdInfo`, every 10 min (with zingod also: `/status`, within 2 blocks of zebrad, not stuck, the tip cross-check; [Health of zingod](#health-of-zingod)) | 10 min; 5 s with zingod | `Degraded`: the front door says "unavailable" | by itself, after 5 min caught up |
+| zebrad running and at the tip | on change | `Degraded` while it restarts or catches up: 10 or more blocks behind at once, more than 2 only after 10 min, since zebrad's estimate of the tip grows by one every 75 s after the tip block's time and an ordinary gap between blocks puts it 3 ahead; paused if stopped or halted at end of support | by itself, as soon as it is within 2 |
+| an upgrade the serving software doesn't know, at activation minus one | each block | paused (`BuildTooOld`): zeeder, and zingod; on Mainnet zebrad halts at its end of support instead; on Testnet zebrad never halts (`zebrad/src/components/sync/end_of_support.rs:53-60`), so one that doesn't know the upgrade stays at the block before it, and the tip watch keeps the front door `Unavailable` until a Zeal update brings a newer zebrad | after a Zeal update |
 | the name equals the WAN address, at the authoritative servers | 5 min | paused after 15 min | by itself |
 | the LAN address unchanged | 5 min, at start | paused at once | when the forward or address is right again |
 | no VPN on the route to the internet | 5 min | paused | by itself |
@@ -1192,8 +1962,8 @@ Zeal shows each step before the system asks, and never elevates without a click.
 | Zeal quits or crashes | — | everything public stops; mappings deleted (after a crash, at the next start) | at launch, if "resume when Zeal starts" is on and the gates pass |
 
 Problems that clear themselves keep the front door up in `Unavailable`, so wallets get a clear
-error and TLS-ALPN-01 renewals still work: a long stall of the backend, such as Zaino's at an
-upgrade, must not let the certificate expire. Problems with the exposure itself (the LAN
+error and TLS-ALPN-01 renewals still work: a long stall of the backend, such as zingod's first
+index build, must not let the certificate expire. Problems with the exposure itself (the LAN
 address, the name, a VPN, the cap, the user, a too-old build) close it. The network checks and
 the name's resolution keep running through a pause that ends by itself, so it sees its cause
 clear: a VPN going down, the name pointing here again (until a resolution says so the pause
@@ -1201,8 +1971,8 @@ for the name holds). A pause only the user ends stops them. **Pause**, the switc
 off, stops the front door or zeeder and deletes the mappings, and removes zebrad's endpoint
 with a restart of zebrad ([How Zeal runs it](#how-zeal-runs-it)); **Resume** re-runs what the
 pause may have changed. **Turn off and forget** also offers to delete Zeal's DNS records, the
-token and the firewall rule, asks whether to keep a Zaino or zeeder node for local use, and
-says: "Your address stays in DNS history
+token, the firewall rule and zingod's index, asks whether to keep a zeeder node for local use,
+and says: "Your address stays in DNS history
 services, and the name in public certificate logs." It also lists what Zeal didn't add and
 can't remove. The router forward (TCP 443 → 192.168.1.20:8443, or UDP and TCP 53 → 1053), with
 the vendor guide's page for it. On Linux, the command that reverses the firewall step:
@@ -1216,8 +1986,9 @@ reachable from the internet.
 ### The light client server's limits
 
 zebrad's endpoint sets a few limits of its own ([above](#what-zebrads-endpoint-serves)) and
-none per client, Zaino 0.10.2 sets none, and behind the front door both see every client as
-127.0.0.1, so the limits live in the front door: **v1** (PS1) forwards decrypted bytes and
+none per client, zingod sets its own ([The front door for zingod](#the-front-door-for-zingod)),
+and behind the front door both see every client as 127.0.0.1, so the per-client limits live in
+the front door: **v1** (PS1) forwards decrypted bytes and
 limits connections, **v2** (PS2) ends HTTP/2 and limits streams and methods
 ([The front door](#the-front-door)). Values are proposals, tuned by the wallet runs.
 
@@ -1234,7 +2005,7 @@ limits connections, **v2** (PS2) ends HTTP/2 and limits streams and methods
 | streams per connection; header list | 16 (never above the backend's own: zebrad's 20); 16 KiB | hyper `http2` builder | v2 |
 | request body | 4 MiB, `SendTransaction` 2.5 MiB | a counting body, then `RESOURCE_EXHAUSTED` | v2 |
 | `GetBlockRange`, `GetBlockRangeNullifiers` in flight | 16 in all; a 10 s wait, then `UNAVAILABLE` | per-method `Semaphore` | v2 |
-| `GetSubtreeRoots` in flight | 2 (a block per root in Zaino 0.10.2, #1665; a hash lookup per root on zebrad) | `Semaphore` | v2 |
+| `GetSubtreeRoots` in flight | 2 (a hash lookup per root on zebrad; zingod reads its own index) | `Semaphore` | v2 |
 | transparent-address methods in flight | 8 | `Semaphore` | v2 |
 | `GetMempoolStream` per address | 2 | `LimitsActor` | v2 |
 | `SendTransaction` per address | 1 a second, burst 5, 120 an hour | `LimitsActor` | v2 |
@@ -1246,9 +2017,11 @@ repeat `GetSubtreeRoots` or long `GetBlockRange` calls, each many `getblock`s on
 behind the owner's wallet; every client frame reaches Zaino's own HTTP/2 stack, and 0.10.2 pins
 h2 0.4.15, affected by RUSTSEC-2026-0258 (unbounded empty DATA frames; low; fixed in 0.4.16);
 and everything on Zaino's port is reachable, its `zaino.index.v1.IndexedTipService` extension
-and, in the rewrite, `/readyz` included. So Zaino serves only through v2. zebrad's endpoint
-answers the first two and shrinks the third, so **PS1 opens Mainnet on v1**, labelled
-experimental, once Zeal's wallet runs pass there:
+and, in the rewrite, `/readyz` included. So Zaino would have served only through v2; zingod,
+which answers all three, serves through v1
+([The front door for zingod](#the-front-door-for-zingod)). zebrad's endpoint answers the first
+two and shrinks the third, so **PS1 opens Mainnet on v1**, labelled experimental, once Zeal's
+wallet runs pass there:
 
 - `GetSubtreeRoots` reads one block hash per root, not a block
   (`zebra-rpc/src/lightwalletd/methods.rs:497-501`), and every read stays inside zebrad, with no
@@ -1270,10 +2043,10 @@ experimental, once Zeal's wallet runs pass there:
   from that until v2's permits and deadlines apply (proposal).
 
 v2 forwards only the `CompactTxStreamer` methods the backend serves (others get
-`UNIMPLEMENTED`, zebrad's reflection service and Zaino's extension included), only the
-`content-type`, `te`, `grpc-timeout`, `grpc-encoding` and `grpc-accept-encoding` headers (no
-`user-agent`), and re-frames everything on one upstream h2c connection per client, so the
-backend's h2 never sees a client frame. Its upstream client is h2 0.4.16 or newer, and the Zaino
+`UNIMPLEMENTED`, zebrad's reflection service and zingod's `/status` and `/readyz` included),
+only the `content-type`, `te`, `grpc-timeout`, `grpc-encoding` and `grpc-accept-encoding`
+headers (no `user-agent`), and re-frames everything on one upstream h2c connection per client,
+so the backend's h2 never sees a client frame. Its upstream client is h2 0.4.16 or newer, and the Zaino
 rewrite's changeset says older Zaino streams small DATA frames that make such clients "that read
 late" fail with `GOAWAY too_many_data_frames`; so v2 drains upstream frames at once into a
 bounded buffer per stream and slows the backend through the flow-control window. Block spans
@@ -1296,7 +2069,7 @@ or 500 answered a second (about 2.4 Mbit/s) last 60 s; after three pauses in 24 
 until the user resumes; a monthly cap counted as answers × 600 bytes, 50 GB by default. The
 banner: "Your seeder got about 2,400 queries a second, far more than a seeder outside Zebra's
 default list should. That usually means someone is using it to flood another computer. Zeal
-paused it for an hour." Zaino and zeeder run at a lower priority (nice 10;
+paused it for an hour." zingod and zeeder run at a lower priority (nice 10;
 `BELOW_NORMAL_PRIORITY_CLASS`).
 
 ### What becomes public, and what Zeal keeps
@@ -1306,10 +2079,12 @@ address (in DNS, kept by DNS-history services), the name (in Certificate Transpa
 within minutes, which scanners watch, so probes start at once), the certificate (indexed
 against the address), the region and provider (geolocation; a personal name or WHOIS record
 ties it to a person, so Zeal suggests a neutral name and WHOIS privacy), and the software
-(zebrad's vendor, version and subversion in `GetLightdInfo`; with Zaino, its version, the build
-user, the backing Zebra's `zcashdBuild` and `zcashdSubversion` and any donation address;
+(zebrad's vendor, version and subversion in `GetLightdInfo`; with zingod, its vendor and
+version only;
 `zeeder/<version> (<commit>)` to every peer the crawler contacts; the SOA's
-`hostmaster.<domain>`).
+`hostmaster.<domain>`). With zingod, its status page is public too while it serves: the state,
+the version, the heights, an alarm that dates zebrad's release, and how much the server sent in
+each closed 10-minute window ([The front door for zingod](#the-front-door-for-zingod)).
 
 Wallets show the server their addresses and timing, the blocks they fetch, the transactions
 they ask for, the transparent addresses they look up and where each sent transaction came
@@ -1317,8 +2092,8 @@ from. For the owner's phone that beats a stranger's server; about everyone else,
 learns it all. Zeal keeps as little as it can:
 
 - the front door logs counters, never addresses, and the backend sees only 127.0.0.1 (zebrad
-  logs no client address for a gRPC call in any case, and Zeal never turns on Zaino's PROXY
-  protocol);
+  logs no client address for a gRPC call in any case, zingod none at the level Zeal sets, and
+  Zeal never turns on zingod's PROXY protocol);
 - the limiter is keyed by SipHash-2-4 of the address or /64 under a random key per run, pruned
   once an address without a connection has its whole burst back, after 2 minutes idle at most,
   or an hour after its last `SendTransaction` for an address that sent one (the hourly cap's
@@ -1341,8 +2116,9 @@ current text unconfirmed), that some providers block inbound 53, 80 or 443, and 
 law: in the EU an IP address can be personal data (CJEU *Breyer*, C-582/14). Zeal never says
 running a server is allowed.
 
-**Never**: a plaintext public bind (zebrad's endpoint anywhere but loopback, a `no_tls_*`
-Zaino); Zeal writing zebrad's endpoint while the service is off; Zaino's JSON-RPC;
+**Never**: a plaintext public bind (zebrad's endpoint or zingod anywhere but loopback, a `tls`
+key in zingod's file); Zeal writing zebrad's endpoint while the service is off; zingod's
+`[p2p]`, `[snapshot]` or `[metrics]`;
 `enable_cookie_auth = false`; turning UPnP on, or a mapping that outlives a pause; an open
 proxy (one upstream, fixed at start, no routing by SNI); WAN 8233 to zeeder; a client address
 in a log.
@@ -1354,19 +2130,21 @@ in a log.
 ```text
 crates/launcher-types/src/public.rs  serde types (below), wasm-clean
 crates/launcher-herd/src/public/     pure, native and wasm (HERD.md's crate; PS1 starts it if HERD H1
-                                     hasn't): plan.rs, pause.rs, light.rs (the backend's health and,
-                                     from PS5, pick_backing, the upgrade gate and the stall rule),
+                                     hasn't): plan.rs, pause.rs, light.rs (the backend's health),
+                                     zingod.rs (Z2: when zingod runs, the stall rule, the
+                                     cross-check, the upgrade gate),
                                      wallet.rs (Zodl's check, branch ids pinned to zebra-chain 15),
                                      evidence.rs, share.rs
 crates/launcher-core/src/            config.rs: the managed lightwalletd key, which it can now remove;
                                      logs.rs: the endpoint's and the bind failure's lines; grpc.rs: a
                                      small gRPC client, prost messages written by hand (no protoc) over
-                                     hyper's HTTP/2 client; kinds/zaino.rs (PS5): writers (V0_10,
-                                     V0_11), guard, environment, exit classes, log reader;
+                                     hyper's HTTP/2 client; zingod/ (Z2): the configuration writer,
+                                     the command and its environment, the log reader, exit classes;
                                      kinds/zeeder.rs: HERD.md's adapter plus public mode and redaction;
                                      bin/fake-light-server.rs
 crates/launcher-public/              new, no Tauri: service.rs (PublicServices, ServiceActor),
-                                     light.rs (LightMonitor), netcheck/ (netdev, router queries,
+                                     light.rs (LightMonitor), zingod.rs (ZingodRunner, Z2),
+                                     netcheck/ (netdev, router queries,
                                      hickory-resolver, VPN), ddns/ (DuckDNS, deSEC, Cloudflare,
                                      manual), acme.rs, portmap.rs, gateway.rs (runs the front door),
                                      selftest/ (TLS and hairpin tests, DNS probes), secrets.rs,
@@ -1398,7 +2176,8 @@ supervisor and settings watches (later the registry's and the herd's) ──▶ 
     ├─ PortMapActor (PS6) ──────────────────▶ watch<MapStatus>
     ├─ AcmeActor(name), DNS-01 via DdnsActor ▶ watch<Option<CertStatus>>
     ├─ Gateway, on its own runtime ◀─ mpsc<GatewayCmd> ─▶ watch<GatewayStats>, mpsc<GatewayEvent>
-    └─ LightMonitor (zebrad's endpoint; Zaino's adapter from PS5) ▶ watch<Option<LightStats>>
+    ├─ ZingodRunner (with zingod, Z2) ──────▶ watch<ZingodFacts>
+    └─ LightMonitor (the backend's endpoint) ▶ watch<Option<LightStats>>
   ServiceActor { Seeder, zeeder }: NetWatch, DdnsActor(NS target), HERD.md's census actor, the probes
   KeepAwake: holds the inhibitor while any service serves
 ```
@@ -1437,7 +2216,7 @@ supervisor and settings watches (later the registry's and the herd's) ──▶ 
 **In Zeal's process, as a library.** `launcher-public` runs `launcher_gateway::serve` on a
 tokio runtime of its own, on a thread of its own, so a flood of handshakes can't starve the
 app's commands. It listens on `[::]:8443` and has one upstream, fixed at start: the endpoint's
-logged address (Zaino's from PS5). Its lifetime follows the switch, not zebrad's process, so it
+logged address (zingod's, with zingod). Its lifetime follows the switch, not zebrad's process, so it
 answers TLS-ALPN-01 through zebrad restarts and long stalls. It logs through `tracing` (target
 `zeal::gateway`, never an address), which shows in the serving node's Logs tab as "front
 door", and its port shows among the node's ports (`PublicTls`).
@@ -1481,7 +2260,7 @@ doesn't claim one. The crate's API carries what a sidecar's control protocol wou
 | `ChallengeOnly` | only ALPN `acme-tls/1` with the pending name; the rest refused after the ClientHello | before a certificate; after expiry |
 | `LocalOnly` | challenges, and service connections from loopback | the test on this computer |
 | `Open` | everyone, within the limits | serving |
-| `Unavailable` | challenges; service handshakes complete, and every call gets `UNAVAILABLE` from the front door | zebrad restarting or behind; with Zaino, Zaino behind or stuck too |
+| `Unavailable` | challenges; service handshakes complete, and every call gets `UNAVAILABLE` from the front door | zebrad restarting or behind; with zingod, every zingod problem but `BackingStopped` and `BuildTooOld` |
 | stopped | nothing | paused, off, Zeal not running |
 
 - **v1 (PS1)**: `tokio_rustls::LazyConfigAcceptor` reads the ClientHello and picks the
@@ -1512,9 +2291,9 @@ In `crates/launcher-types/src/public.rs`, reusing HERD.md's `NodeKind::Zeeder`,
 
 ```rust
 pub enum PublicService { LightServer, Seeder }
-// PortRole gains PublicTls; zebrad's endpoint uses the existing Grpc. From PS5, ExitClass gains
-// WaitingForDependency (neither a crash nor Failed), ResourceLimit and TooOld (deterministic), and
-// NodeKind::Zaino.uses() = [Zebrad, Zakura].
+// PortRole gains PublicTls; zebrad's endpoint uses the existing Grpc. With zingod (Z2), ExitClass
+// gains DiskFull and IndexBroken (deterministic); zingod's other types are in "Types and commands
+// for zingod".
 pub struct PublicHostname(String);  // LDH, ≤ 253 bytes, ≥ 2 labels; not an IP; not .local, .home.arpa,
                                     // .internal, .invalid or .onion
 pub struct SeedZone { pub zone: PublicHostname, pub nameserver: PublicHostname } // nameserver outside zone
@@ -1527,7 +2306,8 @@ pub struct PublicLimits { pub max_connections: u32, pub per_address: u32, pub up
 pub struct Consent { pub version: u32, pub at: SystemTime, pub hostname: String }
 
 /// launcher.json `public.services`; no secrets. `node` is the serving node: in PS1, Zeal's one
-/// zebrad (`zebrad-mainnet` or `zebrad-testnet`); the seeder's zeeder; Zaino's node from PS5.
+/// zebrad (`zebrad-mainnet` or `zebrad-testnet`), also with zingod, which reads it; the seeder's
+/// zeeder.
 pub struct PublicServiceSpec {
     pub service: PublicService, pub node: NodeId, pub switch_on: bool, pub resume_on_launch: bool,
     pub name: Option<PublicHostname>, pub seed: Option<SeedZone>, pub provider: DnsProvider,
@@ -1544,8 +2324,8 @@ pub enum PublicState {
 }
 pub enum NotAvailable { NotOnThisSystem, UntestedZebrad { version: String },
     CrawlerPortTaken { by: NodeId, port: u16 } }
-pub enum DegradedReason { BackingRestarting, BackingBehind { blocks: u32 }, CertificateExpired,
-    ZainoBehind { blocks: u32 }, ZainoStuck { at: u32 } }             // the last two from PS5
+pub enum DegradedReason { BackingRestarting, BackingBehind { blocks: u32 }, CertificateExpired }
+                                    // zingod's reasons: "Types and commands for zingod"
 pub enum PauseReason { ByYou, LanAddressChanged { was: IpAddr }, NameElsewhere { points_to: IpAddr },
     VpnRoute, DataCap, UnderAttack { qps: u32 }, BuildTooOld { upgrade: String }, BackingStopped,
     NetworkChanged }
@@ -1586,7 +2366,7 @@ entries in `generate_handler!`), each added to `COMMANDS` in `src-tauri/build.rs
 | --- | --- |
 | `get_public_status()` | the snapshot |
 | `check_connection(refresh)` | read-only network facts and a verdict per service (PS1) |
-| `begin_public_setup(service, network)` | creates the spec and returns its `NodeId`: the network's zebrad for the light client server (Zaino's node from PS5), the zeeder node for the seeder, added when there is none; the herd page's "Set up…" |
+| `begin_public_setup(service, network)` | creates the spec and returns its `NodeId`: the network's zebrad for the light client server, the zeeder node for the seeder, added when there is none; the herd page's "Set up…" |
 | `public_plan(node, draft)` | pure: steps, disclosures, records and ports to show |
 | `set_public_switch(node, on)` | off pauses at once; on resumes the setup or the service |
 | `answer_public_step(node, answer)` | the user's input for the current step |
@@ -1634,7 +2414,7 @@ came first): `public_status` (one changed `PublicStatus`, counters coalesced to 
   `data-encoding`, `der-parser`, `nom`, `oid-registry` and `rusticata-macros` are new; rcgen's
   `CustomExtension::new_acme_identifier` builds the RFC 8737 extension
   (`src/certificate.rs:664` at 0.14.10). hyper gains its `server` feature for the front door.
-  Sidecars, not linked: zainod (Apache-2.0, PS5), zeeder (MIT OR Apache-2.0); Pebble (MPL-2.0)
+  Sidecars, not linked: zingod (Apache-2.0, Z1), zeeder (MIT OR Apache-2.0); Pebble (MPL-2.0)
   runs only in CI.
 - **One crypto provider.** `Cargo.toml` and `.github/dependabot.yml` record that clients built
   without a rustls provider panic ("No rustls crypto provider is configured"). Zeal installs
@@ -1652,7 +2432,7 @@ came first): `public_status` (one changed `PublicStatus`, counters coalesced to 
 
 ### Where the switches are
 
-- **On the serving node's page**: zebrad's page (Zaino's from PS5) and zeeder's get a
+- **On the serving node's page**: zebrad's page, with either backend, and zeeder's get a
   **Public** tab between Configure and Node settings, with the switch, the setup and the status
   panel.
 - **On the herd page**, per network: a **Public services** section, one line per service with
@@ -1725,7 +2505,12 @@ What you take on:
  [ ] I understand what becomes public
 ```
 
-With Zaino (PS5) the software line reads "Zaino 0.11.0, built by runner, reading Zebra 7.0.0".
+With zingod the software line reads "every wallet that connects is told it is zingod 1.1.0",
+with no Zebra version: zingod sends none (`packages/zingod-grpc/src/routes/info.rs:52-69`
+leaves `zcashdBuild` and `zcashdSubversion` empty). The lines in
+[zingod in the UI](#zingod-in-the-ui) replace PS1's "experimental" and port lines rather than
+join them. A `public_text.rs` test checks that the zingod consent names no Zebra version, and no
+Zebra port outside Z4's switch.
 The seeder's version names the zone and the NS target, `zeeder/1.8.0 (<commit>)` as every peer
 sees it, taken from the bundled binary (its `--version` prints `1.8.0 (<commit>)`, and zeeder
 logs `User-Agent: …` at start), the public resolver it will ask, the operator's duties and "not
@@ -1746,7 +2531,7 @@ Dashboard   Logs   Configure   Public   Node settings
  └──────────────────────────────┘ └────────────────────────────┘ └──────────────────────────┘
  Zebra at block 3,544,812 · light wallet endpoint 127.0.0.1:9067 · front door running
  Share   Zodl  zec-alice.duckdns.org:443 [Copy] [QR]   Zingo, Zkool  https://zec-alice.duckdns.org:443 [Copy]
- Checks: 17 passed, 1 warning ▸     What is public ▸     [Limits…]  [Test now]  [⋯ Turn off and forget]
+ Checks: 17 passed, 1 warning ▸     What is public ▸     [Limits…]  [Test now]  [Turn off and forget…]
 ```
 
 Other first lines: "Catching up · wallets are told to try again" (with the lag); "Serving · not
@@ -1754,9 +2539,8 @@ yet confirmed from outside" (with the phone-test card); "Paused · zec-alice.duc
 at 198.51.100.7, not this network. Zeal resumes when it matches."; "Paused · Zebra 7.0.0
 reached its end of support. Wallets that use your server see an error until Zeal updates
 Zebra."; "Under heavy load: the limits refused 3,200 connections in 10 min" with [Pause]. With
-Zaino (PS5): "Paused · Zaino stopped at block 3,543,404: this Zaino doesn't know NU7. Wallets
-that use your server see an error until Zeal updates Zaino." Certificate banners turn amber 14
-days before a failing expiry, red at it.
+zingod, the lines in [What can go wrong](#what-can-go-wrong-and-what-the-user-sees). Certificate
+banners turn amber 14 days before a failing expiry, red at it.
 
 ```text
  DNS seeder                                                                       [ ● On ]
@@ -1776,8 +2560,8 @@ herd's peer counts (whether the counters split by zone is unconfirmed).
 
 ### Elsewhere
 
-- **Sidebar** facts: "serving", "catching up", "paused" for the serving node (zebrad, Zaino
-  from PS5); "seeding" for zeeder.
+- **Sidebar** facts: "serving", "catching up", "paused" for the serving node (zebrad, with
+  either backend); "seeding" for zeeder.
 - **Tray**: a disabled "Public: light client server serving" line (Linux's tray has no
   tooltip), "Pause public services", "Resume public services…", and "Quit (stops public
   services)" while one is on.
@@ -1785,11 +2569,9 @@ herd's peer counts (whether the counters split by zone is unconfirmed).
   isn't offered for a too-old build, a certificate or an attack.
 - **Health verdicts** (`ui/src/health.rs`): a build too old, then paused, then degraded, then
   not confirmed from outside.
-- **Add node**: HERD.md's zeeder card. From PS5, Zaino's line becomes "Bundled with Zeal ·
-  reads an archive node", with "or your own zainod" optional (so the test pairing
-  `program_prompt` with `bundled()` changes); until then it keeps today's caveat (releases up
-  to 0.10.2 stop syncing at NU7's activation) and adds that a zainod you pick runs for this
-  computer only.
+- **Add node**: HERD.md's zeeder card. Zaino's card keeps today's caveat, now that no Zaino
+  release follows NU7, and adds that a zainod you pick runs for this computer only. zingod gets
+  no card: it is the light client server's, not a node.
 - **Words**: "light client server" (the maintainer's), "front door", "DNS seeder",
   "experimental"; Off, Setting up, Serving, Catching up, Paused, Not available.
 
@@ -1797,24 +2579,21 @@ herd's peer counts (whether the counters split by zone is unconfirmed).
 
 - **Pure logic**, native and wasm: the plan as tables of facts to steps for both services, with
   a test that no plan step makes a network request; pauses with their hysteresis and resume
-  rules (zebrad behind or restarting, the name elsewhere, the cap, a third attack; from PS5 a
-  stuck Zaino and the NU7 boundary); evidence ages, and DNS-01 never counting; the endpoint's
-  key present only while the service is on; from PS5 `pick_backing`, the upgrade table,
-  untested versions kept local and the stall rule; the branch check; Zodl's check over
-  `LightdInfo` bytes captured from zebrad's endpoint (and a real Zaino in PS5), with field
-  numbers pinned to a vendored `service.proto`; `PublicHostname` and `SeedZone`.
+  rules (zebrad behind or restarting, the name elsewhere, the cap, a third attack); evidence
+  ages, and DNS-01 never counting; the endpoint's key present only while the service is on; the
+  branch check; Zodl's check over `LightdInfo` bytes captured from zebrad's endpoint (and from
+  zingod in Z2), with field numbers pinned to a vendored `service.proto`; `PublicHostname` and
+  `SeedZone`. zingod's are in [Tests for zingod](#tests-for-zingod).
 - **Adapters**: zebrad's managed key, written while the service is on, removed when it is off,
   a hand edit overridden, a non-loopback value refused, a hand-set loopback value kept while no
   service is set up; the `Opened lightwalletd gRPC endpoint at` and bind-failure lines from
-  captured fixtures; from PS5, each `zainod.toml` writer against its `generate-config` fixture,
-  the guards, the environment scrubbing, the exit classifiers on captured lines and the restart
-  on the archive's pid change; zeeder's redaction on lines inside and outside the `dns_query`
+  captured fixtures; from Z2, zingod's adapter ([Tests for zingod](#tests-for-zingod)); zeeder's
+  redaction on lines inside and outside the `dns_query`
   span, with no address reaching the ring; an answered query and a dropped one add no line to
   the ring or the log file.
 - **The front door against `fake-light-server`**, an h2c gRPC server on hyper that serves
   `GetLightdInfo`, `GetLatestBlock`, a delayed `GetBlockRange`, a long `GetMempoolStream` and
-  `SendTransaction`, and can stall at a height, stop reading, send error trailers, or, for
-  PS5, log `invalid consensus branch id` and exit with each classified Zaino message. Cases:
+  `SendTransaction`, and can stall at a height, stop reading or send error trailers. Cases:
   bytes both ways (v1), unary and streaming calls, trailers and cancellation (v2); the challenge
   certificate for `acme-tls/1`; a wrong or missing SNI refused; every mode; a certificate
   rotated during an open stream; every limit, with client addresses injected through a trait; a
@@ -1835,19 +2614,17 @@ herd's peer counts (whether the counters split by zone is unconfirmed).
   `GetTreeState`, `GetSubtreeRoots` and a `GetBlockRange` streamed to a slow client through the
   front door; an HTTP/1.1 `POST` to the endpoint gets no gRPC answer; the key removed and the
   port closed once the switch is off; the endpoint and bind-failure lines captured for the
-  fixtures. This gates every zebrad pin while zebrad serves. `real_zainod.rs` (PS5): a Regtest
-  zebrad with NU7 at height 10, the pinned `zeal-zainod` and the real front door with a Pebble
-  certificate; Zaino crosses NU7, the wallet check passes through the front door, Zaino
-  restarts with zebrad, and a long `GetBlockRange` streams to a slow client. This gates the
-  Zaino pin. `real_zeeder.rs` (Linux): `print-config`, SOA, NS and A from loopback, REFUSED out
+  fixtures. This gates every zebrad pin while zebrad serves. `real_zingod.rs` (Z2,
+  [Tests for zingod](#tests-for-zingod)) gates the zingod pin, and every zebrad pin with it.
+  `real_zeeder.rs` (Linux): `print-config`, SOA, NS and A from loopback, REFUSED out
   of zone, `/health`, the metrics, SIGTERM.
 - **Wallet acceptance**, a RELEASING.md checklist before PS1's release on Testnet and Mainnet,
-  at every zebrad pin while zebrad serves and for every Zaino pin, on a real home connection:
+  at every zebrad pin while zebrad serves and for every zingod pin, on a real home connection:
   Zingo through a scripted `zingo-cli` (a new wallet, an old birthday, a send with a memo), and
   Zodl Android, Zodl iOS and Zkool by hand (Custom in Manual mode, a new wallet, a restore, a
   send, a transparent balance, the app sent to the background mid-sync). Each run records the
-  first-sync time (zebrad's one-block-at-a-time reads; #1665 and #1537 with Zaino) and the bytes
-  sent. Testnet needs Testnet wallet builds; that Zodl publishes one is unconfirmed.
+  first-sync time (zebrad's one-block-at-a-time reads; with zingod, also its index build) and
+  the bytes sent. Testnet needs Testnet wallet builds; that Zodl publishes one is unconfirmed.
 - **By hand**, per release touching the flow: a TP-Link or FRITZ!Box with UPnP on and off,
   carrier-grade NAT through a phone's hotspot, macOS's Local Network prompt, ufw on.
 - **The mock** (`ui/src/mock/public.rs`) runs the pure plan over fake facts, combines with
@@ -1855,8 +2632,9 @@ herd's peer counts (whether the counters split by zone is unconfirmed).
   keeps off. Flags, listed in `ui/src/mock.rs` and ui/README.md: `?public=setup`, `serving`,
   `unconfirmed`, `catchingup`, `eos`, `untested`, `moved`, `lan`, `cap`, `cgnat`, `doublenat`,
   `noforward`, `ratelimited`, `expiring`, `keychain`, `seeder` (replacing HERD.md's
-  `?seeder=public`), `seeder-warmup`, `seeder-attack` and `portclash`, and from PS5 `zaino`,
-  `zaino-nu7` and `zaino-stuck`. Screenshots come from the headless-Chromium workflow.
+  `?seeder=public`), `seeder-warmup`, `seeder-attack` and `portclash`, and from Z3 the `zingod*`
+  flags ([zingod in the UI](#zingod-in-the-ui)). Screenshots come from the headless-Chromium
+  workflow.
 
 ## Phases
 
@@ -1873,8 +2651,8 @@ upstream gate opens first ships first.
 | **PS2 Front door v2** | HTTP/2 ended in the front door: the allow-list (no reflection), per-method limits, deadlines, header stripping, connection age with GOAWAY, trailers-only errors, the browser page, calls per method in the status panel | PS1; the first-sync times and bytes from PS1's wallet runs | `?public=serving`, `ratelimited` |
 | **PS3 macOS** | the light client server on macOS: the Local Network prompt and `NSLocalNetworkUsageDescription`, `caffeinate`, the firewall checks | PS1; how Tauri 2 merges a `src-tauri/Info.plist`, checked | `?public=setup` on macOS |
 | **PS4 The public DNS seeder (Linux)** | the bundled `zeal-zeeder`; the domain step (Cloudflare, deSEC, by hand, a dynamic-DNS NS target), the port 53 guide, firewall help, warm-up, Open, the probe, the watchdog, the panel, Share, redaction, on PS1's shared flow | HERD H5 (the zeeder kind, census, the 8233 dialog, on MULTI-NODE phase 4); PS1; zeeder's crawler setting, or the 8233 dialog | `?public=seeder`, `seeder-warmup`, `seeder-attack`, `portclash` |
-| **PS5 Zaino as the backend** | `ZAINOD_VERSION`, `ZAINOD_COMMIT`, `zainod-sidecars.yml`; `zeal-zainod` on Linux (macOS once CI passes); the Zaino adapter's config, gates, restarts and exit classes; the front door's upstream moved from zebrad's endpoint to Zaino, Testnet first; the build user and a donation address in Share | PS2; MULTI-NODE phase 5 (the Zaino kind, dependencies); HERD H3 (storage in the spec, so `dependency_ok` refuses a pruned Zakura), or `Zaino.uses()` kept at `[Zebrad]` until it lands; a Zaino release with NU7 passing `real_zainod.rs` and the Testnet wallet run; two weeks on Testnet without a Zaino-caused pause before Mainnet | `?public=zaino`, `zaino-nu7`, `zaino-stuck` |
-| **PS6 Reach and hardening** | Windows (after zebrad's stdin-close flag: the UAC firewall rule, keep-awake, stops); optional automatic mapping; DNS-01 and external port 9067; Cloudflare names for the light client server; IPv6 (pinholes, AAAA after an inbound check, zeeder on IPv6); macOS public seeding once zeeder stops on stdin close; the front door as a sidecar if Windows or a Landlock sandbox needs one; Zaino's own index and the rewrite's schema; a second light client server (Testnet beside Mainnet) on its own port; a block-span cap; more DNS providers | PS1, and PS5 for the Zaino items | per item |
+| **PS5 zingod as the backend** | Z1 to Z5 ([Phases for zingod](#phases-for-zingod)), in place of the Zaino plan: `zeal-zingod` bundled on Linux and run by the light client server, chosen at consent; Testnet first, then Mainnet after a measured gate | PS1; neither PS2 nor MULTI-NODE phase 5 | `?public=zingod-choose`, `zingod-building`, `zingod` and one flag per row of [What can go wrong](#what-can-go-wrong-and-what-the-user-sees) |
+| **PS6 Reach and hardening** | Windows (after zebrad's stdin-close flag: the UAC firewall rule, keep-awake, stops); optional automatic mapping; DNS-01 and external port 9067; Cloudflare names for the light client server; IPv6 (pinholes, AAAA after an inbound check, zeeder on IPv6); macOS public seeding once zeeder stops on stdin close; the front door as a sidecar if Windows or a Landlock sandbox needs one; a second light client server (Testnet beside Mainnet) on its own port; a block-span cap; more DNS providers | PS1 | per item |
 
 - **Why PS1 is Linux only.** With no sidecar to build or sign, macOS waits on two checks, the
   Local Network prompt (TN3179), which the read-only router queries trigger, and how Tauri 2
@@ -1911,7 +2689,8 @@ beside a public seeder; H7's public mode moved to PS4; Zaino on an archive other
 in the small-server preset; the small-server preset's "a public seed belongs on another IP or a
 VPS" replaced by the 8233 dialog; open question 6 answered (public seeding at home, as the
 maintainer asked); the census table's "Public seed (servers only, a later phase)" pointed at
-PUBLIC-SERVICES.md.
+PUBLIC-SERVICES.md. On 2026-11-16 zingod took the Zaino items' place: MULTI-NODE.md's binaries
+non-goal and decision 1 name `zeal-zingod`, and its Zaino section notes the move.
 
 **PS0's upstream issues.** Zebra: testing the light-wallet endpoint with the SDKs (#11158's
 follow-up work); lightwallet-protocol v0.4.0 and v0.6.0 (`poolTypes`, `vin` and `vout`,
@@ -1921,20 +2700,21 @@ the HTTP/2-only listener as a documented promise; a listener only the front door
 Unix socket, or authentication). zeeder: a crawler `listen_addr` that takes loopback or port 0
 and is never advertised (with #106), and a `cache_dir`; rate-limit drops logged as one line
 without addresses; an overall response cap; limits by /24 and /56; TC=1 slip; no RFC 1918,
-CGNAT or ULA addresses in answers; a stop on stdin close; macOS and Windows builds. Zaino: a
-release with #1655; fixes for #1665 and #1537; a `ZAINO_BUILD_USER` override; an h2 bump in the
-0.10 line.
+CGNAT or ULA addresses in answers; a stop on stdin close; macOS and Windows builds. Zaino,
+before the move to zingod: a release with #1655; fixes for #1665 and #1537; a
+`ZAINO_BUILD_USER` override; an h2 bump in the 0.10 line. zingod:
+[Upstream asks for zingod](#upstream-asks-for-zingod).
 
 ## Open questions for the maintainer
 
 1. **Serve PS1 from zebrad's experimental endpoint**, though the Zebra book says not to depend
    on it for a service run for others yet, and not to run it on a user's machine? → Yes: on
    loopback, only while the service is on, behind the front door, labelled experimental, with
-   the local risk said at consent and Zeal's wallet runs as the test; Zaino replaces it in PS5.
+   the local risk said at consent and Zeal's wallet runs as the test; zingod joins it as a
+   second backend (Z1 to Z5).
 2. **Mainnet in PS1, on front door v1?** → Yes, once the wallet runs pass on Mainnet: zebrad's h2
    has the RUSTSEC-2026-0258 fix, its subtree roots cost a hash lookup each, and the front door
-   goes `Unavailable` when zebrad falls behind; per-method limits follow in PS2, before Zaino,
-   which serves only through v2.
+   goes `Unavailable` when zebrad falls behind; per-method limits follow in PS2.
 3. **The front door as its own sidecar, or in Zeal's process?** → In Zeal's process, as a
    library crate: no new binary to build, sign, notarize and bundle for five targets, no
    supervisor change and no control protocol, a listener that can't outlive Zeal, and rustls
@@ -1945,7 +2725,8 @@ release with #1655; fixes for #1665 and #1537; a `ZAINO_BUILD_USER` override; an
    for files the user brings? → Yes; files may come later as an option.
 5. **Bundle `zeal-zainod` and `zeal-zeeder`**, or download them on demand, verified like
    zebrad's tarball? → Bundle: "pull in zeeder" and "easily be enabled" ask for it, upstream has
-   no binaries beyond zeeder's Linux ones, and a local build leaks its builder's name.
+   no binaries beyond zeeder's Linux ones, and a local build leaks its builder's name. zingod
+   takes zainod's place (question 18).
 6. **A name required for the light client server** (a free one works), with no IP-certificate
    or Tailscale path built in? → Yes.
 7. **Ports**: a hand-made 443 forward first, automatic mapping as an opt-in, 9067 with DNS-01
@@ -1957,9 +2738,9 @@ release with #1655; fixes for #1665 and #1537; a `ZAINO_BUILD_USER` override; an
    the zeeder change, and when?
 10. **The light client server's node**: share the herd's archive (on a laptop, the wallet's), or
     recommend a second one once public? → Share, prefer one that isn't the wallet's, revisit
-    with measured load; the same for zebrad's endpoint and, in PS5, Zaino's archive.
+    with measured load; the same for zebrad's endpoint and for the zebrad zingod reads.
 11. **No index of Zaino's own at first**, never on Windows? → Yes, while releases are in the 0.10
-    line; the rewrite always keeps one.
+    line; the rewrite always keeps one, as zingod does.
 12. **"Test now" through a Let's Encrypt staging order**, the last authorization deactivated and
     the order never finalized, at most every 10 minutes: acceptable use? → Yes, on a click only.
 13. **Defaults**: the limits, the 300 GB and 50 GB caps, the seeder's pause thresholds,
@@ -1968,9 +2749,37 @@ release with #1655; fixes for #1665 and #1537; a `ZAINO_BUILD_USER` override; an
     (licence unconfirmed)? → Keep-awake yes; the plugin is the maintainer's call.
 15. **Laptops**: offer the switches with a warning, or hide them? → Offer, with the warning.
 16. **Wallet acceptance**: which Zodl and Zingo versions and devices are the reference, and is a
-    scripted `zingo-cli` run enough before PS1's release and for Zaino's Testnet gate?
+    scripted `zingo-cli` run enough before PS1's release and for zingod's Testnet gate?
 17. **Zaino on front door v1** if its NU7 release is the rewrite, with its own `[grpc]` limits?
-    → No, v2, for the allow-list, the header stripping and the re-framing.
+    → No, v2, for the allow-list, the header stripping and the re-framing. For zingod 1.1.0
+    (2026-11-16): → v1, for the reasons in [The front door for zingod](#the-front-door-for-zingod);
+    v2 follows for both backends.
+18. **Bundle `zeal-zingod` on Linux from Z1**, revising MULTI-NODE.md's "Zeal bundles only
+    zebrad"? → Yes, as asked: upstream publishes no binaries, and a non-expert can't build
+    zingod. A Linux install grows by about 25 MB, the stripped binary, and each Linux download
+    (`.deb` or AppImage) by roughly 6 to 9 MB, since both compress their payloads (a research
+    build: 6.3 MB with `xz -9`, 6.9 MB with `zstd -19`, 9.2 MB with `gzip -9`). Nothing runs zingod until Z3; if Z3
+    slips, Z1 can leave out only the `tauri.linux.conf.json` line and still build and attest.
+19. **The default backend for new setups** once Mainnet passes Z4's gate? → Zebra's built-in
+    server until then; after it, zingod, for Zingo wallets and its own limits, with Zebra's
+    offered for small disks. The maintainer's call (`DEFAULT_BACKEND`).
+20. **Mainnet with zingod**, which says it is not for production Mainnet use? → After Z4's
+    gate, labelled experimental, as PS1 did with zebrad's endpoint.
+21. **zingod owned by the light client server now, a node kind later?** → Yes: the kind adapter
+    doesn't exist yet, and one owner keeps the front door and zingod in order.
+22. **The five git dependencies on one person's forks**: the source archive on each Zeal
+    release, or mirrors under the Foundation too? → The archive from Z1; a mirror is cheap
+    insurance.
+23. **zingod's environment cleared**, an exception to ARCHITECTURE.md's "never `env_clear`"?
+    → Yes, as for Zallet: Linux only, and zingod starts no program.
+24. **Advisories in zingod's `Cargo.lock`**: report them in the build's summary and triage them
+    at each bump, or fail the build? → Report: Zeal can't patch zingod's dependencies, and a
+    failing build would block unrelated releases.
+25. **Licence notices**: zingod's, lightwallet-protocol's, Zebra's and the four C libraries'
+    texts, without a list of every Rust crate, the gap zebrad's bundle already has? Two of the
+    files (jemalloc's and AWS-LC's) carry personal contact addresses, so the build copies them
+    into the bundle instead of the repository holding them. → Yes for Z1; a Zeal-wide inventory
+    is a follow-up.
 
 ## Sources
 
@@ -1981,6 +2790,23 @@ release with #1655; fixes for #1665 and #1537; a `ZAINO_BUILD_USER` override; an
   `src-tauri/tauri.conf.json`, `tauri.linux.conf.json`, `src-tauri/Cargo.toml`; `Cargo.toml`,
   `Cargo.lock` (with `cargo tree -i rustls` and `cargo metadata`, 2026-11-03), `deny.toml`,
   `clippy.toml`, `.github/dependabot.yml`.
+- **zingod** at tag `v1.1.0` (`bfce8b2b`), read and built in research runs on 2026-11-16:
+  `packages/zingod/src/` (`main.rs`, `cli.rs`, `daemon.rs`, `daemon/fd_limit.rs`, `config.rs`,
+  `health.rs`, `error.rs`); `packages/zingod-grpc/src/` (`service.rs`, `limits.rs`, `health.rs`,
+  `transport.rs`, `proxy_protocol.rs`, `routes/info.rs`, `routes/transactions.rs`);
+  `packages/zingod-source/src/` (`endpoint.rs`, `rpc/client.rs`, `decode.rs`);
+  `packages/zingod-chainview/src/alarm_thresholds.rs`;
+  `packages/zingod-grpc-snapshot/src/grpc_snapshot.rs` and `report.rs`;
+  `packages/zingod/src/telemetry/egress.rs`;
+  `packages/zingod-sync/src/follower.rs` and `usage.md`; `packages/zingod-persistence/src/`
+  (`error.rs`, `manifest.rs`, `pages.rs`); `packages/zingod-primitives/src/protocol.rs`;
+  `packages/zingod-chainview/src/submit/driver.rs`;
+  `docs/running.md`, `docs/architecture.md`, `docs/rpc_api.md` and `docs/client-requirements.md`;
+  `README.md`, `CHANGELOG.md`, `Cargo.lock`, `LICENSE`, `rust-toolchain.toml`; the release and
+  the tag through the GitHub API; Zingo Labs' Mainnet index snapshot manifest
+  (`snapshots.zingolabs.dev`, read 2026-11-16). Zebra `v7.0.0`'s
+  `zebra-rpc/src/server/http_request_compatibility.rs`, and commit `a1bf8a7e89` (in `v7.1.0`).
+  zingolib's `crates/pepper-sync/src/client.rs` at `zingolib_v8.0.0` and at `dev` (`0a39640`).
 - **Zaino** at `zainod-0.10.2` (`5ced0ae8`): `packages/zainod/src/config.rs`;
   `zaino-serve/src/server/config.rs`, `server/grpc.rs`; `zaino-state/build.rs`,
   `src/indexer.rs`, `src/chain_index/validator_source.rs`; `zaino-rpc/src/probe.rs`;
