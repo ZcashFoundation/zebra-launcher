@@ -13,7 +13,9 @@ use std::{
 
 use launcher_core::{
     logfile::RotatingLogConfig,
-    supervisor::{self, Listener, SupervisorConfig, SupervisorError},
+    pidfile,
+    process::Launch,
+    supervisor::{self, Listener, StartOptions, SupervisorConfig, SupervisorError},
     zingod::{ZingodCommand, ZingodConfig, ZingodNetwork},
 };
 use launcher_types::{ExitClass, LogLine, Phase, PortRole};
@@ -192,6 +194,94 @@ async fn zingods_failures_have_their_classes() {
         }
     );
     assert!(status.restarts >= 2, "{status:?}");
+    within(handle.shutdown()).await.unwrap();
+}
+
+/// A zingod an earlier Zeal left that ignores `SIGTERM` is killed, with its process group, once
+/// the stop grace has passed, and the start goes ahead. A stale zebrad isn't
+/// (supervisor.rs's `the_actor_answers_commands_while_a_stale_zebrad_is_terminated`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_zingod_that_ignores_sigterm_is_killed_after_the_grace() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::process::CommandExt,
+        process::{Command, Stdio},
+    };
+
+    let left = fixture("ignore-sigterm");
+    let Launch::Zingod(command) = &left.config.command else {
+        unreachable!("the fixture runs zingod");
+    };
+    // In its own process group, as Zeal spawns zingod.
+    let mut orphan = Command::new(fake_zingod())
+        .args(command.args())
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let orphan_pid = orphan.id();
+    // So a failing run doesn't leave it behind.
+    struct KillOnDrop(nix::unistd::Pid);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = nix::sys::signal::killpg(self.0, nix::sys::signal::Signal::SIGKILL);
+        }
+    }
+    let guard = KillOnDrop(nix::unistd::Pid::from_raw(
+        i32::try_from(orphan_pid).unwrap(),
+    ));
+    // Its SIGTERM handler is up before its Listening line. The test is its parent, so a thread
+    // keeps reading its output and reaps it, as init would.
+    let mut stdout = BufReader::new(orphan.stdout.take().unwrap());
+    let (listening, listening_rx) = std::sync::mpsc::channel();
+    let reaper = std::thread::spawn(move || {
+        let mut line = String::new();
+        while stdout.read_line(&mut line).is_ok_and(|n| n > 0) {
+            if line.contains(" message=Listening ") {
+                let _ = listening.send(());
+            }
+            line.clear();
+        }
+        orphan.wait()
+    });
+    listening_rx
+        .recv_timeout(LIMIT)
+        .expect("the stale zingod listens");
+
+    let fx = fixture("serving");
+    pidfile::write(
+        fx.config.pidfile.as_ref().unwrap(),
+        orphan_pid,
+        &fake_zingod(),
+    )
+    .unwrap();
+    let grace = fx.config.stop_grace;
+    let handle = supervisor::spawn(fx.config.clone()).unwrap();
+    within(handle.start_with(StartOptions { kill_stale: true }))
+        .await
+        .expect("the start goes ahead once the stale zingod is gone");
+    assert_eq!(handle.status().phase, Phase::Running);
+    assert_eq!(handle.status().stale, None);
+    let lines = history(&handle).await;
+    assert!(
+        contains(
+            &lines,
+            &format!(
+                "killed a zingod left behind by an earlier run (pid {orphan_pid}): it did not stop within {grace:?}"
+            )
+        ),
+        "{:#?}",
+        lines.iter().map(|line| &line.message).collect::<Vec<_>>()
+    );
+    let exit = reaper.join().unwrap().unwrap();
+    // Reaped: its pid may name another process now.
+    std::mem::forget(guard);
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&exit),
+        Some(9)
+    );
     within(handle.shutdown()).await.unwrap();
 }
 

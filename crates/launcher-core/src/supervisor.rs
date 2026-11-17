@@ -176,7 +176,9 @@ fn detail_suffix(info: &ExitInfo) -> String {
 pub struct StartOptions {
     /// Terminate a zebrad left behind by an earlier launcher run before
     /// starting. Without this, such a process makes the start fail with
-    /// [`SupervisorError::StaleProcess`] so the user can decide.
+    /// [`SupervisorError::StaleProcess`] so the user can decide. A stale
+    /// zingod that outlives the request is killed once the stop grace has
+    /// passed ([`crate::process::Launch::kills_stale`]).
     pub kill_stale: bool,
 }
 

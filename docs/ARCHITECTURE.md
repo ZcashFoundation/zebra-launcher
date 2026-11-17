@@ -227,7 +227,11 @@ detector and classifier, or zingod's (`zingod::logs`: logfmt, `Running` at its g
 `Listening` line, which also sets `Status.lightwalletd_addr`). `push_line` runs the reader's
 `redact` before anything else, so the log file and the ring get the same text: the identity
 for zebrad, every `txid=` value replaced by `[txid]` for zingod. The pid file records the
-`Launch`'s binary, and the launcher's notes name the program.
+`Launch`'s binary, and the launcher's notes name the program. With `kill_stale`, a stale
+zebrad still there 5 s after the termination request fails the start, for the user to
+decide; a stale zingod still there once the stop grace has passed since the request is killed
+with its process group (`Launch::kills_stale`; `pidfile::kill` checks its executable again
+first), and the start goes ahead once it is gone.
 
 | Channel | Direction | Carries |
 | --- | --- | --- |

@@ -65,6 +65,19 @@ pub(crate) fn terminate_pid(pid: u32) -> io::Result<()> {
     }
 }
 
+/// Kills a process the launcher did not start and, on Unix, its process group, which a
+/// process Zeal spawned leads (`SIGKILL`); `TerminateProcess` on Windows.
+pub(crate) fn kill_pid(pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::kill_group(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows::terminate_pid(pid)
+    }
+}
+
 /// The executable of the running process `pid`, if the platform tells us: it
 /// reads `/proc/<pid>/exe` on Linux, calls `proc_pidpath` on macOS and
 /// `QueryFullProcessImageNameW` on Windows. `None` on other platforms, or
@@ -186,6 +199,13 @@ impl Launch {
             Launch::Zebrad(command) => command.stop_is_graceful(),
             Launch::Zingod(_) => cfg!(unix),
         }
+    }
+
+    /// Whether a process an earlier launcher left that outlives the termination request is
+    /// killed once the stop grace has passed: zingod's is, since nothing else ends it; a stale
+    /// zebrad fails the start, for the user to decide.
+    pub fn kills_stale(&self) -> bool {
+        matches!(self, Launch::Zingod(_))
     }
 
     /// zebrad's command, if this runs zebrad.
@@ -510,6 +530,7 @@ mod tests {
         let mut zebrad = Launch::from(ZebradCommand::new("/bin/zebrad", "zebrad.toml"));
         assert_eq!(zebrad.program(), "zebrad");
         assert_eq!(zebrad.binary(), std::path::Path::new("/bin/zebrad"));
+        assert!(!zebrad.kills_stale());
         zebrad.zebrad_mut().expect("zebrad").shutdown_on_stdin_close = true;
         assert!(zebrad.stop_is_graceful());
         assert!(zebrad.zebrad().is_some_and(|z| z.shutdown_on_stdin_close));
@@ -518,6 +539,7 @@ mod tests {
         assert_eq!(zingod.program(), "zingod");
         assert_eq!(zingod.binary(), std::path::Path::new("/bin/zeal-zingod"));
         assert_eq!(zingod.stop_is_graceful(), cfg!(unix));
+        assert!(zingod.kills_stale());
         assert!(zingod.zebrad_mut().is_none());
         assert!(zingod.zebrad().is_none());
     }

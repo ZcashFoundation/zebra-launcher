@@ -52,11 +52,13 @@ enum ChildEvent {
         run: u64,
         status: io::Result<std::process::ExitStatus>,
     },
-    /// The stale zebrad `pid` was asked to stop [`STALE_KILL_WAIT`] ago;
-    /// `alive` says whether it is still there.
+    /// The stale zebrad `pid` was asked to stop [`STALE_KILL_WAIT`] ago, or
+    /// for a stale zingod was `killed` after the stop grace; `alive` says
+    /// whether it is still there.
     StaleTerminated {
         pid: u32,
         alive: bool,
+        killed: bool,
     },
 }
 
@@ -383,8 +385,9 @@ impl Actor {
     }
 
     /// Asks the stale zebrad to stop and waits for it off the actor loop, so
-    /// commands keep being answered meanwhile; the outcome arrives as
-    /// [`ChildEvent::StaleTerminated`].
+    /// commands keep being answered meanwhile; a stale zingod still there
+    /// once the stop grace has passed is killed ([`kill_stale`]). The outcome
+    /// arrives as [`ChildEvent::StaleTerminated`].
     fn terminate_stale(
         &mut self,
         stale: StaleProcess,
@@ -395,14 +398,27 @@ impl Actor {
             let program = self.config.command.program();
             tracing::warn!(?err, pid, program, "could not terminate the stale process");
         }
+        // A stale zingod that outlives the request is killed once the stop grace has passed.
+        let kill_at = self
+            .config
+            .command
+            .kills_stale()
+            .then(|| Instant::now() + self.config.stop_grace);
+        let target = stale.clone();
         let tx = self.child_tx.clone();
         tokio::spawn(async move {
             let deadline = Instant::now() + STALE_KILL_WAIT;
             while pidfile::is_alive(pid) && Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+            let killed = match kill_at {
+                Some(kill_at) if pidfile::is_alive(pid) => kill_stale(&target, kill_at).await,
+                _ => false,
+            };
             let alive = pidfile::is_alive(pid);
-            let _ = tx.send(ChildEvent::StaleTerminated { pid, alive }).await;
+            let _ = tx
+                .send(ChildEvent::StaleTerminated { pid, alive, killed })
+                .await;
         });
         self.pending_stale = Some(PendingStale {
             stale,
@@ -410,21 +426,31 @@ impl Actor {
         });
     }
 
-    async fn on_stale_terminated(&mut self, pid: u32, alive: bool) {
+    async fn on_stale_terminated(&mut self, pid: u32, alive: bool, killed: bool) {
         let Some(pending) = self.pending_stale.take_if(|p| p.stale.pid == pid) else {
             return;
         };
+        let program = self.config.command.program();
         if alive {
+            if killed {
+                self.note(format!(
+                    "the {program} left behind by an earlier run (pid {pid}) is still there after SIGKILL"
+                ));
+            }
             self.report_stale(&pending.stale, pending.start_replies);
             return;
         }
         if let Some(path) = &self.config.pidfile {
             let _ = pidfile::remove(path);
         }
-        let program = self.config.command.program();
-        self.note(format!(
-            "terminated a {program} left behind by an earlier run (pid {pid})"
-        ));
+        self.note(if killed {
+            let grace = self.config.stop_grace;
+            format!(
+                "killed a {program} left behind by an earlier run (pid {pid}): it did not stop within {grace:?}"
+            )
+        } else {
+            format!("terminated a {program} left behind by an earlier run (pid {pid})")
+        });
         self.launch(pending.start_replies).await;
     }
 
@@ -690,8 +716,8 @@ impl Actor {
                 }
                 self.maybe_finalize().await;
             }
-            ChildEvent::StaleTerminated { pid, alive } => {
-                self.on_stale_terminated(pid, alive).await
+            ChildEvent::StaleTerminated { pid, alive, killed } => {
+                self.on_stale_terminated(pid, alive, killed).await
             }
             // Events from a previous run that are still draining.
             _ => {}
@@ -976,6 +1002,25 @@ impl Actor {
             message: text,
         });
     }
+}
+
+/// Waits until `kill_at` for the stale process to exit, then kills it and waits up to
+/// [`STALE_KILL_WAIT`] for it to go. Returns whether it was killed.
+async fn kill_stale(stale: &StaleProcess, kill_at: Instant) -> bool {
+    while pidfile::is_alive(stale.pid) && Instant::now() < kill_at {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !pidfile::is_alive(stale.pid) {
+        return false;
+    }
+    if let Err(err) = pidfile::kill(stale) {
+        tracing::warn!(?err, pid = stale.pid, "could not kill the stale process");
+    }
+    let deadline = Instant::now() + STALE_KILL_WAIT;
+    while pidfile::is_alive(stale.pid) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    true
 }
 
 /// The first of `listeners` whose address another program holds
