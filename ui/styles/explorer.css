@@ -663,6 +663,96 @@ button.link.ex-link {
   overflow-wrap: anywhere;
 }
 
+/* A hover card: a few facts under the link the pointer or focus rests on. */
+
+.ex-hovercard {
+  position: fixed;
+  z-index: 20;
+  width: 280px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 4px 16px var(--shadow);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.ex-hovercard p {
+  margin: 2px 0;
+  color: var(--text-secondary);
+}
+
+.ex-hovercard .ex-hovercard-title {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Show RPC: the toggle in the source line, and each page's list of its reads. */
+
+.ex-rpc-toggle {
+  min-height: 28px;
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+.ex-rpc-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.ex-rpc {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.ex-rpc h3 {
+  margin: 0 0 6px;
+}
+
+.ex-rpc summary {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.ex-rpc summary h3 {
+  display: inline;
+  margin: 0;
+}
+
+.ex-rpc[open] summary {
+  margin-bottom: 6px;
+}
+
+.ex-rpc-calls {
+  margin: 0;
+  padding-left: 28px;
+  font-size: 12px;
+}
+
+.ex-rpc-calls li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 1px 0;
+}
+
+.ex-rpc-calls code {
+  overflow-wrap: anywhere;
+}
+
+.ex-rpc-cached code {
+  color: var(--text-secondary);
+}
+
+.ex-rpc-failed .muted {
+  color: var(--warn);
+}
+
 /* Forced colours drop backgrounds, so every mark drawn by one keeps its colour and gains an
    outline: the strip's interval bars too, the only mark of a block's interval. */
 @media (forced-colors: active) {

@@ -1,13 +1,14 @@
 //! The Explorer's words and numbers: amounts in ZEC (TAZ on Testnet), pool movements, block
-//! and transaction sentences, budgets, confirmations, search hints and refusals. Pure, tested
-//! natively. A hidden amount has no number here: callers show "hidden" instead.
+//! and transaction sentences, budgets, confirmations, search hints and refusals, and Show
+//! RPC's reads. Pure, tested natively. A hidden amount has no number here: callers show
+//! "hidden" instead.
 
 use explorer_model::classify::{Classified, Later};
 use launcher_types::{
     Network, Phase,
     explorer::{
         BlockSummary, Budget, LedgerCheck, NotFoundHint, PerPool, Pool, ReorgNotice, SecretKind,
-        Shown, TxKind, TxPage, UnknownWhy,
+        Shown, SourceCall, TxKind, TxPage, UnknownWhy,
     },
 };
 
@@ -580,6 +581,30 @@ pub fn not_found_text(hint: &NotFoundHint) -> String {
     }
 }
 
+/// A read for Show RPC: `getblock ["3549000",1]`.
+pub fn source_text(call: &SourceCall) -> String {
+    format!("{} {}", call.method, call.params)
+}
+
+/// Where a read's answer came from and what it took: `12 ms · 3.8 kB`, `from memory`, `not
+/// found`.
+pub fn source_cost(call: &SourceCall) -> String {
+    if !call.ok {
+        return format!("{} ms · no answer", thousands(u64::from(call.ms)));
+    }
+    if call.cached {
+        return "from memory".to_owned();
+    }
+    match call.bytes {
+        Some(size) => format!(
+            "{} ms · {}",
+            thousands(u64::from(call.ms)),
+            bytes(u64::from(size))
+        ),
+        None => format!("{} ms", thousands(u64::from(call.ms))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use explorer_model::classify::classify_query;
@@ -706,6 +731,33 @@ mod tests {
             "70.6 kB of 2.0 MB"
         );
         assert_eq!(budget_fraction(&Budget::Unknown), None);
+    }
+
+    #[test]
+    fn show_rpc_says_where_each_answer_came_from() {
+        let call = SourceCall {
+            method: "getblock".into(),
+            params: r#"["3549000",1]"#.into(),
+            ms: 12,
+            bytes: Some(3_800),
+            cached: false,
+            ok: true,
+        };
+        assert_eq!(source_text(&call), r#"getblock ["3549000",1]"#);
+        assert_eq!(source_cost(&call), "12 ms · 3.8 kB");
+        let cached = SourceCall {
+            cached: true,
+            ms: 0,
+            bytes: None,
+            ..call.clone()
+        };
+        assert_eq!(source_cost(&cached), "from memory");
+        let failed = SourceCall {
+            ok: false,
+            bytes: None,
+            ..call
+        };
+        assert_eq!(source_cost(&failed), "12 ms · no answer");
     }
 
     #[test]

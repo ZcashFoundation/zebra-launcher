@@ -714,7 +714,14 @@ pub async fn explorer(
     node: &NodeId,
     request: ExplorerRequest,
 ) -> Result<ExplorerReply, ExplorerError> {
-    let call = ExplorerCall::new(request);
+    explorer_call(node, ExplorerCall::new(request)).await
+}
+
+/// Like [`explorer`], with the whole call: `trace` lists the reads the answer took.
+pub async fn explorer_call(
+    node: &NodeId,
+    call: ExplorerCall,
+) -> Result<ExplorerReply, ExplorerError> {
     if !is_tauri() {
         return match mock::explorer::handle(node, call).await {
             Ok(reply) => wire(reply).map_err(explorer_error),

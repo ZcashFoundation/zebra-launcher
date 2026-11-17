@@ -14,7 +14,7 @@ use launcher_types::{
 use leptos::{ev, html, prelude::*};
 
 use super::{
-    parts::{Failure, Loading, RouteLink},
+    parts::{Failure, Loading, RouteLink, RpcCalls},
     state::{Loaded, NodeExplorer, load},
     text,
 };
@@ -145,6 +145,10 @@ pub fn SearchPage(node: NodeId, nav: NodeExplorer, query: String) -> impl IntoVi
         }
     });
     let shown_query = short_hash(&query);
+    let sources = Signal::derive(move || match answer.value.get() {
+        Loaded::Ready(reply) => reply.sources,
+        _ => None,
+    });
     view! {
         <section class="ex-section" aria-labelledby="ex-search-title">
             <h2 id="ex-search-title">"Search"</h2>
@@ -188,6 +192,7 @@ pub fn SearchPage(node: NodeId, nav: NodeExplorer, query: String) -> impl IntoVi
                     _ => view! { <Loading /> }.into_any(),
                 },
             }}
+            <RpcCalls sources title="What this search asked your node" />
         </section>
     }
 }
