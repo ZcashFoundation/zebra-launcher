@@ -1,11 +1,13 @@
-//! Finds the bundled zebrad for a channel.
+//! Finds the bundled zebrad for a channel, and the bundled zingod.
 //!
 //! The bundler installs the sidecars next to the launcher executable as
 //! `zeal-zebrad`, `zeal-zebrad-beta` and `zeal-zebrad-nightly` (`.exe` on
-//! Windows); `cargo tauri dev` copies them there too. Inside an AppImage the
-//! executable lives on a FUSE mount that disappears when the launcher exits
-//! or is replaced by an update, so the selected sidecar is copied into the
-//! data directory first and zebrad runs from the copy.
+//! Windows), and on Linux `zeal-zingod`; `cargo tauri dev` copies them there
+//! too. Inside an AppImage the executable lives on a FUSE mount that
+//! disappears when the launcher exits or is replaced by an update, so the
+//! selected sidecar is copied into the data directory first and runs from the
+//! copy: `<data>/sidecar/<channel>/<version>/` for zebrad and
+//! `<data>/sidecar/zingod/<version>/` for zingod.
 
 use std::{
     fs::{self, File},
@@ -19,55 +21,103 @@ use launcher_types::ZebradChannel;
 /// The stable sidecar's file name without the platform suffix, as installed.
 pub const SIDECAR_NAME: &str = "zeal-zebrad";
 
-/// The zebrad binary to run for `channel`. Never fails: when something is
-/// wrong the supervisor reports the spawn failure to the user.
-pub fn resolve(paths: &Paths, channel: ZebradChannel) -> PathBuf {
-    let bundled = match bundled_path(&channel) {
+/// zingod's sidecar file name, as installed on Linux.
+pub const ZINGOD_NAME: &str = "zeal-zingod";
+
+/// A bundled program: zebrad for a channel, or zingod.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sidecar {
+    Zebrad(ZebradChannel),
+    Zingod,
+}
+
+impl Sidecar {
+    /// The program's name for logs.
+    fn program(self) -> &'static str {
+        match self {
+            Sidecar::Zebrad(_) => "zebrad",
+            Sidecar::Zingod => "zingod",
+        }
+    }
+
+    /// The folder of its AppImage copies, below the sidecar folder: the channel's, or
+    /// `zingod`.
+    fn folder(self) -> &'static str {
+        match self {
+            Sidecar::Zebrad(channel) => channel.as_str(),
+            Sidecar::Zingod => "zingod",
+        }
+    }
+}
+
+/// The binary to run for `sidecar`. Never fails: when something is wrong the
+/// supervisor reports the spawn failure to the user.
+pub fn resolve(paths: &Paths, sidecar: Sidecar) -> PathBuf {
+    let bundled = match bundled_path(sidecar) {
         Ok(path) => path,
         Err(err) => {
-            tracing::error!(%err, channel = channel.as_str(), "could not locate the launcher executable");
-            PathBuf::from(sidecar_file_name(&channel))
+            tracing::error!(%err, sidecar = sidecar.folder(), "could not locate the launcher executable");
+            PathBuf::from(sidecar_file_name(sidecar))
         }
     };
     if !bundled.is_file() {
-        tracing::error!(path = %bundled.display(), channel = channel.as_str(), "the bundled zebrad is missing");
+        // zingod is bundled on Linux only: elsewhere its absence is expected.
+        if sidecar == Sidecar::Zingod && !cfg!(target_os = "linux") {
+            tracing::debug!(path = %bundled.display(), "no bundled zingod on this system");
+        } else {
+            tracing::error!(path = %bundled.display(), sidecar = sidecar.folder(), "the bundled {} is missing", sidecar.program());
+        }
         return bundled;
     }
     if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some() {
-        let dir = appimage_dir(paths, &channel);
+        let dir = appimage_dir(paths, sidecar);
         match copy_out(&bundled, &dir) {
             Ok(copy) => {
-                remove_other_versions(&paths.sidecar_dir().join(channel.as_str()), &dir);
+                remove_other_versions(&paths.sidecar_dir().join(sidecar.folder()), &dir);
                 return copy;
             }
             Err(err) => tracing::error!(
                 %err,
-                channel = channel.as_str(),
+                sidecar = sidecar.folder(),
                 dir = %dir.display(),
-                "could not copy zebrad out of the AppImage; running it from the mount"
+                "could not copy {} out of the AppImage; running it from the mount",
+                sidecar.program()
             ),
         }
     }
     bundled
 }
 
-fn sidecar_file_name(channel: &ZebradChannel) -> String {
-    format!("{}{}", channel.sidecar_name(), std::env::consts::EXE_SUFFIX)
+/// The bundled zingod, where one is: Linux only. `None` disables the light client server's
+/// zingod choice.
+pub fn zingod(paths: &Paths) -> Option<PathBuf> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    Some(resolve(paths, Sidecar::Zingod)).filter(|path| path.is_file())
 }
 
-/// The selected channel's `zeal-zebrad*[.exe]` next to the running executable.
-fn bundled_path(channel: &ZebradChannel) -> io::Result<PathBuf> {
+fn sidecar_file_name(sidecar: Sidecar) -> String {
+    let name = match sidecar {
+        Sidecar::Zebrad(channel) => channel.sidecar_name(),
+        Sidecar::Zingod => ZINGOD_NAME,
+    };
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// The sidecar's file next to the running executable.
+fn bundled_path(sidecar: Sidecar) -> io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let dir = exe
         .parent()
         .ok_or_else(|| io::Error::other("the launcher executable has no parent directory"))?;
-    Ok(dir.join(sidecar_file_name(channel)))
+    Ok(dir.join(sidecar_file_name(sidecar)))
 }
 
-fn appimage_dir(paths: &Paths, channel: &ZebradChannel) -> PathBuf {
+fn appimage_dir(paths: &Paths, sidecar: Sidecar) -> PathBuf {
     paths
         .sidecar_dir()
-        .join(channel.as_str())
+        .join(sidecar.folder())
         .join(env!("CARGO_PKG_VERSION"))
 }
 
@@ -91,7 +141,7 @@ pub fn copy_out(source: &Path, dir: &Path) -> io::Result<PathBuf> {
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
     }
     fs::rename(&tmp, &target)?;
-    tracing::info!(from = %source.display(), to = %target.display(), "copied the zebrad sidecar");
+    tracing::info!(from = %source.display(), to = %target.display(), "copied a sidecar out of the AppImage");
     Ok(target)
 }
 
@@ -183,22 +233,57 @@ mod tests {
     fn file_names_come_from_the_channel() {
         for channel in ZebradChannel::ALL {
             assert_eq!(
-                sidecar_file_name(&channel),
+                sidecar_file_name(Sidecar::Zebrad(channel)),
                 format!("{}{}", channel.sidecar_name(), std::env::consts::EXE_SUFFIX)
             );
         }
         assert_eq!(
-            sidecar_file_name(&ZebradChannel::Stable),
+            sidecar_file_name(Sidecar::Zebrad(ZebradChannel::Stable)),
             format!("{SIDECAR_NAME}{}", std::env::consts::EXE_SUFFIX)
         );
+        assert_eq!(
+            sidecar_file_name(Sidecar::Zingod),
+            format!("zeal-zingod{}", std::env::consts::EXE_SUFFIX)
+        );
+    }
+
+    #[test]
+    fn zingods_appimage_copy_has_a_folder_of_its_own() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::under(root.path());
+        let zingod = appimage_dir(&paths, Sidecar::Zingod);
+        assert_eq!(
+            zingod,
+            paths
+                .sidecar_dir()
+                .join("zingod")
+                .join(env!("CARGO_PKG_VERSION"))
+        );
+        // zebrad's folders are unchanged.
+        assert_eq!(
+            appimage_dir(&paths, Sidecar::Zebrad(ZebradChannel::Stable)),
+            paths
+                .sidecar_dir()
+                .join("stable")
+                .join(env!("CARGO_PKG_VERSION"))
+        );
+        // Each program's cleanup keeps the other's copies.
+        let stable = appimage_dir(&paths, Sidecar::Zebrad(ZebradChannel::Stable));
+        let old_zingod = zingod.parent().expect("version parent").join("0.0.9");
+        for dir in [&zingod, &stable, &old_zingod] {
+            fs::create_dir_all(dir).expect("copy");
+        }
+        remove_other_versions(&paths.sidecar_dir().join("zingod"), &zingod);
+        assert!(zingod.is_dir() && stable.is_dir());
+        assert!(!old_zingod.exists());
     }
 
     #[test]
     fn appimage_cleanup_preserves_other_channels() {
         let root = tempfile::tempdir().expect("tempdir");
         let paths = Paths::under(root.path());
-        let stable = appimage_dir(&paths, &ZebradChannel::Stable);
-        let beta = appimage_dir(&paths, &ZebradChannel::Beta);
+        let stable = appimage_dir(&paths, Sidecar::Zebrad(ZebradChannel::Stable));
+        let beta = appimage_dir(&paths, Sidecar::Zebrad(ZebradChannel::Beta));
         let old_stable = stable.parent().expect("version parent").join("0.0.9");
         fs::create_dir_all(&stable).expect("stable copy");
         fs::create_dir_all(&beta).expect("beta copy");

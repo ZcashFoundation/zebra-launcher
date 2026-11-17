@@ -116,6 +116,8 @@ pub fn run() {
             commands::run_public_checks,
             commands::open_public_service,
             commands::forget_public_service,
+            commands::rebuild_public_index,
+            commands::delete_public_index,
             commands::open_signup,
             commands::explorer,
         ])
@@ -298,7 +300,7 @@ async fn start(app: &AppHandle) -> Result<(AppState, bool), StartupError> {
     let stdin_close = std::env::var_os(STDIN_CLOSE_ENV).is_some_and(|v| v == "1");
     let sidecar_paths = paths.clone();
     let mut config = RegistryConfig::with_resolver(paths.clone(), move |channel| {
-        sidecar::resolve(&sidecar_paths, channel)
+        sidecar::resolve(&sidecar_paths, sidecar::Sidecar::Zebrad(channel))
     });
     config.customize = Some(Arc::new(move |_node, supervisor| {
         if let Some(zebrad) = supervisor.command.zebrad_mut() {

@@ -54,6 +54,8 @@
     "allow-run-public-checks",
     "allow-open-public-service",
     "allow-forget-public-service",
+    "allow-rebuild-public-index",
+    "allow-delete-public-index",
     "allow-open-signup",
     "allow-explorer"
   ]

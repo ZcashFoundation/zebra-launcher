@@ -834,7 +834,7 @@ fn Forget(left: RwSignal<Option<Vec<String>>>) -> impl IntoView {
         failed.set(None);
         left.set(None);
         spawn_local(async move {
-            match api::public::forget_public_service(remove_token.get_untracked()).await {
+            match api::public::forget_public_service(remove_token.get_untracked(), false).await {
                 Ok(still) => {
                     let mut lines = Vec::new();
                     if let Some((external, lan, internal)) = still.forward {

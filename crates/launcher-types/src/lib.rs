@@ -111,6 +111,9 @@ pub enum OpenTarget {
     /// zebrad's Prometheus metrics page, `http://<metrics_addr>/metrics`, in
     /// the browser. Fails while zebrad is not running.
     MetricsEndpoint,
+    /// zingod's log, `zingod-<network>.log` in the log directory, for the light client
+    /// server's network. Fails while zingod hasn't run.
+    ZingodLog,
 }
 
 /// Where a log line came from.

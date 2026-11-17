@@ -613,7 +613,10 @@ pub async fn open_public_service() -> Result<(), OpenError> {
     Ok(())
 }
 
-pub async fn forget_public_service(remove_token: bool) -> Result<StillPublic, String> {
+pub async fn forget_public_service(
+    remove_token: bool,
+    _remove_index: bool,
+) -> Result<StillPublic, String> {
     let public = public();
     let (spec, locked) = public
         .world
