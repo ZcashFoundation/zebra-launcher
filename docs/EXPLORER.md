@@ -1393,7 +1393,9 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
   until 300 ms after it leaves both, and Escape, wherever focus is, or any scroll hides it. The
   UI keeps the cards it read while the chain they were read on
   holds: another network or a reorganisation (a new epoch) drops them all, and a new tip the
-  cards of transactions not in a best-chain block. A card whose read failed says why ("Block
+  cards of transactions not in a best-chain block. A card answered once any of these has
+  happened may be of the old chain: it is not kept, and is asked for again while its hover
+  lasts. A card whose read failed says why ("Block
   N is not mined yet", "Not in your node yet", "Your node is not running") on that hover
   only; the next one asks again.
 - **The synthetic chain** funds every transparent input with an output it has (a coinbase's,

@@ -5,14 +5,16 @@
 //! pointer moves onto it, and goes 300 ms after the pointer or focus leaves both the link and
 //! the card, at once on Escape wherever focus is, and when anything scrolls. The facts are kept while the chain they were read on holds:
 //! another network or a reorganisation drops them all, and a new tip those of transactions
-//! not in a block yet.
+//! not in a block yet. A read answered once the chain has changed may be of the old one: it is
+//! not kept, and is asked for again while its hover lasts.
 
 use std::{collections::HashMap, time::Duration};
 
 use launcher_types::{
     Network, NodeId,
     explorer::{
-        Card, CardTarget, ExplorerErrorKind, ExplorerRequest, ExplorerResponse, TxKind, TxStatus,
+        Card, CardTarget, ExplorerError, ExplorerErrorKind, ExplorerReply, ExplorerRequest,
+        ExplorerResponse, TxKind, TxStatus,
     },
 };
 use leptos::{ev, prelude::*, task::spawn_local};
@@ -51,6 +53,9 @@ pub struct HoverCards {
     /// one asks again.
     failed: RwSignal<Option<(u64, CardTarget, ExplorerErrorKind)>>,
     generation: StoredValue<u64>,
+    /// The chain the cards are for, counted: one more at each new network, epoch or tip, so a
+    /// read answered across one is not kept.
+    revision: StoredValue<u64>,
     /// The pointer is on the card.
     on_card: StoredValue<bool>,
 }
@@ -71,11 +76,15 @@ impl HoverCards {
             shown: RwSignal::new(None),
             cards: RwSignal::new(HashMap::new()),
             generation: StoredValue::new(0),
+            revision: StoredValue::new(0),
         };
         // Facts of another chain do not hold: another network, or the epoch a reorganisation
         // bumps, drops them all. At a new tip, a transaction not yet in a block may be in one.
         Effect::new(move |previous: Option<(Network, Option<(u64, u32)>)>| {
             let now = (network.get(), tip.get());
+            if previous.is_some_and(|previous| previous != now) {
+                cards.revision.update_value(|revision| *revision += 1);
+            }
             if let Some((was_network, was_tip)) = previous {
                 let epoch = |tip: Option<(u64, u32)>| tip.map(|(epoch, _)| epoch);
                 if was_network != now.0 || epoch(was_tip) != epoch(now.1) {
@@ -111,7 +120,8 @@ impl HoverCards {
                 {
                     return;
                 }
-                spawn_local(self.read(node, key, wanted, mine));
+                let call = async move |request| api::explorer(&node, request).await;
+                spawn_local(self.read(call, key, wanted, mine));
             },
             ASK_AFTER,
         );
@@ -133,24 +143,46 @@ impl HoverCards {
         );
     }
 
-    /// Reads the card `key` names for the hover `mine`.
-    async fn read(self, node: NodeId, key: (NodeId, CardTarget), wanted: CardTarget, mine: u64) {
-        let request = ExplorerRequest::Card {
-            target: wanted.clone(),
-        };
-        match api::explorer(&node, request).await {
-            Ok(reply) => {
-                if let ExplorerResponse::Card(card) = reply.response {
-                    self.cards.try_update(|cards| {
-                        cards.insert(key, card);
-                    });
-                }
-            }
-            Err(error) => {
+    /// Reads the card `key` names for the hover `mine`, with `call` (the node's explorer). An
+    /// answer that comes once the cards are for another chain (a new network, epoch or tip
+    /// meanwhile) may be of the old one: it is not kept, and is asked for again while the hover
+    /// lasts.
+    async fn read(
+        self,
+        call: impl AsyncFn(ExplorerRequest) -> Result<ExplorerReply, ExplorerError>,
+        key: (NodeId, CardTarget),
+        wanted: CardTarget,
+        mine: u64,
+    ) {
+        loop {
+            let Some(asked_on) = self.revision.try_get_value() else {
+                return;
+            };
+            let request = ExplorerRequest::Card {
+                target: wanted.clone(),
+            };
+            let answer = call(request).await;
+            if self.revision.try_get_value() != Some(asked_on) {
                 if self.generation.try_get_value() == Some(mine) {
-                    self.failed.try_set(Some((mine, wanted, error.kind)));
+                    continue;
+                }
+                return;
+            }
+            match answer {
+                Ok(reply) => {
+                    if let ExplorerResponse::Card(card) = reply.response {
+                        self.cards.try_update(|cards| {
+                            cards.insert(key, card);
+                        });
+                    }
+                }
+                Err(error) => {
+                    if self.generation.try_get_value() == Some(mine) {
+                        self.failed.try_set(Some((mine, wanted, error.kind)));
+                    }
                 }
             }
+            return;
         }
     }
 
@@ -336,9 +368,129 @@ pub fn HoverCard() -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        cell::Cell,
+        pin::pin,
+        task::{Context, Waker},
+    };
+
     use launcher_types::explorer::{Hash32, TxKind};
 
     use super::*;
+
+    fn tx_card(status: TxStatus) -> Card {
+        Card::Tx {
+            txid: Hash32([2; 32]),
+            kind: TxKind::Transparent,
+            status,
+            inputs: 1,
+            outputs: 2,
+            pools: Vec::new(),
+            size: Some(226),
+        }
+    }
+
+    fn hover_cards() -> HoverCards {
+        HoverCards {
+            node: Signal::stored(NodeId::new("zebrad-mainnet").unwrap()),
+            tip: Signal::stored(Some((0, 3_550_990))),
+            shown: RwSignal::new(None),
+            cards: RwSignal::new(HashMap::new()),
+            failed: RwSignal::new(None),
+            generation: StoredValue::new(1),
+            revision: StoredValue::new(0),
+            on_card: StoredValue::new(false),
+        }
+    }
+
+    fn key() -> (NodeId, CardTarget) {
+        let target = CardTarget::Tx {
+            txid: Hash32([2; 32]),
+        };
+        (NodeId::new("zebrad-mainnet").unwrap(), target)
+    }
+
+    /// Reads the card of transaction 2 for hover 1 with `call`, which answers at once.
+    fn read(
+        cards: HoverCards,
+        call: impl AsyncFn(ExplorerRequest) -> Result<ExplorerReply, ExplorerError>,
+    ) {
+        let (node, target) = key();
+        let mut reading = pin!(cards.read(call, (node, target.clone()), target, 1));
+        let ready = reading
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        assert!(ready.is_ready());
+    }
+
+    #[test]
+    fn a_card_answered_across_a_change_of_chain_is_asked_for_again() {
+        let owner = Owner::new();
+        owner.set();
+        let mined = tx_card(TxStatus::Mined {
+            block: Hash32([1; 32]),
+            height: 3_550_990,
+            time: None,
+        });
+        let reply = |card: &Card| {
+            Ok(ExplorerReply {
+                chain: None,
+                response: ExplorerResponse::Card(card.clone()),
+                sources: None,
+            })
+        };
+        let card = |cards: HoverCards| {
+            cards
+                .cards
+                .with_untracked(|known| known.get(&key()).cloned())
+        };
+        // A reorganisation while the node reads: the transaction it found mined is back in the
+        // mempool. The first answer is not kept; the hover asks again.
+        let cards = hover_cards();
+        let calls = Cell::new(0);
+        read(cards, async |_| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                cards.revision.update_value(|revision| *revision += 1);
+                return reply(&mined);
+            }
+            reply(&tx_card(TxStatus::Mempool))
+        });
+        assert_eq!(calls.get(), 2);
+        assert_eq!(card(cards), Some(tx_card(TxStatus::Mempool)));
+        // A failure across it is not shown either.
+        let cards = hover_cards();
+        let calls = Cell::new(0);
+        read(cards, async |_| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                cards.revision.update_value(|revision| *revision += 1);
+                return Err(ExplorerError {
+                    kind: ExplorerErrorKind::NotFound,
+                    message: "not found".into(),
+                });
+            }
+            reply(&mined)
+        });
+        assert_eq!(calls.get(), 2);
+        assert_eq!(cards.failed.get_untracked(), None);
+        assert_eq!(card(cards), Some(mined.clone()));
+        // Once the pointer has gone on, nothing is kept and nothing asked again.
+        let cards = hover_cards();
+        let calls = Cell::new(0);
+        read(cards, async |_| {
+            calls.set(calls.get() + 1);
+            cards.revision.update_value(|revision| *revision += 1);
+            cards.generation.set_value(2);
+            reply(&mined)
+        });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(card(cards), None);
+        // On the same chain, the answer is kept.
+        let cards = hover_cards();
+        read(cards, async |_| reply(&mined));
+        assert_eq!(card(cards), Some(mined));
+    }
 
     #[test]
     fn a_new_tip_drops_the_cards_of_transactions_not_yet_in_a_block() {
