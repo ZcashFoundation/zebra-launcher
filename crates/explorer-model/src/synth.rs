@@ -21,8 +21,8 @@
 //! start, the block's own coinbase). Roots are found without looking further back, so a
 //! block stays cheap to build. Nothing checks that an output is spent only once.
 //!
-//! With [`SynthChain::with_big_blocks`], every so many blocks hold 5,000 more transparent
-//! payments, about 2 MB in all.
+//! With [`SynthChain::with_big_blocks`], every so many blocks hold 4,600 more transparent
+//! payments, nearly 2 MB in all and under zebrad's limit of 2,000,000 bytes.
 //!
 //! Block hashes and transaction ids encode their height, branch and position, so lookups need
 //! no index. Addresses are made-up strings in the right shape: never real ones.
@@ -76,8 +76,9 @@ const HEADER_BYTES: i64 = 1_487;
 /// A pay-to-public-key-hash input's unlocking script, in bytes: a signature and a public key.
 const P2PKH_SCRIPT_SIG: u32 = 107;
 
-/// The transactions a big block holds beyond its plan ([`SynthChain::with_big_blocks`]).
-const FILLERS: u32 = 5_000;
+/// The transactions a big block holds beyond its plan ([`SynthChain::with_big_blocks`]): with
+/// the largest plans, about 200 KB, the block stays under 2,000,000 bytes.
+const FILLERS: u32 = 4_600;
 /// What each of them pays.
 const FILLER_FEE: i64 = 10_000;
 /// And its size: two inputs and two outputs, all pay-to-public-key-hash.
@@ -122,8 +123,8 @@ impl SynthChain {
         self
     }
 
-    /// The same chain with every `every`-th block holding 5,000 more transparent payments,
-    /// about 2 MB in all: a block too big to read whole at once.
+    /// The same chain with every `every`-th block holding 4,600 more transparent payments,
+    /// nearly 2 MB in all: a block too big to read whole at once.
     pub fn with_big_blocks(mut self, every: u32) -> Self {
         self.big_blocks = (every > 0).then_some(every);
         self
@@ -1851,7 +1852,7 @@ mod tests {
     }
 
     #[test]
-    fn big_blocks_hold_five_thousand_more_payments() {
+    fn big_blocks_hold_thousands_more_payments_under_two_megabytes() {
         let chain = SynthChain::new(Network::Mainnet, 3_551_000, NOW).with_big_blocks(10);
         let plain = SynthChain::new(Network::Mainnet, 3_551_000, NOW);
         let height = 3_550_990;
@@ -1859,8 +1860,16 @@ mod tests {
         let block = chain.block(BlockId::Height(height)).unwrap();
         let small = plain.block(BlockId::Height(height)).unwrap();
         assert_eq!(block.tx.len(), small.tx.len() + FILLERS as usize);
-        let size = block.size.unwrap();
-        assert!((1_800_000..2_000_000).contains(&size), "{size}");
+        // Each stays under zebrad's 2,000,000 bytes, on either network.
+        for chain in [
+            chain.clone(),
+            SynthChain::new(Network::Testnet, 4_500_000, NOW).with_big_blocks(10),
+        ] {
+            for height in (chain.tip() - 3_000..=chain.tip()).step_by(10) {
+                let size = chain.block(BlockId::Height(height)).unwrap().size.unwrap();
+                assert!((1_700_000..2_000_000).contains(&size), "{height}: {size}");
+            }
+        }
         // The last one is a payment from two coinbase outputs, as found by its id.
         let last = chain
             .tx(block.tx.last().unwrap())

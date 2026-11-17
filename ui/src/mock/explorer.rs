@@ -13,7 +13,7 @@
 //!
 //! `?explorer=slow` makes each answer take 300 to 800 ms instead of 20 to 80, `?explorer=nobi`
 //! takes zebrad's value-pool row from every seventh block (so the next one shows the zero-diff
-//! case), `?explorer=big` gives every tenth block 5,000 more transactions (about 2 MB, read
+//! case), `?explorer=big` gives every tenth block 4,600 more transactions (nearly 2 MB, read
 //! row by row), and `?reorg` replaces the main node's top two blocks about every 90 s.
 //! `?attip`, `?tip=` and `?explorer=empty` choose the main node's height (mock.rs).
 
@@ -1002,7 +1002,7 @@ mod tests {
         assert_eq!(sources[1].params, format!(r#"["{}",3]"#, small.hash));
         // A big block: row by row, the fees after.
         let big = chain.block(BlockId::Height(3_550_000)).unwrap();
-        assert!(big.tx.len() > 5_000);
+        assert!(big.tx.len() > 4_600);
         let mut reads = Reads::new(&chain, &mut seen);
         let first = block_txs(&mut reads, big.hash, 4_000, 25, false).unwrap();
         assert_eq!(first.read, RowsRead::OneByOne);

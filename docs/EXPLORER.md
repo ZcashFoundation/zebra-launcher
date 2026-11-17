@@ -1051,7 +1051,7 @@ pub async fn explorer_job(app: AppHandle, state: State<'_, AppState>, node: Node
 | Flag | Effect |
 | --- | --- |
 | `?attip`, `?tip=<h>` | the main node synced near 3,551,000 (past NU7), a block every 25 s; or any height. The mock's end of support (ui/src/mock.rs:627-630, now block 3,160,000) moves with the tip and keeps its distance: 41 days of blocks above it at the era's spacing, 10 with `?eos=soon`, so the dashboard and "your zebrad stops at block X" agree with the height |
-| `?explorer=slow`, `=big`, `=empty` | 300–800 ms calls; 5,000-transaction and 2 MB blocks and a 200,000-transaction address; a 10-block chain |
+| `?explorer=slow`, `=big`, `=empty` | 300–800 ms calls; blocks of 4,600 more transactions, nearly 2 MB, and a 200,000-transaction address; a 10-block chain |
 | `?explorer=nobi` | blocks without `BlockInfo`, including a parent without (the zero-diff case) |
 | `?explorer=pruned`, `=stopped`, `=perf` | Zakura pruned (with `?herd`); a stopped node with cached pages "from memory"; the performance overlay |
 | `?reorg` | a 2-block reorg about every 90 s |
@@ -1383,7 +1383,8 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
   or one of a transaction without transparent inputs, from 100 blocks back), so the fees the
   explorer works out from spent outputs are what the transactions paid; an output may be spent
   more than once, which nothing checks. `?explorer=big` gives every tenth block (heights
-  ending in 0) 5,000 two-in, two-out payments, about 2 MB; the 200,000-transaction address
+  ending in 0) 4,600 two-in, two-out payments, so that with its own transactions it is nearly
+  2 MB and under zebrad's 2,000,000 bytes; the 200,000-transaction address
   waits for P4. The mock names its reads as the backend's RPC calls, with made-up times and
   sizes, and remembers them as the backend's cache would, for Show RPC.
 - **Call budgets** pinned by the actor's tests: a small block's rows are one heavy read with

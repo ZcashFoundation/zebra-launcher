@@ -202,8 +202,8 @@ every node command and event carries a node's id, and the mock's zebrad below is
   800 ms, `?explorer=empty` gives a chain of ten blocks, `?explorer=nobi` takes zebrad's
   value-pool row from every seventh block, so that block and the next show their fees as
   unknown and that block, of a size zebrad does not report, reads its rows one by one, and
-  `?explorer=big` gives every tenth block (heights ending in 0) 5,000 more
-  transactions, about 2 MB, whose rows the Block page reads one by one as they scroll into
+  `?explorer=big` gives every tenth block (heights ending in 0) 4,600 more
+  transactions, nearly 2 MB, whose rows the Block page reads one by one as they scroll into
   view, their fees after them. The mock reads as the backend does (a small block whole, a
   transaction's earlier ones, a coinbase's block) and remembers what it read as the backend's
   cache would, so Show RPC lists the same reads, made-up times included, and "from memory"

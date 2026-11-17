@@ -957,7 +957,7 @@ differs.
   call (`mock/explorer/reads.rs`), for the first node only as the backend does (`?herd`'s
   other nodes get its answer), and the dashboard's details read the same chain. Every
   transparent input of the synthetic chain spends an output it has, so fees worked out from
-  spent outputs are the ones paid; `?explorer=big` adds 5,000 transactions to every tenth
+  spent outputs are the ones paid; `?explorer=big` adds 4,600 transactions to every tenth
   block. The mock's zebrad reports
   its node's network as it was at its start, so a network change shows `OtherNetwork` until
   a restart, which gives a new chain on the new network.
