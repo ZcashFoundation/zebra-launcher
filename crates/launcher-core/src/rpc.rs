@@ -463,7 +463,7 @@ impl RpcSession<'_> {
             timeout,
         )
         .await;
-        result
+        result.map(|(value, _)| value)
     }
 }
 
@@ -504,6 +504,18 @@ impl OwnedSession {
         params: Value,
         timeout: Duration,
     ) -> Result<T, RpcError> {
+        self.call_sized(method, params, timeout)
+            .await
+            .map(|(value, _)| value)
+    }
+
+    /// Like [`OwnedSession::call_timeout`], with the size of zebrad's answer in bytes.
+    pub async fn call_sized<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<(T, usize), RpcError> {
         let authorization = self.authorization.borrow().clone();
         let (result, fresh) = exchange_or_reread(
             &self.http,
@@ -554,7 +566,7 @@ async fn exchange_or_reread<T: DeserializeOwned>(
     method: &str,
     params: Value,
     timeout: Duration,
-) -> (Result<T, RpcError>, Option<String>) {
+) -> (Result<(T, usize), RpcError>, Option<String>) {
     let first = exchange(http, url, authorization, method, params.clone(), timeout).await;
     match first {
         Err(err) if may_be_stale_cookie(&err) => match read_authorization(cookie_file).await {
@@ -568,8 +580,8 @@ async fn exchange_or_reread<T: DeserializeOwned>(
     }
 }
 
-/// One request and its decoded result. `timeout` replaces the client's own for this
-/// request.
+/// One request, its decoded result and the size of the answer's body. `timeout` replaces the
+/// client's own for this request.
 async fn exchange<T: DeserializeOwned>(
     http: &reqwest::Client,
     url: &str,
@@ -577,7 +589,7 @@ async fn exchange<T: DeserializeOwned>(
     method: &str,
     params: Value,
     timeout: Duration,
-) -> Result<T, RpcError> {
+) -> Result<(T, usize), RpcError> {
     let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
     let response = http
         .post(url)
@@ -594,7 +606,7 @@ async fn exchange<T: DeserializeOwned>(
     if bytes.is_empty() {
         return Err(RpcError::EmptyResponse);
     }
-    decode(&bytes)
+    decode(&bytes).map(|value| (value, bytes.len()))
 }
 
 /// Decodes a JSON-RPC response body.
