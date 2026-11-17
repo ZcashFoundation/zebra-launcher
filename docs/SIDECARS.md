@@ -618,8 +618,10 @@ can also be run by hand (Actions → zingod sidecars → Run workflow):
   findings go in the job's summary, with a warning that counts them, and
   don't fail it (PUBLIC-SERVICES.md's open question 24). On 2026-11-16 the
   report for 1.1.0 named 15. Nor does a failed report: if cargo-deny can't
-  be downloaded, doesn't match its pin or can't be unpacked, the summary and
-  a warning say so instead, and the step has `continue-on-error` and a
+  be downloaded, doesn't match its pin or can't be unpacked, or its output
+  lacks the closing `advisories ok` or `advisories FAILED` line (when the
+  advisory database can't be fetched, for one), the summary and a warning
+  say so instead of "None found.". The step has `continue-on-error` and a
   10-minute timeout, so the attestation and upload steps after it always
   run;
 - with `attest`, it attests provenance with `actions/attest-build-provenance`,

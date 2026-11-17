@@ -255,15 +255,26 @@ jobs:
             --config "${RUNNER_TEMP}/empty-deny.toml" --color never check advisories \
             > "${report}" 2>&1 || status=$?
           found="$(grep -E '^(error|warning)\[' "${report}" || true)"
+          # A run that checked the lock file ends with `advisories ok` or
+          # `advisories FAILED`. Without that line (the database fetch failed,
+          # say) nothing was checked, and "None found." would read as clean.
+          checked=false
+          if grep -qxE 'advisories (ok|FAILED)' "${report}"; then
+            checked=true
+          fi
           {
             echo "### Advisories in zingod ${VERSION}'s Cargo.lock"
             echo
-            echo "cargo-deny ${version}, exit status ${status}. Triage these at each bump; they don't fail the build."
-            echo
-            if [ -n "${found}" ]; then
-              while IFS= read -r line; do echo "- ${line}"; done <<< "${found}"
+            if [ "${checked}" = false ]; then
+              echo "cargo-deny ${version} did not complete (exit status ${status}), so no advisories were checked; the full report says why."
             else
-              echo "None found."
+              echo "cargo-deny ${version}, exit status ${status}. Triage these at each bump; they don't fail the build."
+              echo
+              if [ -n "${found}" ]; then
+                while IFS= read -r line; do echo "- ${line}"; done <<< "${found}"
+              else
+                echo "None found."
+              fi
             fi
             echo
             echo "<details><summary>The full report</summary>"
@@ -273,7 +284,9 @@ jobs:
             echo '```'
             echo "</details>"
           } >> "${GITHUB_STEP_SUMMARY}"
-          if [ -n "${found}" ]; then
+          if [ "${checked}" = false ]; then
+            echo "::warning title=zingod advisories::cargo-deny ${version} did not complete (exit status ${status}); see the job summary"
+          elif [ -n "${found}" ]; then
             echo "::warning title=zingod advisories::$(wc -l <<< "${found}") advisories in zingod ${VERSION}'s Cargo.lock; see the job summary"
           fi
 
