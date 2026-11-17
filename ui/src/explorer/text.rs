@@ -613,12 +613,16 @@ pub fn flow_glyph(row: &TxRow) -> String {
 }
 
 /// What a row moved into or out of each shielded pool: `Ironwood +1.2 · Orchard −1.2001`.
-/// Value that left a pool is negative.
+/// Value that left a pool is negative; value that stayed in it is "nothing net", never a
+/// zero, which would read as an amount the chain hides.
 pub fn net_text(shielded: &[PoolPart], unit: Unit) -> String {
     shielded
         .iter()
         .map(|part| {
             let into = -part.net_out;
+            if into == 0 {
+                return format!("{} nothing net", part.pool.label());
+            }
             let sign = if into > 0 { "+" } else { "" };
             format!("{} {sign}{}", part.pool.label(), unit.number(into))
         })
@@ -1139,6 +1143,21 @@ mod tests {
             &[(Pool::Sapling, 5)],
         );
         assert_eq!(flow_glyph(&deshielding), "z → t");
+        // Value that stayed in a pool is nothing net there, never a zero.
+        let paying_from_orchard = row(
+            TxKind::Mixed,
+            0,
+            0,
+            &[(Pool::Sapling, 0), (Pool::Orchard, 10_000)],
+        );
+        assert_eq!(
+            net_text(&paying_from_orchard.shielded, ZEC),
+            "Sapling nothing net · Orchard -0.0001"
+        );
+        assert_eq!(
+            net_text(&paying_from_orchard.shielded, ZAT),
+            "Sapling nothing net · Orchard -10,000"
+        );
         assert_eq!(flow_glyph(&row(TxKind::Transparent, 1, 2, &[])), "t → t");
         let coinbase = row(
             TxKind::Coinbase {
