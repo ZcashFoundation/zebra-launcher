@@ -40,3 +40,50 @@ release's `SHA256SUMS` by hand, without the cosign signature) on Linux,
 
 Re-capture when the pinned zebrad changes log wording; the parser tests pin
 the exact lines the supervisor relies on.
+
+## zingod
+
+Captured from `zingod 1.1.0` (commit `bfce8b2`, a release build of the pinned
+commit with plain `cargo build --locked --release -p zingod --bin zingod`) on
+Linux, 2026-11-17, with zingod's environment cleared to the five variables
+Zeal sets (`HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME`
+under a scratch folder, and `RUST_LOG=zingod=info`), the configuration in
+the shape Zeal writes (`launcher_core::zingod::config`), and `zebrad 7.0.0`
+(git `e8db87e`) on Regtest as the validator, with `[mining] miner_address` set
+and three blocks mined with `generate`. Paths are scrubbed to `<DIR>`, and the
+default paths of `generate-config` to `<HOME>`.
+
+- `zingod-1.1.0-generate.toml`: `zingod generate-config -o FILE`. Exit code
+  0. It leaves out the keys that default to unset, such as
+  `[[trusted_validators]] cookie_path`.
+- `zingod-1.1.0-regtest-start-shutdown.stdout.log`: `zingod -c FILE start`
+  on Regtest, serving at height 3 a second later, stopped with `SIGTERM`
+  after 4 s. Exit code 0, empty stderr. logfmt with no `target`: the
+  `Listening` line with `component=Grpc` is the one the reader keys on.
+- `zingod-1.1.0-port-in-use.stderr.log`: a second zingod on the same
+  `grpc_listen_address`. Exit code 1.
+- `zingod-1.1.0-lock-held.stderr.log`: a second zingod on another port with
+  the same indexes. Exit code 1; the lock comes as a `manifest io:` text.
+- `zingod-1.1.0-config-error.stderr.log`: the same file with `bogus = 1`
+  added. Exit code 1.
+- `zingod-1.1.0-cookie-dir.stderr.log`: `cookie_path` names a folder. Exit
+  code 1.
+- `zingod-1.1.0-status-syncing-null.json`: `GET /status` 3 s after the start
+  on Testnet with nothing listening at the validator's address: `syncing`
+  with a `null` detail (no sync target yet).
+- `zingod-1.1.0-status-no-validator.json`: the same on Regtest, where the boot
+  waits for the validator's first answer: `down`, `no_validator_reachable`.
+- `zingod-1.1.0-status-serving.json`: `GET /status` 4 s after the start on
+  Regtest: `serving` at height 3.
+- `zingod-1.1.0-status-syncing-tip.json`: `GET /status` 5 s after the start
+  on Regtest, through a loopback proxy that answered `getrawmempool` with the
+  error zebrad gives while its mempool is off (`-1`, `mempool is not active:
+  wait for Zebra to sync to the tip`): `syncing` at zebrad's tip, with a
+  detail whose `target` is zingod's clock estimate (Regtest's genesis is old)
+  and `blocks_per_sec` `null`.
+
+zingod 1.1.0 sends its JSON-RPC calls as batches, so the proxy had to answer
+batches; fake-zebrad doesn't, and only fake-zingod reads it.
+
+Re-capture them at each `ZINGOD_VERSION` bump: the reader's and the config
+writer's tests fail until they agree with the new files.
