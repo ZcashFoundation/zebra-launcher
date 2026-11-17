@@ -1,9 +1,11 @@
 # Resource monitoring
 
-> **Status, 2026-11-16: phases 1 to 4 are built (the Resources card, live on Linux, macOS and
-> Windows, with its history charts), and of phase 7 the parts the node registry of MULTI-NODE
-> phase 2a makes possible (a sampler per node, the node-scoped event and command, the herd's
-> figures in the mock); phases 5 and 6 and the rest of phase 7 are the design.** Phase 3 was built on Linux, where the
+> **Status, 2026-11-16: phases 1 to 5 are built (the Resources card, live on Linux, macOS and
+> Windows, with its history charts; the data volumes' free space and the disk and memory
+> verdicts), and of phase 7 the parts the node registry of MULTI-NODE phase 2a makes possible
+> (a sampler per node, the node-scoped event and command, the herd's figures in the mock,
+> the machine sampler fed the registry's data folders); phase 6 and the rest of phase 7 are
+> the design.** Phase 3 was built on Linux, where the
 > macOS and Windows code is only type-checked; its tests run on CI's macos-15 and windows-2025
 > runners, and what neither could check is listed under [Phases](#phases), which says what
 > each built phase changed from this design. [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built
@@ -1381,10 +1383,9 @@ Each phase is one pull request that ships on its own, with screenshots from the 
 
    **Built.** As planned, with these differences:
 
-   - `MachineResources` has no `volumes` field yet, and `VolumeUsage` and
-     `NodeResourcesEvent` do not exist: they come with phases 5 and 7. The field defaults on
-     the wire, so adding it later breaks nothing. The card's footer line has no free-space
-     part until then.
+   - `MachineResources` had no `volumes` field and `VolumeUsage` did not exist until phase 5;
+     the field defaults on the wire. `NodeResourcesEvent` is not added (phase 7). The card's
+     footer line had no free-space part until phase 5.
    - `MemoryPressure::as_str` gives the footer's words; the macOS memory label reads "Memory
      as Activity Monitor shows it", the basis line's wording.
    - `format::mem_bytes` drops a trailing `.0`, so totals read "16 GiB" and a commit charge of
@@ -1433,9 +1434,10 @@ Each phase is one pull request that ships on its own, with screenshots from the 
 
    - `TreeProbe` holds the run id, the pid and the spawn on both clocks; it has no job field,
      and `ChildHandle.job` stays a plain `Job`, until phase 3.
-   - `MachineSampler::spawn()` and `spawn_with(interval, reader)` take no data folders, and
-     `MachineReader` has only `machine()`: `DataDir`, the `data_dirs` mapping in src-tauri
-     and its test come with the volumes in phase 5.
+   - `MachineSampler::spawn()` and `spawn_with(interval, reader)` took no data folders, and
+     `MachineReader` had only `machine()`, until phase 5 brought the volumes and `DataDir`.
+     The data folders come from the registry rather than a mapping in src-tauri (see phase
+     5).
    - `TreeReading` has no `job` field and `MemberReading` no commit charge (Windows, phase
      3). The fold has Linux's rule only, CPU and I/O rolling into the parent; the `Rollup`
      modes of macOS and Windows come with their readers. `TreeReading.denied` says which
@@ -1662,6 +1664,64 @@ Each phase is one pull request that ships on its own, with screenshots from the 
 
    Screenshots of each verdict. Ships: Zeal warns before the data disk or the memory runs
    out, and says so when a crash followed either.
+
+   **Built.** As planned, with these differences:
+
+   - `firstrun::Volume` is as designed. On Unix the label is the topmost of the folder and
+     its ancestors on the folder's device, so a bind mount or a btrfs subvolume is a volume
+     of its own; on Windows the key is the volume path in lower case.
+   - `MachineReader::volume` has a default, `firstrun::volume`, which the platform readers
+     keep; tests script it. A `DataDir`'s path is the node's data folder, the folder Zeal
+     creates; the chain state inside it is on the same volume unless something is mounted
+     there.
+   - The data folders come from `RegistryHandle::watch_data_dirs` in launcher-core, which
+     follows the registry's summaries (a node added, removed or given another folder), not
+     from a `data_dirs` mapping of the settings in src-tauri, as several nodes have their own
+     folders; a registry test checks that it follows them.
+   - One volume read is in flight at a time, on a blocking task of its own; folders that
+     change during a read are read again when it ends. The newest volumes go into every
+     sample, and a finished read updates the sample already published, so the UI's history
+     gets the sample again with the same time and replaces its newest. A folder whose volume
+     cannot be read is left out, with one warning per sampler and debug lines after it. On a
+     platform without a machine reader the sampler stops at its first reading, as before,
+     and reads no volumes. `MachineResources::volume_of(node)` finds a node's volume, and Copy
+     diagnostics has a line per volume under the computer.
+   - `ResourceInput` also has the node's `info` (its id finds its volume, its name is in the
+     reasons) and `largest_consumer`, which `with_health_input` works out from every node's
+     newest sample, of both networks; a node without a run is never the largest.
+   - `Episode` has `since` (the first reading of the run that began it) and `until` (the
+     newest reading), and `Episode::current(readings, enters, leaves, sustain)` runs the rule
+     over readings oldest first. The sustain helpers take the entry threshold, the sustain
+     time and the leave threshold and give the episode: `available_below_for`,
+     `pressure_at_least_for` (which ends below its level) and `commit_above_for`.
+     `MachineHistory` also gains `latest`, `volume_readings(node)` (one per reading, though
+     the samples carry each for 30 s) and `any_between` for the exit sentences.
+   - Only rule 20 checks the computer sample's age, as designed; rules 19 and 21 read the
+     newest volume reading of any age. Rule 19's warning reads "12.0 GB free of 1,000.0 GB on
+     the disk with this node's data (/mnt/zcash) for 3 min. zebrad stops when a write
+     fails."; rule 20's on macOS "macOS reports critical memory pressure for 1 min; Zebra ·
+     Mainnet uses 6.1 GiB of it", and on Windows "Windows has committed 23 of 24 GiB (96 %)
+     for 3 min; Zebra · Mainnet commits 7 GiB of it". The thresholds are named constants in
+     `ui/src/health/resources.rs`.
+   - Rule 21 takes the state's size at each volume reading from the metrics history, and the
+     newest where the history has none; it needs this run's gauge.
+   - The exit has no field for its signal. The supervisor's detail names it ("killed by
+     signal 9") when zebrad logged no reason, so the memory sentence needs an exit without
+     a code whose detail is that or none. The commit sentence counts for any crash, not only
+     a kill. The sentences are parts of the reason, as its other parts are, so they start in
+     lower case: "the computer was almost out of memory just before; the system may have
+     stopped it", "only 1.2 GB was free on its disk".
+   - The memory verdict goes only on the largest consumer. Until the overview's
+     `MachineStrip` (phase 6), the other nodes show nothing about it, on either tab.
+   - The Disk tile takes the warning tone from `DISK_RULES` while the node runs, and adds the
+     free space also while it waits for zebrad's metrics. The card's footer, and with it Copy
+     summary's computer line, ends with "212.4 GB free on the data disk".
+   - The mock's volumes: `/` (212.4 GB free of 1,000.2 GB), `/mnt/storage` (1,834.5 of
+     4,000.8 GB), `/mnt/zcash` (3,412.7 of 8,001.6 GB) and, for any other folder, its first two
+     parts (120 of 500.1 GB). `?nofit` shows after a minute, at once with `&backfill`.
+     `?lowmem` makes macOS's pressure critical and Windows' commit charge 96 % of its limit,
+     and with `?crashloop` the system kills zebrad with signal 9 on Linux and macOS, so the
+     exit's memory sentence shows; `?lowdisk&crashloop` shows the disk's.
 6. **Overview.**
    - `MachineStrip` with its volume lines.
    - The card lines and sparklines.
@@ -1695,8 +1755,7 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      `machine_resources` and `get_machine_resources` are unchanged. The bridge starts and
      stops a node's resource forwarder with its other forwarders.
    - The app keeps one `MachineSampler`, and `AppState` only its receiver: each node's
-     samples are in the registry. It is not fed the registry's data folders: it reads no
-     volumes until phase 5.
+     samples are in the registry. Since phase 5 it is fed the registry's data folders.
    - Copy diagnostics gives each node's newest sample, with one line per process, in a
      "resources" section of that node's part, after its statistics, and the computer's in a
      "Computer" section after the nodes' parts (`diagnostics::machine_section`), instead of
@@ -1717,9 +1776,8 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      that each node's samples name its own zebrad and only that node's show the memory
      (Linux, like the other live tests).
    - Not built yet: `NodeSummary`'s `cpu_cores` and `memory_bytes` (the tray shows no figures
-     per node before its per-node submenus, MULTI-NODE phase 2b), the machine sampler's data
-     folders (phase 5), Generic and Zebend trees (MULTI-NODE phase 4), `dir_size`, and
-     leftover processes after the root exits.
+     per node before its per-node submenus, MULTI-NODE phase 2b), Generic and Zebend trees
+     (MULTI-NODE phase 4), `dir_size`, and leftover processes after the root exits.
 
 Through every phase:
 
