@@ -44,6 +44,9 @@ pub fn TxPage(
     // asks again with every earlier transaction its inputs spend from.
     let waiting = RwSignal::new(false);
     let resolve = RwSignal::new(false);
+    // The output a link led here for is brought into view once, not at each redraw (a new
+    // unit, Show RPC, a waiting transaction's new tip).
+    let scrolled = StoredValue::new(false);
     let answer = load(node, nav, move || {
         let (epoch, height) = tip();
         let height = if waiting.get() { height } else { 0 };
@@ -75,7 +78,7 @@ pub fn TxPage(
                     ExplorerResponse::Tx(page) => {
                         // A new unit draws the same answer again; nothing is read for it.
                         let unit = prefs.unit(network);
-                        view! { <Tx page=*page nav unit network out resolve /> }.into_any()
+                        view! { <Tx page=*page nav unit network out resolve scrolled /> }.into_any()
                     }
                     _ => view! { <Loading /> }.into_any(),
                 },
@@ -93,14 +96,17 @@ fn Tx(
     network: Network,
     out: Option<u32>,
     resolve: RwSignal<bool>,
+    /// Whether the followed output was brought into view.
+    scrolled: StoredValue<bool>,
 ) -> impl IntoView {
     let sentence = text::tx_sentence(&page, unit);
     let coinbase = matches!(page.kind, TxKind::Coinbase { .. });
     let status = page.status.clone();
     let flow = tx_flow(&page);
     let lit = RwSignal::new(None::<Lit>);
-    // The output an input link led here for comes into view.
-    if out.is_some() {
+    // The output an input link led here for comes into view, the first time it is drawn.
+    if out.is_some() && !scrolled.get_value() {
+        scrolled.set_value(true);
         request_animation_frame(|| {
             if let Some(row) = web_sys::window()
                 .and_then(|window| window.document())
