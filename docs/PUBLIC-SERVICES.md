@@ -1337,8 +1337,9 @@ over.
     `ubuntu-24.04` and `ubuntu-24.04-arm`, each leg with its target's `zingod-<triple>`. The
     aarch64 leg is what the Mainnet gate's first item needs.
 
-  To settle when it is written (unconfirmed): whether a Regtest chain reaches `serving`, and
-  whether the pinned zebrad's `generate` mines the blocks the test needs.
+  Settled when it was written (Z2): a Regtest chain reaches `serving`, at genesis already, and
+  the pinned zebrad's `generate` mines what the test needs (300 blocks in under a second)
+  once `[mining] miner_address` is set.
 - **Wallet runs** (RELEASING.md), on a real home connection, before zingod is offered on a
   network: Zingo through a scripted `zingo-cli` (a new wallet, an old birthday, a send with a
   memo), which zebrad's endpoint can't serve; Zodl and Zkool by hand, where builds for the network
