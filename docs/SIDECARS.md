@@ -466,7 +466,9 @@ What was built follows PUBLIC-SERVICES.md's Z1, with these differences:
   tied to one of them would break whenever it changes.
 - `build-zingod.sh` builds only for the host's own Linux triple, since its
   checks run the binary, and takes the host from `uname`. It checks the
-  licence folder before the build rather than after.
+  licence folder before the build rather than after, and fixes jemalloc's
+  page and address layout instead of letting its configure probe the build
+  machine ([step 4 below](#how-zingod-is-built)).
 - The workflows install the artifact through `install_zingod` in
   `scripts/lib.sh`, which also checks the build information's commit, target
   and binary sha256.
@@ -491,9 +493,10 @@ What was built follows PUBLIC-SERVICES.md's Z1, with these differences:
 | `x86_64-pc-windows-msvc` | not bundled | doesn't compile at 1.1.0: `std::os::unix::fs::FileExt` (`packages/zingod-persistence/src/fs/real.rs:7`), `tokio::signal::unix` (`packages/zingod/src/daemon.rs:530`), `MetadataExt` and `statvfs` (`packages/zingod/src/daemon/index_snapshot.rs:13, 224`) and sd-notify 0.5 are used with no `cfg` gate, and jemalloc is untested on MSVC |
 
 jemalloc 5.3.1's configure defaults to 64 KiB pages on aarch64 Linux
-(tikv-jemalloc-sys 0.7.1, `jemalloc/configure.ac:1975-1992`), so a binary built
-on a runner with 4 KiB pages also runs on kernels with 16 KiB pages, such as
-the Raspberry Pi 5's. This is unchecked on hardware.
+(tikv-jemalloc-sys 0.7.1, `jemalloc/configure.ac:1975-1992`), and
+`build-zingod.sh` states the same value, so a binary built on a runner with
+4 KiB pages also runs on kernels with 16 KiB pages, such as the Raspberry Pi
+5's. This is unchecked on hardware.
 
 ### How zingod is built
 
@@ -526,7 +529,21 @@ the Raspberry Pi 5's. This is unchecked on hardware.
      `OUT_DIR`, and a build that remapped only the other three still held one
      host path;
    - `AWS_LC_SYS_USE_SYSTEM=0`, so aws-lc-sys never links an AWS-LC it finds on
-     the host.
+     the host;
+   - `JEMALLOC_SYS_WITH_LG_VADDR=48`, `JEMALLOC_SYS_WITH_LG_PAGE` (12 on
+     x86-64, 16 on aarch64) and `JEMALLOC_SYS_WITH_LG_HUGEPAGE=21`, clearing
+     the `<TARGET>_JEMALLOC_SYS_WITH_*` forms that tikv-jemalloc-sys reads
+     first. zingod's global allocator is jemalloc, and without these its
+     configure probes the build machine and compiles the answers in: on
+     x86-64 the CPU's virtual address bits (`jemalloc/configure.ac:510-552`)
+     and the page size, and the huge page size from `/proc/meminfo`
+     (`configure.ac:2050-2061`). A host whose CPU reports 57-bit addresses,
+     as Intel's Xeons from Ice Lake on do, would build a different binary.
+     The values are what a 48-bit x86-64 host and configure's aarch64
+     defaults give: on a 48-bit x86-64 host, with this step's other
+     settings, zingod 1.1.0 built with them was byte-identical to one built
+     with the probes, and one built with `JEMALLOC_SYS_WITH_LG_VADDR=57` was
+     not (2026-11-16).
 5. Check a copy of the result, and install nothing otherwise:
    - `--version` prints `zingod <ZINGOD_VERSION>`;
    - `generate-config -o <tmp>` exits 0, offline, with `HOME` in the scratch
@@ -546,15 +563,20 @@ the Raspberry Pi 5's. This is unchecked on hardware.
    replacement it prints added to the copy's `.cargo/config.toml`, and pack it
    with the files sorted, their owners 0 and their times set to
    `SOURCE_DATE_EPOCH`, and `zstd -19`. Its sha256 goes in `<file>.sha256`.
-   This is what a rebuild needs if a fork disappears: inside it, `cargo build
-   --locked --offline --release -p zingod --bin zingod`. At 1.1.0 it is 55 MB.
+   This is what a rebuild needs if a fork disappears: inside it,
+   `JEMALLOC_SYS_WITH_LG_VADDR=48 JEMALLOC_SYS_WITH_LG_PAGE=12
+   JEMALLOC_SYS_WITH_LG_HUGEPAGE=21 cargo build --locked --offline --release
+   -p zingod --bin zingod`, with `JEMALLOC_SYS_WITH_LG_PAGE=16` on aarch64:
+   the `jemalloc_lg_*` values `zingod-build-info.txt` records. At 1.1.0 it is
+   55 MB.
 7. Install the binary at `--out` and, in the same folder, `licenses/` with
    jemalloc's `COPYING` and AWS-LC's `LICENSE` copied from the build's own
    sources, and `zingod-build-info.txt`: the version, commit, source URL,
    target, toolchain, `rustc` and `protoc` versions, the operating system,
-   `SOURCE_DATE_EPOCH`, the sha256 of the binary, of each copied licence file
-   (`license_sha256_<name>=`) and of the source archive, and, in CI, the run
-   and Zeal's commit.
+   `SOURCE_DATE_EPOCH`, jemalloc's layout values (`jemalloc_lg_vaddr=`,
+   `jemalloc_lg_page=`, `jemalloc_lg_hugepage=`), the sha256 of the binary,
+   of each copied licence file (`license_sha256_<name>=`) and of the source
+   archive, and, in CI, the run and Zeal's commit.
 
 The build needs:
 
@@ -635,7 +657,9 @@ can also be run by hand (Actions → zingod sidecars → Run workflow):
 Two runs of `build-zingod.sh --vendor-archive` in `ubuntu:22.04` containers,
 each from its own temporary checkout, gave byte-identical binaries and source
 archives (2026-11-16), and the archive alone built zingod in a container with
-no network and an empty cargo home.
+no network and an empty cargo home. Both runs were on one machine; the fixed
+jemalloc values (step 4) are what keep a build on a machine with another CPU
+the same.
 
 `bundle.yml` and `release.yml` call it once each, as `sidecars-zingod`, with
 `attest: true`. Every Linux job that compiles the `zeal` crate needs it, since

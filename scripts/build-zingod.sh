@@ -14,8 +14,10 @@
 #      scripts/zingod-licenses.sh gathers from the checkout and its sources.
 #   4. `cargo build --locked --release -p zingod --bin zingod`, with
 #      SOURCE_DATE_EPOCH from the commit, symbols stripped, AWS-LC never taken
-#      from the host (AWS_LC_SYS_USE_SYSTEM=0), and the checkout, CARGO_HOME,
-#      RUSTUP_HOME and CARGO_TARGET_DIR remapped out of the binary.
+#      from the host (AWS_LC_SYS_USE_SYSTEM=0), jemalloc's page and address
+#      layout fixed rather than probed (JEMALLOC_SYS_WITH_LG_*), and the
+#      checkout, CARGO_HOME, RUSTUP_HOME and CARGO_TARGET_DIR remapped out of
+#      the binary.
 #   5. Checks, and nothing is installed unless all pass: `--version` prints
 #      `zingod <ZINGOD_VERSION>`; `generate-config` writes a file, offline;
 #      scripts/check-glibc.sh passes at GLIBC_FLOOR (.github/tool-versions.env);
@@ -24,7 +26,8 @@
 #      The build never runs `start`, which would contact a validator.
 #   6. Installs the binary at --out and, in the same folder, licenses/ with
 #      the two licence files that aren't committed (jemalloc-COPYING and
-#      aws-lc-LICENSE) and zingod-build-info.txt, which records their sha256.
+#      aws-lc-LICENSE) and zingod-build-info.txt, which records their sha256
+#      and the jemalloc layout.
 #
 # With --vendor-archive FILE it also runs `cargo vendor --locked` in a copy of
 # the checkout and packs it as FILE, which must be named
@@ -259,6 +262,27 @@ export AWS_LC_SYS_USE_SYSTEM=0
 echo "+ export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
 printf '+ export CARGO_ENCODED_RUSTFLAGS=%q\n' "${CARGO_ENCODED_RUSTFLAGS}"
 echo "+ export CARGO_PROFILE_RELEASE_STRIP=symbols AWS_LC_SYS_USE_SYSTEM=0"
+# jemalloc's configure would otherwise probe this machine and compile in what
+# it finds: on x86-64 the CPU's virtual address bits, and the page and huge
+# page sizes. Fixed values keep a rebuild on another machine, a CPU with
+# 57-bit addresses say, the same binary. They are what a 48-bit x86-64 host
+# and configure's aarch64 defaults give. tikv-jemalloc-sys reads
+# <TARGET>_JEMALLOC_SYS_WITH_* first, so those are cleared.
+case "${target}" in
+    x86_64-*) jemalloc_lg_page=12 ;;
+    aarch64-*) jemalloc_lg_page=16 ;;
+    *) die "no jemalloc page size for ${target}" ;;
+esac
+jemalloc_lg_vaddr=48
+jemalloc_lg_hugepage=21
+jemalloc_target="${target^^}"
+for setting in LG_VADDR LG_PAGE LG_HUGEPAGE; do
+    unset "${jemalloc_target//-/_}_JEMALLOC_SYS_WITH_${setting}"
+done
+export JEMALLOC_SYS_WITH_LG_VADDR="${jemalloc_lg_vaddr}"
+export JEMALLOC_SYS_WITH_LG_PAGE="${jemalloc_lg_page}"
+export JEMALLOC_SYS_WITH_LG_HUGEPAGE="${jemalloc_lg_hugepage}"
+echo "+ export JEMALLOC_SYS_WITH_LG_VADDR=${jemalloc_lg_vaddr} JEMALLOC_SYS_WITH_LG_PAGE=${jemalloc_lg_page} JEMALLOC_SYS_WITH_LG_HUGEPAGE=${jemalloc_lg_hugepage}"
 run cargo build --manifest-path "${src}/Cargo.toml" --locked --release \
     -p zingod --bin zingod --target "${target}"
 built="${target_dir}/${target}/release/zingod"
@@ -340,6 +364,9 @@ os="$(sed -n 's/^PRETTY_NAME="\(.*\)"$/\1/p' /etc/os-release 2>/dev/null || true
     echo "protoc=$(protoc --version)"
     echo "os=${os:-unknown}"
     echo "source_date_epoch=${SOURCE_DATE_EPOCH}"
+    echo "jemalloc_lg_vaddr=${jemalloc_lg_vaddr}"
+    echo "jemalloc_lg_page=${jemalloc_lg_page}"
+    echo "jemalloc_lg_hugepage=${jemalloc_lg_hugepage}"
     echo "binary_sha256=$(sha256_of "${out}")"
     for file in "${licenses}/copied/"*; do
         echo "license_sha256_$(basename "${file}")=$(sha256_of "${file}")"
