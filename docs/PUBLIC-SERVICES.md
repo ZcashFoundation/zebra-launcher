@@ -1392,6 +1392,10 @@ command line and the reader) and `Launch` in the supervisor and the spawner; `Di
 - **nice** adds 10 to the nice value zingod inherits from Zeal, capped at 19, rather than
   setting 10: zingod stays below zebrad at any nice Zeal runs at, and raising a nice value
   needs no privilege, where lowering one (Zeal at nice 15, say) fails the spawn.
+- **Rebuild and Delete** wait for a start under way before they remove anything, stopping
+  whatever it launches: a start waiting for a stale zingod to go goes ahead past a stop. The
+  runner sends each start with `SupervisorHandle::send_start`, from its own loop, so a stop it
+  sends next is handled after the start.
 - **A stale zingod**: `kill_stale` sends a `zeal-zingod` an earlier Zeal left `SIGTERM`, and one
   still there once the 30 s stop grace has passed is killed with its process group, as a stop
   escalates; zebrad's stale path doesn't change. One still there after that (a process stuck in

@@ -23,10 +23,11 @@ use std::{
 
 use launcher_core::{
     paths::Paths,
+    pidfile::{self, StaleProcess},
     policy::RestartPolicy,
     process::ZebradCommand,
     supervisor::{self, SupervisorConfig, SupervisorHandle},
-    zingod::{ZingodConfig, ZingodNetwork},
+    zingod::{ZingodCommand, ZingodConfig, ZingodNetwork},
 };
 use launcher_herd::public::zingod::{
     Blocked, DiskFullKind, DiskReading, StartFacts, Want, ZebradRun, ZingodFacts, want,
@@ -802,6 +803,110 @@ async fn deletion_stays_inside_the_folder() {
     setup
         .facts_until("zingod running after Rebuild", running)
         .await;
+    setup.finish().await;
+}
+
+/// Delete waits for a start under way: one that waits for a stale zingod to go would otherwise
+/// launch zingod while its index is removed, after Delete had answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deletion_waits_for_a_start_under_way() {
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::process::CommandExt,
+        process::Stdio,
+    };
+
+    let setup = setup("ok", "serving", |options| {
+        options.stop_grace = Duration::from_millis(500);
+    })
+    .await;
+    // A zingod an earlier Zeal left, which ignores SIGTERM: the start waits 5 s for it, then
+    // kills it.
+    let left_dir = setup.dir.path().join("left");
+    let left = ZingodConfig {
+        network: ZingodNetwork::Testnet,
+        validator: SocketAddr::from((Ipv4Addr::LOCALHOST, free_port())),
+        cookie: left_dir.join(".cookie"),
+        listen: SocketAddr::from((Ipv4Addr::LOCALHOST, free_port())),
+        index_dir: left_dir.join("zingod/testnet"),
+    };
+    left.ensure_dirs().unwrap();
+    let left_toml = left_dir.join("zingod.toml");
+    left.write(&left_toml).unwrap();
+    let binary = launcher_core_bin("fake-zingod");
+    let command = ZingodCommand::new(&binary, &left_toml, left.home_dir());
+    let mut orphan = std::process::Command::new(&binary)
+        .args(command.args())
+        .env("FAKE_ZINGOD_MODE", "ignore-sigterm")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stale = StaleProcess {
+        pid: orphan.id(),
+        binary: binary.clone(),
+    };
+    // So a failing run doesn't leave it behind.
+    struct KillOnDrop(StaleProcess);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = pidfile::kill(&self.0);
+        }
+    }
+    let _guard = KillOnDrop(stale.clone());
+    // Its SIGTERM handler is up before its Listening line. The test is its parent, so a thread
+    // keeps reading its output and reaps it, as init would.
+    let mut stdout = BufReader::new(orphan.stdout.take().unwrap());
+    let (listening, listening_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        while stdout.read_line(&mut line).is_ok_and(|n| n > 0) {
+            if line.contains(" message=Listening ") {
+                let _ = listening.send(());
+            }
+            line.clear();
+        }
+        orphan.wait()
+    });
+    listening_rx
+        .recv_timeout(LIMIT)
+        .expect("the stale zingod listens");
+    pidfile::write(
+        &setup.dir.path().join("data/public/zingod-testnet.pid"),
+        stale.pid,
+        &binary,
+    )
+    .unwrap();
+    let indexes = setup.index_dir.join("indexes");
+    std::fs::create_dir_all(indexes.join("tree_state")).unwrap();
+    std::fs::write(indexes.join("tree_state/seg-1"), vec![7u8; 4096]).unwrap();
+
+    setup.give_plan(0);
+    setup
+        .facts_until("the start under way", |f| f.running_for.is_some())
+        .await;
+    timeout(LIMIT, setup.runner.delete())
+        .await
+        .unwrap()
+        .expect("the index is deleted");
+    assert!(
+        !pidfile::is_alive(stale.pid),
+        "Delete answered once the start was over"
+    );
+    assert!(!indexes.exists());
+    setup
+        .facts_stay("stopped after Delete", Duration::from_millis(500), |f| {
+            !f.phase.is_active()
+        })
+        .await;
+    assert!(!indexes.exists(), "no zingod recreated it");
+    assert_eq!(
+        starts(&setup).await,
+        1,
+        "the start went ahead and was stopped"
+    );
     setup.finish().await;
 }
 

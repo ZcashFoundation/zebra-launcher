@@ -940,7 +940,9 @@ listed in PUBLIC-SERVICES.md ("PS1 as built").
   the disk every minute, the index's size every 10 minutes (50,000 entries at most, in
   `spawn_blocking`) and the process tree, and publishes them as a `watch<ZingodFacts>`.
   Rebuild and Delete come on an mpsc with oneshot replies and empty `indexes/` and `state/`
-  inside the recorded `…/zingod/<network>` folder only (`remove_index`). The rules it and Z3
+  inside the recorded `…/zingod/<network>` folder only (`remove_index`), once a start under
+  way has ended and whatever it launched has stopped. The runner sends each start from the
+  actor with `SupervisorHandle::send_start`, so a stop it sends next is handled after it. The rules it and Z3
   read (`want()`, the restart with each zebrad run, the stall rule, the hysteresis, the
   cross-check, what `/status` means, `TESTED_ZINGOD`) are in launcher-herd's
   `public::zingod`.

@@ -690,9 +690,14 @@ impl Runner {
             facts.running_for = Some(plan.zebrad);
         });
         let handle = zingod.handle.clone();
+        // Sent from the actor, so a stop it sends next is handled after this start.
+        let answer = handle.send_start(StartOptions { kill_stale: true }).await;
         let tx = self.internal_tx.clone();
         tokio::spawn(async move {
-            let started = handle.start_with(StartOptions { kill_stale: true }).await;
+            let started = match answer {
+                Ok(answer) => answer.await,
+                Err(err) => Err(err),
+            };
             let _ = tx.send(Internal::Started(started)).await;
         });
     }
@@ -735,6 +740,22 @@ impl Runner {
     /// Stops zingod and removes its index and state, off the actor's thread.
     async fn remove(&mut self) -> Result<(), String> {
         self.stop().await;
+        // A start under way can still launch zingod: one that waits for a stale zingod to go
+        // goes ahead past a stop. Wait for it to end, stopping whatever it launches.
+        while self.starting {
+            let status = self.zingod.as_mut().map(|zingod| &mut zingod.status);
+            tokio::select! {
+                Some(event) = self.internal.recv() => self.on_internal(event),
+                alive = changed(status) => {
+                    if alive {
+                        self.on_zingod_status();
+                    }
+                }
+            }
+            if self.phase().is_active() {
+                self.stop().await;
+            }
+        }
         let Some(dir) = self.index_dir() else {
             return Ok(());
         };
