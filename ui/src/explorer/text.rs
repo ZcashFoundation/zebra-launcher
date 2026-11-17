@@ -914,6 +914,28 @@ pub fn coin_age(spent_at: Option<u32>, status: &TxStatus) -> String {
     }
 }
 
+/// What "Read them all" read, for a status line: of `before` inputs unread, `after` still are.
+pub fn read_all_text(before: u32, after: u32) -> String {
+    let read = before.saturating_sub(after);
+    let outputs = |count: u32| {
+        format!(
+            "{} spent output{}",
+            thousands(u64::from(count)),
+            plural(count)
+        )
+    };
+    if after == 0 {
+        format!("Read {}: the fee is known.", outputs(read))
+    } else {
+        format!(
+            "Read {}; {} {} not read.",
+            outputs(read),
+            outputs(after),
+            if after == 1 { "is" } else { "are" }
+        )
+    }
+}
+
 /// A transaction card's counts: its transparent inputs and outputs, left out when it has none
 /// (a coinbase's input spends nothing), and the shielded pools it touches: `2 transparent
 /// inputs · 1 transparent output · Orchard`.
@@ -1373,6 +1395,22 @@ mod tests {
         assert_eq!(coin_age(Some(1_000), &mined), "204 blocks");
         assert_eq!(coin_age(Some(1_204), &mined), "in this block");
         assert_eq!(coin_age(None, &TxStatus::Mempool), "waiting");
+    }
+
+    #[test]
+    fn reading_them_all_says_what_was_read() {
+        assert_eq!(
+            read_all_text(4, 0),
+            "Read 4 spent outputs: the fee is known."
+        );
+        assert_eq!(
+            read_all_text(1_010, 10),
+            "Read 1,000 spent outputs; 10 spent outputs are not read."
+        );
+        assert_eq!(
+            read_all_text(2, 1),
+            "Read 1 spent output; 1 spent output is not read."
+        );
     }
 
     #[test]

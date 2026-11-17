@@ -13,6 +13,7 @@ use launcher_types::{
     },
 };
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use super::{
     flow_diagram::{FlowDiagram, Lit, input_node, output_node},
@@ -22,6 +23,13 @@ use super::{
     text::{self, FeeFigures, Unit},
 };
 use crate::format::{bytes, short_hash, thousands};
+
+/// "Read them all": whether it was asked for, and how many inputs were unread then. `Copy`.
+#[derive(Clone, Copy)]
+struct ReadAll {
+    asked: RwSignal<bool>,
+    unread: StoredValue<Option<u32>>,
+}
 
 #[component]
 pub fn TxPage(
@@ -43,7 +51,13 @@ pub fn TxPage(
     // transaction after a reorganisation, which may have replaced its block. "Read them all"
     // asks again with every earlier transaction its inputs spend from.
     let waiting = RwSignal::new(false);
-    let resolve = RwSignal::new(false);
+    let resolve = ReadAll {
+        asked: RwSignal::new(false),
+        unread: StoredValue::new(None),
+    };
+    // Once the answer with them all is drawn, focus moves to the fee section, where the button
+    // was, and a status line says what was read.
+    let read = RwSignal::new(String::new());
     // The output a link led here for is brought into view once, not at each redraw (a new
     // unit, Show RPC, a waiting transaction's new tip).
     let scrolled = StoredValue::new(false);
@@ -53,7 +67,7 @@ pub fn TxPage(
         Some((
             ExplorerRequest::Tx {
                 txid,
-                resolve: resolve.get(),
+                resolve: resolve.asked.get(),
             },
             (epoch << 32) | u64::from(height),
         ))
@@ -64,6 +78,33 @@ pub fn TxPage(
             Loaded::Ready(ref reply) if matches!(&reply.response, ExplorerResponse::Tx(page) if page.status == TxStatus::Mempool)
         );
         waiting.set(is_waiting);
+    });
+    Effect::new(move |_| {
+        let Loaded::Ready(reply) = answer.value.get() else {
+            return;
+        };
+        let ExplorerResponse::Tx(page) = &reply.response else {
+            return;
+        };
+        let Some(before) = resolve
+            .unread
+            .get_value()
+            .filter(|_| resolve.asked.get_untracked())
+        else {
+            return;
+        };
+        resolve.unread.set_value(None);
+        read.set(text::read_all_text(before, page.unresolved));
+        request_animation_frame(|| {
+            if let Some(heading) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.get_element_by_id("ex-fee-title"))
+                .and_then(|heading| heading.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                let _ = heading.set_attribute("tabindex", "-1");
+                let _ = heading.focus();
+            }
+        });
     });
     let sources = Signal::derive(move || match answer.value.get() {
         Loaded::Ready(reply) => reply.sources,
@@ -83,6 +124,7 @@ pub fn TxPage(
                     _ => view! { <Loading /> }.into_any(),
                 },
             }}
+            <p class="visually-hidden" role="status">{read}</p>
             <RpcCalls sources title="What this page asked your node" />
         </div>
     }
@@ -95,7 +137,7 @@ fn Tx(
     unit: Unit,
     network: Network,
     out: Option<u32>,
-    resolve: RwSignal<bool>,
+    resolve: ReadAll,
     /// Whether the followed output was brought into view.
     scrolled: StoredValue<bool>,
 ) -> impl IntoView {
@@ -185,7 +227,7 @@ fn Tx(
 
 /// Inputs whose spent outputs were not read, and the button that reads them all.
 #[component]
-fn Unresolved(unresolved: u32, resolvable: bool, resolve: RwSignal<bool>) -> impl IntoView {
+fn Unresolved(unresolved: u32, resolvable: bool, resolve: ReadAll) -> impl IntoView {
     (unresolved > 0).then(|| {
         view! {
             <p class="ex-unresolved">
@@ -197,8 +239,18 @@ fn Unresolved(unresolved: u32, resolvable: bool, resolve: RwSignal<bool>) -> imp
                 )}
                 {resolvable.then(|| view! {
                     " "
-                    <button type="button" disabled=move || resolve.get() on:click=move |_| resolve.set(true)>
-                        "Read them all"
+                    // Focusable while it reads, so focus stays here until the answer comes.
+                    <button
+                        type="button"
+                        aria-disabled=move || resolve.asked.get().then_some("true")
+                        on:click=move |_| {
+                            if !resolve.asked.get_untracked() {
+                                resolve.unread.set_value(Some(unresolved));
+                                resolve.asked.set(true);
+                            }
+                        }
+                    >
+                        {move || if resolve.asked.get() { "Reading them…" } else { "Read them all" }}
                     </button>
                 })}
             </p>
@@ -210,7 +262,7 @@ fn Unresolved(unresolved: u32, resolvable: bool, resolve: RwSignal<bool>) -> imp
 /// action, the multiple and zebrad's weight ratio, with what they mean for a waiting or a mined
 /// transaction.
 #[component]
-fn FeeCard(page: Page, unit: Unit, network: Network, resolve: RwSignal<bool>) -> impl IntoView {
+fn FeeCard(page: Page, unit: Unit, network: Network, resolve: ReadAll) -> impl IntoView {
     let waiting = page.status == TxStatus::Mempool;
     let burns = page.burns_fees.then_some(
         "From NU7, 60 % of a block's fees are burned and 40 % go to the miner; the split applies \
