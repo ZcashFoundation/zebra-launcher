@@ -691,8 +691,11 @@ pub struct IndexerFacts {
     pub behind_since: Option<SystemTime>,
     /// The stall rule after its restart: zingod's height and zebrad's.
     pub stuck: Option<(u64, u64)>,
-    /// The tip cross-check found zingod on another chain at this height. It holds until a
-    /// rebuild.
+    /// The tip cross-check found zingod on another chain at this height: the actor's finding,
+    /// or the one the spec kept ([`ZingodSpec::mismatch`]). It holds until a rebuild or a
+    /// delete.
+    ///
+    /// [`ZingodSpec::mismatch`]: launcher_types::public::ZingodSpec::mismatch
     pub mismatch: Option<u64>,
     /// The last tip cross-check.
     pub tip: Option<Checked<TipCheck>>,
@@ -2009,10 +2012,7 @@ mod service_tests {
             Network::Testnet,
         );
         spec.backend = LightBackend::Zingod;
-        spec.zingod = Some(ZingodSpec {
-            port: 18137,
-            dir: dir(),
-        });
+        spec.zingod = Some(ZingodSpec::new(18137, dir()));
         spec.consent = Some(Consent {
             version: CONSENT_VERSION,
             at: at(0),

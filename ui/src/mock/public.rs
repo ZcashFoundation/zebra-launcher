@@ -520,10 +520,7 @@ impl World {
         if let Some(spec) = &mut world.spec {
             spec.backend = LightBackend::Zingod;
             spec.backend_port = None;
-            spec.zingod = Some(ZingodSpec {
-                port: ZINGOD_PORT,
-                dir: index_dir(network),
-            });
+            spec.zingod = Some(ZingodSpec::new(ZINGOD_PORT, index_dir(network)));
             if let Some(consent) = &mut spec.consent {
                 consent.backend = LightBackend::Zingod;
             }
@@ -1147,10 +1144,7 @@ pub async fn answer_public_step(answer: StepAnswer) -> Result<(), String> {
             public.spec_mut(|spec| {
                 spec.backend = backend;
                 if backend == LightBackend::Zingod && spec.zingod.is_none() {
-                    spec.zingod = Some(ZingodSpec {
-                        port: ZINGOD_PORT,
-                        dir: index_dir(network),
-                    });
+                    spec.zingod = Some(ZingodSpec::new(ZINGOD_PORT, index_dir(network)));
                 }
             })?;
         }

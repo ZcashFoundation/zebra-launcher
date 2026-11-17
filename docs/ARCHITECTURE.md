@@ -913,14 +913,15 @@ phone wallet ──TLS h2──▶ router :443 ──▶ [::]:8443  front door (
   (once per zebrad run), records a port the runner moved to, reads the index folder's disk
   itself every minute, and runs the tip cross-check (zingod's `GetLatestBlock`, hash
   reversed, against zebrad's `getblockhash` through `RpcClient`) at most once a minute while
-  zingod serves; three mismatches over 3 minutes stop zingod until a rebuild. The front
-  door's upstream is zingod's port, the light monitor's endpoint zingod's only once it serves,
-  and the front door goes `Unavailable` before the actor stops zingod itself. Every zingod
-  problem is `Degraded` (the front door stays up in `Unavailable`) except zebrad stopping
-  (`BackingStopped`) and an active upgrade zingod doesn't know (`BuildTooOld`), which pause.
-  Rebuild and Delete stop zingod and remove `indexes/` and `state/` in the recorded folder;
-  "Turn off and forget" does with `remove_index`. Diagnostics end with zingod's status, its
-  files' paths and its last 200 redacted lines.
+  zingod serves; three mismatches over 3 minutes stop zingod until a rebuild or a delete,
+  kept in the spec (`ZingodSpec.mismatch`) through a restart of Zeal and a change of backend.
+  The front door's upstream is zingod's port, the light monitor's endpoint zingod's only once
+  it serves, and the front door goes `Unavailable` before the actor stops zingod itself.
+  Every zingod problem is `Degraded` (the front door stays up in `Unavailable`) except zebrad
+  stopping (`BackingStopped`) and an active upgrade zingod doesn't know (`BuildTooOld`), which
+  pause. Rebuild and Delete stop zingod and remove `indexes/` and `state/` in the recorded
+  folder; "Turn off and forget" does with `remove_index`. Diagnostics end with zingod's status,
+  its files' paths and its last 200 redacted lines.
 - **The front door** (`launcher-gateway`) reads the certificate, a pending TLS-ALPN-01
   challenge and its mode from `watch`es at every handshake. `ChallengeOnly` answers only ALPN
   `acme-tls/1` for the name; `LocalOnly` adds service connections from loopback; `Open` serves

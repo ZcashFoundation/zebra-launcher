@@ -1217,7 +1217,8 @@ PublicServiceSpec {
     #[serde(default)] pub zingod: Option<ZingodSpec>,            // kept after switching back
     // backend_port stays zebrad's endpoint port
 }
-pub struct ZingodSpec { pub port: u16, pub dir: PathBuf }          // recorded when first chosen
+pub struct ZingodSpec { pub port: u16, pub dir: PathBuf,           // recorded when first chosen
+    #[serde(default)] pub mismatch: Option<u64> }                 // until a rebuild or delete
 Consent { #[serde(default)] pub backend: LightBackend }           // a consent covers one backend
 StepAnswer::Backend { backend: LightBackend }
 CheckId: ZingodTested, UpgradesKnown, IndexSpace, IndexReady, TipMatches
@@ -1537,6 +1538,10 @@ screens with the 27 `zingod…` mock flags. Where it differs from the sections a
   with `DbLocked` and the folder: it holds the index. `BuildTooOld` resumes by itself, as a
   Zeal update brings a zingod that knows the upgrade. The types keep the design's fields:
   `IndexBehind { blocks }` and `IndexerStuck { at, zebrad_at }`.
+- **A chain mismatch is kept in the spec** (`ZingodSpec.mismatch`), since it belongs to the
+  index: it holds through a restart of Zeal and a change of backend, and only Rebuild or Delete,
+  once the index is gone, clears it. The actor's memory has it first and saves it at the next
+  look.
 - **The status** carries the backend, `ZingodChoice` (offered, not bundled, not on this
   network, an untested pair) for the consent screen, and `IndexerStats` while the spec records
   zingod's folder, with its port and whether the index's size is a lower bound.

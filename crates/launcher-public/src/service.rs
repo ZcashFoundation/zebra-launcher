@@ -530,13 +530,13 @@ impl Zingod {
         }
     }
 
-    /// Starts over the rules' memory: after a rebuild, a delete, a new backend or a forget.
+    /// Starts over the rules' memory: after a rebuild, a delete, a new backend or a forget. A
+    /// chain mismatch stays: it belongs to the index, so only the index's removal clears it.
     fn forget_history(&mut self) {
         self.behind_since = None;
         self.stall = Stall::default();
         self.stuck = None;
         self.cross = CrossCheck::with_span(self.mismatch_span);
-        self.mismatch = None;
         self.tip = None;
     }
 
@@ -887,7 +887,10 @@ impl Actor {
             },
             behind_since: self.zingod.behind_since,
             stuck: self.zingod.stuck,
-            mismatch: self.zingod.mismatch,
+            mismatch: self
+                .zingod
+                .mismatch
+                .or_else(|| spec.zingod.as_ref().and_then(|recorded| recorded.mismatch)),
             tip: self.zingod.tip.clone(),
             restarting,
             dir,
@@ -981,6 +984,19 @@ impl Actor {
         if next != self.zingod.tip_run {
             self.zingod.tip_run = next;
             changed = true;
+        }
+        // A chain mismatch goes into the spec, so it holds through a restart of Zeal; retried
+        // at every look while launcher.json cannot be written.
+        if let (Some(at), Some(recorded)) = (self.zingod.mismatch, &spec.zingod)
+            && recorded.mismatch != Some(at)
+        {
+            let _ = self
+                .update_spec(move |spec| {
+                    if let Some(zingod) = &mut spec.zingod {
+                        zingod.mismatch = Some(at);
+                    }
+                })
+                .await;
         }
         if spec.backend != LightBackend::Zingod {
             return changed;
@@ -2096,6 +2112,7 @@ impl Actor {
             runner.handle.shutdown().await;
         }
         self.zingod.forget_history();
+        self.zingod.mismatch = None;
         self.zingod.disk = None;
         // The endpoint must be gone before the spec is: once it is, the key is the user's.
         let node = self.node_rx.borrow().id.clone();
@@ -2199,10 +2216,10 @@ impl Actor {
                         )))
                     })
                     .ok_or("no free port for zingod")?;
-                recorded = Some(ZingodSpec {
+                recorded = Some(ZingodSpec::new(
                     port,
-                    dir: zingod_rules::index_dir(&self.node_data(), spec.network),
-                });
+                    zingod_rules::index_dir(&self.node_data(), spec.network),
+                ));
             }
         }
         self.door_unavailable();
@@ -2242,6 +2259,14 @@ impl Actor {
             self.zingod.attempt += 1;
         }
         removed?;
+        // The index a mismatch was found on is gone.
+        self.zingod.mismatch = None;
+        self.update_spec(|spec| {
+            if let Some(zingod) = &mut spec.zingod {
+                zingod.mismatch = None;
+            }
+        })
+        .await?;
         if restart {
             tracing::info!(target: "zeal::public", "zingod's index is rebuilt");
         } else {

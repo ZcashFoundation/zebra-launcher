@@ -469,21 +469,21 @@ async fn forget_removes_the_index() {
 }
 
 /// zingod's tip with another hash, three times over the span: ChainMismatch, zingod stops,
-/// and Rebuild clears it and starts zingod on a new index.
+/// and the spec keeps it through a change of backend. Rebuild clears it and starts zingod on a
+/// new index.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_mismatching_tips_stop_zingod_until_a_rebuild() {
     let s = setup("wrong-hash").await;
     s.choose_zingod().await;
-    let status = s
-        .wait_for("the mismatch", |status| {
-            matches!(
-                outcome(status, CheckId::TipMatches),
-                Some(CheckOutcome::Fail {
-                    finding: Finding::ChainMismatch { .. }
-                })
-            )
-        })
-        .await;
+    let mismatch = |status: &PublicStatus| {
+        matches!(
+            outcome(status, CheckId::TipMatches),
+            Some(CheckOutcome::Fail {
+                finding: Finding::ChainMismatch { .. }
+            })
+        )
+    };
+    let status = s.wait_for("the mismatch", mismatch).await;
     assert_eq!(
         outcome(&status, CheckId::TipMatches),
         Some(CheckOutcome::Fail {
@@ -497,7 +497,45 @@ async fn three_mismatching_tips_stop_zingod_until_a_rebuild() {
             .is_some_and(|indexer| !indexer.phase.is_active())
     })
     .await;
+    let kept = || {
+        s.settings
+            .current()
+            .public
+            .light_server()
+            .and_then(|spec| spec.zingod.as_ref().and_then(|zingod| zingod.mismatch))
+    };
+    timeout(LIMIT, async {
+        while kept().is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the spec keeps the mismatch");
+    assert_eq!(kept(), Some(chain::TIP));
+    // Zebra's built-in server and back: the index is the same, and so is its chain.
+    for backend in [LightBackend::ZebradEndpoint, LightBackend::Zingod] {
+        s.services
+            .answer(StepAnswer::Backend { backend })
+            .await
+            .unwrap();
+        s.services
+            .answer(StepAnswer::Consent {
+                version: CONSENT_VERSION,
+            })
+            .await
+            .unwrap();
+    }
+    s.wait_for("the mismatch again, with zingod stopped", |status| {
+        status.backend == LightBackend::Zingod
+            && mismatch(status)
+            && status
+                .indexer
+                .as_ref()
+                .is_some_and(|indexer| !indexer.phase.is_active())
+    })
+    .await;
     s.services.rebuild_index().await.unwrap();
+    assert_eq!(kept(), None, "the rebuild clears it");
     s.wait_for("zingod again", |status| {
         status
             .indexer

@@ -67,6 +67,22 @@ pub struct ZingodSpec {
     pub port: u16,
     /// `<the serving node's data folder>/zingod/<network>`.
     pub dir: PathBuf,
+    /// The tip cross-check found the index in `dir` on another chain at this height: zingod
+    /// stays stopped, through a restart of Zeal and a change of backend, until a rebuild or a
+    /// delete.
+    #[serde(default)]
+    pub mismatch: Option<u64>,
+}
+
+impl ZingodSpec {
+    /// zingod's record when it is first chosen: its port and folder, with nothing found yet.
+    pub fn new(port: u16, dir: PathBuf) -> Self {
+        ZingodSpec {
+            port,
+            dir,
+            mismatch: None,
+        }
+    }
 }
 
 /// The services Zeal can make public. The DNS seeder joins in a later phase (PS4).
@@ -1519,10 +1535,20 @@ mod tests {
             serde_json::to_value(LightBackend::ZebradEndpoint).unwrap(),
             serde_json::json!("zebrad_endpoint")
         );
+        round_trips(ZingodSpec::new(18137, path.clone()));
         round_trips(ZingodSpec {
-            port: 18137,
-            dir: path.clone(),
+            mismatch: Some(4_611_980),
+            ..ZingodSpec::new(18137, path.clone())
         });
+        assert_eq!(
+            serde_json::from_value::<ZingodSpec>(serde_json::json!({
+                "port": 18137,
+                "dir": "/mnt/zebra/zingod/testnet",
+            }))
+            .unwrap(),
+            ZingodSpec::new(18137, path.clone()),
+            "a spec saved before the mismatch was kept"
+        );
         round_trips(StepAnswer::Backend {
             backend: LightBackend::Zingod,
         });
