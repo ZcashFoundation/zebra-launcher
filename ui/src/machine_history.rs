@@ -964,6 +964,64 @@ mod tests {
     }
 
     #[test]
+    fn a_carried_free_space_episode_is_of_the_volume_the_data_is_on() {
+        let full = FreeBelow {
+            bytes: 2_000,
+            share: None,
+            sustain: Duration::ZERO,
+            margin: 1_000,
+        };
+        let low = FreeBelow {
+            bytes: 20_000,
+            ..full
+        };
+        let node = NodeId::new("zebrad-mainnet").unwrap();
+        let mut history = MachineHistory::following(&[], &[full, low]);
+        // A reading every 5 s, the next at `secs`.
+        let mut secs = 0;
+        let mut push = |history: &mut MachineHistory, count: u64, label: &str, free: u64| {
+            for _ in 0..count {
+                history.push(&MachineResources {
+                    volumes: vec![VolumeUsage {
+                        label: label.into(),
+                        total_bytes: 1_000_000,
+                        free_bytes: free,
+                        nodes: vec![node.clone()],
+                        measured_at: at(secs),
+                    }],
+                    ..sample(secs, None)
+                });
+                secs += 5;
+            }
+        };
+        let since = |history: &MachineHistory, condition| {
+            history.free_episode(&node, condition).map(|e| e.since)
+        };
+        // Low on /a, then moved to /b at 500 s, 1,400 there once and then 2,500, inside the
+        // problem's margin, for longer than the samples kept: both episodes are carried from
+        // the move, though /a's warning was still going on when its readings were let go.
+        push(&mut history, 100, "/a", 15_000);
+        push(&mut history, 1, "/b", 1_400);
+        push(&mut history, MAX_SAMPLES as u64 + 100, "/b", 2_500);
+        assert!(history.samples[0].at > at(500), "the move is let go");
+        assert_eq!(since(&history, full), Some(at(500)));
+        assert_eq!(since(&history, low), Some(at(500)));
+        // Moved to /c for 50 s and back to /b among the samples kept: the episodes carried on
+        // /b before then end with the run they were in.
+        push(&mut history, 10, "/c", 10_000);
+        let back = history
+            .latest()
+            .map(|newest| newest.at + Duration::from_secs(5));
+        push(&mut history, 10, "/b", 2_500);
+        assert_eq!(since(&history, full), None);
+        assert_eq!(since(&history, low), back);
+        // And once those samples are let go too.
+        push(&mut history, MAX_SAMPLES as u64, "/b", 2_500);
+        assert_eq!(since(&history, full), None);
+        assert_eq!(since(&history, low), back);
+    }
+
+    #[test]
     fn a_nodes_volume_readings_come_once_each() {
         let node = NodeId::new("zebrad-mainnet").unwrap();
         let other = NodeId::new("zebrad-testnet").unwrap();
