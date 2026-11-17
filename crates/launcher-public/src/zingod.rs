@@ -30,11 +30,12 @@ use std::{
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty, Limited};
 use launcher_core::{
-    firstrun::{dir_size, free_inodes, free_space},
+    firstrun::{dir_size, free_inodes, free_space, network_filesystem},
     logfile::RotatingLogConfig,
     paths::Paths,
     policy::RestartPolicy,
     resources::ResourceSampler,
+    rpc::{RpcClient, RpcError},
     supervisor::{
         self, Listener, LogSubscription, StartOptions, SupervisorConfig, SupervisorError,
         SupervisorHandle,
@@ -42,8 +43,8 @@ use launcher_core::{
     zingod::{ZingodCommand, ZingodConfig, ZingodNetwork, logs::disk_full_kind},
 };
 use launcher_herd::public::zingod::{
-    Cookie, DiskFullEvidence, DiskFullKind, DiskReading, DiskRecovery, ZebradFacts, ZebradRun,
-    ZingodFacts, ZingodResources, answering_zero_since, disk_allows, disk_full_recovery,
+    Cookie, DiskFullEvidence, DiskFullKind, DiskReading, DiskRecovery, TipCheck, ZebradFacts,
+    ZebradRun, ZingodFacts, ZingodResources, answering_zero_since, disk_allows, disk_full_recovery,
 };
 use launcher_types::{
     ExitClass, NodeResources, Phase, PortRole, Status,
@@ -235,6 +236,75 @@ pub fn remove_index(index_dir: &Path) -> io::Result<()> {
             "could not remove {}",
             failed.join("; ")
         )))
+    }
+}
+
+/// How long one tip cross-check may take: zingod's `GetLatestBlock` and zebrad's
+/// `getblockhash`.
+pub const CROSS_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One tip cross-check (docs/PUBLIC-SERVICES.md, "Health of zingod"): zingod's
+/// `GetLatestBlock` on loopback, its hash reversed from the internal byte order, against
+/// zebrad's `getblockhash` at that height, asked with zebrad's cookie. A height above
+/// `zebrad_height`, or one zebrad says it doesn't have, is [`TipCheck::Skipped`]. `None` when
+/// either side didn't answer, which says nothing about the chain.
+pub async fn cross_check(
+    zingod: SocketAddr,
+    rpc: SocketAddr,
+    cookie: PathBuf,
+    zebrad_height: Option<u64>,
+) -> Option<(u64, TipCheck)> {
+    let check = async {
+        let stream = TcpStream::connect(zingod).await.ok()?;
+        let block = crate::grpc::get_latest_block(stream, &zingod.to_string(), false)
+            .await
+            .ok()?;
+        if zebrad_height.is_none_or(|height| block.height > height) {
+            return Some((block.height, TipCheck::Skipped));
+        }
+        let display: String = block
+            .hash
+            .iter()
+            .rev()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let client = RpcClient::new(rpc, cookie).ok()?;
+        match client
+            .call::<String>("getblockhash", serde_json::json!([block.height]))
+            .await
+        {
+            Ok(hash) if hash.eq_ignore_ascii_case(&display) => {
+                Some((block.height, TipCheck::Match))
+            }
+            Ok(_) => Some((block.height, TipCheck::Mismatch)),
+            // zebrad's answer for a height above its tip.
+            Err(RpcError::Rpc { code: -8, .. }) => Some((block.height, TipCheck::Skipped)),
+            Err(_) => None,
+        }
+    };
+    tokio::time::timeout(CROSS_CHECK_TIMEOUT, check)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The index folder's disk as the service actor reads it before zingod runs: free bytes and
+/// inodes, whether it is a network filesystem, and the index's size (with whether the walk
+/// stopped early). Each part that can't be read is left out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IndexDisk {
+    pub disk: Option<DiskReading>,
+    pub network_fs: bool,
+    pub index_bytes: Option<(u64, bool)>,
+}
+
+/// Reads [`IndexDisk`] for `index_dir`, blocking.
+pub fn read_index_disk(index_dir: &Path) -> IndexDisk {
+    let indexes = index_dir.join("indexes");
+    IndexDisk {
+        disk: read_disk(index_dir).ok(),
+        network_fs: network_filesystem(index_dir).unwrap_or(false),
+        index_bytes: indexes.is_dir().then(|| dir_size(&indexes, SIZE_LIMIT)),
     }
 }
 
@@ -902,10 +972,12 @@ impl Runner {
         self.facts.send_if_modified(|facts| {
             let changed = facts.phase != status.phase
                 || facts.last_exit != status.last_exit
-                || facts.stale != status.stale;
+                || facts.stale != status.stale
+                || facts.listening != status.lightwalletd_addr;
             facts.phase = status.phase.clone();
             facts.last_exit = status.last_exit.clone();
             facts.stale = status.stale.clone();
+            facts.listening = status.lightwalletd_addr;
             changed
         });
         status.phase

@@ -113,6 +113,39 @@ fn platform_free_inodes(_dir: &Path) -> io::Result<Option<u64>> {
     Ok(None)
 }
 
+/// Whether the volume holding `path` is a network filesystem (NFS, SMB, CIFS, Ceph, AFS, Coda,
+/// 9P), from `statfs`'s filesystem type, like [`free_space`]. zingod reads its indexes through
+/// memory maps and asks for a local disk. Always false off Linux, where the type isn't read.
+pub fn network_filesystem(path: &Path) -> io::Result<bool> {
+    let existing = nearest_existing(path)?;
+    platform_network_filesystem(&existing)
+}
+
+#[cfg(target_os = "linux")]
+fn platform_network_filesystem(dir: &Path) -> io::Result<bool> {
+    /// The magic numbers of `statfs(2)`'s `f_type` for network filesystems.
+    const NETWORK: [i64; 8] = [
+        0x6969,      // NFS
+        0x517B,      // SMB
+        0xFF53_4D42, // CIFS
+        0xFE53_4D42, // SMB2
+        0x00C3_6400, // Ceph
+        0x5346_414F, // AFS
+        0x7375_7245, // Coda
+        0x0102_1997, // 9P
+    ];
+    let stat = nix::sys::statfs::statfs(dir).map_err(io::Error::from)?;
+    // The field's type differs between C libraries.
+    #[allow(clippy::unnecessary_cast)]
+    let kind = stat.filesystem_type().0 as i64;
+    Ok(NETWORK.contains(&kind))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_network_filesystem(_dir: &Path) -> io::Result<bool> {
+    Ok(false)
+}
+
 /// `path` or its closest ancestor that exists, as a directory.
 fn nearest_existing(path: &Path) -> io::Result<PathBuf> {
     for ancestor in path.ancestors() {
@@ -685,6 +718,12 @@ mod tests {
         } else if let Some(inodes) = inodes {
             assert!(inodes > 0);
         }
+    }
+
+    #[test]
+    fn a_local_folder_is_no_network_filesystem() {
+        let dir = tempdir();
+        assert!(!network_filesystem(&dir.path().join("zingod/testnet")).expect("statfs"));
     }
 
     #[test]

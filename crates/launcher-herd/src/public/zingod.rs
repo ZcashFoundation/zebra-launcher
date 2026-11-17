@@ -491,14 +491,31 @@ pub enum TipCheck {
 pub struct CrossCheck {
     first: Option<SystemTime>,
     count: u32,
+    /// [`MISMATCH_SPAN`] unless a test shortened it.
+    span: Option<Duration>,
 }
 
 impl CrossCheck {
+    /// A cross-check whose mismatches must span `span` instead of [`MISMATCH_SPAN`], for
+    /// tests in real time.
+    pub fn with_span(span: Duration) -> Self {
+        CrossCheck {
+            span: Some(span),
+            ..CrossCheck::default()
+        }
+    }
+
     /// One check; true once [`MISMATCHES`] different hashes in a row span [`MISMATCH_SPAN`].
     /// A match starts over, and a skipped height changes nothing.
     pub fn observe(&mut self, check: TipCheck, now: SystemTime) -> bool {
+        let span = self.span.unwrap_or(MISMATCH_SPAN);
         match check {
-            TipCheck::Match => *self = CrossCheck::default(),
+            TipCheck::Match => {
+                *self = CrossCheck {
+                    span: self.span,
+                    ..CrossCheck::default()
+                }
+            }
             TipCheck::Skipped => {}
             TipCheck::Mismatch => {
                 self.first.get_or_insert(now);
@@ -508,7 +525,7 @@ impl CrossCheck {
         self.count >= MISMATCHES
             && self
                 .first
-                .is_some_and(|first| now.duration_since(first).unwrap_or_default() >= MISMATCH_SPAN)
+                .is_some_and(|first| now.duration_since(first).unwrap_or_default() >= span)
     }
 }
 

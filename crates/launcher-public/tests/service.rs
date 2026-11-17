@@ -94,7 +94,7 @@ async fn setup_with(secrets: impl FnOnce(&std::path::Path) -> Arc<dyn SecretStor
         status: status_tx.clone(),
         applied: applied.clone(),
     };
-    let mut options = Options::new(dir.path(), "7.0.0");
+    let mut options = Options::new(&paths, "7.0.0");
     options.supported = true;
     options.listen_ip = Ipv4Addr::LOCALHOST.into();
     options.acme_staging = "https://acme.invalid/dir".into();
@@ -107,6 +107,8 @@ async fn setup_with(secrets: impl FnOnce(&std::path::Path) -> Arc<dyn SecretStor
             node,
             status,
             stats,
+            details: watch::channel(None).1,
+            machine: watch::channel(None).1,
             host: Arc::new(host),
             secrets: secrets(dir.path()),
             fetch: Arc::new(NoNetwork),
@@ -221,7 +223,7 @@ async fn the_endpoint_exists_only_while_switched_on_with_consent() {
     .await;
 
     // Forget: the key goes first, then the spec.
-    let still = s.services.forget(true).await.unwrap();
+    let still = s.services.forget(true, false).await.unwrap();
     assert_eq!(still.name, None);
     assert_eq!(backend_port(&s.settings), None);
     assert!(s.settings.current().public.is_empty());
@@ -328,7 +330,7 @@ async fn forget_deletes_the_token_after_a_new_name_and_provider() {
     assert_eq!(spec.secret.unwrap().account, "dns:duckdns:duckdns.org");
     name(&s, "zec.example.com", DnsProvider::Manual).await;
 
-    let still = s.services.forget(true).await.unwrap();
+    let still = s.services.forget(true, false).await.unwrap();
     assert!(!still.token_left);
     assert_eq!(tokens_left(s.dir.path()), Vec::<String>::new());
 }
@@ -361,7 +363,7 @@ async fn a_token_kept_for_an_old_name_moves_to_the_zone() {
         store.get("dns:duckdns:duckdns.org".into()).await.unwrap(),
         TOKEN
     );
-    s.services.forget(true).await.unwrap();
+    s.services.forget(true, false).await.unwrap();
     assert_eq!(tokens_left(s.dir.path()), Vec::<String>::new());
 }
 
@@ -408,7 +410,7 @@ async fn forget_says_when_the_keychain_kept_the_token() {
         })
         .await
         .unwrap();
-    assert!(s.services.forget(true).await.unwrap().token_left);
+    assert!(s.services.forget(true, false).await.unwrap().token_left);
     assert!(!s.settings.current().public.light_server().is_some());
 }
 
@@ -524,7 +526,7 @@ async fn a_new_name_waits_until_the_old_names_token_moved() {
     refusals.get.store(true, Ordering::SeqCst);
     name(&s, "zec.example.com", DnsProvider::Manual).await;
     refusals.get.store(false, Ordering::SeqCst);
-    let still = s.services.forget(true).await.unwrap();
+    let still = s.services.forget(true, false).await.unwrap();
     assert!(!still.token_left);
     assert_eq!(tokens_left(s.dir.path()), Vec::<String>::new());
 }
@@ -617,7 +619,7 @@ async fn an_expired_certificate_is_known_after_a_restart_with_an_earlier_step_fa
     use launcher_types::public::{PublicHostname, PublicServiceSpec, StepState};
     let s = setup().await;
     let name = "zec-alice.duckdns.org";
-    let paths = PublicPaths::new(s.dir.path());
+    let paths = PublicPaths::new(Paths::under(s.dir.path()).data_dir());
     let mut params = rcgen::CertificateParams::new(vec![name.to_string()]).unwrap();
     params.not_before = rcgen::date_time_ymd(2025, 1, 1);
     params.not_after = rcgen::date_time_ymd(2025, 4, 1);
@@ -678,8 +680,9 @@ async fn what_was_proven_belongs_to_its_name() {
         }
     });
     let s = setup_with(move |dir| {
-        std::fs::create_dir_all(dir.join("public")).unwrap();
-        std::fs::write(dir.join("public/state.json"), state.to_string()).unwrap();
+        let public = Paths::under(dir).data_dir().join("public");
+        std::fs::create_dir_all(&public).unwrap();
+        std::fs::write(public.join("state.json"), state.to_string()).unwrap();
         Arc::new(FileStore::new(dir.join("secrets")))
     })
     .await;
@@ -705,7 +708,12 @@ async fn what_was_proven_belongs_to_its_name() {
         status.reach
     );
     // Forgotten, nothing stays proven.
-    s.services.forget(false).await.unwrap();
-    let saved = std::fs::read_to_string(s.dir.path().join("public/state.json")).unwrap();
+    s.services.forget(false, false).await.unwrap();
+    let saved = std::fs::read_to_string(
+        Paths::under(s.dir.path())
+            .data_dir()
+            .join("public/state.json"),
+    )
+    .unwrap();
     assert!(!saved.contains("zec-old"), "{saved}");
 }

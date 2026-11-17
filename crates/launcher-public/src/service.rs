@@ -6,6 +6,13 @@
 //! It never writes `zebrad.toml` or restarts zebrad itself: it sets or clears the spec's
 //! `backend_port` through the settings actor, the only writer of `launcher.json`, and asks the
 //! [`EndpointHost`] (the app) to apply the managed keys behind the app's permits.
+//!
+//! With zingod as the backend (docs/PUBLIC-SERVICES.md, "zingod as the backend") it also owns
+//! the [`ZingodRunner`]: it records the [`ZingodSpec`] when zingod is first chosen, gives the
+//! runner a plan while launcher-herd's `plan_run` allows one, restarts zingod for a stall, for
+//! no validator and for the user's Try again, runs the tip cross-check once a minute, and puts
+//! the front door in `Unavailable` before it stops zingod itself. zebrad's endpoint goes while
+//! zingod is the backend.
 
 use std::{
     future::Future,
@@ -15,20 +22,22 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use launcher_core::settings::SettingsHandle;
+use launcher_core::{paths::Paths, settings::SettingsHandle, zingod::ZingodNetwork};
 use launcher_herd::public::{
     self as rules, Checked, Facts, evidence,
     firewall::firewall_info,
     light::{at_tip, behind, pick_endpoint_port, track_since, wants_endpoint},
     names::{DUCKDNS_ACCOUNT, legacy_duckdns_account, parse_name, plausible_duckdns_token},
+    zingod::{self as zingod_rules, CrossCheck, IndexerFacts, Stall, StallVerdict, ZebradRun},
 };
 use launcher_types::{
-    ExitClass, Network, NodeId, NodeStats, Phase, Settings, Status,
+    ExitClass, MachineResources, Network, NodeDetails, NodeId, NodeStats, Phase, Settings, Status,
     public::{
         CONSENT_VERSION, CheckId, ConnectionReport, Consent, DnsProvider, Evidence, EvidenceSource,
-        FirewallInfo, GatewayMode, GatewayStats, LightdInfo, LocalTestProblem, NetFacts, OpenError,
-        PublicHostname, PublicService, PublicServiceSpec, PublicState, PublicStatus, SecretRef,
-        StepAnswer, StepId, StillPublic, WanKind,
+        FirewallInfo, GatewayMode, GatewayStats, LightBackend, LightdInfo, LocalTestProblem,
+        NetFacts, OpenError, PublicHostname, PublicService, PublicServiceSpec, PublicState,
+        PublicStatus, SecretRef, StepAnswer, StepId, StillPublic, WanKind, ZingodChoice,
+        ZingodSpec,
     },
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -43,6 +52,10 @@ use crate::{
     secrets::{SecretError, SecretStore},
     selftest,
     store::{self, PublicPaths, State},
+    zingod::{
+        IndexDisk, RunnerOptions, STOP_GRACE, ZingodPlan, ZingodRunner, cross_check,
+        read_index_disk, remove_index, zebrad_facts,
+    },
 };
 
 /// How often the actor looks again without a change.
@@ -53,6 +66,16 @@ const NET_EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// How often the month's upload is written down.
 const SAVE_EVERY: Duration = Duration::from_secs(10 * 60);
+
+/// How often the tip cross-check runs while zingod serves: at most once a minute.
+pub const CROSS_CHECK_EVERY: Duration = Duration::from_secs(60);
+
+/// How often the actor reads the index folder's disk itself, for the setup and for an index
+/// zingod doesn't run on.
+pub const INDEX_DISK_EVERY: Duration = Duration::from_secs(60);
+
+/// How many lines of zingod's log the diagnostics carry.
+pub const DIAGNOSTIC_LINES: usize = 200;
 
 /// What the app does for the actor: write `node`'s managed keys with the light wallet endpoint
 /// on loopback at `port`, or without the endpoint for `None`, and, with `restart`, restart its
@@ -74,6 +97,21 @@ pub trait EndpointHost: Send + Sync + 'static {
 #[derive(Clone, Debug)]
 pub struct Options {
     pub paths: PublicPaths,
+    /// The launcher's folders: the serving node's data folder and zingod's files.
+    pub launcher: Paths,
+    /// `zeal-zingod`, where one is bundled (Linux); `None` disables the choice.
+    pub zingod_binary: Option<std::path::PathBuf>,
+    /// Changes to the runner's options before it starts, for tests.
+    pub tune_zingod: Option<fn(&mut RunnerOptions)>,
+    /// [`CROSS_CHECK_EVERY`], shorter in tests.
+    pub cross_check_every: Duration,
+    /// [`INDEX_DISK_EVERY`], shorter in tests.
+    pub index_disk_every: Duration,
+    /// How the actor reads the index folder's disk: [`read_index_disk`], scripted in tests.
+    pub read_index_disk: fn(&std::path::Path) -> IndexDisk,
+    /// The span three mismatching cross-checks must cover: launcher-herd's `MISMATCH_SPAN`,
+    /// shorter in tests, since the actor's clock is the wall clock.
+    pub mismatch_span: Duration,
     /// Public services run on this platform: Linux in PS1.
     pub supported: bool,
     /// The bundled zebrad's version, until zebrad reports its own.
@@ -88,10 +126,18 @@ pub struct Options {
 }
 
 impl Options {
-    /// Let's Encrypt and DuckDNS, with the public services' files under `data_dir`.
-    pub fn new(data_dir: &std::path::Path, bundled_version: &str) -> Self {
+    /// Let's Encrypt and DuckDNS, with the public services' files under the launcher's data
+    /// folder, and no zingod.
+    pub fn new(launcher: &Paths, bundled_version: &str) -> Self {
         Options {
-            paths: PublicPaths::new(data_dir),
+            paths: PublicPaths::new(launcher.data_dir()),
+            launcher: launcher.clone(),
+            zingod_binary: None,
+            tune_zingod: None,
+            cross_check_every: CROSS_CHECK_EVERY,
+            index_disk_every: INDEX_DISK_EVERY,
+            read_index_disk,
+            mismatch_span: zingod_rules::MISMATCH_SPAN,
             supported: cfg!(target_os = "linux"),
             bundled_version: bundled_version.to_string(),
             listen_ip: IpAddr::from(std::net::Ipv6Addr::UNSPECIFIED),
@@ -112,6 +158,10 @@ pub struct Wiring {
     pub node: watch::Receiver<launcher_core::nodes::NodeSpec>,
     pub status: watch::Receiver<Status>,
     pub stats: watch::Receiver<Option<NodeStats>>,
+    /// The serving node's details, for the network upgrades zingod's gate reads.
+    pub details: watch::Receiver<Option<NodeDetails>>,
+    /// This computer's newest sample, for its memory.
+    pub machine: watch::Receiver<Option<MachineResources>>,
     pub host: Arc<dyn EndpointHost>,
     pub secrets: Arc<dyn SecretStore>,
     pub fetch: Arc<dyn Fetch>,
@@ -157,12 +207,25 @@ enum Msg {
     },
     Forget {
         remove_token: bool,
+        remove_index: bool,
         reply: Reply<Result<StillPublic, String>>,
     },
     CheckConnection {
         reply: Reply<ConnectionReport>,
     },
+    Rebuild {
+        reply: Reply<Result<(), String>>,
+    },
+    DeleteIndex {
+        reply: Reply<Result<(), String>>,
+    },
+    Diagnostics {
+        reply: Reply<Option<String>>,
+    },
     Shutdown {
+        reply: Reply<()>,
+    },
+    StopIndexer {
         reply: Reply<()>,
     },
 }
@@ -182,6 +245,13 @@ enum Internal {
         result: Result<(), String>,
     },
     Door(launcher_gateway::Event),
+    /// The actor's own reading of the index folder `dir`.
+    IndexDisk {
+        dir: std::path::PathBuf,
+        read: IndexDisk,
+    },
+    /// A tip cross-check: the height zingod served and what zebrad said at it.
+    TipCheck(Option<(u64, zingod_rules::TipCheck)>),
 }
 
 /// The public services. Cheap to clone; the actor stops when the last handle is dropped.
@@ -257,9 +327,44 @@ impl PublicServices {
         answer.await.map_err(|_| stopped())?
     }
 
-    /// Turns the service off and forgets it, returning what Zeal could not undo.
-    pub async fn forget(&self, remove_token: bool) -> Result<StillPublic, String> {
-        ask!(self, Forget { remove_token })?
+    /// Turns the service off and forgets it, returning what Zeal could not undo. With
+    /// `remove_index`, zingod's index goes too, once zingod has stopped.
+    pub async fn forget(
+        &self,
+        remove_token: bool,
+        remove_index: bool,
+    ) -> Result<StillPublic, String> {
+        ask!(
+            self,
+            Forget {
+                remove_token,
+                remove_index
+            }
+        )?
+    }
+
+    /// Stops zingod, removes its index and state in the recorded folder, and starts it again:
+    /// hours of "try again" for wallets.
+    pub async fn rebuild_index(&self) -> Result<(), String> {
+        ask!(self, Rebuild {})?
+    }
+
+    /// Stops zingod and removes its index and state in the recorded folder, after switching
+    /// back to zebrad's endpoint.
+    pub async fn delete_index(&self) -> Result<(), String> {
+        ask!(self, DeleteIndex {})?
+    }
+
+    /// zingod's part of the diagnostics: its status, its configuration's paths and the last
+    /// [`DIAGNOSTIC_LINES`] of its log, redacted. `None` while zingod isn't set up.
+    pub async fn indexer_diagnostics(&self) -> Option<String> {
+        let asked: Result<Option<String>, String> = async { ask!(self, Diagnostics {}) }.await;
+        asked.ok().flatten()
+    }
+
+    /// How long [`Self::stop_indexer`] may take: zingod's stop grace and its kill.
+    pub fn indexer_shutdown_cap(&self) -> Duration {
+        launcher_core::supervisor::shutdown_cap(STOP_GRACE)
     }
 
     /// "Check my connection": the read-only network checks, without setting anything up.
@@ -267,10 +372,19 @@ impl PublicServices {
         ask!(self, CheckConnection {})
     }
 
-    /// Closes the front door and lets go of everything, for Zeal's exit.
+    /// Closes the front door and lets go of everything but zingod, for Zeal's exit:
+    /// [`Self::stop_indexer`] stops zingod after it, beside the nodes.
     pub async fn shutdown(&self) {
         let (reply, answer) = oneshot::channel();
         if self.tx.send(Msg::Shutdown { reply }).await.is_ok() {
+            let _ = answer.await;
+        }
+    }
+
+    /// Stops zingod and ends the actor, for Zeal's exit after [`Self::shutdown`].
+    pub async fn stop_indexer(&self) {
+        let (reply, answer) = oneshot::channel();
+        if self.tx.send(Msg::StopIndexer { reply }).await.is_ok() {
             let _ = answer.await;
         }
     }
@@ -310,6 +424,8 @@ struct Actor {
     node_rx: watch::Receiver<launcher_core::nodes::NodeSpec>,
     status_rx: watch::Receiver<Status>,
     stats_rx: watch::Receiver<Option<NodeStats>>,
+    details_rx: watch::Receiver<Option<NodeDetails>>,
+    machine_rx: watch::Receiver<Option<MachineResources>>,
     host: Arc<dyn EndpointHost>,
     secrets: Arc<dyn SecretStore>,
     fetch: Arc<dyn Fetch>,
@@ -358,6 +474,78 @@ struct Actor {
     mode: watch::Sender<launcher_gateway::Mode>,
     can_validate: watch::Sender<bool>,
     awake: Option<KeepAwake>,
+    /// The front door has closed for Zeal's exit: nothing starts again.
+    closed: bool,
+
+    /// The backend's endpoint the light monitor checks.
+    endpoint: watch::Sender<Option<SocketAddr>>,
+    zingod: Zingod,
+}
+
+/// What the actor keeps about zingod between looks.
+struct Zingod {
+    mismatch_span: Duration,
+    runner: Option<Child<ZingodRunner>>,
+    plan: watch::Sender<Option<ZingodPlan>>,
+    /// Bumped for the user's Try again and for a restart the rules decide.
+    attempt: u64,
+    /// zebrad's run, and whether it has been at the tip in it.
+    tip_run: Option<(ZebradRun, bool)>,
+    behind_since: Option<SystemTime>,
+    stall: Stall,
+    stuck: Option<(u64, u64)>,
+    /// The zebrad run zingod was restarted for when no validator answered: once per run.
+    no_validator_restart: Option<ZebradRun>,
+    cross: CrossCheck,
+    mismatch: Option<u64>,
+    tip: Option<Checked<zingod_rules::TipCheck>>,
+    tip_due: Option<tokio::time::Instant>,
+    tip_running: bool,
+    /// The actor's own reading of the index folder.
+    disk: Option<(std::path::PathBuf, IndexDisk)>,
+    disk_due: Option<tokio::time::Instant>,
+    disk_running: bool,
+}
+
+impl Zingod {
+    fn new(mismatch_span: Duration) -> Self {
+        Zingod {
+            mismatch_span,
+            runner: None,
+            plan: watch::channel(None).0,
+            attempt: 0,
+            tip_run: None,
+            behind_since: None,
+            stall: Stall::default(),
+            stuck: None,
+            no_validator_restart: None,
+            cross: CrossCheck::with_span(mismatch_span),
+            mismatch: None,
+            tip: None,
+            tip_due: None,
+            tip_running: false,
+            disk: None,
+            disk_due: None,
+            disk_running: false,
+        }
+    }
+
+    /// Starts over the rules' memory: after a rebuild, a delete, a new backend or a forget.
+    fn forget_history(&mut self) {
+        self.behind_since = None;
+        self.stall = Stall::default();
+        self.stuck = None;
+        self.cross = CrossCheck::with_span(self.mismatch_span);
+        self.mismatch = None;
+        self.tip = None;
+    }
+
+    fn facts(&self) -> launcher_herd::public::zingod::ZingodFacts {
+        self.runner
+            .as_ref()
+            .map(|runner| runner.handle.facts().borrow().clone())
+            .unwrap_or_default()
+    }
 }
 
 fn door_mode(mode: GatewayMode) -> launcher_gateway::Mode {
@@ -428,6 +616,7 @@ impl Actor {
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::channel(64);
         let state: State = store::load(&options.paths.state());
+        let mismatch_span = options.mismatch_span;
         let applied = wiring
             .settings
             .current()
@@ -440,6 +629,8 @@ impl Actor {
             node_rx: wiring.node,
             status_rx: wiring.status,
             stats_rx: wiring.stats,
+            details_rx: wiring.details,
+            machine_rx: wiring.machine,
             host: wiring.host,
             secrets: wiring.secrets,
             fetch: wiring.fetch,
@@ -480,6 +671,9 @@ impl Actor {
             mode: watch::channel(launcher_gateway::Mode::ChallengeOnly).0,
             can_validate: watch::channel(false).0,
             awake: None,
+            closed: false,
+            endpoint: watch::channel(None).0,
+            zingod: Zingod::new(mismatch_span),
         }
     }
 
@@ -489,20 +683,30 @@ impl Actor {
         let mut stats = self.stats_rx.clone();
         let mut settings = self.settings.watch();
         let mut node = self.node_rx.clone();
+        let mut details = self.details_rx.clone();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            self.step().await;
+            if !self.closed {
+                self.step().await;
+            }
             tokio::select! {
                 msg = rx.recv() => match msg {
                     Some(Msg::Shutdown { reply }) => {
                         self.shutdown();
                         let _ = reply.send(());
+                    }
+                    Some(Msg::StopIndexer { reply }) => {
+                        self.shutdown();
+                        self.stop_indexer().await;
+                        let _ = reply.send(());
                         return;
                     }
+                    Some(_) if self.closed => {}
                     Some(msg) => self.handle(msg).await,
                     None => {
                         self.shutdown();
+                        self.stop_indexer().await;
                         return;
                     }
                 },
@@ -513,6 +717,7 @@ impl Actor {
                 Ok(()) = settings.changed() => {}
                 // A network change holds the service at once.
                 Ok(()) = node.changed() => {}
+                Ok(()) = details.changed() => {}
                 _ = tick.tick() => {}
             }
         }
@@ -562,8 +767,14 @@ impl Actor {
                 .as_ref()
                 .and_then(|exit| exit.detail.as_deref())
                 .is_some_and(|detail| detail.contains("lightwalletd"));
-        facts.phase = status.phase;
+        facts.phase = status.phase.clone();
         facts.endpoint = status.lightwalletd_addr;
+        facts.upgrades = self
+            .details_rx
+            .borrow()
+            .as_ref()
+            .map(|details| details.upgrades.clone())
+            .unwrap_or_default();
         facts.endpoint_error = self.endpoint_error.clone();
         facts.height = stats.as_ref().map(|stats| stats.height);
         facts.tip = stats.as_ref().map(|stats| stats.estimated_height);
@@ -617,7 +828,66 @@ impl Actor {
         };
         facts.awake_held = self.awake.is_some();
         facts.held = self.held.clone();
+        facts.zingod = self.indexer_facts(spec, &status);
         facts
+    }
+
+    /// The serving node's data folder.
+    fn node_data(&self) -> std::path::PathBuf {
+        self.node_rx.borrow().data_dir(&self.options.launcher)
+    }
+
+    /// zingod's index folder for `spec`: the recorded one, or where a first choice puts it.
+    fn index_dir(&self, spec: &PublicServiceSpec) -> std::path::PathBuf {
+        spec.zingod.as_ref().map_or_else(
+            || zingod_rules::index_dir(&self.node_data(), spec.network),
+            |zingod| zingod.dir.clone(),
+        )
+    }
+
+    /// What the rules read about zingod, while it is bundled or was chosen.
+    fn indexer_facts(&self, spec: &PublicServiceSpec, status: &Status) -> Option<IndexerFacts> {
+        let bundled = self.options.zingod_binary.is_some();
+        if !bundled && spec.backend != LightBackend::Zingod && spec.zingod.is_none() {
+            return None;
+        }
+        let dir = self.index_dir(spec);
+        let runner = self.zingod.facts();
+        let own = self
+            .zingod
+            .disk
+            .as_ref()
+            .filter(|(read, _)| *read == dir)
+            .map(|(_, read)| *read)
+            .unwrap_or_default();
+        let node = self.node_rx.borrow().clone();
+        let cookie = node.paths(&self.options.launcher).rpc_cookie_file();
+        let run = ZebradRun::of(status);
+        let at_tip_once = self
+            .zingod
+            .tip_run
+            .is_some_and(|(tip_run, at_tip)| Some(tip_run) == run && at_tip);
+        Some(IndexerFacts {
+            bundled,
+            version: launcher_types::zingod::version().to_owned(),
+            disk: runner.disk.or(own.disk),
+            network_fs: own.network_fs,
+            total_memory: self
+                .machine_rx
+                .borrow()
+                .as_ref()
+                .map(|machine| machine.memory_total_bytes),
+            zebrad: zebrad_facts(status, node.network == spec.network, &cookie, at_tip_once),
+            runner: launcher_herd::public::zingod::ZingodFacts {
+                index_bytes: runner.index_bytes.or(own.index_bytes),
+                ..runner
+            },
+            behind_since: self.zingod.behind_since,
+            stuck: self.zingod.stuck,
+            mismatch: self.zingod.mismatch,
+            tip: self.zingod.tip.clone(),
+            dir,
+        })
     }
 
     /// One look: the facts, the rules, the children, the status.
@@ -626,6 +896,8 @@ impl Actor {
         let settings = self.settings.current();
         let Some(spec) = settings.public.light_server().cloned() else {
             self.stop_children();
+            self.zingod.plan.send_replace(None);
+            self.zingod.runner = None;
             self.out.send_if_modified(|statuses| {
                 let changed = !statuses.is_empty();
                 statuses.clear();
@@ -649,6 +921,12 @@ impl Actor {
         facts.behind_since = self.behind_since;
         self.name_elsewhere_since = rules::name_elsewhere_since(&spec, &facts);
         facts.name_elsewhere_since = self.name_elsewhere_since;
+        if self.track_zingod(&spec, &facts, now).await {
+            facts = self.facts(&spec, now);
+            facts.at_tip_since = self.at_tip_since;
+            facts.behind_since = self.behind_since;
+            facts.name_elsewhere_since = self.name_elsewhere_since;
+        }
 
         let steps = rules::plan(&spec, &facts);
         let pause = rules::pause(&spec, &facts);
@@ -674,6 +952,110 @@ impl Actor {
             *statuses = vec![status];
             changed
         });
+    }
+
+    /// Follows zingod between looks: zebrad at the tip in its run, zingod behind, the stall
+    /// rule, the restart when no validator answers, a moved port into the spec. Returns whether
+    /// the facts changed.
+    async fn track_zingod(
+        &mut self,
+        spec: &PublicServiceSpec,
+        facts: &Facts,
+        now: SystemTime,
+    ) -> bool {
+        let Some(zingod) = &facts.zingod else {
+            return false;
+        };
+        let run = ZebradRun::of(&self.status_rx.borrow());
+        let at_tip = at_tip(facts.height, facts.tip);
+        let mut changed = false;
+        let next = run.map(|run| match self.zingod.tip_run {
+            Some((known, was)) if known == run => (run, was || at_tip),
+            _ => (run, at_tip),
+        });
+        if next != self.zingod.tip_run {
+            self.zingod.tip_run = next;
+            changed = true;
+        }
+        if spec.backend != LightBackend::Zingod {
+            return changed;
+        }
+        let runner = &zingod.runner;
+        let status = runner
+            .status
+            .as_ref()
+            .filter(|_| runner.phase == Phase::Running);
+        let behind_since = track_since(
+            self.zingod.behind_since,
+            zingod_rules::behind(status, facts.height),
+            now,
+        );
+        changed |= behind_since != self.zingod.behind_since;
+        self.zingod.behind_since = behind_since;
+        let health = zingod_rules::health(
+            status,
+            runner.misses,
+            runner.answering_zero_since,
+            facts.height,
+            now,
+        );
+        let building = matches!(health, zingod_rules::IndexerHealth::Building { .. });
+        let stuck = match self.zingod.stall.observe(
+            status.and_then(|status| status.served),
+            facts.height,
+            building,
+            now,
+        ) {
+            StallVerdict::Moving => None,
+            StallVerdict::Restart => {
+                tracing::warn!(target: "zeal::public", "zingod is stalled; restarting it once");
+                self.restart_zingod();
+                None
+            }
+            StallVerdict::Stuck { at, zebrad_at } => Some((at, zebrad_at)),
+        };
+        changed |= stuck != self.zingod.stuck;
+        self.zingod.stuck = stuck;
+        // A missed cookie change looks like no validator: restart zingod once per zebrad run.
+        if health == zingod_rules::IndexerHealth::NoValidator
+            && run.is_some()
+            && self.zingod.no_validator_restart != run
+        {
+            tracing::warn!(target: "zeal::public", "zingod can't reach zebrad; restarting it once");
+            self.zingod.no_validator_restart = run;
+            self.restart_zingod();
+        }
+        // The runner's one move after `PortInUse` goes into the spec.
+        if let (Some(port), Some(recorded)) = (runner.port, &spec.zingod)
+            && port != recorded.port
+            && runner.phase == Phase::Running
+        {
+            let _ = self
+                .update_spec(move |spec| {
+                    if let Some(zingod) = &mut spec.zingod {
+                        zingod.port = port;
+                    }
+                })
+                .await;
+        }
+        changed
+    }
+
+    /// A new attempt for zingod: the runner restarts it, or starts it again after a failure
+    /// that waited for the user. The front door goes `Unavailable` first.
+    fn restart_zingod(&mut self) {
+        self.door_unavailable();
+        self.zingod.attempt += 1;
+    }
+
+    /// Puts a running front door in `Unavailable`, before Zeal stops zingod itself.
+    fn door_unavailable(&mut self) {
+        if self.door.is_some() {
+            self.mode.send_if_modified(|current| {
+                std::mem::replace(current, launcher_gateway::Mode::Unavailable)
+                    != launcher_gateway::Mode::Unavailable
+            });
+        }
     }
 
     /// Sets or clears the spec's `backend_port` and has the app apply it.
@@ -772,6 +1154,26 @@ impl Actor {
                 }
             }
             Internal::Door(_) => {}
+            Internal::IndexDisk { dir, read } => {
+                self.zingod.disk_running = false;
+                self.zingod.disk = Some((dir, read));
+            }
+            Internal::TipCheck(checked) => {
+                self.zingod.tip_running = false;
+                let Some((height, check)) = checked else {
+                    return;
+                };
+                let now = SystemTime::now();
+                self.zingod.tip = Some(Checked {
+                    at: now,
+                    result: check,
+                });
+                if self.zingod.cross.observe(check, now) && self.zingod.mismatch.is_none() {
+                    tracing::warn!(target: "zeal::public", height, "zingod's chain doesn't match zebrad's; stopping zingod");
+                    self.door_unavailable();
+                    self.zingod.mismatch = Some(height);
+                }
+            }
         }
     }
 
@@ -836,11 +1238,25 @@ impl Actor {
         self.awake = None;
     }
 
+    /// Closes the front door for Zeal's exit and saves the month's upload. zingod keeps running
+    /// until [`Self::stop_indexer`], so its stop runs beside the nodes'.
     fn shutdown(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
         self.stop_door();
         self.awake = None;
         self.state.month_bytes_up += std::mem::take(&mut self.upload).this_run(None);
         let _ = store::save(&self.options.paths.state(), &self.state, false);
+    }
+
+    /// Stops zingod, after the front door closed.
+    async fn stop_indexer(&mut self) {
+        self.zingod.plan.send_replace(None);
+        if let Some(runner) = self.zingod.runner.take() {
+            runner.handle.shutdown().await;
+        }
     }
 
     /// Starts, stops and pokes the children for the current state.
@@ -867,14 +1283,31 @@ impl Actor {
         }
         self.was_watching = watching;
 
-        // The light monitor follows zebrad's endpoint.
+        // The light monitor follows the backend's endpoint: zebrad's, or zingod's once it
+        // serves.
+        let endpoint = match spec.backend {
+            LightBackend::ZebradEndpoint => facts.endpoint,
+            LightBackend::Zingod => zingod_rules::ready(spec, facts)
+                .then(|| {
+                    facts
+                        .zingod
+                        .as_ref()
+                        .and_then(|zingod| zingod.runner.listening)
+                })
+                .flatten(),
+        };
+        self.endpoint
+            .send_if_modified(|current| std::mem::replace(current, endpoint) != endpoint);
         if self
             .light
             .as_ref()
             .is_none_or(|light| light.key != spec.network.as_str())
         {
-            let monitor =
-                LightMonitor::spawn(spec.network, self.status_rx.clone(), self.stats_rx.clone());
+            let monitor = LightMonitor::spawn(
+                spec.network,
+                self.endpoint.subscribe(),
+                self.stats_rx.clone(),
+            );
             let forwards = vec![forward_changes(
                 monitor.result.clone(),
                 self.internal_tx.clone(),
@@ -1020,10 +1453,14 @@ impl Actor {
             }
         }
 
-        // The front door, in the mode the rules give.
-        let upstream = spec
-            .backend_port
-            .map(|port| SocketAddr::from((Ipv4Addr::LOCALHOST, port)));
+        // The front door, in the mode the rules give, before zingod's plan changes: it goes
+        // `Unavailable` before Zeal stops zingod.
+        let upstream = match spec.backend {
+            LightBackend::ZebradEndpoint => spec
+                .backend_port
+                .map(|port| SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
+            LightBackend::Zingod => zingod_rules::endpoint(spec, facts),
+        };
         match (mode, upstream, &spec.name) {
             (Some(mode), Some(upstream), Some(name)) => {
                 self.mode.send_if_modified(|current| {
@@ -1039,15 +1476,20 @@ impl Actor {
             _ => self.stop_door(),
         }
 
+        self.drive_zingod(spec, facts);
+
         // The test on this computer, once there is a certificate and the front door serves
-        // this computer.
+        // this computer, and with zingod once it serves.
         let cert_valid = facts
             .cert
             .as_ref()
             .and_then(|cert| cert.not_after)
             .is_some_and(|not_after| not_after > facts.now);
+        let backend_serves =
+            spec.backend == LightBackend::ZebradEndpoint || zingod_rules::ready(spec, facts);
         if current == Some(StepId::LocalTest)
             && cert_valid
+            && backend_serves
             && mode == Some(GatewayMode::LocalOnly)
             && self.local_test.is_none()
             && !self.local_running
@@ -1093,6 +1535,120 @@ impl Actor {
             }
         } else {
             self.awake = None;
+        }
+    }
+
+    /// zingod's runner and plan, the tip cross-check and the actor's reading of the index
+    /// folder, for the current facts.
+    fn drive_zingod(&mut self, spec: &PublicServiceSpec, facts: &Facts) {
+        let Some(zingod) = &facts.zingod else {
+            self.zingod.plan.send_replace(None);
+            self.zingod.runner = None;
+            return;
+        };
+        // The index folder's disk, for the setup's room and an index zingod doesn't run on.
+        let now = tokio::time::Instant::now();
+        if !self.zingod.disk_running
+            && self.zingod.disk_due.is_none_or(|due| now >= due)
+            && (spec.backend == LightBackend::Zingod || spec.zingod.is_some())
+        {
+            self.zingod.disk_running = true;
+            self.zingod.disk_due = Some(now + self.options.index_disk_every);
+            let (dir, tx) = (zingod.dir.clone(), self.internal_tx.clone());
+            let reader = self.options.read_index_disk;
+            tokio::spawn(async move {
+                let read = {
+                    let dir = dir.clone();
+                    tokio::task::spawn_blocking(move || reader(&dir))
+                        .await
+                        .unwrap_or_default()
+                };
+                let _ = tx.send(Internal::IndexDisk { dir, read }).await;
+            });
+        }
+        // The runner lives while zingod has a recorded folder here, so a delete after
+        // switching back finds it stopped.
+        let Some(binary) = self.options.zingod_binary.clone() else {
+            self.zingod.plan.send_replace(None);
+            self.zingod.runner = None;
+            return;
+        };
+        let Some(recorded) = spec.zingod.clone() else {
+            self.zingod.plan.send_replace(None);
+            self.zingod.runner = None;
+            return;
+        };
+        let key = format!("{} {}", spec.network.as_str(), recorded.dir.display());
+        if self
+            .zingod
+            .runner
+            .as_ref()
+            .is_none_or(|runner| runner.key != key)
+        {
+            self.zingod.plan.send_replace(None);
+            let mut options = RunnerOptions::new(
+                binary,
+                &self.options.launcher,
+                ZingodNetwork::of(spec.network),
+            );
+            if let Some(tune) = self.options.tune_zingod {
+                tune(&mut options);
+            }
+            let runner = ZingodRunner::spawn(options, self.zingod.plan.subscribe());
+            let forwards = vec![forward_changes(runner.facts(), self.internal_tx.clone())];
+            self.zingod.runner = Some(Child {
+                key,
+                handle: runner,
+                forwards,
+            });
+        }
+        // The plan, while the conditions outside the runner hold.
+        let start = zingod_rules::start_facts(spec, facts);
+        let rpc = self.status_rx.borrow().rpc_addr;
+        let plan = match (zingod_rules::plan_run(&start), rpc) {
+            (Ok(run), Some(validator)) => Some(ZingodPlan {
+                config: launcher_core::zingod::ZingodConfig {
+                    network: ZingodNetwork::of(spec.network),
+                    validator,
+                    cookie: self
+                        .node_rx
+                        .borrow()
+                        .paths(&self.options.launcher)
+                        .rpc_cookie_file(),
+                    listen: SocketAddr::from((Ipv4Addr::LOCALHOST, recorded.port)),
+                    index_dir: recorded.dir.clone(),
+                },
+                zebrad: run,
+                attempt: self.zingod.attempt,
+            }),
+            _ => None,
+        };
+        if plan.is_none() && self.zingod.plan.borrow().is_some() {
+            self.door_unavailable();
+        }
+        self.zingod.plan.send_if_modified(|current| {
+            let changed = *current != plan;
+            *current = plan;
+            changed
+        });
+        // The tip cross-check, at most once a minute while zingod serves.
+        if zingod_rules::ready(spec, facts)
+            && !self.zingod.tip_running
+            && self.zingod.tip_due.is_none_or(|due| now >= due)
+            && let (Some(listening), Some(rpc)) = (zingod.runner.listening, rpc)
+        {
+            self.zingod.tip_running = true;
+            self.zingod.tip_due = Some(now + self.options.cross_check_every);
+            let cookie = self
+                .node_rx
+                .borrow()
+                .paths(&self.options.launcher)
+                .rpc_cookie_file();
+            let (height, tx) = (facts.height, self.internal_tx.clone());
+            tokio::spawn(async move {
+                let checked = cross_check(listening, rpc, cookie, height).await;
+                let _ = tx.send(Internal::TipCheck(checked)).await;
+            });
         }
     }
 
@@ -1254,16 +1810,29 @@ impl Actor {
             }
             Msg::Forget {
                 remove_token,
+                remove_index,
                 reply,
             } => {
-                let result = self.forget(remove_token).await;
+                let result = self.forget(remove_token, remove_index).await;
                 let _ = reply.send(result);
             }
             Msg::CheckConnection { reply } => {
                 let report = self.check_connection().await;
                 let _ = reply.send(report);
             }
-            Msg::Shutdown { .. } => unreachable!("handled by the loop"),
+            Msg::Rebuild { reply } => {
+                let result = self.remove_zingod_index(true).await;
+                let _ = reply.send(result);
+            }
+            Msg::DeleteIndex { reply } => {
+                let result = self.remove_zingod_index(false).await;
+                let _ = reply.send(result);
+            }
+            Msg::Diagnostics { reply } => {
+                let text = self.indexer_diagnostics().await;
+                let _ = reply.send(text);
+            }
+            Msg::Shutdown { .. } | Msg::StopIndexer { .. } => unreachable!("handled by the loop"),
         }
     }
 
@@ -1389,7 +1958,7 @@ impl Actor {
                 self.update_spec(move |spec| spec.resume_on_launch = on)
                     .await
             }
-            StepAnswer::Backend { .. } => Err("zingod can't be chosen yet".into()),
+            StepAnswer::Backend { backend } => self.choose_backend(&spec, backend).await,
             StepAnswer::Upload { preset } => {
                 let kbit = preset.kbit();
                 if let Some(door) = &self.door {
@@ -1408,6 +1977,15 @@ impl Actor {
         match step {
             StepId::Service => {
                 self.endpoint_error = None;
+                // zingod's Try again: a new attempt starts it again after a failure that waits
+                // for the user.
+                if self
+                    .spec()
+                    .is_some_and(|spec| spec.backend == LightBackend::Zingod)
+                {
+                    self.restart_zingod();
+                    self.zingod.no_validator_restart = None;
+                }
                 // zebrad could not bind the endpoint's port: the next look picks a free one.
                 let taken = {
                     let status = self.status_rx.borrow();
@@ -1474,11 +2052,25 @@ impl Actor {
         Ok(())
     }
 
-    async fn forget(&mut self, remove_token: bool) -> Result<StillPublic, String> {
+    async fn forget(
+        &mut self,
+        remove_token: bool,
+        remove_index: bool,
+    ) -> Result<StillPublic, String> {
         let spec = self.spec().ok_or("no light client server is set up")?;
         // Closed until the service is gone, even if a write below fails.
         self.held = Some(launcher_types::public::PauseReason::ByYou);
         self.stop_children();
+        // zingod stops once the front door is closed; its index goes only once it has.
+        self.zingod.plan.send_replace(None);
+        if remove_index && let Some(recorded) = &spec.zingod {
+            self.delete_index_in(&recorded.dir).await?;
+        }
+        if let Some(runner) = self.zingod.runner.take() {
+            runner.handle.shutdown().await;
+        }
+        self.zingod.forget_history();
+        self.zingod.disk = None;
         self.update_spec(|spec| {
             spec.switch_on = false;
             spec.backend_port = None;
@@ -1538,6 +2130,168 @@ impl Actor {
             name: spec.name,
             token_left,
         })
+    }
+
+    /// Chooses the server that answers wallets. zingod must be one Zeal offers here; the first
+    /// choice records its port, the next free one from 8137 or 18137, and its folder beside the
+    /// serving node's data, so a later data-folder change doesn't orphan the index. The consent
+    /// covers one backend, so the other one asks for it again.
+    async fn choose_backend(
+        &mut self,
+        spec: &PublicServiceSpec,
+        backend: LightBackend,
+    ) -> Result<(), String> {
+        if backend == spec.backend {
+            return Ok(());
+        }
+        let mut recorded = spec.zingod.clone();
+        if backend == LightBackend::Zingod {
+            let facts = self.facts(spec, SystemTime::now());
+            match zingod_rules::choice(&facts, spec.network) {
+                ZingodChoice::Offered => {}
+                ZingodChoice::NotBundled => {
+                    return Err("zingod runs on Linux only for now".into());
+                }
+                ZingodChoice::NotOnNetwork { network } => {
+                    return Err(format!(
+                        "zingod is being tested on Testnet first, not {network}"
+                    ));
+                }
+                ZingodChoice::Untested {
+                    version,
+                    zebrad,
+                    network,
+                } => {
+                    return Err(format!(
+                        "zingod {version} isn't tested with Zebra {zebrad} on {network} yet"
+                    ));
+                }
+            }
+            if recorded.is_none() {
+                let first = launcher_types::public::zingod_port(spec.network);
+                let port = (first..=first.saturating_add(100))
+                    .find(|port| {
+                        !launcher_core::supervisor::addr_in_use(SocketAddr::from((
+                            Ipv4Addr::LOCALHOST,
+                            *port,
+                        )))
+                    })
+                    .ok_or("no free port for zingod")?;
+                recorded = Some(ZingodSpec {
+                    port,
+                    dir: zingod_rules::index_dir(&self.node_data(), spec.network),
+                });
+            }
+        }
+        self.door_unavailable();
+        self.zingod.forget_history();
+        self.local_test = None;
+        tracing::info!(target: "zeal::public", ?backend, "the light client server's backend changes");
+        self.update_spec(move |spec| {
+            spec.backend = backend;
+            spec.zingod = recorded;
+        })
+        .await
+    }
+
+    /// Rebuild (`restart`) or Delete: the front door goes `Unavailable`, zingod stops, and its
+    /// index and state go from the recorded folder; a rebuild starts it again under a new
+    /// attempt.
+    async fn remove_zingod_index(&mut self, restart: bool) -> Result<(), String> {
+        let spec = self.spec().ok_or("no light client server is set up")?;
+        let recorded = spec.zingod.ok_or("zingod has no index here")?;
+        if restart && spec.backend != LightBackend::Zingod {
+            return Err("zingod isn't the light client server's backend".into());
+        }
+        if !restart && spec.backend == LightBackend::Zingod {
+            return Err("zingod serves the light client server: switch back to Zebra's built-in server first".into());
+        }
+        self.door_unavailable();
+        self.delete_index_in(&recorded.dir).await?;
+        self.zingod.forget_history();
+        self.zingod.disk_due = None;
+        if restart {
+            self.zingod.attempt += 1;
+            tracing::info!(target: "zeal::public", "zingod's index is rebuilt");
+        } else {
+            tracing::info!(target: "zeal::public", "zingod's index is deleted");
+        }
+        Ok(())
+    }
+
+    /// Stops zingod and removes the index and state in `dir`, the recorded folder: the
+    /// runner's removal, which waits for zingod's stop, then the folder's again, for an index
+    /// the runner never ran on in this run.
+    async fn delete_index_in(&mut self, dir: &std::path::Path) -> Result<(), String> {
+        if let Some(runner) = &self.zingod.runner {
+            runner.handle.delete().await?;
+        }
+        let dir = dir.to_path_buf();
+        tokio::task::spawn_blocking(move || remove_index(&dir))
+            .await
+            .map_err(|err| err.to_string())?
+            .map_err(|err| err.to_string())
+    }
+
+    /// zingod's part of the diagnostics: its status, its files and its last log lines, which
+    /// the reader redacted before they reached the ring.
+    async fn indexer_diagnostics(&mut self) -> Option<String> {
+        let spec = self.spec()?;
+        let recorded = spec.zingod.clone()?;
+        let facts = self.facts(&spec, SystemTime::now());
+        let stats = zingod_rules::stats(&spec, &facts);
+        let mut text = String::new();
+        text.push_str(&format!("backend: {:?}\n", spec.backend));
+        text.push_str(&format!("index folder: {}\n", recorded.dir.display()));
+        text.push_str(&format!("port: {}\n", recorded.port));
+        let options = RunnerOptions::new(
+            self.options.zingod_binary.clone().unwrap_or_default(),
+            &self.options.launcher,
+            ZingodNetwork::of(spec.network),
+        );
+        text.push_str(&format!("binary: {}\n", options.binary.display()));
+        text.push_str(&format!(
+            "configuration: {}\n",
+            options.config_file.display()
+        ));
+        text.push_str(&format!("log: {}\n", options.log.path.display()));
+        text.push_str(&format!(
+            "cookie: {}\n",
+            self.node_rx
+                .borrow()
+                .paths(&self.options.launcher)
+                .rpc_cookie_file()
+                .display()
+        ));
+        text.push_str(&format!(
+            "status: {}\n",
+            serde_json::to_string_pretty(&stats).unwrap_or_default()
+        ));
+        let lines = match &self.zingod.runner {
+            Some(runner) => runner.handle.subscribe().await,
+            None => None,
+        };
+        text.push_str(&format!("last {DIAGNOSTIC_LINES} lines:\n"));
+        if let Some(lines) = lines {
+            let skip = lines.history.len().saturating_sub(DIAGNOSTIC_LINES);
+            for line in lines.history.iter().skip(skip) {
+                let level = line
+                    .level
+                    .map(|level| format!("{level:?} "))
+                    .unwrap_or_default();
+                let target = line
+                    .target
+                    .as_deref()
+                    .map(|target| format!("{target}: "))
+                    .unwrap_or_default();
+                text.push_str(&format!(
+                    "{} {level}{target}{}\n",
+                    line.timestamp.as_deref().unwrap_or("-"),
+                    line.message
+                ));
+            }
+        }
+        Some(text)
     }
 
     /// Moves a token an older Zeal kept for the name `old` to the zone's entry, before the name
