@@ -2199,6 +2199,53 @@ async fn show_rpc_lists_the_reads_an_answer_took() {
 }
 
 #[tokio::test]
+async fn show_rpc_lists_a_block_asked_by_height_as_the_read_of_its_hash() {
+    let harness = harness();
+    // A check of the tip gives the index the tip's hash, without reading the tip's block.
+    harness
+        .reply(ExplorerRequest::Resolve {
+            query: "tip".into(),
+        })
+        .await;
+    assert_eq!(harness.counts(), [1, 0, 0, 0, 0, 0]);
+    let hash = harness.chain.borrow().hash(TIP).unwrap();
+    let call = ExplorerCall {
+        request: ExplorerRequest::Block {
+            id: BlockId::Height(TIP),
+        },
+        trace: true,
+    };
+    let reply = harness
+        .explorer
+        .call(&mainnet(), call.clone())
+        .await
+        .expect("an answer");
+    let sources = reply.sources.expect("the reads");
+    // zebrad was asked for the tip's block by its hash, and Show RPC says so.
+    assert!(
+        sources
+            .iter()
+            .any(|call| call.method == "getblock" && call.params == format!(r#"["{hash}",1]"#)),
+        "{sources:?}"
+    );
+    assert!(
+        !sources
+            .iter()
+            .any(|call| call.params.contains(&format!(r#""{TIP}""#))),
+        "{sources:?}"
+    );
+    // So it does when the cache answers.
+    let again = harness.explorer.call(&mainnet(), call).await.unwrap();
+    let sources = again.sources.expect("the reads");
+    assert!(
+        sources
+            .iter()
+            .any(|call| call.cached && call.params == format!(r#"["{hash}",1]"#)),
+        "{sources:?}"
+    );
+}
+
+#[tokio::test]
 async fn prefetch_and_cards_read_on_their_own_lane_and_fill_the_cache() {
     let harness = harness();
     let height = TIP - 2_000;

@@ -46,7 +46,9 @@ pub(super) enum Command {
     },
 }
 
-type ReadReply = oneshot::Sender<Result<Served, ExplorerError>>;
+/// A read's answer, with the call that answered it: the one sent to the node, or answered from
+/// the cache, which for a block asked for by a height the index knows is the read of its hash.
+type ReadReply = oneshot::Sender<(ReadCall, Result<Served, ExplorerError>)>;
 /// The tip, and whether the explorer vouched for it without asking the node.
 type TipReply = oneshot::Sender<Result<(ChainView, bool), ExplorerError>>;
 
@@ -101,22 +103,21 @@ pub(super) struct Fetcher {
 
 /// A read that was asked for and not yet awaited, so several go out together.
 pub(super) struct Pending {
-    response: oneshot::Receiver<Result<Served, ExplorerError>>,
-    call: ReadCall,
+    response: oneshot::Receiver<(ReadCall, Result<Served, ExplorerError>)>,
     trace: Option<(mpsc::UnboundedSender<SourceCall>, std::time::Instant)>,
 }
 
 impl Pending {
     async fn result(self) -> Result<ReadResult, ExplorerError> {
-        let served = self.response.await.map_err(|_| stopped())?;
+        let (sent, served) = self.response.await.map_err(|_| stopped())?;
         if let Some((trace, asked)) = self.trace {
             let (cached, bytes) = match &served {
                 Ok(served) => (served.cached, served.bytes),
                 Err(_) => (false, None),
             };
             let _ = trace.send(SourceCall {
-                method: self.call.method().to_owned(),
-                params: self.call.params().to_string(),
+                method: sent.method().to_owned(),
+                params: sent.params().to_string(),
                 ms: if cached { 0 } else { elapsed_ms(asked) },
                 bytes,
                 cached,
@@ -200,7 +201,6 @@ impl Fetcher {
         let _ = self.tx.send(Internal::Read { call, lane, reply });
         Pending {
             response,
-            call,
             trace: self
                 .trace
                 .clone()
@@ -694,9 +694,9 @@ where
     fn forget_reads(&mut self) {
         self.network_changes += 1;
         self.sched.clear_queue();
-        for (_, inflight) in self.inflight.drain() {
+        for (call, inflight) in self.inflight.drain() {
             for waiter in inflight.waiters {
-                let _ = waiter.send(Err(not_running()));
+                let _ = waiter.send((call, Err(not_running())));
             }
         }
     }
@@ -706,7 +706,7 @@ where
         self.run = None;
         for call in self.sched.clear_queue() {
             for waiter in self.inflight.remove(&call).unwrap_or_default().waiters {
-                let _ = waiter.send(Err(not_running()));
+                let _ = waiter.send((call, Err(not_running())));
             }
         }
         for waiter in self.tip_waiters.drain(..) {
@@ -998,7 +998,7 @@ where
                     .map(|inflight| inflight.waiters)
                     .unwrap_or_default()
                 {
-                    let _ = waiter.send(result.clone());
+                    let _ = waiter.send((call, result.clone()));
                 }
                 self.pump();
             }
@@ -1023,26 +1023,28 @@ where
 
     fn read(&mut self, call: ReadCall, lane: Lane, reply: ReadReply) {
         if self.run.is_none() {
-            let _ = reply.send(Err(not_running()));
+            let _ = reply.send((call, Err(not_running())));
             return;
         }
         let now = now();
         let key = self.cache_key(call, now);
-        if let Some(value) = key.and_then(|key| self.cache.get(&key)) {
-            let _ = reply.send(Ok(Served {
-                result: value.clone(),
-                cached: true,
-                bytes: None,
-            }));
-            return;
-        }
-        // A height the index knows is read by its hash, so it joins reads of that hash.
+        // A height the index knows is read by its hash, so it joins reads of that hash, and is
+        // listed by it: that is what the node is asked, or what the cache holds it by.
         let call = match (call, key) {
             (ReadCall::Block(BlockId::Height(_)), Some(CacheKey::Block(hash))) => {
                 ReadCall::Block(BlockId::Hash(hash))
             }
             _ => call,
         };
+        if let Some(value) = key.and_then(|key| self.cache.get(&key)) {
+            let served = Served {
+                result: value.clone(),
+                cached: true,
+                bytes: None,
+            };
+            let _ = reply.send((call, Ok(served)));
+            return;
+        }
         match self.inflight.get_mut(&call) {
             Some(inflight) => {
                 inflight.waiters.push(reply);
