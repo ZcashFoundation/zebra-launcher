@@ -1,9 +1,9 @@
 # Resource monitoring
 
-> **Status, 2026-11-16: phases 1 to 3 are built (the Resources card, live on Linux, macOS and
-> Windows), and of phase 7 the parts the node registry of MULTI-NODE phase 2a makes possible
-> (a sampler per node, the node-scoped event and command, the herd's figures in the mock);
-> phases 4 to 6 and the rest of phase 7 are the design.** Phase 3 was built on Linux, where the
+> **Status, 2026-11-16: phases 1 to 4 are built (the Resources card, live on Linux, macOS and
+> Windows, with its history charts), and of phase 7 the parts the node registry of MULTI-NODE
+> phase 2a makes possible (a sampler per node, the node-scoped event and command, the herd's
+> figures in the mock); phases 5 and 6 and the rest of phase 7 are the design.** Phase 3 was built on Linux, where the
 > macOS and Windows code is only type-checked; its tests run on CI's macos-15 and windows-2025
 > runners, and what neither could check is listed under [Phases](#phases), which says what
 > each built phase changed from this design. [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built
@@ -1406,8 +1406,8 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      slow or close to the tip) and the tree to use half the CPUs or more. zebrad says it
      syncs whenever it is behind the tip, also with no peers, so a stalled node or one
      without peers shows the run's average instead.
-   - The footer's busy share is the newest computer sample's (its last 5 s); one-minute
-     averages of the computer wait for `MachineHistory` (phase 4).
+   - The footer's busy share was the newest computer sample's (its last 5 s) until phase 4
+     brought `MachineHistory` and its one-minute average.
    - The mock has no flag for the tip: its sync reaches the tip after about 47 minutes, when
      the card shows the tip's figures.
    - Two mock flags the design did not plan show the card's other states: `?children`, a
@@ -1616,6 +1616,42 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - `?backfill`.
 
    Ships: up to 4 h of resource history on the existing range control.
+
+   **Built.** As planned, with these differences:
+
+   - `Unit` has a fourth method, `tick_labels`, the labels of `ticks`; `Count` keeps the
+     dashboard's labels. Below 1 GiB the memory axis is on whole MiB, in decimal steps (500
+     MiB, not 512). The end label of a core count has no unit (`5.6`), as the axis has none;
+     a rate's is whole from 10 up (`95 MB/s`), and the tooltip has one decimal (`95.0 MB/s`).
+   - `LineChart` also gains `separate`: the tooltip's total of two lines, which the Peers
+     chart has, is left out where the lines are of different quantities (the CPU and Memory
+     charts). Only a lone line has its area washed, as before, so "This node" is washed only
+     while the computer's line is missing.
+   - A gap is a point half way between the two samples with no value in any series, so the
+     tooltip and the table show a dash there. A line's end dot and the end label sit on its
+     last finite value.
+   - The charts' times are the node's samples. The computer's figures beside each are its
+     newest sample at or before it, within 15 s (`MachineHistory::at`), so the computer's
+     line breaks where the node's does. A series with no value in the range is left out: CPU
+     or I/O the system does not report, or a computer that is not read. The charts sit in
+     the card between the tiles and the process table, three across from 1200 px and stacked
+     under, and their empty frame says "Measuring… every 5 s" (`chart_empty_text` in
+     `resources.rs`, beside the dashboard's own).
+   - `MachineHistory` keeps every sample whole for 4 h; a sample published again with the
+     same time replaces the newest. `busy_cores(span, now)` is the mean of the samples'
+     figures in the span. The card's footer now shows that average over the last minute.
+   - `HealthInput` gains `resources: ResourceInput` in this phase, with the node's sample and
+     history and the computer's sample and history, for the Copy summary lines. The node's
+     line adds the commit charge on Windows and names the I/O as the card does (`Disk 35.0
+     MB/s read, 95.0 MB/s written`); a stopped node's is the card's last-run line. The
+     computer's line is the card's footer line, so it has the busy share, swap, commit and
+     pressure; its free space comes with phase 5. The lines come from the card's helpers (the
+     dashboard's `resources` module is crate-visible for that), so the summary cannot
+     disagree with the card.
+   - `?backfill` also puts the mock's zebrad in Running at once, with the run started 45
+     minutes before the load; its statistics start at the load. The 40 minutes of samples
+     reach each new listener before the live ones. With `?herd` the backfilled computer
+     counts the main zebrad only.
 5. **Free space and verdicts.**
    - `firstrun::volume`, and volumes in `MachineResources` every 30 s.
    - Rules 19–21, `DISK_RULES` and `MEMORY_RULES`, and `Action::OpenDataFolder`.

@@ -628,9 +628,11 @@ disk and memory bytes, the network byte counters, ready and unready peers, downl
 flight, the checkpoint height and so on; 4 h of 10 s snapshots), the newest kept whole for
 the one-off gauges. `ui/src/resource_history.rs` holds the samples of the node's process tree
 (4 h of 5 s samples, the newest minute with their process lists) and answers the one-minute
-rates of CPU and disk I/O, each process's rates, the sparklines of the current run and the
-last run's summary. Tiles and charts read them over the range the user picks (15 min, 1 h,
-4 h, all); the sync hero's rate and ETA use a fixed 15 min window (`HERO_RATE_WINDOW`), so
+rates of CPU and disk I/O, each process's rates, the sparklines of the current run, the
+charts of every sample in a range (with a gap at a restart or after 15 s without samples) and
+the last run's summary. `ui/src/machine_history.rs` holds the computer's samples (4 h of 5 s
+samples) and answers its CPU busy over a span and its figures beside a node's sample. Tiles
+and charts read them over the range the user picks (15 min, 1 h, 4 h, all); the sync hero's rate and ETA use a fixed 15 min window (`HERO_RATE_WINDOW`), so
 they do not move with the range control.
 
 **Health verdict.** `ui/src/health.rs` folds the status, the latest statistics, both
@@ -653,8 +655,9 @@ are the named constants at the top of the file (`STALE_AFTER` 30 s, `RPC_FIRST_A
 `EOS_URGENT` 3 days). `NodeState.phase_since` records when the phase or the rule last
 changed, for the "for N min" in the reason. `summary_text` builds the plain-text report
 that "Copy summary" puts on the clipboard (verdict, versions, phase, sync, peers, mempool,
-disk, ports, end of support, the newest problems and the run's events, with absolute local
-times) from the same input, so it cannot disagree with the page.
+disk, the node's resources and the computer's, ports, end of support, the newest problems and
+the run's events, with absolute local times) from the same input, so it cannot disagree with
+the page.
 
 **Dashboard page.** `ui/src/pages/dashboard.rs` holds the signals the cards share, the
 chart data and the page order; the cards are in `ui/src/pages/dashboard/`. `status_card.rs`
@@ -665,11 +668,15 @@ six stat tiles with sparklines (Height, Blocks per minute, Peers, Mempool, Disk,
 from the statistics history, the metrics (Disk) and the status (Uptime). The page itself
 mounts the two inline SVG line charts (`ui/src/charts.rs`, no chart library; hover
 crosshair, keyboard navigation and a table view): "Blocks behind the tip" and "Peers" by
-direction, whose table adds the peer set's ready and unready counts from the metrics.
-`resources.rs` is the Resources card under the charts (see
+direction, whose table adds the peer set's ready and unready counts from the metrics. A
+chart's `Unit` (counts, the default; cores; memory in binary units with ticks on whole GiB;
+bytes per second) writes its axis, end label, tooltip, table and summary, and a non-finite
+value is a gap in its line. `resources.rs` is the Resources card under the charts (see
 [RESOURCES.md](RESOURCES.md)): four tiles (CPU, Memory, Disk or I/O, Processes) with rates
-over the last minute, the table of the node's processes in tree order, and a line about the
-computer's CPUs, memory and swap (commit on Windows, memory pressure on macOS). It stays
+over the last minute, three charts on the range control (CPU and memory beside the
+computer's, and disk I/O read and written), the table of the node's processes in tree order,
+and a line about the computer's CPUs (busy over the last minute), memory and swap (commit on
+Windows, memory pressure on macOS). It stays
 hidden until the node's first sample, a stopped node shows its last run instead of live
 values, and a running node whose sampler stopped after a panic says it is not measured until
 the next run; none of its figures takes a tone. `activity.rs` is the activity row: Recent problems and This run (views from
@@ -717,8 +724,9 @@ restarts on This run), `?eos=soon` and `?eos=halt` (the end-of-support warning a
 `?stale` (an earlier zebrad still running), and `?update=countdown` and `?update=health`
 (the install countdown and a launcher update that did not come back healthy). The mock samples
 its main zebrad's resources every 5 s while it has a pid; `?os=macos` and `?os=windows` give the
-Resources card those platforms' figures and labels.
-chains come from `?attip`, `?tip=<h>`, `?explorer=slow|empty|nobi` and `?reorg`. The herd's
+Resources card those platforms' figures and labels, and `?backfill` starts its run 45 minutes
+before the page loaded, with the samples of the 40 minutes before the load, so the card's
+charts have history at once. The Explorer's chains come from `?attip`, `?tip=<h>`, `?explorer=slow|empty|nobi` and `?reorg`. The herd's
 agreement comes from `?herd&agree` and `&agree=behind|stall|fork|race|split|impl|channels|
 restart|deepfork|silent|herdstall|replaced|pair|otherchain` (see [The herd](#the-herd)).
 
