@@ -48,6 +48,7 @@
 //! | `?explorer=slow` | Every Explorer answer takes 300 to 800 ms ([`explorer`]). |
 //! | `?explorer=empty` | A chain of ten blocks: zebrad at height 9, at the tip. |
 //! | `?explorer=nobi` | Every seventh block lacks zebrad's value-pool row, so its successor shows the zero-diff case. |
+//! | `?explorer=big` | Every tenth block holds 5,000 more transactions (about 2 MB): the Block page reads its rows one by one as they scroll into view, and their fees after them. |
 //! | `?reorg` | About every 90 s at the tip, the main node's top two blocks are replaced. |
 //! | `?herd&agree` | The herd's agreement ([`agreement`], docs/HERD.md): Zebra · Mainnet 2 joins, zebrad and Zakura · Mainnet are at the tip, and the three agree. Implies `?herd` and `?attip`. |
 //! | `&agree=behind`, `stall`, `fork`, `race`, `split`, `impl`, `channels`, `restart`, `deepfork`, `silent`, `herdstall`, `replaced`, `pair`, `otherchain` | A scenario: a node lagging, stuck, on a chain of its own, racing; a split without a majority; Zakura on its own chain (implementations disagree); Zebra · Mainnet 3 on Beta on its own chain (channels disagree); a node restarting; a fork past the rollback window; a node that does not answer probes; no new block on any node (the herd stalls); a node stuck on a block the others replaced; zebrad and Zakura alone, each on a chain of its own; Zakura catching up on another chain ([`agreement`]). |
@@ -328,6 +329,8 @@ enum ExplorerFlag {
     Empty,
     /// `nobi`: blocks without zebrad's value-pool row.
     NoBlockInfo,
+    /// `big`: every tenth block holds 5,000 more transactions.
+    Big,
 }
 
 impl ExplorerFlag {
@@ -336,6 +339,7 @@ impl ExplorerFlag {
             Some("slow") => ExplorerFlag::Slow,
             Some("empty") => ExplorerFlag::Empty,
             Some("nobi") => ExplorerFlag::NoBlockInfo,
+            Some("big") => ExplorerFlag::Big,
             _ => ExplorerFlag::Normal,
         }
     }
@@ -1291,6 +1295,7 @@ mod tests {
         assert_eq!(Flags::parse("?tip=3100000&attip").at_tip(), Some(3_100_000));
         assert_eq!(Flags::parse("?explorer=empty&attip").at_tip(), Some(9));
         assert_eq!(Flags::parse("?explorer=slow").explorer, ExplorerFlag::Slow);
+        assert_eq!(Flags::parse("?explorer=big").explorer, ExplorerFlag::Big);
         assert_eq!(Flags::parse("?tip=lots").at_tip(), None);
         assert_eq!(target_spacing(Network::Mainnet, 3_543_405), 25);
         assert_eq!(target_spacing(Network::Mainnet, 3_100_000), 75);

@@ -196,9 +196,14 @@ every node command and event carries a node's id, and the mock's zebrad below is
   node has and does not follow the tip. `?attip` puts zebrad at the tip near block 3,551,000
   (past NU7, a block every 25 s), so Ironwood, the burn and the shielded budget show;
   `?tip=<h>` does the same at height `h`. `?explorer=slow` makes every answer take 300 to
-  800 ms, `?explorer=empty` gives a chain of ten blocks, and `?explorer=nobi` takes zebrad's
+  800 ms, `?explorer=empty` gives a chain of ten blocks, `?explorer=nobi` takes zebrad's
   value-pool row from every seventh block, so that block and the next show their fees as
-  unknown. `?reorg` replaces the main node's top two blocks about every 90 s at the tip (with
+  unknown, and `?explorer=big` gives every tenth block (heights ending in 0) 5,000 more
+  transactions, about 2 MB, whose rows the Block page reads one by one as they scroll into
+  view, their fees after them. The mock reads as the backend does (a small block whole, a
+  transaction's earlier ones, a coinbase's block) and remembers what it read as the backend's
+  cache would, so Show RPC lists the same reads, made-up times included, and "from memory"
+  the second time. `?reorg` replaces the main node's top two blocks about every 90 s at the tip (with
   `?attip`), and the Explorer shows the banner. With `?herd` the other nodes' Explorer tabs
   say that the Explorer reads only the node that was first when Zeal started: each node gets
   its own in P6. The mock's zebrad runs on its node's network as it was when it started, as
@@ -301,7 +306,7 @@ to the CSP when it serves the bundled assets.
 | `src/tauri.rs` | `#[wasm_bindgen]` externs to `window.__TAURI__`, JSON-compatible (de)serialization |
 | `src/api.rs` | One typed function per backend command or event, Tauri or mock; the node commands and events carry the node's id |
 | `src/mock.rs`, `src/mock/` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads. `nodes.rs` is the node-scoped API and the node list's rules, `herd.rs` the light simulation of every node but the first, and `resources.rs` the resource samples, pure and tested natively |
-| `src/mock/explorer.rs` | The mock's block explorers: one synthetic chain per zebrad or Zakura node, answered with explorer-model's views, and the chain facts the mock's dashboard details read |
+| `src/mock/explorer.rs`, `src/mock/explorer/` | The mock's block explorers: one synthetic chain per zebrad or Zakura node, answered with explorer-model's views, and the chain facts the mock's dashboard details read; `reads.rs` names each read as the backend's RPC call and remembers it as its cache would |
 | `src/app.rs` | Shared state (`AppState`: the node list from `list_nodes` and the `nodes` event, matched by id, the selected node and `open_docs(DocsSection)`), backend subscriptions, the shell with `Tab::Docs`: header, the tab bar for one node or the sidebar for several, and the first-run wizard |
 | `src/node_state.rs` | One node's state: what the backend reports about it and the histories and log analysis the UI keeps for it |
 | `src/node_summary.rs` | A node's state in a few words, for the sidebar and the overview. Pure, tested natively |
