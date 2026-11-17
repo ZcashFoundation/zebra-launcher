@@ -165,12 +165,15 @@ impl Fetcher {
         self.request(ReadCall::Tx(txid), Lane::Prefetch)
     }
 
+    async fn peek(&self, call: ReadCall) -> Option<ReadResult> {
+        let (reply, response) = oneshot::channel();
+        let _ = self.tx.send(Internal::Peek { call, reply });
+        response.await.ok()?
+    }
+
     /// The cached transaction `txid`, if the cache has it; nothing is read.
     pub(super) async fn cached_tx(&self, txid: TxId) -> Option<Arc<Tx>> {
-        let (reply, response) = oneshot::channel();
-        let call = ReadCall::Tx(txid);
-        let _ = self.tx.send(Internal::Peek { call, reply });
-        match response.await.ok()?? {
+        match self.peek(ReadCall::Tx(txid)).await? {
             ReadResult::Tx(tx) => Some(tx),
             _ => None,
         }
@@ -693,28 +696,33 @@ where
                     )));
                     return;
                 }
-                let stats = self.inputs.stats.borrow().clone();
-                let context = Context {
-                    fetch: self.fetcher(),
-                    network: self.network,
-                    heights: self.heights(),
-                    chain,
-                    node_height: stats
-                        .as_ref()
-                        .and_then(|stats| u32::try_from(stats.height).ok()),
-                    estimated_height: stats
-                        .as_ref()
-                        .and_then(|stats| u32::try_from(stats.estimated_height).ok()),
-                    syncing: !self.at_tip(),
-                    end_of_support: stats
-                        .as_ref()
-                        .and_then(|stats| stats.eos.as_ref())
-                        .map(|eos| eos.block_height),
-                };
+                let context = self.context(chain);
                 tokio::spawn(async move {
                     let _ = reply.send(assemble::handle(request, context).await);
                 });
             }
+        }
+    }
+
+    /// What a request task starts from.
+    fn context(&self, chain: Option<ChainView>) -> Context {
+        let stats = self.inputs.stats.borrow().clone();
+        Context {
+            fetch: self.fetcher(),
+            network: self.network,
+            heights: self.heights(),
+            chain,
+            node_height: stats
+                .as_ref()
+                .and_then(|stats| u32::try_from(stats.height).ok()),
+            estimated_height: stats
+                .as_ref()
+                .and_then(|stats| u32::try_from(stats.estimated_height).ok()),
+            syncing: !self.at_tip(),
+            end_of_support: stats
+                .as_ref()
+                .and_then(|stats| stats.eos.as_ref())
+                .map(|eos| eos.block_height),
         }
     }
 
