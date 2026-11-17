@@ -9,7 +9,7 @@
 
 use std::time::SystemTime;
 
-use launcher_types::{MachineResources, NodeResources, Platform};
+use launcher_types::{MachineResources, NodeId, NodeResources, Platform};
 use leptos::prelude::*;
 
 use crate::{
@@ -198,9 +198,10 @@ pub fn idle_line(
 }
 
 /// The line about the computer: `This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB
-/// available · swap 0.3 of 2 GiB`, with the commit charge on Windows and the memory pressure
-/// on macOS. `busy` is the CPUs it kept busy over the last minute.
-pub fn machine_text(machine: &MachineResources, busy: Option<f64>) -> String {
+/// available · swap 0.3 of 2 GiB · 212.4 GB free on the data disk`, with the commit charge on
+/// Windows and the memory pressure on macOS. `busy` is the CPUs it kept busy over the last
+/// minute; the data disk is the volume that holds `node`'s data folder.
+pub fn machine_text(machine: &MachineResources, busy: Option<f64>, node: &NodeId) -> String {
     let cpus = match machine.logical_cpus {
         1 => "1 CPU".to_owned(),
         n => format!("{n} CPUs"),
@@ -231,6 +232,12 @@ pub fn machine_text(machine: &MachineResources, busy: Option<f64>) -> String {
     }
     if let Some(pressure) = machine.pressure {
         parts.push(format!("memory pressure {}", pressure.as_str()));
+    }
+    if let Some(volume) = machine.volume_of(node) {
+        parts.push(format!(
+            "{} free on the data disk",
+            bytes(volume.free_bytes)
+        ));
     }
     format!("This computer: {}", parts.join(" · "))
 }
@@ -670,10 +677,13 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                             let busy = state
                                 .machine_history
                                 .with(|history| history.busy_cores(RATE_WINDOW, now));
+                            let node = state.node().info.with(|info| info.id.clone());
                             machine.with(|machine| {
                                 machine.as_ref().map(|machine| {
                                     view! {
-                                        <p class="muted dash-resources-line">{machine_text(machine, busy)}</p>
+                                        <p class="muted dash-resources-line">
+                                            {machine_text(machine, busy, &node)}
+                                        </p>
                                     }
                                 })
                             })
@@ -884,10 +894,27 @@ mod tests {
             pressure: None,
             volumes: Vec::new(),
         };
+        let node = NodeId::new("zebrad-mainnet").unwrap();
         assert_eq!(
-            machine_text(&machine, Some(6.5)),
+            machine_text(&machine, Some(6.5), &node),
             "This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB available · swap 0.3 of 2 GiB"
         );
+        let with_disk = MachineResources {
+            volumes: vec![launcher_types::VolumeUsage {
+                label: "/".into(),
+                total_bytes: 1_000_200_000_000,
+                free_bytes: 212_400_000_000,
+                nodes: vec![node.clone()],
+                measured_at: at(0),
+            }],
+            ..machine.clone()
+        };
+        assert_eq!(
+            machine_text(&with_disk, Some(6.5), &node),
+            "This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB available · swap 0.3 of 2 GiB · 212.4 GB free on the data disk"
+        );
+        let other = NodeId::new("zebrad-testnet").unwrap();
+        assert!(!machine_text(&with_disk, None, &other).contains("data disk"));
         let first = MachineResources {
             cpu_busy_cores: None,
             swap_total_bytes: Some(0),
@@ -895,7 +922,7 @@ mod tests {
             ..machine.clone()
         };
         assert_eq!(
-            machine_text(&first, None),
+            machine_text(&first, None, &node),
             "This computer: 8 CPUs · 16 GiB, 4.7 GiB available · no swap"
         );
         let windows = MachineResources {
@@ -906,7 +933,7 @@ mod tests {
             ..machine.clone()
         };
         assert_eq!(
-            machine_text(&windows, Some(6.5)),
+            machine_text(&windows, Some(6.5), &node),
             "This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB available · committed 14.1 of 24 GiB"
         );
         let mac = MachineResources {
@@ -914,9 +941,10 @@ mod tests {
             ..machine
         };
         assert!(
-            machine_text(&mac, None).ends_with(" · swap 0.3 of 2 GiB · memory pressure normal"),
+            machine_text(&mac, None, &node)
+                .ends_with(" · swap 0.3 of 2 GiB · memory pressure normal"),
             "{}",
-            machine_text(&mac, None)
+            machine_text(&mac, None, &node)
         );
     }
 

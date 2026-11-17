@@ -110,7 +110,7 @@ impl ResourceInput<'_> {
         }
         if let Some(machine) = self.machine {
             let busy = self.machine_history.busy_cores(RATE_WINDOW, now);
-            lines.push(machine_text(machine, busy));
+            lines.push(machine_text(machine, busy, &self.info.id));
         }
         lines
     }

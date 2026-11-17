@@ -129,11 +129,16 @@ pub fn mempool_detail(size: Option<u64>, delta: Option<i64>, range: Range) -> St
     }
 }
 
-/// `+1.1 GB in the last hour`; without a delta yet, how the number arrives.
-pub fn disk_detail(delta: Option<i64>, range: Range) -> String {
-    match delta {
+/// `+1.1 GB in the last hour`; without a delta yet, how the number arrives. Then the free
+/// space on the node's data volume, when it is read: `· 212.4 GB free`.
+pub fn disk_detail(delta: Option<i64>, range: Range, free: Option<u64>) -> String {
+    let growth = match delta {
         Some(delta) => format!("{} {}", signed_bytes(delta), range.phrase()),
         None => "from zebrad's metrics, every 10 s".to_owned(),
+    };
+    match free {
+        Some(free) => format!("{growth} · {} free", bytes(free)),
+        None => growth,
     }
 }
 
@@ -350,10 +355,19 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
         }
     });
 
-    // Disk: the state database's size from the metrics page and its growth over the range; the
-    // warning tone follows the verdict's disk rules.
+    // Disk: the state database's size from the metrics page, its growth over the range and the
+    // free space on its volume; the warning tone follows the verdict's disk rules.
     let disk_bytes = Memo::new(move |_| dash.metrics.get().and_then(|facts| facts.disk_bytes));
     let disk_value = Signal::derive(move || disk_bytes.get().map_or_else(|| "—".to_owned(), bytes));
+    let free = Memo::new(move |_| {
+        let node = state.node().info.with(|info| info.id.clone());
+        state.machine.with(|machine| {
+            machine
+                .as_ref()
+                .and_then(|machine| machine.volume_of(&node))
+                .map(|volume| volume.free_bytes)
+        })
+    });
     let disk_tone = Signal::derive(move || {
         if running.get() && dash.verdict.with(|v| DISK_RULES.contains(&v.rule)) {
             Tone::Warning
@@ -365,14 +379,17 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
     });
     let disk_detail = Signal::derive(move || {
         if disk_bytes.get().is_none() {
-            return "waiting for zebrad's metrics".to_owned();
+            return match free.get() {
+                Some(free) => format!("waiting for zebrad's metrics · {} free", bytes(free)),
+                None => "waiting for zebrad's metrics".to_owned(),
+            };
         }
         let now = state.now.get();
         let delta = state
             .node()
             .metrics_history
             .with(|history| history.disk_delta(dash.span(), now));
-        disk_detail(delta, range.get())
+        disk_detail(delta, range.get(), free.get())
     });
 
     // Uptime: since the run was spawned; stopped, how the last run ended.
@@ -561,20 +578,24 @@ mod tests {
     #[test]
     fn disk_and_uptime_words() {
         assert_eq!(
-            disk_detail(Some(1_100_000_000), Range::Hour1),
+            disk_detail(Some(1_100_000_000), Range::Hour1, None),
             "+1.1 GB in the last hour"
         );
         assert_eq!(
-            disk_detail(Some(-200_000_000), Range::Min15),
+            disk_detail(Some(-200_000_000), Range::Min15, None),
             "-200.0 MB in the last 15 min"
         );
         assert_eq!(
-            disk_detail(None, Range::Hour1),
+            disk_detail(None, Range::Hour1, None),
             "from zebrad's metrics, every 10 s"
         );
         assert_eq!(
-            disk_detail(Some(0), Range::Hour1),
+            disk_detail(Some(0), Range::Hour1, None),
             "0 bytes in the last hour"
+        );
+        assert_eq!(
+            disk_detail(Some(1_100_000_000), Range::Hour1, Some(212_400_000_000)),
+            "+1.1 GB in the last hour · 212.4 GB free"
         );
         // The tiles take their tones from the verdict's rules: the disk's and the memory's.
         assert_eq!(DISK_RULES, [19, 21]);
