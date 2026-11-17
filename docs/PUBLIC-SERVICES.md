@@ -893,7 +893,8 @@ answers 503 through a whole first sync, so Zeal doesn't read it.
   record it).
 - **The stall rule** (pure): `served` unchanged for 5 minutes while zebrad is 4 or more blocks
   ahead, or 15 minutes during a build, since the indexes publish in steps. Zeal restarts zingod
-  once; if it stays stuck, `IndexerStuck` holds until it moves. An upgrade zingod doesn't know
+  once; if it stays stuck, `IndexerStuck` holds until it moves, whether `/status` says it
+  serves, catches up or builds. An upgrade zingod doesn't know
   would look like this ([Upgrades of zingod](#upgrades-of-zingod)).
 - **The tip cross-check**: at most once a minute while zingod is ready, the light monitor calls
   `GetLatestBlock` on loopback and compares the hash at the served height (sent in internal byte

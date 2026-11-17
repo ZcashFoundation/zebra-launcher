@@ -903,13 +903,26 @@ pub fn problem(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReason
                 _ => return starting(IndexerWait::Boot),
             }
             let status = runner.status.as_ref();
-            match health(
+            let health = health(
                 status,
                 runner.misses,
                 runner.answering_zero_since,
                 facts.height,
                 facts.now,
-            ) {
+            );
+            // The stall rule's verdict after its restart, while zingod says it builds, catches
+            // up or serves: its height hasn't moved, whatever its state says.
+            if let Some((at, zebrad_at)) = zingod.stuck
+                && matches!(
+                    health,
+                    IndexerHealth::Building { .. }
+                        | IndexerHealth::CatchingUp { .. }
+                        | IndexerHealth::Ready
+                )
+            {
+                return Some(DegradedReason::IndexerStuck { at, zebrad_at });
+            }
+            match health {
                 IndexerHealth::Boot => starting(IndexerWait::Boot),
                 IndexerHealth::Building {
                     served,
@@ -935,9 +948,6 @@ pub fn problem(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReason
                     why: DownReason::NoAnswer,
                 }),
                 IndexerHealth::Ready => {
-                    if let Some((at, zebrad_at)) = zingod.stuck {
-                        return Some(DegradedReason::IndexerStuck { at, zebrad_at });
-                    }
                     let Some((_, blocks)) = served_behind(status, facts.height) else {
                         return starting(IndexerWait::Boot);
                     };
@@ -2462,6 +2472,48 @@ mod service_tests {
                 DegradedReason::IndexerStuck {
                     at: 4_611_002,
                     zebrad_at: 4_611_019,
+                },
+            ),
+            (
+                "stuck while it says it builds",
+                |f| {
+                    let zingod = zingod(f);
+                    zingod.runner.status = Some(IndexerStatus {
+                        state: IndexerState::Syncing {
+                            progress: Some(launcher_types::zingod::SyncProgress {
+                                height: 1_204_331,
+                                target: Some(HEIGHT),
+                                milli_blocks_per_sec: None,
+                            }),
+                        },
+                        ..serving_status(1_204_331)
+                    });
+                    zingod.stuck = Some((1_204_331, HEIGHT));
+                },
+                DegradedReason::IndexerStuck {
+                    at: 1_204_331,
+                    zebrad_at: HEIGHT,
+                },
+            ),
+            (
+                "stuck while it says it catches up after a zebrad restart",
+                |f| {
+                    let zingod = zingod(f);
+                    zingod.runner.status = Some(IndexerStatus {
+                        state: IndexerState::Syncing {
+                            progress: Some(launcher_types::zingod::SyncProgress {
+                                height: HEIGHT - 40,
+                                target: Some(HEIGHT),
+                                milli_blocks_per_sec: None,
+                            }),
+                        },
+                        ..serving_status(HEIGHT - 40)
+                    });
+                    zingod.stuck = Some((HEIGHT - 40, HEIGHT));
+                },
+                DegradedReason::IndexerStuck {
+                    at: HEIGHT - 40,
+                    zebrad_at: HEIGHT,
                 },
             ),
             (
