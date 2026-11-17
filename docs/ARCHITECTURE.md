@@ -1097,9 +1097,15 @@ Stable ZEBRAD_VERSION/ZEBRAD_COMMIT     Beta ZEBRAD_BETA_*     Nightly ZEBRAD_NI
        every Linux sidecar: glibc-floor check
 all three -> zebrad-docs.yml -> zebra-docs artifact (Book, Config, Changes at exact pins)
 
+ZINGOD_VERSION/ZINGOD_COMMIT (Linux only; nothing runs it yet)
+  '- zingod-sidecars.yml -> sidecars-zingod: build-zingod.sh from the pinned commit
+       in Ubuntu 22.04 on both Linux targets: tag/commit, version, generate-config,
+       glibc-floor, ldd and strings checks; the licence files; provenance attestation;
+       x86_64: the vendored source archive zingod-src-<ver>.tar.zst
+
 tag v* -> release.yml
-  1. create one draft release; pass its id to the matrix
-  2. unprivileged jobs, no secrets: three sidecar matrices, docs, cargo tauri build --no-bundle
+  1. create one draft release, with zingod's source archive; pass its id to the matrix
+  2. unprivileged jobs, no secrets: four sidecar matrices, docs, cargo tauri build --no-bundle
   3. environment "release" (required reviewer, no caches): cargo tauri bundle,
      codesign + notarization (macOS), Azure Artifact Signing (Windows app and sidecars),
      updater .sig files
@@ -1120,7 +1126,8 @@ shellcheck and actionlint over the scripts and workflows; clippy and tests on
 `windows-2025` and `macos-15`; and, on pushes to `main` and on pull requests that change
 the stable zebrad pin, the real-zebrad contract tests against the verified release binary.
 `bundle.yml` builds unsigned bundles with all three real zebrad sidecars and their offline
-documentation for all five targets.
+documentation for all five targets, and on Linux `zeal-zingod` and its licences
+([SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)).
 
 ## Decisions
 

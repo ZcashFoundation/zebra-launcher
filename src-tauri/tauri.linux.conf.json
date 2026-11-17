@@ -1,4 +1,15 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "zeal-app"
+  "productName": "zeal-app",
+  "bundle": {
+    "externalBin": [
+      "binaries/zeal-zebrad",
+      "binaries/zeal-zebrad-beta",
+      "binaries/zeal-zebrad-nightly",
+      "binaries/zeal-zingod"
+    ],
+    "resources": {
+      "resources/licenses/zingod/": "licenses/zingod/"
+    }
+  }
 }

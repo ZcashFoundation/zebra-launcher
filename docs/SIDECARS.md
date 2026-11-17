@@ -598,26 +598,30 @@ each from its own temporary checkout, gave byte-identical binaries and source
 archives (2026-11-16), and the archive alone built zingod in a container with
 no network and an empty cargo home.
 
-`bundle.yml` and `release.yml` call it once each, as `sidecars-zingod`. Every
-Linux job that compiles the `zeal` crate needs it, since tauri-build copies
-every `externalBin` at compile time and fails on a missing one: `bundle.yml`'s
-Linux `bundle` legs, and both of `release.yml`'s Linux jobs, the unprivileged
-`build` (`cargo tauri build --no-bundle`, `.github/workflows/release.yml:346`)
-and `bundle_sign` (`:483`). Each adds `sidecars-zingod` to its `needs`,
-downloads the artifact, runs `chmod +x` (artifacts lose the executable bit),
-checks `--version` against `ZINGOD_VERSION`, adds it to its glibc check (both
-release jobs have one) and installs it as
-`src-tauri/binaries/zeal-zingod-<target triple>`. Each also installs the
-artifact's two licence files into `src-tauri/resources/licenses/zingod/` and
-checks them against the sha256 in `zingod-build-info.txt`. The macOS and
-Windows jobs don't download it.
+`bundle.yml` and `release.yml` call it once each, as `sidecars-zingod`, with
+`attest: true`. Every Linux job that compiles the `zeal` crate needs it, since
+tauri-build copies every `externalBin` at compile time and fails on a missing
+one ("resource path `binaries/zeal-zingod-<triple>` doesn't exist"):
+`bundle.yml`'s Linux `bundle` legs, and both of `release.yml`'s Linux jobs,
+the unprivileged `build` (`cargo tauri build --no-bundle`) and `bundle_sign`.
+Each adds `sidecars-zingod` to its `needs`, downloads the artifact on Linux
+only, and runs `install_zingod` from `scripts/lib.sh`. That installs the
+binary as `src-tauri/binaries/zeal-zingod-<target triple>` with `chmod +x`
+(artifacts lose the executable bit), checks `--version` against
+`ZINGOD_VERSION` and the build information's commit, target and binary sha256
+against the pins and the file, and installs each licence file the build
+copied into `src-tauri/resources/licenses/zingod/`, checked against the sha256
+`zingod-build-info.txt` records. The binary then joins each job's glibc check.
+The macOS and Windows jobs don't download it.
 
 `bundle.yml` compiles and bundles in one job, so its runs on `main` never
 exercise `release.yml`'s split; the first release candidate that carries
 zingod (`vX.Y.Z-rc.N`, RELEASING.md) does. `release.yml`'s `draft` job also
-needs `sidecars-zingod`, and uploads `zingod-src-<ver>.tar.zst` and its sha256
-to the draft release. `manifest` already needs `draft` and hashes every draft
-asset, so `SHA256SUMS` and the release's attestations cover the archive.
+needs `sidecars-zingod`: its release notes name the zingod version, commit and
+source archive, and once the draft exists it checks `zingod-src-<ver>.tar.zst`
+against its `.sha256` and uploads both. `manifest` already needs `draft` and
+hashes every draft asset, so `SHA256SUMS` and the release's attestations cover
+the archive.
 
 - `ci.yml` runs the workflow on pull requests that change the `ZINGOD_*` pins,
   `build-zingod.sh` or the workflow. A job that calls a reusable workflow can't
@@ -634,9 +638,12 @@ asset, so `SHA256SUMS` and the release's attestations cover the archive.
   steps follow. `ci.yml` passes false: a fork's pull request gets no OIDC
   token, and a binary built from an unmerged branch never carries an
   attestation. `bundle.yml` and `release.yml` always attest.
-- `collect-bundles.sh --raw` includes the binary.
-- `smoke-linux.sh` runs `zeal-zingod --version` with the other sidecars, and
-  counts a live `zeal-zingod` as left over.
+- `collect-bundles.sh --raw` includes the binary as `raw/zeal-zingod`, and a
+  development bundle also keeps `zingod-build-info.txt`.
+- `smoke-linux.sh` checks that `zeal-zingod --version` is `zingod
+  <ZINGOD_VERSION>`, that the installed licence folder holds every committed
+  and copied file byte for byte, and counts a live `zeal-zingod` as left over.
+  `bundle.yml`'s `.deb` step checks `/usr/bin/zeal-zingod --version` too.
 - The CI binaries are unsigned, like the zebrad sidecars; a release's
   `SHA256SUMS` and its cosign bundle cover the Linux bundles.
 
@@ -681,12 +688,15 @@ merge in beside `zebra-docs`:
   test jobs don't change.
 - **Every Linux build** of the `zeal` crate needs
   `src-tauri/binaries/zeal-zingod-<triple>`, since tauri-build copies every
-  `externalBin` and fails on a missing one, and the committed licence folder.
-  So on Linux `scripts/dev-sidecar.sh` also builds `fake-zingod`, a
-  launcher-core bin beside `fake-zebrad`, and installs it as
-  `zeal-zingod-<host>`; `ci.yml`'s Linux job already runs that script before
-  clippy.
-- **At runtime**, `sidecar::resolve(paths, Sidecar::Zingod)` finds
+  `externalBin` and fails on a missing one, and the committed licence folder,
+  which it copies to `target/<profile>/licenses/zingod/`. So on Linux
+  `scripts/dev-sidecar.sh` also builds `fake-zingod`, a launcher-core bin
+  beside `fake-zebrad`, and installs it as `zeal-zingod-<host>`; `ci.yml`'s
+  Linux job already runs that script before clippy.
+- **In the bundles** the binary is `/usr/bin/zeal-zingod` in the `.deb` and
+  `usr/bin/zeal-zingod` in the AppImage, and the licences are under the
+  resource folder's `licenses/zingod/`. Nothing in Zeal runs it yet.
+- **At runtime**, from Z3, `sidecar::resolve(paths, Sidecar::Zingod)` finds
   `zeal-zingod` beside the launcher. Inside an AppImage it is first copied to
   `<data>/sidecar/zingod/<launcher version>/`, and the cleanup of other
   versions stays inside that folder.

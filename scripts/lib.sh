@@ -248,3 +248,37 @@ install_atomic() {
     fi
     mv -f "$2.tmp" "$2"
 }
+
+# install_zingod ARTIFACT TARGET ROOT: installs the zingod-<TARGET> artifact
+# of zingod-sidecars.yml, downloaded to the folder ARTIFACT, into the checkout
+# ROOT for a Linux build of the app: the binary as
+# src-tauri/binaries/zeal-zingod-<TARGET>, made executable again (artifacts
+# drop the bit) and checked against ROOT's ZINGOD_VERSION and ZINGOD_COMMIT,
+# and each licence file the build copied into
+# src-tauri/resources/licenses/zingod/, checked against the sha256 that
+# zingod-build-info.txt records for it. Prints the build information.
+install_zingod() {
+    local from="$1" target="$2" root="$3"
+    local info="$1/zingod-build-info.txt" sidecar recorded name sha256 got copied=0
+    [ -s "${info}" ] || die "the zingod-${target} artifact has no zingod-build-info.txt"
+    cat "${info}"
+    grep -qx "zingod_commit=$(read_pin "${root}/ZINGOD_COMMIT")" "${info}" ||
+        die "zingod-build-info.txt is not for the pinned commit $(read_pin "${root}/ZINGOD_COMMIT")"
+    grep -qx "target=${target}" "${info}" || die "zingod-build-info.txt is not for ${target}"
+    sidecar="${root}/src-tauri/binaries/zeal-zingod-${target}"
+    install_atomic "${from}/zeal-zingod-${target}" "${sidecar}"
+    check_zingod_version "${sidecar}" "$(read_pin "${root}/ZINGOD_VERSION")"
+    recorded="$(sed -n 's/^binary_sha256=//p' "${info}")"
+    got="$(sha256_of "${sidecar}")"
+    [ "${got}" = "${recorded}" ] || die "zeal-zingod-${target} has sha256 ${got}, not the ${recorded} its build recorded"
+    while IFS='=' read -r name sha256; do
+        name="${name#license_sha256_}"
+        [ -f "${from}/licenses/${name}" ] || die "the zingod-${target} artifact has no licenses/${name}"
+        got="$(sha256_of "${from}/licenses/${name}")"
+        [ "${got}" = "${sha256}" ] || die "licenses/${name} has sha256 ${got}, not the ${sha256} its build recorded"
+        cp "${from}/licenses/${name}" "${root}/src-tauri/resources/licenses/zingod/${name}"
+        copied=$((copied + 1))
+    done < <(grep '^license_sha256_' "${info}")
+    [ "${copied}" -gt 0 ] || die "zingod-build-info.txt records no licence file"
+    echo "installed zingod $(read_pin "${root}/ZINGOD_VERSION") at ${sidecar}, with ${copied} copied licence files"
+}
