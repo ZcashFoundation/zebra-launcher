@@ -5,7 +5,8 @@
 use std::time::Duration;
 
 use launcher_types::explorer::{
-    CardTarget, ExplorerError, ExplorerErrorKind, ExplorerRoute, Hash32, Pool, SourceCall, TxKind,
+    CardTarget, ExplorerError, ExplorerErrorKind, ExplorerRoute, Hash32, Pool, ReadOutcome,
+    SourceCall, TxKind,
 };
 use leptos::{prelude::*, task::spawn_local};
 
@@ -139,7 +140,10 @@ pub fn RpcCalls(
                             .map(|call| {
                                 let cost = text::source_cost(&call);
                                 view! {
-                                    <li class:ex-rpc-cached=call.cached class:ex-rpc-failed=!call.ok>
+                                    <li
+                                        class:ex-rpc-cached=call.cached
+                                        class:ex-rpc-failed=matches!(call.outcome, ReadOutcome::Error | ReadOutcome::NoAnswer)
+                                    >
                                         <code>{text::source_text(&call)}</code>
                                         <span class="muted">{cost}</span>
                                     </li>

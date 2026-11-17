@@ -694,8 +694,32 @@ pub struct SourceCall {
     pub bytes: Option<u32>,
     /// The explorer answered from memory.
     pub cached: bool,
-    /// The node answered; `false` when it reported an error or did not answer.
-    pub ok: bool,
+    pub outcome: ReadOutcome,
+}
+
+/// How a read Show RPC lists ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadOutcome {
+    /// The node answered, or the explorer from memory.
+    Answered,
+    /// The node answered that it has no such block or transaction.
+    NotFound,
+    /// The node answered with another error, or with something the explorer could not read.
+    Error,
+    /// The node did not answer: it took too long, or it does not run.
+    NoAnswer,
+}
+
+impl ReadOutcome {
+    /// How a read that failed with `kind` ended.
+    pub fn of_error(kind: &ExplorerErrorKind) -> Self {
+        match kind {
+            ExplorerErrorKind::NotFound => ReadOutcome::NotFound,
+            ExplorerErrorKind::Timeout | ExplorerErrorKind::NodeNotRunning => ReadOutcome::NoAnswer,
+            _ => ReadOutcome::Error,
+        }
+    }
 }
 
 /// Where a query leads.
@@ -933,7 +957,7 @@ pub struct ExplorerReply {
     /// The chain the answer was read against.
     pub chain: Option<ChainView>,
     pub response: ExplorerResponse,
-    /// With `trace`, the reads the answer took, in the order they ended.
+    /// With `trace`, the reads the answer took, in the order the answer used them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sources: Option<Vec<SourceCall>>,
 }

@@ -865,7 +865,7 @@ pub enum TxStatus { Mempool { since: u64, depends: Vec<TxId> }, Mined { block: B
 
 pub struct ExplorerCall { pub request: ExplorerRequest, pub scope: Option<Scope>, pub trace: bool }
 pub struct ExplorerReply { pub chain: Option<ChainView>, pub response: ExplorerResponse,
-    pub sources: Option<Vec<SourceCall>> }   // with `trace`: method, params, ms, bytes, cached
+    pub sources: Option<Vec<SourceCall>> }   // with `trace`: method, params, ms, bytes, cached, outcome
 #[serde(tag = "q", rename_all = "snake_case")]
 pub enum ExplorerRequest {
     Status, Interest { visible: bool, page: PageKind }, Chain,
@@ -1331,7 +1331,7 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
   `CoinbaseClaim` (subsidy, block fees, burned share, lockbox change). Hover cards have a
   request of their own, `Card { target }` (a block or a transaction, from one read), and
   `Prefetch` reads a Block page, a transaction or a big block's rows ahead. `SourceCall` also
-  says whether the node answered (`ok`).
+  says how the read ended (`outcome`): answered, not found, another error, or no answer.
 - **Spent outputs** have no cache of their own by outpoint: they come from the block at
   verbosity 3, kept whole (reduced) by its hash, or from the earlier transactions, kept as
   transactions. A small block is one of up to 256 transactions and 512 KB, the design's
@@ -1348,9 +1348,12 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
   lane's cap goes in the interactive lane, so it cannot block that lane. Queued reads whose
   pages have gone are not skipped, there is no `Scope` to cancel paged requests, and no 429
   back-off yet.
-- **Show RPC** lists, for each answer, the reads it took in the order they ended: method,
-  parameters as sent, the time from asking to the answer (the page's wait, queueing
-  included), the answer's size and whether the cache answered. The tip check is listed as
+- **Show RPC** lists, for each answer, the reads it took in the order the page used them:
+  method, parameters as sent (a block asked for by a height the explorer knows the hash of is
+  read, and listed, by its hash), the time from asking to the answer (the page's wait,
+  queueing included), the answer's size, whether the cache answered, and how a read that
+  brought nothing ended: "not found" or "error" when zebrad said so, "no answer" when it
+  took too long or did not run. The tip check is listed as
   `getbestblockheightandhash`, from memory when a recent check vouched for it. Reads made in
   the background (the Chain page's coinbases, prefetches) are not listed. The table lists its
   own reads, folded, under a count.

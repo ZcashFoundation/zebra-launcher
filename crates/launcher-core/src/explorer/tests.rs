@@ -23,8 +23,8 @@ use launcher_types::{
     explorer::{
         BlockHash, BlockId, Card, CardTarget, ChainPage, ExplorerCall, ExplorerErrorKind,
         ExplorerLive, ExplorerReply, ExplorerRequest, ExplorerResponse, ExplorerRoute, Hash32,
-        LedgerCheck, LiveState, NotFoundHint, PageKind, PrefetchTarget, Resolution, RowsRead,
-        SecretKind, Shown, TxId, TxStatus, UnknownWhy,
+        LedgerCheck, LiveState, NotFoundHint, PageKind, PrefetchTarget, ReadOutcome, Resolution,
+        RowsRead, SecretKind, Shown, TxId, TxStatus, UnknownWhy,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -2144,7 +2144,11 @@ async fn show_rpc_lists_the_reads_an_answer_took() {
             "getrawtransaction"
         ]
     );
-    assert!(sources.iter().all(|call| !call.cached && call.ok));
+    assert!(
+        sources
+            .iter()
+            .all(|call| !call.cached && call.outcome == ReadOutcome::Answered)
+    );
     assert!(
         sources
             .iter()
@@ -2180,7 +2184,8 @@ async fn show_rpc_lists_the_reads_an_answer_took() {
             .sources,
         None
     );
-    // A missing transaction is listed as a read that failed.
+    // An unknown hash is listed as the reads zebrad answered "not found": a block, then a
+    // transaction.
     let missing = harness
         .explorer
         .call(
@@ -2195,7 +2200,17 @@ async fn show_rpc_lists_the_reads_an_answer_took() {
         .await
         .expect("an answer");
     let sources = missing.sources.expect("the reads");
-    assert!(sources.iter().all(|call| !call.ok), "{sources:?}");
+    let methods: Vec<(&str, ReadOutcome)> = sources
+        .iter()
+        .map(|call| (call.method.as_str(), call.outcome))
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            ("getblock", ReadOutcome::NotFound),
+            ("getrawtransaction", ReadOutcome::NotFound)
+        ]
+    );
 }
 
 #[tokio::test]

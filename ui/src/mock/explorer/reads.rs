@@ -10,7 +10,7 @@ use explorer_model::{
     shapes::{BlockV1, BlockV3, Header, Subsidy, Tx},
     synth::SynthChain,
 };
-use launcher_types::explorer::{BlockHash, BlockId, SourceCall, TxId};
+use launcher_types::explorer::{BlockHash, BlockId, ReadOutcome, SourceCall, TxId};
 
 /// Reads remembered before the memory starts again, as the backend's cache evicts.
 const REMEMBERED: usize = 50_000;
@@ -41,15 +41,19 @@ impl<'a> Reads<'a> {
     /// Notes a read of `method` with `params` that brought `bytes`, or found nothing.
     fn note(&mut self, method: &str, params: String, bytes: Option<u32>) {
         let key = format!("{method}{params}");
-        let ok = bytes.is_some();
-        let cached = ok && !self.seen.insert(key.clone());
+        let found = bytes.is_some();
+        let cached = found && !self.seen.insert(key.clone());
         self.sources.push(SourceCall {
             method: method.to_owned(),
             ms: if cached { 0 } else { made_up_ms(&key) },
             params,
             bytes: if cached { None } else { bytes },
             cached,
-            ok,
+            outcome: if found {
+                ReadOutcome::Answered
+            } else {
+                ReadOutcome::NotFound
+            },
         });
     }
 
@@ -174,7 +178,7 @@ mod tests {
         assert_eq!(sources[0].params, r#"["3550000",1]"#);
         assert!(!sources[0].cached && sources[0].bytes.is_some() && sources[0].ms > 0);
         assert!(sources[2].cached && sources[2].ms == 0 && sources[2].bytes.is_none());
-        assert!(!sources[3].ok, "not found");
+        assert_eq!(sources[3].outcome, ReadOutcome::NotFound);
         // The memory outlives one answer.
         let mut reads = Reads::new(&chain, &mut seen);
         assert!(reads.has_tx(&block.tx[0]));

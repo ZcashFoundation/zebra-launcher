@@ -20,7 +20,7 @@ use launcher_types::{
     explorer::{
         BlockHash, BlockId, ChainView, ExplorerCall, ExplorerError, ExplorerErrorKind,
         ExplorerLive, ExplorerLiveEvent, ExplorerReply, ExplorerRequest, ExplorerResponse,
-        LiveState, ReorgNotice, SourceCall, TxId,
+        LiveState, ReadOutcome, ReorgNotice, SourceCall, TxId,
     },
 };
 use tokio::{
@@ -121,7 +121,7 @@ impl Pending {
                 ms: if cached { 0 } else { elapsed_ms(asked) },
                 bytes,
                 cached,
-                ok: served.is_ok(),
+                outcome: outcome(&served),
             });
         }
         served.map(|served| served.result)
@@ -279,10 +279,18 @@ impl Fetcher {
                 ms: if cached { 0 } else { elapsed_ms(asked) },
                 bytes: None,
                 cached,
-                ok: result.is_ok(),
+                outcome: outcome(&result),
             });
         }
         result.map(|(view, _)| view)
+    }
+}
+
+/// How a read that ended in `result` is listed.
+fn outcome<T>(result: &Result<T, ExplorerError>) -> ReadOutcome {
+    match result {
+        Ok(_) => ReadOutcome::Answered,
+        Err(err) => ReadOutcome::of_error(&err.kind),
     }
 }
 

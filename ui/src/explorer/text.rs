@@ -12,7 +12,8 @@ use launcher_types::{
     Network, Phase,
     explorer::{
         BlockSummary, Budget, LedgerCheck, LogicalActions, NotFoundHint, PerPool, Pool, PoolPart,
-        ReorgNotice, SecretKind, Shown, SourceCall, TxKind, TxPage, TxRow, TxStatus, UnknownWhy,
+        ReadOutcome, ReorgNotice, SecretKind, Shown, SourceCall, TxKind, TxPage, TxRow, TxStatus,
+        UnknownWhy,
     },
 };
 
@@ -909,11 +910,17 @@ pub fn source_text(call: &SourceCall) -> String {
     format!("{} {}", call.method, call.params)
 }
 
-/// Where a read's answer came from and what it took: `12 ms · 3.8 kB`, `from memory`, `not
-/// found`.
+/// Where a read's answer came from and what it took: `12 ms · 3.8 kB`, `from memory`, `12 ms
+/// · not found`, `12 ms · error`, `10,000 ms · no answer`.
 pub fn source_cost(call: &SourceCall) -> String {
-    if !call.ok {
-        return format!("{} ms · no answer", thousands(u64::from(call.ms)));
+    let ended = match call.outcome {
+        ReadOutcome::Answered => None,
+        ReadOutcome::NotFound => Some("not found"),
+        ReadOutcome::Error => Some("error"),
+        ReadOutcome::NoAnswer => Some("no answer"),
+    };
+    if let Some(ended) = ended {
+        return format!("{} ms · {ended}", thousands(u64::from(call.ms)));
     }
     if call.cached {
         return "from memory".to_owned();
@@ -1282,7 +1289,7 @@ mod tests {
             ms: 12,
             bytes: Some(3_800),
             cached: false,
-            ok: true,
+            outcome: ReadOutcome::Answered,
         };
         assert_eq!(source_text(&call), r#"getblock ["3549000",1]"#);
         assert_eq!(source_cost(&call), "12 ms · 3.8 kB");
@@ -1293,12 +1300,20 @@ mod tests {
             ..call.clone()
         };
         assert_eq!(source_cost(&cached), "from memory");
-        let failed = SourceCall {
-            ok: false,
+        let ended = |outcome| SourceCall {
+            outcome,
             bytes: None,
-            ..call
+            ..call.clone()
         };
-        assert_eq!(source_cost(&failed), "12 ms · no answer");
+        assert_eq!(
+            source_cost(&ended(ReadOutcome::NotFound)),
+            "12 ms · not found"
+        );
+        assert_eq!(source_cost(&ended(ReadOutcome::Error)), "12 ms · error");
+        assert_eq!(
+            source_cost(&ended(ReadOutcome::NoAnswer)),
+            "12 ms · no answer"
+        );
         let mined = TxStatus::Mined {
             block: Hash32([2; 32]),
             height: 1_204,
