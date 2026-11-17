@@ -623,15 +623,17 @@ against its `.sha256` and uploads both. `manifest` already needs `draft` and
 hashes every draft asset, so `SHA256SUMS` and the release's attestations cover
 the archive.
 
-- `ci.yml` runs the workflow on pull requests that change the `ZINGOD_*` pins,
-  `build-zingod.sh` or the workflow. A job that calls a reusable workflow can't
-  have steps, so a `zingod-gate` job diffs the pull request against its base,
-  as `real-zebrad`'s gate step does, and outputs `run`. The `zingod-sidecars`
-  job has `needs: zingod-gate` and `if: needs.zingod-gate.outputs.run ==
-  'true'`. `ci.yml` grants only `contents: read`, and the called jobs declare
-  `id-token: write` and `attestations: write`, so the calling job grants all
-  three itself.
-- `zingod-gate` also says run whenever the contract test runs
+- `ci.yml` runs the workflow on pull requests that change what `zeal-zingod`
+  is built from: the `ZINGOD_*` pins, `build-zingod.sh` and the `lib.sh` it
+  sources, `zingod-licenses.sh` and the licence folder it checks, or the
+  workflow. On pushes to `main` it doesn't, since `bundle.yml` builds it then.
+  A job that calls a reusable workflow can't have steps, so a `zingod-gate`
+  job diffs the pull request against its base, as `real-zebrad`'s gate step
+  does, and outputs `run`. The `zingod-sidecars` job has `needs: zingod-gate`
+  and `if: needs.zingod-gate.outputs.run == 'true'`. `ci.yml` grants only
+  `contents: read`, and the called jobs declare `id-token: write` and
+  `attestations: write`, so the calling job grants all three itself.
+- From Z2, `zingod-gate` also says run whenever the contract test runs
   (PUBLIC-SERVICES.md's [Tests for zingod](PUBLIC-SERVICES.md#tests-for-zingod)),
   whose `real-zingod` job takes its zingod from this call.
 - The workflow has an `attest` input, true by default, that both attestation

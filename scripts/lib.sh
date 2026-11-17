@@ -2,8 +2,9 @@
 # Helpers shared by the sidecar, licence and version scripts
 # (fetch-zebrad-linux.sh, build-zebrad.sh, build-zingod.sh, zingod-licenses.sh,
 # dev-sidecar.sh, check-versions.sh, bump-zebrad.sh, bump-zingod.sh) and by the
-# `run:` steps of zebrad-sidecars.yml and zebrad-watch.yml. Source it after
-# defining `die MESSAGE...`, which must print the message and exit non-zero.
+# `run:` steps of the workflows (zebrad-sidecars.yml, zingod-sidecars.yml,
+# zebrad-watch.yml, bundle.yml, release.yml). Source it after defining
+# `die MESSAGE...`, which must print the message and exit non-zero.
 #
 # The functions that print a value are meant for `x="$(fn ...)"` under
 # `set -e`: when they call die inside the command substitution, the assignment

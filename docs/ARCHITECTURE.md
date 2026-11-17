@@ -1123,8 +1123,10 @@ CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs, on Linux,
 `scripts/check-versions.sh`, fmt, clippy with the mutex ban, the tests, the UI crate's
 clippy for `wasm32-unknown-unknown` and `trunk build --release`, `cargo deny`, and
 shellcheck and actionlint over the scripts and workflows; clippy and tests on
-`windows-2025` and `macos-15`; and, on pushes to `main` and on pull requests that change
-the stable zebrad pin, the real-zebrad contract tests against the verified release binary.
+`windows-2025` and `macos-15`; on pushes to `main` and on pull requests that change
+the stable zebrad pin, the real-zebrad contract tests against the verified release binary;
+and, on pull requests that change what `zeal-zingod` is built from, `zingod-sidecars.yml`
+without attestation.
 `bundle.yml` builds unsigned bundles with all three real zebrad sidecars and their offline
 documentation for all five targets, and on Linux `zeal-zingod` and its licences
 ([SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)).
