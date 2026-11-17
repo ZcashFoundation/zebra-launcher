@@ -365,9 +365,20 @@ async fn the_job_closes_when_the_run_is_finalized() {
         }
     })
     .await;
-    let err = platform_reader()
-        .tree(&probe, &[])
-        .expect_err("a finalized run's probe reads nothing");
+    // A sample read in flight may still hold the job for a moment after the stop: until it
+    // lets go, the probe reads the closing job with no members left. Then it reads nothing.
+    let err = within_limit(Duration::from_secs(5), "the job to close", async {
+        loop {
+            match platform_reader().tree(&probe, &[]) {
+                Err(err) => break err,
+                Ok(reading) => {
+                    assert!(reading.members.is_empty(), "{reading:?}");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        }
+    })
+    .await;
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     live.stop().await;
 }
