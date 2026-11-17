@@ -68,6 +68,8 @@ struct Synth {
     counts: Counts,
     /// Blocks read at verbosity 3.
     v3: Arc<AtomicU64>,
+    /// Each read as it starts, in order.
+    started: std::sync::mpsc::Sender<ReadCall>,
 }
 
 /// `value` as zebrad writes it and the explorer reads it back.
@@ -95,6 +97,7 @@ impl ChainSource for Synth {
             Some(slot) => self.counts[slot].fetch_add(1, Ordering::SeqCst),
             None => self.v3.fetch_add(1, Ordering::SeqCst),
         };
+        let _ = self.started.send(call);
         let mut gate = self.gate.clone();
         let _ = gate.wait_for(|open| *open).await;
         let held = match call {
@@ -141,6 +144,7 @@ struct Harness {
     subsidy_gate: watch::Sender<bool>,
     counts: Counts,
     v3: Arc<AtomicU64>,
+    started: std::sync::mpsc::Receiver<ReadCall>,
     status: watch::Sender<Status>,
     stats: watch::Sender<Option<NodeStats>>,
     details: watch::Sender<Option<NodeDetails>>,
@@ -200,6 +204,7 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
     let (subsidy_gate_tx, subsidy_gate_rx) = watch::channel(true);
     let counts: Counts = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
     let v3 = Arc::new(AtomicU64::new(0));
+    let (started_tx, started) = std::sync::mpsc::channel();
     let (status_tx, status) = watch::channel(running());
     let (stats_tx, stats) = watch::channel(Some(stats));
     let (details_tx, details) = watch::channel(Some(details));
@@ -211,6 +216,7 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
         subsidy_gate: subsidy_gate_rx,
         counts: counts.clone(),
         v3: v3.clone(),
+        started: started_tx,
     };
     let mut explorer_config = ExplorerConfig::new(PathBuf::from("/nonexistent/.cookie"));
     config(&mut explorer_config);
@@ -232,6 +238,7 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
         subsidy_gate: subsidy_gate_tx,
         counts,
         v3,
+        started,
         status: status_tx,
         stats: stats_tx,
         details: details_tx,
@@ -272,6 +279,11 @@ impl Harness {
     /// Blocks read at verbosity 3 so far.
     fn v3_reads(&self) -> u64 {
         self.v3.load(Ordering::SeqCst)
+    }
+
+    /// The reads started since the last look, in the order they started.
+    fn started(&self) -> Vec<ReadCall> {
+        self.started.try_iter().collect()
     }
 }
 
@@ -1659,6 +1671,104 @@ async fn a_big_blocks_rows_are_read_one_by_one_and_their_fees_after() {
         "each row and each earlier transaction once"
     );
     assert_eq!(harness.v3_reads(), 0);
+}
+
+impl Harness {
+    /// Asks for `request` on a task of its own, so the test goes on while it waits.
+    fn ask_later(
+        &self,
+        request: ExplorerRequest,
+    ) -> tokio::task::JoinHandle<Result<ExplorerReply, launcher_types::explorer::ExplorerError>>
+    {
+        let explorer = self.explorer.clone();
+        tokio::spawn(async move { explorer.call(&mainnet(), ExplorerCall::new(request)).await })
+    }
+}
+
+#[tokio::test]
+async fn a_big_blocks_fee_reads_wait_behind_its_rows_and_the_tip() {
+    let harness = harness_with(
+        SynthChain::new(Network::Mainnet, TIP, NOW).with_big_blocks(10),
+        |_| {},
+    );
+    let chain = harness.chain.borrow().clone();
+    let block = chain.block(BlockId::Height(TIP - 2_000)).unwrap();
+    let hash = block.hash;
+    // The block and the transactions of rows 4,000 to 4,024 are in the cache, but not the
+    // earlier transactions they spend from: a card reads its transaction and nothing else.
+    harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Hash(hash),
+        })
+        .await;
+    let shown = &block.tx[4_000..4_025];
+    for txid in shown {
+        harness
+            .reply(ExplorerRequest::Card {
+                target: CardTarget::Tx { txid: *txid },
+            })
+            .await;
+    }
+    let parents: std::collections::HashSet<TxId> = shown
+        .iter()
+        .flat_map(|txid| chain.tx(txid).unwrap().vin)
+        .filter_map(|input| input.txid)
+        .collect();
+    let next_rows: std::collections::HashSet<TxId> =
+        block.tx[4_025..4_050].iter().copied().collect();
+    let rows = |offset, with_fees| ExplorerRequest::BlockTxs {
+        hash,
+        offset,
+        limit: 25,
+        with_fees,
+    };
+    let _ = harness.started();
+    // The next rows are asked for while transaction reads are held: six start, 19 wait.
+    harness.tx_gate.send_replace(false);
+    let next = harness.ask_later(rows(4_025, false));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Shown, the explorer checks the tip, which waits for a permit too.
+    harness.show(PageKind::Block).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The first rows are asked for again, with their fees: the outputs their inputs spend.
+    let fees = harness.ask_later(rows(4_000, true));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    harness.tx_gate.send_replace(true);
+    let Ok(ExplorerReply {
+        response: ExplorerResponse::BlockTxs(page),
+        ..
+    }) = fees.await.expect("no panic")
+    else {
+        panic!("a page of rows");
+    };
+    assert!(!page.fees_pending);
+    assert!(
+        page.rows
+            .iter()
+            .all(|row| matches!(row.fee, Some(Shown::Public { .. })))
+    );
+    next.await.expect("no panic").expect("the next rows");
+    // Those reads waited on the prefetch lane: the rows and the tip check went first, though
+    // they were asked for before.
+    let started = harness.started();
+    let read = |wanted: &std::collections::HashSet<TxId>| {
+        let wanted = wanted.clone();
+        move |call: &ReadCall| matches!(call, ReadCall::Tx(txid) if wanted.contains(txid))
+    };
+    let first_parent = started
+        .iter()
+        .position(read(&parents))
+        .expect("the earlier transactions were read");
+    let last_row = started
+        .iter()
+        .rposition(read(&next_rows))
+        .expect("the next rows were read");
+    let tip = started
+        .iter()
+        .position(|call| *call == ReadCall::Best)
+        .expect("the tip was checked");
+    assert!(last_row < first_parent, "{started:?}");
+    assert!(tip < first_parent, "{started:?}");
 }
 
 #[tokio::test]

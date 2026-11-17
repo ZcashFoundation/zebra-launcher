@@ -31,7 +31,7 @@ pub(super) const RECENT_BLOCKS: u32 = 25;
 const INTERVAL_SPAN: u32 = 100;
 /// How old a checked tip the Chain page and search accept.
 const TIP_AGE: Duration = Duration::from_secs(2);
-/// The earlier transactions one page of a big block's rows reads.
+/// The earlier transactions one page of a big block's rows reads, on the prefetch lane.
 const ROW_PARENTS: usize = 1_000;
 /// The targets one prefetch reads ahead.
 const PREFETCH_TARGETS: usize = 8;
@@ -328,8 +328,9 @@ async fn future(context: &Context, height: u32) -> Result<ExplorerResponse, Expl
 
 /// A page of a block's transaction rows. A small block is read whole, once, at verbosity 3,
 /// which brings every spent output and fee. A big one is read row by row: the rows'
-/// transactions on the page's lane, then the outputs their inputs spend, which `with_fees`
-/// waits for and otherwise go on the prefetch lane while the page answers without them.
+/// transactions on the page's lane, then the outputs their inputs spend, on the prefetch lane
+/// whether `with_fees` waits for them or the page answers without them. So the reads of rows
+/// asked for meanwhile, and the follower's checks of the tip, go before them.
 async fn block_txs(
     context: &Context,
     hash: BlockHash,
@@ -391,9 +392,10 @@ async fn block_txs(
 }
 
 /// The outputs the inputs of `txs` spend, one list per transaction, from the earlier
-/// transactions in the cache; the others are read on the fetcher's lane when `read`, up to
-/// `cap` of them, and otherwise asked for in the background on the prefetch lane. Also says
-/// whether any was left out.
+/// transactions in the cache. Up to `cap` of the others are asked for on the prefetch lane,
+/// never the fetcher's, so a page waiting for them does not move them ahead of interactive
+/// reads: with `read` the answer waits for them, without it they fill the cache for the next
+/// ask. Also says whether any was left out.
 async fn spent_by(
     fetch: &Fetcher,
     txs: &[Arc<Tx>],
@@ -422,21 +424,17 @@ async fn spent_by(
         }
     }
     let left_out = !missing.is_empty() && (!read || missing.len() > cap);
+    let reads: Vec<_> = missing
+        .iter()
+        .take(cap)
+        .map(|txid| (*txid, fetch.tx_later(*txid)))
+        .collect();
     if read {
-        let reads: Vec<_> = missing
-            .iter()
-            .take(cap)
-            .map(|txid| (*txid, fetch.tx(*txid)))
-            .collect();
         for (txid, pending) in reads {
             parents.insert(txid, pending.tx().await.ok());
         }
-    } else {
-        for txid in missing.iter().take(cap) {
-            // Read in the background: the answer fills the cache for the next ask.
-            drop(fetch.tx_later(*txid));
-        }
     }
+    // Otherwise the reads go on unheeded, and their answers fill the cache for the next ask.
     let spent = txs
         .iter()
         .map(|tx| {

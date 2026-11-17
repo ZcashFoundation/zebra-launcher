@@ -1337,9 +1337,11 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
   transactions. A small block is one of up to 256 transactions and 512 KB, the design's
   thresholds until the P0 bench measures v3; its body is decoded on the read's task, not in
   `spawn_blocking`. A big block's rows are read with `getrawtransaction(txid, 1)` without the
-  block hash, so they share the transaction cache with the Transaction page. A waiting
-  transaction reads its earlier ones with `getrawtransaction` too: there is no mempool
-  snapshot until P3. "Read them all" reads past the first 16 on the prefetch lane.
+  block hash, so they share the transaction cache with the Transaction page. The earlier
+  transactions a page of them spends from are read on the prefetch lane, also when the page
+  waits for them, so rows asked for meanwhile and the follower's checks of the tip go first.
+  A waiting transaction reads its earlier ones with `getrawtransaction` too: there is no
+  mempool snapshot until P3. "Read them all" reads past the first 16 on the prefetch lane.
 - **The scheduler** weighs in units: a heavy read, only `getblock` at verbosity 3 so far, takes
   three of the six (its timeout is 60 s); one runs while other interactive reads wait, two
   otherwise, and one waiting for room holds the reads behind it. A prefetch heavier than its
