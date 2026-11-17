@@ -228,12 +228,11 @@ fn toml_string(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
-    use toml_edit::{DocumentMut, Item};
+    use toml_edit::DocumentMut;
 
     use super::*;
 
+    #[cfg(unix)]
     const GENERATED: &str = include_str!("../../tests/fixtures/zingod-1.1.0-generate.toml");
 
     fn config(network: ZingodNetwork, rpc: u16, port: u16, name: &str) -> ZingodConfig {
@@ -246,6 +245,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn mainnet() -> ZingodConfig {
         config(ZingodNetwork::Mainnet, 8232, 8137, "mainnet")
     }
@@ -254,9 +254,11 @@ mod tests {
         config(ZingodNetwork::Testnet, 18232, 18137, "testnet")
     }
 
+    #[cfg(unix)]
     /// Every key as a dotted path: `trusted_validators.cookie_path`, `index.tree_state.path`.
-    fn keys(text: &str) -> BTreeSet<String> {
-        fn walk(prefix: &str, item: &Item, out: &mut BTreeSet<String>) {
+    fn keys(text: &str) -> std::collections::BTreeSet<String> {
+        use toml_edit::Item;
+        fn walk(prefix: &str, item: &Item, out: &mut std::collections::BTreeSet<String>) {
             let join = |key: &str| {
                 if prefix.is_empty() {
                     key.to_string()
@@ -284,7 +286,7 @@ mod tests {
             }
         }
         let doc: DocumentMut = text.parse().expect("valid TOML");
-        let mut out = BTreeSet::new();
+        let mut out = std::collections::BTreeSet::new();
         walk("", doc.as_item(), &mut out);
         out
     }
