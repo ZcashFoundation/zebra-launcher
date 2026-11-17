@@ -1381,7 +1381,9 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
 - **Hover cards** are on every link to a block or a transaction and on the table's rows, not
   on the strip's tiles. The UI keeps the cards it read while the chain they were read on
   holds: another network or a reorganisation (a new epoch) drops them all, and a new tip the
-  cards of transactions not in a best-chain block.
+  cards of transactions not in a best-chain block. A card whose read failed says why ("Block
+  N is not mined yet", "Not in your node yet", "Your node is not running") on that hover
+  only; the next one asks again.
 - **The synthetic chain** funds every transparent input with an output it has (a coinbase's,
   or one of a transaction without transparent inputs, from 100 blocks back), so the fees the
   explorer works out from spent outputs are what the transactions paid; an output may be spent

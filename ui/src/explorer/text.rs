@@ -11,9 +11,9 @@ use explorer_model::{
 use launcher_types::{
     Network, Phase,
     explorer::{
-        BlockSummary, Budget, LedgerCheck, LogicalActions, NotFoundHint, PerPool, Pool, PoolPart,
-        ReadOutcome, ReorgNotice, SecretKind, Shown, SourceCall, TxKind, TxPage, TxRow, TxStatus,
-        UnknownWhy,
+        BlockId, BlockSummary, Budget, CardTarget, ExplorerErrorKind, LedgerCheck, LogicalActions,
+        NotFoundHint, PerPool, Pool, PoolPart, ReadOutcome, ReorgNotice, SecretKind, Shown,
+        SourceCall, TxKind, TxPage, TxRow, TxStatus, UnknownWhy,
     },
 };
 
@@ -936,6 +936,28 @@ pub fn read_all_text(before: u32, after: u32) -> String {
     }
 }
 
+/// What a hover card says when its read failed: the block or transaction the node does not
+/// have yet (a height above the tip `tip` is not mined yet), or why the node did not answer.
+pub fn card_failure_text(
+    target: &CardTarget,
+    kind: &ExplorerErrorKind,
+    tip: Option<u32>,
+) -> String {
+    match kind {
+        ExplorerErrorKind::NotFound => match target {
+            CardTarget::Block {
+                id: BlockId::Height(height),
+            } if tip.is_some_and(|tip| *height > tip) => {
+                format!("Block {} is not mined yet", thousands(u64::from(*height)))
+            }
+            _ => "Not in your node yet".to_owned(),
+        },
+        ExplorerErrorKind::NodeNotRunning => "Your node is not running".to_owned(),
+        ExplorerErrorKind::Timeout => "Your node did not answer in time".to_owned(),
+        _ => "The read failed".to_owned(),
+    }
+}
+
 /// A transaction card's counts: its transparent inputs and outputs, left out when it has none
 /// (a coinbase's input spends nothing), and the shielded pools it touches: `2 transparent
 /// inputs · 1 transparent output · Orchard`.
@@ -1410,6 +1432,32 @@ mod tests {
         assert_eq!(
             read_all_text(2, 1),
             "Read 1 spent output; 1 spent output is not read."
+        );
+    }
+
+    #[test]
+    fn a_card_whose_read_failed_says_why() {
+        let next = CardTarget::Block {
+            id: BlockId::Height(3_551_001),
+        };
+        assert_eq!(
+            card_failure_text(&next, &ExplorerErrorKind::NotFound, Some(3_551_000)),
+            "Block 3,551,001 is not mined yet"
+        );
+        let tx = CardTarget::Tx {
+            txid: Hash32([3; 32]),
+        };
+        assert_eq!(
+            card_failure_text(&tx, &ExplorerErrorKind::NotFound, Some(3_551_000)),
+            "Not in your node yet"
+        );
+        assert_eq!(
+            card_failure_text(&next, &ExplorerErrorKind::NodeNotRunning, None),
+            "Your node is not running"
+        );
+        assert_eq!(
+            card_failure_text(&tx, &ExplorerErrorKind::Timeout, None),
+            "Your node did not answer in time"
         );
     }
 

@@ -10,7 +10,9 @@ use std::{collections::HashMap, time::Duration};
 
 use launcher_types::{
     Network, NodeId,
-    explorer::{Card, CardTarget, ExplorerRequest, ExplorerResponse, TxKind, TxStatus},
+    explorer::{
+        Card, CardTarget, ExplorerErrorKind, ExplorerRequest, ExplorerResponse, TxKind, TxStatus,
+    },
 };
 use leptos::{ev, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
@@ -35,10 +37,15 @@ pub const CARD_ID: &str = "ex-hover-card";
 #[derive(Clone, Copy)]
 pub struct HoverCards {
     node: Signal<NodeId>,
+    /// The node's tip as its explorer last said: its epoch and height.
+    tip: Signal<Option<(u64, u32)>>,
     /// The card shown: what about, and where (left, top) in the window.
     shown: RwSignal<Option<(CardTarget, (f64, f64))>>,
     /// The facts read, per node, on the chain the node has now.
     cards: RwSignal<HashMap<(NodeId, CardTarget), Card>>,
+    /// A read that failed, with the hover it was for: it shows on that hover only, and the next
+    /// one asks again.
+    failed: RwSignal<Option<(u64, CardTarget, ExplorerErrorKind)>>,
     generation: StoredValue<u64>,
 }
 
@@ -52,6 +59,8 @@ impl HoverCards {
     ) -> Self {
         let cards = HoverCards {
             node,
+            tip,
+            failed: RwSignal::new(None),
             shown: RwSignal::new(None),
             cards: RwSignal::new(HashMap::new()),
             generation: StoredValue::new(0),
@@ -96,13 +105,22 @@ impl HoverCards {
                     return;
                 }
                 spawn_local(async move {
-                    let request = ExplorerRequest::Card { target: wanted };
-                    if let Ok(reply) = api::explorer(&node, request).await
-                        && let ExplorerResponse::Card(card) = reply.response
-                    {
-                        self.cards.try_update(|cards| {
-                            cards.insert(key, card);
-                        });
+                    let request = ExplorerRequest::Card {
+                        target: wanted.clone(),
+                    };
+                    match api::explorer(&node, request).await {
+                        Ok(reply) => {
+                            if let ExplorerResponse::Card(card) = reply.response {
+                                self.cards.try_update(|cards| {
+                                    cards.insert(key, card);
+                                });
+                            }
+                        }
+                        Err(error) => {
+                            if self.generation.try_get_value() == Some(mine) {
+                                self.failed.try_set(Some((mine, wanted, error.kind)));
+                            }
+                        }
                     }
                 });
             },
@@ -195,10 +213,22 @@ pub fn HoverCard() -> impl IntoView {
             let node = cards.node.get_untracked();
             let card = cards
                 .cards
-                .with(|known| known.get(&(node, target)).cloned());
-            let lines = match card {
-                None => vec!["Reading from your node…".to_owned()],
-                Some(Card::Block { height, time, tx_count, size, .. }) => {
+                .with(|known| known.get(&(node, target.clone())).cloned());
+            // A failed read shows for the hover it was made for, never the next one.
+            let hover = cards.generation.try_get_value();
+            let failure = cards.failed.with(|failed| {
+                failed
+                    .as_ref()
+                    .filter(|(made_for, about, _)| Some(*made_for) == hover && *about == target)
+                    .map(|(_, _, kind)| kind.clone())
+            });
+            let lines = match (card, failure) {
+                (None, Some(kind)) => {
+                    let tip = cards.tip.get_untracked().map(|(_, height)| height);
+                    vec![text::card_failure_text(&target, &kind, tip)]
+                }
+                (None, None) => vec!["Reading from your node…".to_owned()],
+                (Some(Card::Block { height, time, tx_count, size, .. }), _) => {
                     let mined = std::time::UNIX_EPOCH + Duration::from_secs(time);
                     vec![
                         format!("Block {}", thousands(u64::from(height))),
@@ -211,7 +241,7 @@ pub fn HoverCard() -> impl IntoView {
                         format!("mined {}", relative(mined, app.now.get())),
                     ]
                 }
-                Some(Card::Tx { kind, status, inputs, outputs, pools, size, .. }) => {
+                (Some(Card::Tx { kind, status, inputs, outputs, pools, size, .. }), _) => {
                     let place = match status {
                         TxStatus::Mined { height, .. } => {
                             format!("in block {}", thousands(u64::from(height)))
