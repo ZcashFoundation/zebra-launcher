@@ -17,6 +17,26 @@ pub const OVERSCAN: u32 = 6;
 /// How long scrolling must rest before the page hears of the rows in view.
 const SETTLE: Duration = Duration::from_millis(120);
 
+/// The rows a list has in the page, and the ones of them in view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Window {
+    /// `first..end`: the rows in view and the overscan either side.
+    pub rows: (u32, u32),
+    /// The rows in view, one half in view included.
+    pub seen: (u32, u32),
+}
+
+impl Window {
+    /// The window of a viewport `height` pixels tall, scrolled `top` pixels, over `total` rows
+    /// of `row` pixels, with `overscan` either side.
+    pub fn of(top: f64, height: f64, row: f64, total: u32, overscan: u32) -> Self {
+        Window {
+            rows: visible_window(top, height, row, total, overscan),
+            seen: visible_window(top, height, row, total, 0),
+        }
+    }
+}
+
 /// The rows a viewport `height` pixels tall, scrolled `top` pixels, shows of `total` rows of
 /// `row` pixels, with `overscan` either side: `first..end`.
 pub fn visible_window(top: f64, height: f64, row: f64, total: u32, overscan: u32) -> (u32, u32) {
@@ -53,8 +73,8 @@ pub fn slot_row(slot: u32, first: u32, slots: u32) -> u32 {
 
 /// A virtual list of `total` rows, at most `rows_shown` of them in view at once, under a
 /// header row. `row` builds one slot's cells, once, from the row index it shows (a signal:
-/// the cells read it). `on_window` hears of the rows in view, overscan included, once
-/// scrolling settles and when the list first shows.
+/// the cells read it). `on_window` hears of the rows in the page and those in view once
+/// scrolling settles, and when the list first shows.
 #[component]
 pub fn VirtualList<H, HV, R, V>(
     total: u32,
@@ -64,7 +84,7 @@ pub fn VirtualList<H, HV, R, V>(
     /// The header row's cells.
     header: H,
     row: R,
-    on_window: Callback<(u32, u32)>,
+    on_window: Callback<Window>,
 ) -> impl IntoView
 where
     H: Fn() -> HV + Send + Sync + 'static,
@@ -75,7 +95,7 @@ where
     let height = f64::from(total.min(rows_shown).max(1)) * ROW;
     let slots = slot_count(height, ROW, total, OVERSCAN);
     let top = RwSignal::new(0.0f64);
-    let window = Memo::new(move |_| visible_window(top.get(), height, ROW, total, OVERSCAN));
+    let window = Memo::new(move |_| Window::of(top.get(), height, ROW, total, OVERSCAN));
     let scroller = NodeRef::<html::Div>::new();
     let frame_pending = StoredValue::new(false);
     let settle = StoredValue::new(0u64);
@@ -95,13 +115,13 @@ where
     };
     // The page hears of the rows in view once they rest.
     Effect::new(move |_| {
-        let (first, end) = window.get();
+        let rows = window.get();
         let mine = settle.get_value() + 1;
         settle.set_value(mine);
         set_timeout(
             move || {
                 if settle.try_get_value() == Some(mine) {
-                    on_window.run((first, end));
+                    on_window.run(rows);
                 }
             },
             SETTLE,
@@ -111,7 +131,7 @@ where
         .map(|slot| {
             // Near the end the slots keep to the last rows, so none shows a row past them.
             let index = Memo::new(move |_| {
-                slot_row(slot, window.get().0.min(total - slots), slots)
+                slot_row(slot, window.get().rows.0.min(total - slots), slots)
             });
             let cells = row(index);
             view! {
@@ -168,6 +188,14 @@ mod tests {
         // A short list is all in view.
         assert_eq!(visible_window(0.0, 96.0, ROW, 3, 6), (0, 3));
         assert_eq!(visible_window(0.0, 480.0, ROW, 0, 6), (0, 0));
+        // The rows in view, apart from the overscan.
+        assert_eq!(
+            Window::of(110.0 * ROW, 448.0, ROW, 5_000, 6),
+            Window {
+                rows: (104, 131),
+                seen: (110, 125)
+            }
+        );
     }
 
     #[test]

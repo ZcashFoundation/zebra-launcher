@@ -27,7 +27,7 @@ use super::{
     prefs::Prefs,
     state::{Loaded, NodeExplorer, load},
     text::{self, Unit},
-    virtual_list::VirtualList,
+    virtual_list::{VirtualList, Window},
 };
 use crate::{
     api,
@@ -572,38 +572,56 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
         failed: RwSignal::new(BTreeMap::new()),
     };
     let asked = StoredValue::new(HashSet::<u32>::new());
+    let read_ahead = StoredValue::new(HashSet::<u32>::new());
     let reader = node.clone();
-    let on_window = Callback::new(move |(start, end): (u32, u32)| {
+    let on_window = Callback::new(move |window: Window| {
+        let (start, end) = window.rows;
         if end <= start {
             return;
         }
         let trace = prefs.rpc.get_untracked();
-        let last = (end - 1) / CHUNK;
-        for chunk in start / CHUNK..=last {
+        let chunks = |(start, end): (u32, u32)| start / CHUNK..=(end.max(start + 1) - 1) / CHUNK;
+        let seen = chunks(window.seen);
+        // A block read whole answers every chunk from the explorer's cache. A big one's rows
+        // in view are asked for, and the overscan and the next chunk read ahead, so the
+        // explorer reads the rows in view first.
+        let whole = store.read.get_untracked() == Some(RowsRead::Block);
+        let (mut asking, mut ahead) = (Vec::new(), Vec::new());
+        for chunk in chunks(window.rows) {
             if asked.with_value(|asked| asked.contains(&chunk)) {
                 continue;
             }
+            if whole || seen.contains(&chunk) {
+                asking.push(chunk);
+            } else {
+                ahead.push(chunk);
+            }
+        }
+        // The explorer reads the newest request first: the chunk with the first row in view
+        // is asked for last.
+        for chunk in asking.into_iter().rev() {
             asked.update_value(|asked| {
                 asked.insert(chunk);
             });
             spawn_local(read_rows(reader.clone(), hash, chunk, trace, store, asked));
         }
-        // A big block's next rows are read ahead, behind these.
-        let next = last + 1;
-        if store.read.get_untracked() == Some(RowsRead::OneByOne)
-            && next * CHUNK < total
-            && !asked.with_value(|asked| asked.contains(&next))
-        {
+        let next = (end - 1) / CHUNK + 1;
+        if next * CHUNK < total && !asked.with_value(|asked| asked.contains(&next)) {
+            ahead.push(next);
+        }
+        ahead.retain(|chunk| read_ahead.try_update_value(|read| read.insert(*chunk)) == Some(true));
+        if !whole && !ahead.is_empty() {
             let node = reader.clone();
             spawn_local(async move {
-                let request = ExplorerRequest::Prefetch {
-                    targets: vec![PrefetchTarget::BlockTxs {
+                let targets = ahead
+                    .into_iter()
+                    .map(|chunk| PrefetchTarget::BlockTxs {
                         hash,
-                        offset: next * CHUNK,
+                        offset: chunk * CHUNK,
                         limit: CHUNK as u16,
-                    }],
-                };
-                let _ = api::explorer(&node, request).await;
+                    })
+                    .collect();
+                let _ = api::explorer(&node, ExplorerRequest::Prefetch { targets }).await;
             });
         }
     });
