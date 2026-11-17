@@ -501,6 +501,9 @@ struct Zingod {
     tip: Option<Checked<zingod_rules::TipCheck>>,
     tip_due: Option<tokio::time::Instant>,
     tip_running: bool,
+    /// A restart was asked of a running zingod, which hasn't stopped yet: the rules see it as
+    /// starting, so the front door stays `Unavailable` through the restart.
+    restarting: bool,
     /// The actor's own reading of the index folder.
     disk: Option<(std::path::PathBuf, IndexDisk)>,
     disk_due: Option<tokio::time::Instant>,
@@ -524,6 +527,7 @@ impl Zingod {
             tip: None,
             tip_due: None,
             tip_running: false,
+            restarting: false,
             disk: None,
             disk_due: None,
             disk_running: false,
@@ -886,6 +890,7 @@ impl Actor {
             stuck: self.zingod.stuck,
             mismatch: self.zingod.mismatch,
             tip: self.zingod.tip.clone(),
+            restarting: self.zingod.restarting,
             dir,
         })
     }
@@ -981,6 +986,11 @@ impl Actor {
             return changed;
         }
         let runner = &zingod.runner;
+        // A restart asked of a running zingod has begun once it no longer runs.
+        if self.zingod.restarting && runner.phase != Phase::Running {
+            self.zingod.restarting = false;
+            changed = true;
+        }
         let status = runner
             .status
             .as_ref()
@@ -1042,9 +1052,11 @@ impl Actor {
     }
 
     /// A new attempt for zingod: the runner restarts it, or starts it again after a failure
-    /// that waited for the user. The front door goes `Unavailable` first.
+    /// that waited for the user. The front door goes `Unavailable` first, and stays so until
+    /// the restart has begun.
     fn restart_zingod(&mut self) {
         self.door_unavailable();
+        self.zingod.restarting = self.zingod.facts().phase == Phase::Running;
         self.zingod.attempt += 1;
     }
 
@@ -1978,10 +1990,16 @@ impl Actor {
             StepId::Service => {
                 self.endpoint_error = None;
                 // zingod's Try again: a new attempt starts it again after a failure that waits
-                // for the user.
-                if self
-                    .spec()
-                    .is_some_and(|spec| spec.backend == LightBackend::Zingod)
+                // for the user, or restarts one that is stuck. A zingod that runs well keeps
+                // running.
+                let runner = self.zingod.facts();
+                let waits = !runner.phase.is_active()
+                    || runner.stale.is_some()
+                    || self.zingod.stuck.is_some();
+                if waits
+                    && self
+                        .spec()
+                        .is_some_and(|spec| spec.backend == LightBackend::Zingod)
                 {
                     self.restart_zingod();
                     self.zingod.no_validator_restart = None;

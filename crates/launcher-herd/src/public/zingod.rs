@@ -666,6 +666,9 @@ pub struct IndexerFacts {
     pub mismatch: Option<u64>,
     /// The last tip cross-check.
     pub tip: Option<Checked<TipCheck>>,
+    /// The actor asked the runner to restart a running zingod, which hasn't stopped yet: it
+    /// serves no more.
+    pub restarting: bool,
 }
 
 /// Bytes in a GB, for the setup's needs.
@@ -865,6 +868,9 @@ pub fn problem(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReason
             | Blocked::NoSpace => starting(IndexerWait::Boot),
         },
         Want::Run(run) => {
+            if zingod.restarting {
+                return starting(IndexerWait::Boot);
+            }
             if runner.stale.is_some() {
                 return Some(DegradedReason::IndexerFailed {
                     class: ExitClass::DbLocked,
@@ -1960,6 +1966,7 @@ mod service_tests {
                 at: at(NOW - 30),
                 result: TipCheck::Match,
             }),
+            restarting: false,
         });
         (spec, facts)
     }
@@ -2505,6 +2512,13 @@ mod service_tests {
                 "a chain mismatch",
                 |f| zingod(f).mismatch = Some(4_611_980),
                 DegradedReason::ChainMismatch { at: 4_611_980 },
+            ),
+            (
+                "a restart Zeal asked for, before zingod stops",
+                |f| zingod(f).restarting = true,
+                DegradedReason::IndexerStarting {
+                    waiting: IndexerWait::Boot,
+                },
             ),
             (
                 "an untested pair after a zebrad pin or channel change",

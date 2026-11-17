@@ -307,6 +307,7 @@ fn zingod_serving(network: Network) -> IndexerFacts {
             at: now - Duration::from_secs(20),
             result: TipCheck::Match,
         }),
+        restarting: false,
     }
 }
 
