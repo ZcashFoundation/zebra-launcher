@@ -111,25 +111,7 @@ impl HoverCards {
                 {
                     return;
                 }
-                spawn_local(async move {
-                    let request = ExplorerRequest::Card {
-                        target: wanted.clone(),
-                    };
-                    match api::explorer(&node, request).await {
-                        Ok(reply) => {
-                            if let ExplorerResponse::Card(card) = reply.response {
-                                self.cards.try_update(|cards| {
-                                    cards.insert(key, card);
-                                });
-                            }
-                        }
-                        Err(error) => {
-                            if self.generation.try_get_value() == Some(mine) {
-                                self.failed.try_set(Some((mine, wanted, error.kind)));
-                            }
-                        }
-                    }
-                });
+                spawn_local(self.read(node, key, wanted, mine));
             },
             ASK_AFTER,
         );
@@ -149,6 +131,27 @@ impl HoverCards {
             },
             SHOW_AFTER,
         );
+    }
+
+    /// Reads the card `key` names for the hover `mine`.
+    async fn read(self, node: NodeId, key: (NodeId, CardTarget), wanted: CardTarget, mine: u64) {
+        let request = ExplorerRequest::Card {
+            target: wanted.clone(),
+        };
+        match api::explorer(&node, request).await {
+            Ok(reply) => {
+                if let ExplorerResponse::Card(card) = reply.response {
+                    self.cards.try_update(|cards| {
+                        cards.insert(key, card);
+                    });
+                }
+            }
+            Err(error) => {
+                if self.generation.try_get_value() == Some(mine) {
+                    self.failed.try_set(Some((mine, wanted, error.kind)));
+                }
+            }
+        }
     }
 
     /// The card was dismissed, or what it was under has moved: it goes now.
