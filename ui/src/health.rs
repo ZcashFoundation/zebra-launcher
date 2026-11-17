@@ -2548,6 +2548,20 @@ mod tests {
             machine.volumes = vec![other];
         });
         assert_eq!(scene.verdict().rule, 17);
+
+        // A reading that stopped coming (its folder's read hangs, and the samples carry it on)
+        // says nothing once it is more than 90 s old.
+        let mut scene = Scene::syncing(1200);
+        scene.disk(1170, 1200, |_| 1_400_000_000);
+        let stale = |_: u64, machine: &mut MachineResources| {
+            machine.volumes = vec![volume(1200, 1_400_000_000)];
+        };
+        scene.machine_with(1205, 1290, stale);
+        scene.until(1290);
+        assert_eq!(scene.verdict().rule, 19, "90 s old");
+        scene.machine_with(1295, 1295, stale);
+        scene.until(1295);
+        assert_eq!(scene.verdict().rule, 17);
     }
 
     #[test]
@@ -2684,6 +2698,19 @@ mod tests {
         scene.disk(1100, 1200, |_| 40_000_000_000);
         scene.info.network = launcher_types::Network::Testnet;
         assert_eq!(scene.verdict().rule, 17);
+        // Nor from a reading that stopped coming.
+        let mut scene = Scene::syncing(1200);
+        scene.disk(1100, 1200, |_| 40_000_000_000);
+        scene.machine_with(1205, 1300, |_, machine| {
+            machine.volumes = vec![volume(1200, 40_000_000_000)];
+        });
+        scene.until(1300);
+        scene.metrics = Some(metrics(1300, &[state]));
+        assert_eq!(scene.verdict().rule, 17);
+        scene.disk(1305, 1305, |_| 40_000_000_000);
+        scene.until(1305);
+        scene.metrics = Some(metrics(1305, &[state]));
+        assert_eq!(scene.verdict().rule, 21, "a fresh reading again");
     }
 
     #[test]

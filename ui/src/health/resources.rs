@@ -10,14 +10,16 @@ use std::time::{Duration, SystemTime};
 
 use launcher_types::{
     ExitClass, ExitInfo, MachineResources, MemoryPressure, Network, NodeId, NodeInfo, NodeKind,
-    NodeResources,
+    NodeResources, VolumeUsage,
 };
 
 use super::{Action, Facts, Level, STALE_AFTER, Verdict, for_text};
 use crate::{
     charts::byte_rate,
     format::{LOW_SPACE_BYTES, bytes, cores, mem_bytes, mem_of, share, thousands},
-    machine_history::{Episode, MachineHistory, VOLUME_GAP, available_share, commit_share},
+    machine_history::{
+        Episode, MachineHistory, VOLUME_GAP, available_share, commit_share, volume_fresh,
+    },
     metrics_history::names,
     pages::dashboard::resources::{last_run_text, machine_text},
     resource_history::{RATE_WINDOW, ResourceHistory},
@@ -110,7 +112,7 @@ impl ResourceInput<'_> {
         }
         if let Some(machine) = self.machine {
             let busy = self.machine_history.busy_cores(RATE_WINDOW, now);
-            lines.push(machine_text(machine, busy, &self.info.id));
+            lines.push(machine_text(machine, busy, &self.info.id, now));
         }
         lines
     }
@@ -163,25 +165,27 @@ impl Facts<'_> {
         &self.input.resources
     }
 
-    /// The free space readings of the node's volume as an episode's readings.
-    fn free_readings(&self) -> Vec<(SystemTime, Option<f64>)> {
-        let resources = self.resources();
-        resources
-            .machine_history
-            .volume_readings(&resources.info.id)
-            .iter()
-            .map(|volume| (volume.measured_at, Some(volume.free_bytes as f64)))
-            .collect()
-    }
-
-    // Rule 19.
-    pub(super) fn disk_low(&self) -> Option<Verdict> {
+    /// The readings of the node's volume, oldest first, while the newest still says how the
+    /// volume is ([`volume_fresh`]); none once its folder's read hangs.
+    fn volume_readings(&self) -> Vec<&VolumeUsage> {
         let resources = self.resources();
         let readings = resources
             .machine_history
             .volume_readings(&resources.info.id);
+        match readings.last() {
+            Some(newest) if volume_fresh(newest, self.now()) => readings,
+            _ => Vec::new(),
+        }
+    }
+
+    // Rule 19.
+    pub(super) fn disk_low(&self) -> Option<Verdict> {
+        let readings = self.volume_readings();
         let newest = *readings.last()?;
-        let free = self.free_readings();
+        let free: Vec<_> = readings
+            .iter()
+            .map(|volume| (volume.measured_at, Some(volume.free_bytes as f64)))
+            .collect();
         let place = format!("the disk with this node's data ({})", newest.label);
         if Episode::current(
             free.iter().copied(),
@@ -328,9 +332,8 @@ impl Facts<'_> {
         }
         let state = self.metric_count(names::DISK_BYTES)?;
         let history = self.input.metrics_history;
-        let readings = resources
-            .machine_history
-            .volume_readings(&info.id)
+        let volumes = self.volume_readings();
+        let readings = volumes
             .iter()
             .map(|volume| {
                 let state = history
@@ -347,11 +350,7 @@ impl Facts<'_> {
             FIT_FOR,
             VOLUME_GAP,
         )?;
-        let volume = resources
-            .machine_history
-            .volume_readings(&info.id)
-            .last()
-            .copied()?;
+        let volume = volumes.last()?;
         Some(Verdict::new(
             Level::Attention,
             21,
@@ -400,7 +399,8 @@ impl Facts<'_> {
             .volume_readings(&resources.info.id)
             .into_iter()
             .rev()
-            .find(|volume| volume.measured_at <= exit.at);
+            .find(|volume| volume.measured_at <= exit.at)
+            .filter(|volume| volume_fresh(volume, exit.at));
         if let Some(volume) = disk.filter(|volume| volume.free_bytes < DISK_FULL_BYTES) {
             sentences.push(format!(
                 "only {} was free on its disk",

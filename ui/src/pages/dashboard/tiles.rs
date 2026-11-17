@@ -16,6 +16,7 @@ use crate::{
     clock,
     format::{bytes, exit_class_text, local_datetime_short, relative, thousands},
     health::STALE_AFTER,
+    machine_history::volume_fresh,
     stats_history::Field,
 };
 
@@ -359,12 +360,16 @@ pub(super) fn Tiles(dash: Dash) -> impl IntoView {
     // free space on its volume; the warning tone follows the verdict's disk rules.
     let disk_bytes = Memo::new(move |_| dash.metrics.get().and_then(|facts| facts.disk_bytes));
     let disk_value = Signal::derive(move || disk_bytes.get().map_or_else(|| "—".to_owned(), bytes));
+    // A reading that stopped coming (its folder's read hangs) is left out, as the verdict
+    // leaves it out.
     let free = Memo::new(move |_| {
         let node = state.node().info.with(|info| info.id.clone());
+        let now = state.now.get();
         state.machine.with(|machine| {
             machine
                 .as_ref()
                 .and_then(|machine| machine.volume_of(&node))
+                .filter(|volume| volume_fresh(volume, now))
                 .map(|volume| volume.free_bytes)
         })
     });

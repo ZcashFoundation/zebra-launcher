@@ -1087,7 +1087,8 @@ gains their rows.
     disk or exhausted memory is what makes RPC go quiet and the sync stall.
   - Rule 21 is forward-looking, like the end-of-support warning, so it runs after rule 15
     and before rule 16.
-- **Staleness.** Rule 20 needs a computer sample younger than `STALE_AFTER` (30 s).
+- **Staleness.** Rule 20 needs a computer sample younger than `STALE_AFTER` (30 s), and
+  rules 19 and 21 a volume reading younger than three of its 30 s intervals.
 - **Reasons** name the facts:
   - "1.4 GB free on the disk with this node's data (/mnt/zcash). zebrad stops when a write
     fails; free some space or move the data folder."
@@ -1709,8 +1710,10 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      is in launcher-core.
      `MachineHistory` also gains `latest`, `volume_readings(node)` (one per reading, though
      the samples carry each for 30 s) and `any_between` for the exit sentences.
-   - Only rule 20 checks the computer sample's age, as designed; rules 19 and 21 read the
-     newest volume reading of any age. Rule 19's warning reads "12.0 GB free of 1,000.0 GB on
+   - Rule 20 checks the computer sample's age, as designed. Rules 19 and 21, the Disk tile,
+     the card's footer (and Copy summary's computer line) and the exit's disk sentence leave
+     out a volume reading more than `VOLUME_GAP` (90 s) old (`volume_fresh`), since a folder
+     whose read hangs keeps its last reading in every sample. Rule 19's warning reads "12.0 GB free of 1,000.0 GB on
      the disk with this node's data (/mnt/zcash) for 3 min. zebrad stops when a write
      fails."; rule 20's on macOS "macOS reports critical memory pressure for 1 min; Zebra ·
      Mainnet uses 6.1 GiB of it", and on Windows "Windows has committed 23 of 24 GiB (96 %)

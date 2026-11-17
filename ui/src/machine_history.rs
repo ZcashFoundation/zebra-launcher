@@ -89,6 +89,13 @@ fn level(pressure: MemoryPressure) -> f64 {
     }
 }
 
+/// Whether a volume reading still says how the volume is at `now`: it was read within
+/// [`VOLUME_GAP`]. A folder whose read hangs keeps its last reading in the samples, with its
+/// time, so an older one would show figures that no longer hold.
+pub fn volume_fresh(volume: &VolumeUsage, now: SystemTime) -> bool {
+    now.duration_since(volume.measured_at).unwrap_or_default() <= VOLUME_GAP
+}
+
 /// The share of a computer's memory available: `None` without the figure.
 pub fn available_share(machine: &MachineResources) -> Option<f64> {
     let available = machine.memory_available_bytes?;
@@ -509,6 +516,9 @@ mod tests {
         let readings = history.volume_readings(&node);
         let free: Vec<u64> = readings.iter().map(|volume| volume.free_bytes).collect();
         assert_eq!(free, vec![1000, 970]);
+        // The newest, read at 30 s, says how the volume is for 90 s.
+        assert!(volume_fresh(readings[1], at(120)));
+        assert!(!volume_fresh(readings[1], at(121)));
         assert!(history.volume_readings(&other).is_empty());
         assert!(history.any_between(at(10), at(20), |m| m.at == at(15)));
         assert!(!history.any_between(at(10), at(20), |m| m.at == at(25)));
