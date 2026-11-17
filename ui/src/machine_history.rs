@@ -111,6 +111,18 @@ impl EpisodeFold {
     }
 }
 
+/// Where the newest run of `readings` with the newest one's label starts.
+fn run_start(readings: &[&VolumeUsage]) -> usize {
+    readings
+        .last()
+        .and_then(|newest| {
+            readings
+                .iter()
+                .rposition(|volume| volume.label != newest.label)
+        })
+        .map_or(0, |before| before + 1)
+}
+
 /// A pressure level as a number, for [`Episode::current`].
 fn level(pressure: MemoryPressure) -> f64 {
     match pressure {
@@ -265,14 +277,7 @@ impl MachineHistory {
     /// readings of a volume its data folder was moved from are left out.
     pub fn current_volume_readings(&self, node: &NodeId) -> Vec<&VolumeUsage> {
         let mut readings = self.volume_readings(node);
-        let start = readings
-            .last()
-            .and_then(|newest| {
-                readings
-                    .iter()
-                    .rposition(|volume| volume.label != newest.label)
-            })
-            .map_or(0, |before| before + 1);
+        let start = run_start(&readings);
         readings.split_off(start)
     }
 
