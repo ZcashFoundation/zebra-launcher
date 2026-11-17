@@ -1083,8 +1083,13 @@ gains their rows.
 | 21 The chain may not fit | Attention | Mainnet zebrad, not at the tip: free space + the state size (`zebra_state_rocksdb_total_disk_size_bytes`) under `LOW_SPACE_BYTES` (300 GB) × 1.05, for 1 min | Above × 1.10 | Open data folder |
 
 - **Order.**
-  - Rules 19 and 20 run first in the running chain, before rule 7 (RPC silent): a full
-    disk or exhausted memory is what makes RPC go quiet and the sync stall.
+  - Rules 19 and 20 at their Problem level ("Disk almost full", "Memory nearly exhausted")
+    run first in the running chain, before rule 7 (RPC silent): a full disk or exhausted
+    memory is what makes RPC go quiet and the sync stall.
+  - Their Attention level ("Disk space low", "Memory low") causes none of that: 15 GB free,
+    or under 10 % available for a whole Mainnet sync on an 8 or 16 GiB computer, leaves the
+    peers, the RPC and the sync alone. So they run after rule 15, before rule 21, and never
+    hide a running problem such as "No peers" and its actions.
   - Rule 21 is forward-looking, like the end-of-support warning, so it runs after rule 15
     and before rule 16.
 - **Staleness.** Rule 20 needs a computer sample younger than `STALE_AFTER` (30 s), and

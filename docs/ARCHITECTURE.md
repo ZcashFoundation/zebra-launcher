@@ -651,13 +651,13 @@ Install, Cancel, Open data folder, and the recovery actions of a failed launcher
 The 21 rules are tried in order and the first match wins, cause before symptom: a failed
 launcher update (1); every phase but running (2 to 6: failed, backoff or crash loop,
 stopping, stopped or an earlier zebrad still running, starting or a slow start); what can be
-wrong while running: the disk with the node's data almost full or low (19) and the
-computer's memory nearly exhausted or low (20, on the node that uses the most of it), before
-7 to 16 (a silent RPC, no peers, a stalled sync, no new block at the tip, an urgent end of
-support or an install countdown, few peers, a slow sync, recent errors in the log, a
-restart after a crash) and, between 15 and 16, a syncing Mainnet zebrad whose chain may not
-fit its disk (21), then the end-of-support warning (16); then syncing (17) and healthy at
-the tip (18). The resource rules (`ui/src/health/resources.rs`, docs/RESOURCES.md) each have
+wrong while running: the disk with the node's data almost full (19) and the computer's
+memory nearly exhausted (20, on the node that carries the memory verdict), before 7 to 16
+(a silent RPC, no peers, a stalled sync, no new block at the tip, an urgent end of support
+or an install countdown, few peers, a slow sync, recent errors in the log, a restart after
+a crash) and, between 15 and 16, the disk space low (19) and the memory low (20), which
+cause none of 7 to 14, and a syncing Mainnet zebrad whose chain may not fit its disk (21),
+then the end-of-support warning (16); then syncing (17) and healthy at the tip (18). The resource rules (`ui/src/health/resources.rs`, docs/RESOURCES.md) each have
 a sustain time and a leave margin (`machine_history::Episode`), and rules 2, 3 and 15 add a
 sentence when the memory or the disk had run short in the minute before an exit. Rule 0, `Verdict::connecting`, stands in before the first status. The thresholds
 are the named constants at the top of the file (`STALE_AFTER` 30 s, `RPC_FIRST_ANSWER`

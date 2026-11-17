@@ -213,13 +213,14 @@ pub fn health_verdict(input: &HealthInput<'_>) -> Verdict {
         Phase::Starting => return facts.starting(),
         Phase::Running => {}
     }
-    // 19 and 20 first: a full disk or exhausted memory is what makes the RPC go quiet and the
-    // sync stall. Then 7 to 16, what can be wrong while running, cause before symptom, with
-    // 21, a forward-looking warning like the end of support, before 16; then 17 and 18,
-    // running as it should.
+    // 19 and 20 at their problem level first: a full disk or exhausted memory is what makes
+    // the RPC go quiet and the sync stall. Then 7 to 16, what can be wrong while running, cause
+    // before symptom, with 19 and 20 at their warning level, which cause none of that, and 21,
+    // a forward-looking warning like the end of support, after 15 and before 16; then 17 and
+    // 18, running as it should.
     facts
-        .disk_low()
-        .or_else(|| facts.memory_low())
+        .disk_full()
+        .or_else(|| facts.memory_exhausted())
         .or_else(|| facts.rpc_silent())
         .or_else(|| facts.no_peers())
         .or_else(|| facts.stalled())
@@ -229,6 +230,8 @@ pub fn health_verdict(input: &HealthInput<'_>) -> Verdict {
         .or_else(|| facts.slow())
         .or_else(|| facts.recent_errors())
         .or_else(|| facts.restarted_after_crash())
+        .or_else(|| facts.disk_space_low())
+        .or_else(|| facts.memory_low())
         .or_else(|| facts.chain_may_not_fit())
         .or_else(|| facts.eos_warning())
         .unwrap_or_else(|| facts.running())
@@ -2826,6 +2829,52 @@ mod tests {
             estimated_time: t(1200 + 10 * 86_400),
         });
         assert_eq!(scene.verdict().rule, 21);
+        scene.status.last_exit = Some(ExitInfo {
+            at: t(0) - Duration::from_secs(60),
+            ..exit(ExitClass::Crash, Some(101), 0, false)
+        });
+        assert_eq!(scene.verdict().rule, 15);
+    }
+
+    #[test]
+    fn low_disk_or_memory_leaves_the_running_problems_their_verdict() {
+        // No peers for two minutes: rule 8.
+        let no_peers = || {
+            let mut scene = Scene::syncing(600);
+            scene.peers_from(470, 0);
+            scene
+        };
+        assert_eq!(no_peers().verdict().rule, 8);
+        // 15 GB free of 1 TB is low, but it is not why there are no peers.
+        let mut scene = no_peers();
+        scene.disk(400, 600, |_| 15_000_000_000);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (8, Level::Problem));
+        // Nor is 9 % of the memory available for 5 min, usual during a Mainnet sync.
+        let mut scene = no_peers();
+        scene.sampled(200, 600, 1_546_188_227);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (8, Level::Problem));
+        // A disk under 2 GB is the cause, as is exhausted memory.
+        let mut scene = no_peers();
+        scene.disk(570, 600, |_| 1_400_000_000);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (19, Level::Problem));
+        let mut scene = no_peers();
+        scene.sampled(200, 600, 644_245_094);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (20, Level::Problem));
+        // Low space comes after a restart from a crash, and before the chain that may not fit
+        // and the end of support's warning.
+        let mut scene = Scene::syncing(1200);
+        scene.metrics = Some(metrics(1200, &[(names::DISK_BYTES, 248_300_000_000.0)]));
+        scene.disk(1100, 1200, |_| 15_000_000_000);
+        scene.stats.as_mut().unwrap().eos = Some(EosInfo {
+            block_height: 3_160_000,
+            estimated_time: t(1200 + 10 * 86_400),
+        });
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (19, Level::Attention));
         scene.status.last_exit = Some(ExitInfo {
             at: t(0) - Duration::from_secs(60),
             ..exit(ExitClass::Crash, Some(101), 0, false)

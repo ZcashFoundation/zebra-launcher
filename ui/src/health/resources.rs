@@ -60,6 +60,9 @@ pub const FIT_FOR: Duration = Duration::from_secs(60);
 /// The exit sentences look this far back from an exit.
 pub const BEFORE_EXIT: Duration = Duration::from_secs(60);
 
+/// A reading for [`Episode::current`]: its time and its value, if it has one.
+type Reading = (SystemTime, Option<f64>);
+
 /// Whether `node` uses the most memory among the nodes with a run (`memory`, the newest
 /// sample of each, `None` without a run; the first of equals). The memory verdict goes only
 /// on that node, of either network.
@@ -178,35 +181,46 @@ impl Facts<'_> {
         }
     }
 
-    // Rule 19.
-    pub(super) fn disk_low(&self) -> Option<Verdict> {
+    /// The free space readings of the node's volume as an episode's readings, with the newest;
+    /// `None` without a fresh one.
+    fn free_readings(&self) -> Option<(&VolumeUsage, Vec<Reading>)> {
         let readings = self.volume_readings();
         let newest = *readings.last()?;
-        let free: Vec<_> = readings
+        let free = readings
             .iter()
             .map(|volume| (volume.measured_at, Some(volume.free_bytes as f64)))
             .collect();
-        let place = format!("the disk with this node's data ({})", newest.label);
-        if Episode::current(
-            free.iter().copied(),
+        Some((newest, free))
+    }
+
+    // Rule 19, its problem: under 2 GB free on one reading. It runs before rule 7, as a full
+    // disk is what stops zebrad's writes, its RPC and its sync.
+    pub(super) fn disk_full(&self) -> Option<Verdict> {
+        let (newest, free) = self.free_readings()?;
+        Episode::current(
+            free,
             |bytes| bytes < DISK_FULL_BYTES as f64,
             |bytes| bytes > DISK_FULL_CLEARS as f64,
             Duration::ZERO,
             VOLUME_GAP,
-        )
-        .is_some()
-        {
-            return Some(Verdict::new(
-                Level::Problem,
-                19,
-                "Disk almost full",
-                format!(
-                    "{} free on {place}. zebrad stops when a write fails; free some space or move the data folder.",
-                    bytes(newest.free_bytes)
-                ),
-                vec![Action::OpenDataFolder],
-            ));
-        }
+        )?;
+        Some(Verdict::new(
+            Level::Problem,
+            19,
+            "Disk almost full",
+            format!(
+                "{} free on {}. zebrad stops when a write fails; free some space or move the data folder.",
+                bytes(newest.free_bytes),
+                disk_place(newest)
+            ),
+            vec![Action::OpenDataFolder],
+        ))
+    }
+
+    // Rule 19, its warning: under min(5 %, 20 GB) free for a minute. It stops nothing yet, so
+    // it runs after rule 15 and leaves the running problems their verdict.
+    pub(super) fn disk_space_low(&self) -> Option<Verdict> {
+        let (newest, free) = self.free_readings()?;
         let threshold = ((newest.total_bytes as f64 * DISK_LOW_SHARE) as u64).min(DISK_LOW_BYTES);
         let episode = Episode::current(
             free,
@@ -220,17 +234,31 @@ impl Facts<'_> {
             19,
             "Disk space low",
             format!(
-                "{} free of {} on {place} {}. zebrad stops when a write fails.",
+                "{} free of {} on {} {}. zebrad stops when a write fails.",
                 bytes(newest.free_bytes),
                 bytes(newest.total_bytes),
+                disk_place(newest),
                 for_text(self.ago(episode.since))
             ),
             vec![Action::OpenDataFolder],
         ))
     }
 
-    // Rule 20.
+    // Rule 20, its problem: the computer's memory nearly exhausted. It runs before rule 7, as
+    // exhausted memory is what makes the RPC go quiet and the sync stall.
+    pub(super) fn memory_exhausted(&self) -> Option<Verdict> {
+        self.memory(Level::Problem)
+    }
+
+    // Rule 20, its warning: the computer's memory low. Under 10 % for the whole of a Mainnet
+    // sync is usual on an 8 or 16 GiB computer (zebra#9699), so it runs after rule 15 and
+    // leaves the running problems their verdict.
     pub(super) fn memory_low(&self) -> Option<Verdict> {
+        self.memory(Level::Attention)
+    }
+
+    /// Rule 20 at `level`, the problem or the warning, on the node that carries it.
+    fn memory(&self, level: Level) -> Option<Verdict> {
         let resources = self.resources();
         if !resources.largest_consumer {
             return None;
@@ -280,34 +308,33 @@ impl Facts<'_> {
         };
         // macOS's available figure is an estimate, so its verdicts follow the pressure level.
         let macos = machine.pressure.is_some();
-        let problem = if macos {
-            history
-                .pressure_at_least_for(MemoryPressure::Critical, PRESSURE_FOR)
-                .map(pressure)
+        let (headline, reason) = if level == Level::Problem {
+            let reason = if macos {
+                history
+                    .pressure_at_least_for(MemoryPressure::Critical, PRESSURE_FOR)
+                    .map(pressure)
+            } else {
+                history
+                    .available_below_for(MEMORY_OUT_SHARE, MEMORY_OUT_FOR, MEMORY_OUT_CLEARS)
+                    .map(available)
+                    .or_else(|| {
+                        history
+                            .commit_above_for(COMMIT_FULL_SHARE, MEMORY_OUT_FOR, COMMIT_FULL_CLEARS)
+                            .map(commit)
+                    })
+            };
+            ("Memory nearly exhausted", reason?)
         } else {
-            history
-                .available_below_for(MEMORY_OUT_SHARE, MEMORY_OUT_FOR, MEMORY_OUT_CLEARS)
-                .map(available)
-                .or_else(|| {
-                    history
-                        .commit_above_for(COMMIT_FULL_SHARE, MEMORY_OUT_FOR, COMMIT_FULL_CLEARS)
-                        .map(commit)
-                })
-        };
-        let (level, headline, reason) = match problem {
-            Some(reason) => (Level::Problem, "Memory nearly exhausted", reason),
-            None => {
-                let low = if macos {
-                    history
-                        .pressure_at_least_for(MemoryPressure::Warning, PRESSURE_FOR)
-                        .map(pressure)
-                } else {
-                    history
-                        .available_below_for(MEMORY_LOW_SHARE, MEMORY_LOW_FOR, MEMORY_LOW_CLEARS)
-                        .map(available)
-                };
-                (Level::Attention, "Memory low", low?)
-            }
+            let reason = if macos {
+                history
+                    .pressure_at_least_for(MemoryPressure::Warning, PRESSURE_FOR)
+                    .map(pressure)
+            } else {
+                history
+                    .available_below_for(MEMORY_LOW_SHARE, MEMORY_LOW_FOR, MEMORY_LOW_CLEARS)
+                    .map(available)
+            };
+            ("Memory low", reason?)
         };
         // zebra#9699: a zebrad that grew to most of a computer's memory while syncing needs
         // much less after a restart.
@@ -419,6 +446,11 @@ fn sigkill(exit: &ExitInfo) -> bool {
             .detail
             .as_deref()
             .is_none_or(|detail| detail == "killed by signal 9")
+}
+
+/// Where rule 19 says the node's data is: `the disk with this node's data (/mnt/zcash)`.
+fn disk_place(volume: &VolumeUsage) -> String {
+    format!("the disk with this node's data ({})", volume.label)
 }
 
 /// A size in whole decimal units: `300 GB`.
