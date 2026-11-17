@@ -1334,8 +1334,11 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
   says how the read ended (`outcome`): answered, not found, another error, or no answer.
 - **Spent outputs** have no cache of their own by outpoint: they come from the block at
   verbosity 3, kept whole (reduced) by its hash, or from the earlier transactions, kept as
-  transactions. A small block is one of up to 256 transactions and 512 KB, the design's
-  thresholds until the P0 bench measures v3; a block whose size zebrad does not report (no
+  transactions. An input's output is the earlier transaction's output at that place, as
+  zebrad numbers them, so a transaction spending many outputs of one big parent is resolved
+  in linear time; an answer numbered otherwise leaves the input unresolved. A small block is
+  one of up to 256 transactions and 512 KB, the design's thresholds until the P0 bench
+  measures v3; a block whose size zebrad does not report (no
   `BlockInfo` row) counts as big, since it may be a full one of few transactions. A small
   block's body is decoded on the read's task, not in `spawn_blocking`. A big block's rows are read with `getrawtransaction(txid, 1)` without the
   block hash, so they share the transaction cache with the Transaction page. The earlier

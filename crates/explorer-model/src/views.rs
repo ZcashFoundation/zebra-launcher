@@ -329,9 +329,14 @@ pub fn spent_from_prevout(prevout: &Prevout) -> SpentOutput {
     }
 }
 
-/// Output `vout` of `parent`, as read with `getrawtransaction`.
+/// Output `vout` of `parent`, as read with `getrawtransaction`. zebrad numbers the outputs by
+/// their place, so the output is looked up by its place, in constant time however many inputs
+/// spend the parent; one numbered otherwise is not trusted.
 pub fn spent_from_parent(parent: &Tx, vout: u32) -> Option<SpentOutput> {
-    let output = parent.vout.iter().find(|output| output.n == vout)?;
+    let output = parent
+        .vout
+        .get(usize::try_from(vout).ok()?)
+        .filter(|output| output.n == vout)?;
     let height = parent
         .height
         .filter(|height| *height >= 0)
@@ -883,6 +888,34 @@ mod tests {
             ..parent
         };
         assert_eq!(spent_from_parent(&waiting, 0).unwrap().height, None);
+    }
+
+    #[test]
+    fn an_output_is_found_at_its_place() {
+        // zebrad numbers the outputs by their place: output 1 is the second.
+        let parent = Tx {
+            vout: vec![
+                output(5),
+                TxOut { n: 1, ..output(9) },
+                TxOut { n: 2, ..output(7) },
+            ],
+            ..tx()
+        };
+        assert_eq!(
+            spent_from_parent(&parent, 2).map(|spent| spent.zat),
+            Some(7)
+        );
+        // An answer whose numbers are not the places is not trusted: no output is guessed.
+        let shuffled = Tx {
+            vout: vec![output(5), TxOut { n: 2, ..output(9) }],
+            ..tx()
+        };
+        assert_eq!(spent_from_parent(&shuffled, 2), None);
+        assert_eq!(spent_from_parent(&shuffled, 1), None);
+        assert_eq!(
+            spent_from_parent(&shuffled, 0).map(|spent| spent.zat),
+            Some(5)
+        );
     }
 
     #[test]
