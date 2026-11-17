@@ -171,8 +171,12 @@ jobs:
   # cargo-lock-version.sh it runs and the licence folder it checks;
   # zingod-sidecars.yml with the select-targets.sh and targets.json that pick
   # its matrix; or the GLIBC_FLOOR and CARGO_DENY_* lines of tool-versions.env.
-  # bundle.yml builds it on every push to main. A job that calls a reusable
-  # workflow can't have steps, so this one decides.
+  # It also runs whenever the zingod contract test does (real-zingod below),
+  # which takes its zingod from this build: on every push to main, and on pull
+  # requests that change ZEBRAD_VERSION or ZEBRAD_COMMIT, zingod's adapter in
+  # launcher-core, its runner and contract test in launcher-public, or the
+  # front door (launcher-gateway). A job that calls a reusable workflow can't
+  # have steps, so this one decides.
   zingod-gate:
     name: Decide whether zingod is built
     runs-on: ubuntu-24.04
@@ -193,9 +197,15 @@ jobs:
         run: |
           set -euo pipefail
           run=false
-          if [ "${EVENT}" = pull_request ]; then
+          if [ "${EVENT}" = push ]; then
+            run=true
+          elif [ "${EVENT}" = pull_request ]; then
             changed="$(git diff --name-only "${BASE_SHA}...HEAD")"
             if grep -qxE 'ZINGOD_(VERSION|COMMIT|DATE)|scripts/(build-zingod|zingod-licenses|lib|check-glibc|cargo-lock-version|select-targets)\.sh|\.github/targets\.json|src-tauri/resources/licenses/zingod/.+|\.github/workflows/zingod-sidecars\.yml' <<< "${changed}"; then
+              run=true
+            fi
+            # The contract test's inputs (real-zingod).
+            if grep -qxE 'ZEBRAD_(VERSION|COMMIT)|crates/launcher-core/src/zingod/.+|crates/launcher-core/src/bin/fake-zingod\.rs|crates/launcher-public/src/zingod\.rs|crates/launcher-public/tests/real_zingod\.rs|crates/launcher-gateway/.+' <<< "${changed}"; then
               run=true
             fi
             # Of tool-versions.env, only the lines the build reads.
@@ -222,6 +232,66 @@ jobs:
     uses: ./.github/workflows/zingod-sidecars.yml
     with:
       attest: false
+
+  # The contract test against the real zingod and zebrad
+  # (crates/launcher-public/tests/real_zingod.rs), on both Linux targets: the
+  # aarch64 leg is what the Mainnet gate's first item needs. zingod comes from
+  # the zingod-sidecars build above, made in ubuntu:22.04, since a build on the
+  # 24.04 runner itself needs GLIBC_2.39 and the runner has no protoc; a
+  # binary built there runs on the 24.04 host. zebrad is the pinned release,
+  # fetched and verified on the host as real-zebrad does.
+  real-zingod:
+    name: Real-zingod contract test (${{ matrix.target }})
+    needs: [zingod-gate, zingod-sidecars]
+    if: needs.zingod-gate.outputs.run == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download this run's zingod
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          name: zingod-${{ matrix.target }}
+          path: ${{ runner.temp }}/zingod
+      # The binary checked against the pins and the sha256 its build recorded.
+      - name: Install and check zingod
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          die() { echo "::error::$*"; exit 1; }
+          # shellcheck disable=SC1091 # install_zingod lives in scripts/lib.sh
+          . scripts/lib.sh
+          install_zingod "${RUNNER_TEMP}/zingod" "${TARGET}" .
+          echo "ZINGOD_BIN=${GITHUB_WORKSPACE}/src-tauri/binaries/zeal-zingod-${TARGET}" >> "${GITHUB_ENV}"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      # cosign, sha256 and the GitHub attestation, as zebrad-sidecars.yml checks.
+      - name: Fetch and verify the pinned zebrad
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUIRE_ATTESTATION: "1"
+          TARGET: ${{ matrix.target }}
+        run: scripts/fetch-zebrad-linux.sh --target "${TARGET}" --out "${RUNNER_TEMP}/zebrad/zebrad"
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # `#[ignore]` so plain `cargo test` stays hermetic; --include-ignored runs
+      # it here, and it fails loudly without ZEBRAD_BIN or ZINGOD_BIN.
+      - name: Run the zingod contract test
+        env:
+          ZEBRAD_BIN: ${{ runner.temp }}/zebrad/zebrad
+        run: cargo test -p launcher-public --test real_zingod --locked -- --include-ignored --nocapture
 
   # Certificates against Pebble, Let's Encrypt's test ACME server, through the
   # real front door (crates/launcher-public/tests/pebble.rs). The test passes
