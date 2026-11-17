@@ -1,5 +1,6 @@
-//! Spawning zebrad and stopping it, and the OS process primitives behind the
-//! pid file ([`is_alive`], [`terminate_pid`], [`executable_of`]).
+//! Spawning zebrad or zingod ([`Launch`]) and stopping it, and the OS process
+//! primitives behind the pid file ([`is_alive`], [`terminate_pid`],
+//! [`executable_of`]).
 //!
 //! Spawning happens on one long-lived thread, the [`Spawner`]: on Linux the
 //! child's parent-death signal is tied to the thread that forked it, and on
@@ -16,7 +17,7 @@ use std::sync::{Arc, Weak};
 use std::{
     ffi::OsString,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     time::{Instant, SystemTime},
 };
@@ -26,6 +27,8 @@ use tokio::{
     runtime::Handle,
     sync::oneshot,
 };
+
+use crate::zingod::{ZingodCommand, command::NICE as ZINGOD_NICE};
 
 #[cfg(unix)]
 mod unix;
@@ -55,6 +58,19 @@ pub(crate) fn terminate_pid(pid: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
         unix::terminate(pid)
+    }
+    #[cfg(windows)]
+    {
+        windows::terminate_pid(pid)
+    }
+}
+
+/// Kills a process the launcher did not start and, on Unix, its process group, which a
+/// process Zeal spawned leads (`SIGKILL`); `TerminateProcess` on Windows.
+pub(crate) fn kill_pid(pid: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        unix::kill_group(pid)
     }
     #[cfg(windows)]
     {
@@ -137,6 +153,75 @@ impl ZebradCommand {
     /// tells the UI.
     pub fn stop_is_graceful(&self) -> bool {
         self.shutdown_on_stdin_close || cfg!(unix)
+    }
+}
+
+/// What a supervisor runs: zebrad, or the zingod the light client server runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Launch {
+    Zebrad(ZebradCommand),
+    Zingod(ZingodCommand),
+}
+
+impl From<ZebradCommand> for Launch {
+    fn from(command: ZebradCommand) -> Self {
+        Launch::Zebrad(command)
+    }
+}
+
+impl From<ZingodCommand> for Launch {
+    fn from(command: ZingodCommand) -> Self {
+        Launch::Zingod(command)
+    }
+}
+
+impl Launch {
+    /// The program's name, for the launcher's notes: `zebrad` or `zingod`.
+    pub fn program(&self) -> &'static str {
+        match self {
+            Launch::Zebrad(_) => "zebrad",
+            Launch::Zingod(_) => "zingod",
+        }
+    }
+
+    /// The binary, which the pid file records.
+    pub fn binary(&self) -> &Path {
+        match self {
+            Launch::Zebrad(command) => &command.binary,
+            Launch::Zingod(command) => &command.binary,
+        }
+    }
+
+    /// Whether a requested stop lets the program shut down: zingod gets `SIGTERM` on Unix, the
+    /// only platform it runs on.
+    pub fn stop_is_graceful(&self) -> bool {
+        match self {
+            Launch::Zebrad(command) => command.stop_is_graceful(),
+            Launch::Zingod(_) => cfg!(unix),
+        }
+    }
+
+    /// Whether a process an earlier launcher left that outlives the termination request is
+    /// killed once the stop grace has passed: zingod's is, since nothing else ends it; a stale
+    /// zebrad fails the start, for the user to decide.
+    pub fn kills_stale(&self) -> bool {
+        matches!(self, Launch::Zingod(_))
+    }
+
+    /// zebrad's command, if this runs zebrad.
+    pub fn zebrad(&self) -> Option<&ZebradCommand> {
+        match self {
+            Launch::Zebrad(command) => Some(command),
+            Launch::Zingod(_) => None,
+        }
+    }
+
+    /// zebrad's command to change, if this runs zebrad.
+    pub fn zebrad_mut(&mut self) -> Option<&mut ZebradCommand> {
+        match self {
+            Launch::Zebrad(command) => Some(command),
+            Launch::Zingod(_) => None,
+        }
     }
 }
 
@@ -258,11 +343,11 @@ impl ChildHandle {
 }
 
 struct SpawnRequest {
-    command: ZebradCommand,
+    command: Launch,
     reply: oneshot::Sender<io::Result<SpawnedChild>>,
 }
 
-/// Spawns zebrad processes from one dedicated thread.
+/// Spawns zebrad and zingod processes from one dedicated thread.
 #[derive(Clone, Debug)]
 pub struct Spawner {
     tx: std::sync::mpsc::Sender<SpawnRequest>,
@@ -295,7 +380,7 @@ impl Spawner {
     }
 
     /// Spawns `command` and returns its parts.
-    pub async fn spawn(&self, command: ZebradCommand) -> io::Result<SpawnedChild> {
+    pub async fn spawn(&self, command: Launch) -> io::Result<SpawnedChild> {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(SpawnRequest { command, reply })
@@ -315,40 +400,60 @@ fn is_zebra_env_var(key: &std::ffi::OsStr) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"ZEBRA_"))
 }
 
-/// Spawns on the calling thread. See the module docs for why that matters.
-fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
-    debug_assert!(
-        command.stops_when_launcher_dies(),
-        "kill_on_launcher_exit must stay on until shutdown_on_stdin_close is on"
-    );
+/// zingod's command line: `-c <config> start`, stdin null, and a cleared
+/// environment with only its five variables ([`ZingodCommand::env`]).
+fn zingod_command(command: &ZingodCommand) -> Command {
     let mut cmd = Command::new(&command.binary);
-    cmd.arg("-c").arg(&command.config).arg("start");
-    if command.shutdown_on_stdin_close {
-        cmd.arg(SHUTDOWN_ON_STDIN_CLOSE_ARG);
-        cmd.stdin(Stdio::piped());
-    } else {
-        cmd.stdin(Stdio::null());
-    }
-    cmd.args(&command.extra_args);
-    for (key, _) in std::env::vars_os() {
-        if is_zebra_env_var(&key) {
-            cmd.env_remove(key);
+    cmd.args(command.args());
+    cmd.stdin(Stdio::null());
+    cmd.env_clear();
+    cmd.envs(command.env());
+    cmd
+}
+
+/// Spawns on the calling thread. See the module docs for why that matters.
+fn spawn_here(command: &Launch) -> io::Result<SpawnedChild> {
+    let (mut cmd, nice) = match command {
+        Launch::Zebrad(command) => {
+            debug_assert!(
+                command.stops_when_launcher_dies(),
+                "kill_on_launcher_exit must stay on until shutdown_on_stdin_close is on"
+            );
+            let mut cmd = Command::new(&command.binary);
+            cmd.arg("-c").arg(&command.config).arg("start");
+            if command.shutdown_on_stdin_close {
+                cmd.arg(SHUTDOWN_ON_STDIN_CLOSE_ARG);
+                cmd.stdin(Stdio::piped());
+            } else {
+                cmd.stdin(Stdio::null());
+            }
+            cmd.args(&command.extra_args);
+            for (key, _) in std::env::vars_os() {
+                if is_zebra_env_var(&key) {
+                    cmd.env_remove(key);
+                }
+            }
+            cmd.env("ZEBRA_TRACING__USE_COLOR", "false");
+            cmd.env("ZEBRA_TRACING__FORCE_USE_COLOR", "false");
+            cmd.envs(
+                command
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.as_os_str(), v.as_os_str())),
+            );
+            (cmd, 0)
         }
-    }
-    cmd.env("ZEBRA_TRACING__USE_COLOR", "false");
-    cmd.env("ZEBRA_TRACING__FORCE_USE_COLOR", "false");
-    cmd.envs(
-        command
-            .env
-            .iter()
-            .map(|(k, v)| (k.as_os_str(), v.as_os_str())),
-    );
+        Launch::Zingod(command) => (zingod_command(command), ZINGOD_NICE),
+    };
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.kill_on_drop(true);
     #[cfg(unix)]
-    unix::prepare(&mut cmd);
+    unix::prepare(&mut cmd, nice);
     #[cfg(windows)]
-    windows::prepare(&mut cmd);
+    {
+        let _ = nice;
+        windows::prepare(&mut cmd);
+    }
 
     let mut child = cmd.spawn()?;
     let pid = child
@@ -356,7 +461,9 @@ fn spawn_here(command: &ZebradCommand) -> io::Result<SpawnedChild> {
         .ok_or_else(|| io::Error::other("the spawned zebrad has no pid"))?;
 
     #[cfg(windows)]
-    let job = match windows::attach_job(&child, command.kill_on_launcher_exit) {
+    let kill_on_launcher_exit = command.zebrad().is_none_or(|z| z.kill_on_launcher_exit);
+    #[cfg(windows)]
+    let job = match windows::attach_job(&child, kill_on_launcher_exit) {
         Ok(job) => job,
         Err(err) => {
             // The child is still suspended; kill_on_drop finishes it off.
@@ -413,6 +520,28 @@ mod tests {
         assert_eq!(command.stop_is_graceful(), cfg!(unix));
         command.shutdown_on_stdin_close = true;
         assert!(command.stop_is_graceful());
+    }
+
+    #[test]
+    fn a_launch_names_its_program_and_binary() {
+        use super::Launch;
+        use crate::zingod::ZingodCommand;
+
+        let mut zebrad = Launch::from(ZebradCommand::new("/bin/zebrad", "zebrad.toml"));
+        assert_eq!(zebrad.program(), "zebrad");
+        assert_eq!(zebrad.binary(), std::path::Path::new("/bin/zebrad"));
+        assert!(!zebrad.kills_stale());
+        zebrad.zebrad_mut().expect("zebrad").shutdown_on_stdin_close = true;
+        assert!(zebrad.stop_is_graceful());
+        assert!(zebrad.zebrad().is_some_and(|z| z.shutdown_on_stdin_close));
+
+        let mut zingod = Launch::from(ZingodCommand::new("/bin/zeal-zingod", "z.toml", "/h"));
+        assert_eq!(zingod.program(), "zingod");
+        assert_eq!(zingod.binary(), std::path::Path::new("/bin/zeal-zingod"));
+        assert_eq!(zingod.stop_is_graceful(), cfg!(unix));
+        assert!(zingod.kills_stale());
+        assert!(zingod.zebrad_mut().is_none());
+        assert!(zingod.zebrad().is_none());
     }
 
     #[test]

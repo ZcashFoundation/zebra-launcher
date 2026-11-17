@@ -387,7 +387,9 @@ To bump by hand, or to finish the watcher's pull request:
 
      Check the result against the commit shown on the GitHub release page.
 3. Run `scripts/check-versions.sh`. The fake zebrad reads `ZEBRAD_VERSION`
-   when it is built, so nothing else carries the version.
+   when it is built. launcher-herd's `TESTED_ZINGOD` carries it too: a
+   launcher-herd test fails until the new version is listed with the bundled
+   zingod, once `real_zingod.rs` passes against it.
    `scripts/bump-zebrad.sh <ver> <commit>` does step 2 and runs the check.
 4. Check the new Linux release locally:
    `scripts/fetch-zebrad-linux.sh --out /tmp/zebrad-check/zebrad`. The cosign
@@ -409,8 +411,9 @@ To bump by hand, or to finish the watcher's pull request:
 ## The bundled zingod (Linux)
 
 > **Built in Z1** ([PUBLIC-SERVICES.md](PUBLIC-SERVICES.md#phases-for-zingod)),
-> 2026-11-16: the pins, the build, its CI and the Linux bundles. Nothing runs
-> zingod until Z2 and Z3, whose parts below say so. Facts checked at zingod tag
+> 2026-11-16: the pins, the build, its CI and the Linux bundles. Z2 (2026-11-17)
+> runs it in tests only, through the supervisor and the light client server's
+> runner; the app runs it from Z3. The parts below say which phase each is. Facts checked at zingod tag
 > `v1.1.0`; paths under `packages/` are zingod's. Build times and sizes come
 > from builds on 2026-11-16. CI has not run the workflows yet, so the aarch64
 > build is still unverified.
@@ -430,8 +433,8 @@ on Linux only. Only the light client server runs it
   when it is built, through `launcher_types::zingod::version()` (an
   `include_str!`), as fake-zebrad reads `ZEBRAD_VERSION`, and a cargo test
   (`crates/launcher-core/tests/fake_zingod.rs`) checks that its `--version`
-  reports the file's version. From Z3, a launcher-herd test checks that the
-  version is on `TESTED_ZINGOD`.
+  reports the file's version. A launcher-herd test checks that the version is
+  on `TESTED_ZINGOD` and `ZINGOD_KNOWS`.
 - **The name.** The `zeal-` prefix keeps the `.deb`'s `/usr/bin/zeal-zingod`
   from shadowing a system `zingod`.
 - **The date** is the tag commit's date in UTC; zingod's CHANGELOG heads the
@@ -694,17 +697,24 @@ the archive.
   `cargo-lock-version.sh` it runs and the licence folder it checks; the
   workflow, with the `select-targets.sh` and `.github/targets.json` that pick
   its matrix; or the `GLIBC_FLOOR` and `CARGO_DENY_*` lines of
-  `.github/tool-versions.env`, which the gate finds in the file's diff. On
-  pushes to `main` it doesn't, since `bundle.yml` builds it then.
+  `.github/tool-versions.env`, which the gate finds in the file's diff.
   A job that calls a reusable workflow can't have steps, so a `zingod-gate`
   job diffs the pull request against its base, as `real-zebrad`'s gate step
   does, and outputs `run`. The `zingod-sidecars` job has `needs: zingod-gate`
   and `if: needs.zingod-gate.outputs.run == 'true'`. `ci.yml` grants only
   `contents: read`, and the called jobs declare `id-token: write` and
   `attestations: write`, so the calling job grants all three itself.
-- From Z2, `zingod-gate` also says run whenever the contract test runs
-  (PUBLIC-SERVICES.md's [Tests for zingod](PUBLIC-SERVICES.md#tests-for-zingod)),
-  whose `real-zingod` job takes its zingod from this call.
+- Since Z2, `zingod-gate` also says run whenever the contract test runs
+  (PUBLIC-SERVICES.md's [Tests for zingod](PUBLIC-SERVICES.md#tests-for-zingod)):
+  on every push to `main`, where `bundle.yml` builds zingod too, and on pull
+  requests that change `ZEBRAD_VERSION` or `ZEBRAD_COMMIT`, zingod's adapter
+  in launcher-core (and fake-zingod), its runner and contract test in
+  launcher-public, or the front door. Its `real-zingod` job runs
+  `real_zingod.rs` on `ubuntu-24.04` and `ubuntu-24.04-arm` with this call's
+  `zingod-<triple>`, installed with `install_zingod`, and the release zebrad
+  that `fetch-zebrad-linux.sh --target` verifies on the host. It downloads
+  that artifact with `run-id`, through the API, so it grants `actions: read`
+  beside `contents: read`, as `bundle.yml`'s build job does.
 - The workflow has an `attest` input, true by default, that both attestation
   steps follow. `ci.yml` passes false: a fork's pull request gets no OIDC
   token, and a binary built from an unmerged branch never carries an
@@ -843,7 +853,8 @@ zingod-x86_64-unknown-linux-gnu` and install it as the workflows do:
 `. scripts/lib.sh && install_zingod <folder> <triple> .`, after defining
 `die`. On a newer host `build-zingod.sh` builds but installs nothing, since the
 binary fails the glibc floor (on Ubuntu 24.04 it needs `GLIBC_2.39`). To try
-zingod out there, or, from Z2, to run `real_zingod.rs`, build the checkout with
+zingod out there, or to run `real_zingod.rs`
+([DEVELOPMENT.md](DEVELOPMENT.md#zingod)), build the checkout with
 plain cargo (`cargo build --locked --release -p zingod --bin zingod`, with
 `protoc` installed) and set `ZINGOD_BIN` to the result; only
 `build-zingod.sh`'s output is ever installed as `zeal-zingod`. Treat the
@@ -876,17 +887,25 @@ is unknown. Then:
    - `rust-toolchain.toml`, `[features]` and `Cargo.lock`'s git sources.
 3. Run the **zingod sidecars** workflow on both Linux targets: every check must
    pass. Read the advisory report.
-4. From Z2: capture the fixtures again with `real_zingod.rs`'s capture mode:
-   `zingod-<ver>-generate.toml`, the log lines, `/status` for each state and
-   the `LightdInfo` bytes. `cargo test` fails until the writer and the reader
+4. Capture the fixtures again with `real_zingod.rs`'s capture mode
+   (`ZINGOD_CAPTURE`, [DEVELOPMENT.md](DEVELOPMENT.md#log-fixtures)):
+   `zingod-<ver>-generate.toml`, the log lines and `/status` for each state. `cargo test` fails until the writer and the reader
    agree with them. `generate-config` leaves out keys that default to unset, so
    also check the writer's list of such keys (only `cookie_path` at 1.1.0)
    against `packages/zingod/src/config.rs`.
-5. From Z3: update `TESTED_ZINGOD` and `ZINGOD_KNOWS`.
-6. From Z2: run `real_zingod.rs` against the Stable zebrad pin (CI does this on
+5. Update `TESTED_ZINGOD` and `ZINGOD_KNOWS` in launcher-herd: `cargo test`
+   fails until the new version is on both.
+6. Run `real_zingod.rs` against the Stable zebrad pin (CI does this on
    the pull request), with `PREV_ZINGOD_BIN` set to the previous pin's build,
-   so an index the old one wrote must open with the new one. Then run
-   **Bundle**.
+   so an index the old one wrote must open with the new one. Its SIGTERM
+   case accepts 1.1.0's abort on `SIGTERM` (PUBLIC-SERVICES.md's
+   [How Zeal runs zingod](PUBLIC-SERVICES.md#how-zeal-runs-zingod)) and
+   prints a note when it happens. Check whether the new version still has
+   the `assert!` at `packages/zingod-sync/src/follower.rs:143` and
+   `packages/zingod-nfs/src/nfs.rs:118`; once a release fixes the race,
+   drop the case's allowance. fake-zingod's `abort-on-sigterm` and the
+   supervisor's and runner's tests that use it stay: a stop Zeal asked for
+   is a stop however zingod ends it. Then run **Bundle**.
 7. Before a release lists the new version as tested on a network, do the wallet
    runs there; a first Mainnet listing waits for PUBLIC-SERVICES.md's Mainnet
    gate.

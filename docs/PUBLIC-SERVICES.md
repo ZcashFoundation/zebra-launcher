@@ -20,8 +20,8 @@
 > ([Phases for zingod](#phases-for-zingod)): Z1 bundles the pinned, attested binary, which
 > nothing runs yet; Z2 supervises it, with a contract test and no UI; Z3 lets a Linux user choose
 > it for a Testnet light client server; Z4 opens Mainnet after a measured gate; Z5 brings macOS.
-> Z1 is built (2026-11-16; [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)); the others
-> aren't yet.
+> Z1 is built (2026-11-16; [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux)), and so is
+> Z2 (2026-11-17; [Z2 as built](#z2-as-built)); the others aren't yet.
 
 The maintainer asked for two optional services that a user can turn on at home. First: "an
 optional DNS seeder, pull in zeeder", and "The DNS seeder should let you expose the port and
@@ -534,7 +534,7 @@ flag (`?public=<flag>`).
 | zingod can't read zebrad's cookie: the path is a folder, or not readable | `ConfigError` with the cookie text | no restart | "zingod can't read Zebra · Testnet's cookie at /mnt/zebra/testnet/rpc/.cookie: Is a directory (os error 21). [Try again]" | the user's Try again | `zingod-cookie` |
 | zingod's port is taken | the check before the spawn, or `PortInUse` | moves to the next free port, once | "Other programs use ports 18137 and 18138. [Try again]" | the user | `zingod-port` |
 | another program holds the index | `DbLocked`, after the pid file ended Zeal's own leftover | waits | "Another program holds zingod's index in /mnt/zebra/zingod/testnet. [Try again]" | the user | `zingod-locked` |
-| the disk fills | free space every 60 s; `DiskFull` | stops zingod below 10 GB free, starts it above 20 GB | "Waiting for disk space: 6 GB free on /mnt/zebra. zingod starts again above 20 GB." | by itself | `zingod-disk` |
+| the disk fills | free space every 60 s; `DiskFull` | stops zingod below 10 GB free, starts it above 20 GB; after `DiskFull`, starts it again only when bytes ran out and are back, with inodes free | "Waiting for disk space: 6 GB free on /mnt/zebra. zingod starts again above 20 GB." | by itself, or the user's Try again after a quota or inodes ran out | `zingod-disk` |
 | the index is damaged, from another chain or of an older format | `IndexBroken` | no restart | "zingod's index is damaged. Rebuilding it takes hours, and wallets are told to try again meanwhile. [Rebuild]" | the user's Rebuild | `zingod-broken` |
 | zingod serves a block zebrad doesn't have | the tip cross-check | stops zingod | "zingod's chain doesn't match Zebra's at block 4,611,980. [Rebuild]" | the user's Rebuild | `zingod-mismatch` |
 | an upgrade zingod doesn't know is active | zebrad's upgrades against `ZINGOD_KNOWS` | doesn't start zingod; `BuildTooOld` | "zingod 1.1.0 doesn't know NU8, which is active. Wallets that use your server see an error until Zeal updates zingod." | a Zeal update | `zingod-tooold` |
@@ -559,7 +559,7 @@ logged for this run (`Status.rpc_addr`) and the cookie at `NodePaths::rpc_cookie
 always writes `cookie_path`, so zingod's own lookup (`<cache dir>/zebra/.cookie`) never runs.
 
 - **Tested pairs.** `TESTED_ZINGOD` in launcher-herd lists each zingod version with the zebrad
-  versions and networks it passed with: in Z3, 1.1.0 with zebrad 7.0.0 on Testnet; Z4 adds
+  versions and networks it passed with: since Z2, 1.1.0 with zebrad 7.0.0 on Testnet; Z4 adds
   Mainnet once its gate passes. Any other pair disables the choice at setup. For a light client
   server already set up with zingod it is `IndexerUntested`, a `Degraded` reason, so the front
   door stays up in `Unavailable` and renewals go on; PS1's `NotAvailable` would close it. One
@@ -583,7 +583,8 @@ these hold:
    tested, `zeal-zingod` is bundled, and no pause waits for the user.
 2. zebrad runs on the service's network, and this run has logged its RPC endpoint
    (`Status.rpc_addr`).
-3. zebrad's cookie exists, isn't empty, and was written at or after this run's `started_at`.
+3. zebrad's cookie exists and isn't empty. Its time isn't compared with the run's start
+   ([below](#when-zingod-runs)): the barrier is condition 2.
 4. zebrad has been at the tip, within 2 blocks, once in this run.
 5. No zingod failure waits for the user: a refused configuration, an unreadable cookie, a
    damaged index, a chain mismatch, a crash loop, a taken port or a held lock.
@@ -603,9 +604,15 @@ server unavailable, so the extra restart costs little.
 **Why the RPC line.** zebrad 7.0.0 logs `RPC auth cookie written to disk` just before
 `Opened RPC endpoint at` (fixtures `zebrad-7.0.0-lightwalletd-start-shutdown.stdout.log`, lines
 56-57, and `zebrad-7.0.0-regtest-start-shutdown.stdout.log`, lines 57-58), and the supervisor
-clears `Status.rpc_addr` at every spawn (`crates/launcher-core/src/supervisor/actor.rs:532,
-779`). So once `rpc_addr` is set, this run's cookie is on disk; the time check is the backstop. A
-zingod started on the previous run's cookie would never recover.
+clears `Status.rpc_addr` in the same status update that records a new run's pid and
+`started_at` (`install_run` in `crates/launcher-core/src/supervisor/actor.rs`), and again when
+the run ends (`finalize`). So a status whose `rpc_addr` is set names the run whose cookie is on
+disk: the run's identity (its pid and `started_at`) and the address come from that one status,
+and that is the readiness barrier (`launcher_public::zingod::zebrad_facts`). There is no time
+check behind it: the supervisor records `started_at` only once the asynchronous spawn has
+returned, so a quick zebrad can write its cookie before that moment, and a rule that wanted the
+cookie newer than `started_at` could hold zingod back for the whole run. A zingod started on the
+previous run's cookie would never recover, so the restart with each run stays.
 
 **Why the tip.** zingod can index only what zebrad has, and a first build beside a syncing zebrad
 doubles the heavy work. The wait applies after every zebrad restart too, where it is usually
@@ -618,6 +625,7 @@ short; the panel and zebrad's Stop and Restart say so.
 | switched off, a pause only the user ends, a network change, "Turn off and forget", the other backend chosen | stopped; the index stays |
 | any other automatic pause (the name, the LAN address, a VPN, the cap) | keeps running, so a resume serves at once, as PS1 keeps zebrad's endpoint |
 | less than 10 GB free on the index's disk | stopped with `SIGTERM`, so the indexes commit; started again above 20 GB |
+| zingod exits with `DiskFull` | started again above 20 GB only if bytes ran out (below 10 GB free just after the exit) and inodes are free; a quota, inodes, or bytes that were there all along wait for the user's Try again |
 | zingod exits on its own | [zingod's exits](#zingods-exits) |
 | Zeal quits | the front door closes first, within its 5 s cap (`src-tauri/src/exit.rs:108-111`); then zingod's stop runs beside the nodes', under the larger of the registry's cap and zingod's |
 
@@ -642,8 +650,8 @@ short; the panel and zebrad's Stop and Restart say so.
     today's: `-c <config> start`, the `ZEBRA_*` variables removed, the colour variables forced
     off and the stdin-close pairing checked. zingod's branch gets `-c <config> start`, stdin null,
     a cleared environment with its five variables (below), and no
-    stdin-close argument. `unix::prepare` takes a nice value and sets it in the same `pre_exec`
-    as the parent-death signal.
+    stdin-close argument. `unix::prepare` takes a nice value and adds it to the inherited one in
+    the same `pre_exec` as the parent-death signal.
   - The actor (`supervisor/actor.rs`): the spawn (`:456`) passes the `Launch`; the pid file
     records `Launch::binary()` (`:509`); the "started" note names the program, "zingod started
     (pid N)" (`:536`); and the detector, the line parser, the exit classifier and `Running` at
@@ -679,6 +687,26 @@ short; the panel and zebrad's Stop and Restart say so.
   shorten the drain (measured, despite the comment at `daemon.rs:526`), so Zeal sends one. The
   stop grace is 30 s (proposal), then `SIGKILL` to the process group. A killed zingod reopens its
   indexes by checking each file's length, tail page and `.crc` (`docs/running.md:291-295`).
+- **An abort on `SIGTERM`**, a bug in zingod 1.1.0 (an [upstream ask](#upstream-asks-for-zingod)).
+  The drain can end in a panic and an abort instead of exit 0: `assert!(cancel.is_cancelled(),
+  "header sync publishes the verified chain until cancel")` at
+  `packages/zingod-sync/src/follower.rs:143` (the same one is at
+  `packages/zingod-nfs/src/nfs.rs:118`) fires when header sync's chain watch closes before the
+  follower sees the cancel, and the panic hook aborts (`packages/zingod/src/main.rs:36-38`). The
+  contract test hit it once on x86_64, 285 ms into a stop with no connection open, and the same
+  case exited 0 on aarch64: a race in zingod's drain. Zeal can't fix it, and takes the exit as
+  the stop it asked for:
+  - the supervisor keeps it, with no exit code, `Crash`, the assertion as its detail and
+    `requested` set, in the status and in zingod's log beside the panic report;
+  - it ends the stop in `Stopped`, as any stop Zeal asked for, before the crash count, so it
+    starts no backoff and counts toward no crash loop;
+  - the runner and `want()` judge the phase, not the exit, so zingod starts again at once when it
+    should run, and nothing on the panel calls it a failure;
+  - like a kill, the abort leaves what the indexes had made durable, and zingod reopens them as
+    above.
+
+  fake-zingod's `abort-on-sigterm` plays it for the supervisor's and the runner's tests, and the
+  contract test accepts it with a note ([Tests for zingod](#tests-for-zingod)).
 - **Restarts** after a `Crash` use the supervisor's backoff: 1 s doubling to 60 s, and failed
   after 5 crashes in 10 minutes. zingod never restarts inside its process, and expects a
   supervisor to (`packages/zingod/src/main.rs:90-93`).
@@ -800,7 +828,7 @@ deletes hours of index.
 | `Error: cannot read validator cookie <path>: <error>` | `ConfigError` | no restart; the panel names the path and the error. zingod starts with a missing or empty cookie and retries each request (`packages/zingod-source/src/endpoint.rs:154-160`; `CHANGELOG.md:35-38`), so this means the path exists and can't be read: a folder, or a permission. Restarting can't fix it |
 | `Error: binding the gRPC listener: Address already in use (os error 98)` | `PortInUse` | the next free port, once; then the user |
 | `… <dir>/LOCK is held by another process`, matched before every index text below | `DbLocked` | the user: the pid file already ended Zeal's own leftover |
-| `<index> index commit failed: disk <dir> full`, a panic, then an abort; or `No space left on device (os error 28)` or `Disk quota exceeded (os error 122)` after `index io:`, `manifest io:`, `page io:` or `segment io:` | `DiskFull` (new, deterministic) | waits for space ([Disk](#disk-memory-and-the-first-build)) |
+| `<index> index commit failed: disk <dir> full`, a panic, then an abort; or `No space left on device (os error 28)` or `Disk quota exceeded (os error 122)` after `index io:`, `manifest io:`, `page io:` or `segment io:` | `DiskFull` (new, deterministic) | waits for space when bytes ran out, else for the user ([Disk](#disk-memory-and-the-first-build)) |
 | `ManifestError`'s texts (`packages/zingod-persistence/src/manifest.rs:58-79`): `MANIFEST slot does not start with the zingod manifest magic`, `MANIFEST checksum mismatch`, `MANIFEST is … bytes, not this build's two-slot layout`, `MANIFEST body claims … bytes, … present`, ``directory holds `…`, expected `…` ``, `directory holds format …, this build reads format …`, ``directory was built for `…`, opened for `…` `` and `… holds data but the directory has no MANIFEST`; `PageError`'s (`pages.rs:171-177`): `… is … bytes, the durable state needs …`, `…: tail page fails its checksum` and `…: page checksums differ from the digest the manifest committed`; the panic `… page …: checksum mismatch (on-disk corruption: …)` (`pages.rs:540`); and `(resync required)` (`FollowError::Diverged`, `packages/zingod-sync/src/follower.rs:33-36`) | `IndexBroken` (new, deterministic) | the user's Rebuild |
 | any other `index io:`, `manifest io:`, `page io:` or `segment io:` text, such as a refused permission or an I/O error | `Crash` | backoff; never Rebuild |
 | anything else: exit 1 or 2, a signal, another panic | `Crash` | backoff |
@@ -812,6 +840,9 @@ deletes hours of index.
 - How `Diverged` reaches stderr wasn't reproduced, so the rule matches `(resync required)`
   anywhere in the last lines.
 - The contract test captures the corruption texts by flipping a byte in a tail page.
+- An exit during a stop Zeal asked for gets its class too, with `requested` set, but the stop
+  still ends in `Stopped`: "Then" waits for an exit nobody asked for, such as the next start's.
+  zingod 1.1.0's abort on `SIGTERM` is one ([How Zeal runs zingod](#how-zeal-runs-zingod)).
 - zebrad's classifier doesn't change.
 
 #### Health of zingod
@@ -994,6 +1025,14 @@ for that zingod check it.
   `SIGTERM`, before a commit can fail, since a failed commit panics; above 20 GB it starts zingod
   again (proposals). zebrad usually shares the disk, so the stop leaves it room too. The index's
   size comes from a walk every 10 minutes, capped at 50,000 entries.
+- **After `DiskFull`** free bytes alone aren't evidence: a quota (`EDQUOT`) or the inodes
+  (`ENOSPC` with bytes free) can run out while the volume shows more than 20 GB free, and
+  `DiskFull` is deterministic, so a restart on free bytes would loop outside the crash-loop
+  protection. The runner reads the disk just after the exit, bytes and inodes (`statvfs`
+  `f_favail`; a filesystem that keeps no count, as btrfs, counts as free), and the herd's
+  `disk_full_recovery` restarts zingod by itself only when the text isn't a quota, bytes were
+  below 10 GB then, and are now above 20 GB with inodes free. Anything else waits for the user's
+  Try again.
 - **Memory.** No RSS figure exists. From the code: about 674 MiB of index write buffers, up to
   256 MiB of queue per index that lags, and the non-finalized blocks in RAM; 1 to 2 GiB is
   likely. The Service step warns below 8 GB of RAM (proposal), and the wallet runs measure the
@@ -1266,14 +1305,18 @@ over.
     permission at open `Crash`, never `IndexBroken`;
   - the txid redaction, read back from both the ring and the log file's contents;
   - zebrad's lines reaching the file unchanged.
-- **The runner against fakes** (launcher-public, under `tokio::time::pause`). `fake-zingod`, a
-  launcher-core bin beside `fake-zebrad`:
+- **The runner against fakes** (launcher-public). As built they run in real time with short
+  intervals: the supervisor's deadlines use the monotonic clock, which a paused tokio clock
+  can't drive. `fake-zingod`, a launcher-core bin beside `fake-zebrad`:
   - reads its `-c` file and refuses an unknown key with zingod's `unknown field` message;
   - binds `grpc_listen_address`, prints zingod's lines, answers `/status` and `/readyz` over
     HTTP/1.1 from captured JSON and `GetLightdInfo` and `GetLatestBlock` over h2c, and stops on
     `SIGTERM`;
   - plays, through `FAKE_ZINGOD_MODE`: syncing then serving, stuck, a wrong tip hash, no
-    validator answering, each classified exit, an abort, and a `SIGTERM` it ignores;
+    validator answering, each classified exit, an abort, 1.1.0's abort on `SIGTERM`, and a
+    `SIGTERM` it ignores. With the abort on `SIGTERM`, the supervisor's test stops zingod more
+    times than the crash loop allows, each stop ending `Stopped`, and the runner's test starts it
+    again on the same attempt each time;
   - reads the cookie once and again only after a 401, as 1.1.0 does. `fake-zebrad` gains a mode
     that closes the connection on a wrong cookie, as 7.0.0 does, so the fast tests prove that the
     restart on a new zebrad run is what brings zingod back;
@@ -1298,7 +1341,10 @@ over.
   - a `GetBlockRange` streams to a slow client, on loopback and through the front door;
   - after a zebrad restart zingod's polls fail with the stale cookie, and the rule brings it back
     within 60 s;
-  - `SIGTERM` exits 0 within the grace, with and without an open connection;
+  - `SIGTERM` ends zingod within the grace, with and without an open connection: with exit 0, or
+    with 1.1.0's [abort on `SIGTERM`](#how-zeal-runs-zingod), for which it prints a note naming
+    the assertion and zingod's panic line, so a later zingod's run shows whether it still
+    happens;
   - a second zingod on the index gets `DbLocked`, a taken port `PortInUse`, an unknown key
     `ConfigError`, and a flipped tail-page byte `IndexBroken`;
   - a `SIGKILL` mid-build reopens and serves;
@@ -1320,8 +1366,9 @@ over.
     `ubuntu-24.04` and `ubuntu-24.04-arm`, each leg with its target's `zingod-<triple>`. The
     aarch64 leg is what the Mainnet gate's first item needs.
 
-  To settle when it is written (unconfirmed): whether a Regtest chain reaches `serving`, and
-  whether the pinned zebrad's `generate` mines the blocks the test needs.
+  Settled when it was written (Z2): a Regtest chain reaches `serving`, at genesis already, and
+  the pinned zebrad's `generate` mines what the test needs (300 blocks in under a second)
+  once `[mining] miner_address` is set.
 - **Wallet runs** (RELEASING.md), on a real home connection, before zingod is offered on a
   network: Zingo through a scripted `zingo-cli` (a new wallet, an old birthday, a send with a
   memo), which zebrad's endpoint can't serve; Zodl and Zkool by hand, where builds for the network
@@ -1338,10 +1385,81 @@ the spawner, touches shared code. None of them needs front door v2 (PS2) or MULT
 | Phase | Ships | Needs |
 | --- | --- | --- |
 | **Z1 Bundle** | the `ZINGOD_*` pins; `build-zingod.sh` and `bump-zingod.sh`; `zingod-sidecars.yml` with its checks and attestation; the source archive on each release; `zeal-zingod` and its licences in the Linux bundles; a minimal `fake-zingod` for `dev-sidecar.sh`. Nothing runs it yet. **Built**: [SIDECARS.md](SIDECARS.md#the-bundled-zingod-linux) says how, and where it differs from this design | — |
-| **Z2 Supervise** | `Launch` and the zingod reader in the supervisor; the configuration writer; `DiskFull` and `IndexBroken`; the pure rules; the runner; `fake-zingod`'s modes and fake-zebrad's stale-cookie mode; `real_zingod.rs` in CI. No UI | Z1 |
-| **Z3 Choose (Linux, Testnet)** | the types; the backend on the consent screen and in the setup; the service actor's and the app's wiring; the disk, stall, cross-check and active-upgrade rules; Rebuild, Delete and Forget's box; the Server card, banners and mock flags; `TESTED_ZINGOD` = 1.1.0 with zebrad 7.0.0 on Testnet. Switching an open service means "unavailable" until the index is built | Z2; the Testnet wallet run before the release |
+| **Z2 Supervise** | `Launch` and the zingod reader in the supervisor; the configuration writer; `DiskFull` and `IndexBroken`; the pure rules; the runner; `fake-zingod`'s modes and fake-zebrad's stale-cookie mode; `real_zingod.rs` in CI. No UI. **Built**: [Z2 as built](#z2-as-built) | Z1 |
+| **Z3 Choose (Linux, Testnet)** | the types; the backend on the consent screen and in the setup; the service actor's and the app's wiring; the disk, stall, cross-check and active-upgrade rules; Rebuild, Delete and Forget's box; the Server card, banners and mock flags; the choice gated on `TESTED_ZINGOD` (1.1.0 with zebrad 7.0.0 on Testnet, listed since Z2). Switching an open service means "unavailable" until the index is built | Z2; the Testnet wallet run before the release |
 | **Z4 Mainnet** | the gate below; `TESTED_ZINGOD` gains Mainnet; the disk and memory numbers from measurements; the scheduled-upgrade countdown and pause; the consent's Mainnet line; Share naming the wallets the runs confirmed; switching while Zebra's endpoint keeps serving; the default for new setups, as the maintainer decides | Z3 and the gate |
 | **Z5 macOS** | `zingod-sidecars.yml` on `macos-15` and `macos-15-intel` (Xcode command line tools for jemalloc's `sh` and `make` and libproc's bindgen, protoc); a `tauri.macos.conf.json` with four `externalBin` entries; the contract test on both macOS runners, in `bundle.yml`, where both binaries are already built: `fetch-zebrad-linux.sh` is Linux only and a macOS zebrad takes 30 to 60 minutes to build uncached, so the job takes that run's `zebrad-stable-<triple>` and `zingod-<triple>` artifacts; `kern.maxfilesperproc` checked against zingod's 1,280 | PS3; the build passing |
+
+#### Z2 as built
+
+Built 2026-11-17, with no UI: launcher-core's `zingod` module (the configuration writer, the
+command line and the reader) and `Launch` in the supervisor and the spawner; `DiskFull` and
+`IndexBroken`; launcher-herd's `public::zingod` rules; launcher-public's `ZingodRunner`;
+`fake-zingod`'s modes and fake-zebrad's `getblockhash` and `close-on-wrong-cookie`;
+`real_zingod.rs` and its CI job. Where it differs from the sections above:
+
+- **The start barrier** is the zebrad run's RPC line, not the cookie's time ([When zingod
+  runs](#when-zingod-runs)). The run's identity is its pid and `started_at`: `Status` has no run
+  serial, and the supervisor sets both in the update that clears the run's addresses.
+- **The disk's first reading**: zingod doesn't start on an index folder whose disk hasn't been
+  read yet, at Zeal's start or when a plan moves the index. That reading starts the hysteresis
+  over: below 10 GB keeps zingod stopped, anything else (a failed read included) lets it start.
+- **A full disk** restarts zingod by itself only on evidence that covers it ([Disk, memory and
+  the first build](#disk-memory-and-the-first-build)); launcher-core's `free_inodes` reads the
+  inodes beside `free_space`. Every exit clears the evidence of the one before, and a reading
+  counts only for the exit it was taken after, so a second `DiskFull` waits for the user until
+  its own reading arrives.
+- **The plan** (`ZingodPlan`) carries an `attempt` besides the configuration and zebrad's run.
+  Z3 bumps it for the user's Try again and for the restarts its rules decide (the stall rule,
+  no validator for 30 s). A new zebrad run restarts a running zingod, but only a new attempt
+  starts it again after a failure, so a failure that waits for the user (rule 5 of [When
+  zingod runs](#when-zingod-runs)) stays through zebrad's restarts. The runner itself makes the
+  one port move per attempt, keeps the disk's hysteresis and applies the `DiskFull` recovery,
+  with the herd's functions that `want()` uses. The moved port is in `ZingodFacts.port`, for Z3
+  to record in the spec; a new zebrad run keeps it, and a new attempt starts again from the
+  plan's port.
+- **nice** adds 10 to the nice value zingod inherits from Zeal, capped at 19, rather than
+  setting 10: zingod stays below zebrad at any nice Zeal runs at, and raising a nice value
+  needs no privilege, where lowering one (Zeal at nice 15, say) fails the spawn.
+- **Rebuild and Delete** wait for a start under way before they remove anything, stopping
+  whatever it launches: a start waiting for a stale zingod to go goes ahead past a stop. The
+  runner sends each start with `SupervisorHandle::send_start`, from its own loop, so a stop it
+  sends next is handled after the start.
+- **A stale zingod**: `kill_stale` sends a `zeal-zingod` an earlier Zeal left `SIGTERM`, and one
+  still there once the 30 s stop grace has passed is killed with its process group, as a stop
+  escalates; zebrad's stale path doesn't change. One still there after that (a process stuck in
+  the kernel) fails the start with `StaleProcess`: `ZingodFacts.stale` names it, and the runner
+  doesn't start zingod again until zebrad's run or the attempt changes.
+- **Notes**: every note of the supervisor names its program ("zingod exited", "restarting
+  zingod in 1s"), not only the start; zebrad's read as before.
+- **`ZINGOD_KNOWS`** for 1.1.0 lists the 11 upgrades of launcher-herd's `BRANCH_IDS`, NU6.2
+  and NU6.3 included, with zebrad's names.
+- **`TESTED_ZINGOD`** landed in Z2, not Z3: 1.1.0 with zebrad 7.0.0 on Testnet, with the
+  launcher-herd test that the bundled `ZINGOD_VERSION` is on it and on `ZINGOD_KNOWS`, and the
+  Stable `ZEBRAD_VERSION` with it on each network zingod is offered on. A bump of either pin
+  fails `cargo test` until the lists move (SIDECARS.md's bump steps say so). Z3 gates the
+  choice on it.
+- **What `/status` means**: whether a sync is building or catching up is measured against
+  zebrad's height when zingod's target is above it, since that target can be zingod's clock
+  estimate (on Regtest, millions of blocks above the tip).
+- **fake-zingod** reads its settings from its environment or, since Zeal clears zingod's,
+  from `fake-zingod.env` beside its `-c` file. Its h2c answers need `h2`, `http` and `bytes` in
+  launcher-core, already in the tree through launcher-public. launcher-public's runner tests
+  find launcher-core's fakes in their own target folder, where `cargo test --workspace` builds
+  them, and take turns, since each picks free ports.
+- **`real_zingod.rs`** runs every case in one test, which first sets `ZINGOD_CONFIG_NETWORK`
+  in its own environment. Measured there (2026-11-17, x86-64 Linux): a stop takes milliseconds
+  with no connection or with an h2c client that answers zingod's GOAWAY, and zingod's whole
+  10 s drain with one that doesn't; a flipped last written byte of
+  `compact_block/blocks.dat` fails the next start with `<file>: tail page fails its checksum`.
+  Its capture mode wrote the zingod fixtures. It checks zingod's `GetLightdInfo` fields
+  directly, over its own call, so no `LightdInfo` bytes fixture was captured from zingod: the
+  decoder stays pinned to zebrad's. The disk-full texts and how `Diverged` reaches stderr are
+  still unconfirmed: fake-zingod plays the texts the code has.
+- **CI**: `real-zingod` runs on both Linux targets with this run's `zingod-<triple>`, and
+  `zingod-gate` now also runs on every push to `main`, so `main` builds zingod there as well
+  as in `bundle.yml`. It runs without `PREV_ZINGOD_BIN`, since there is no previous pin yet. The
+  aarch64 leg, like the aarch64 build, is unverified until CI runs it.
 
 **The Mainnet gate (Z4):**
 
@@ -1387,6 +1505,10 @@ of "unavailable", measured in Z4. Back to Zebra reverses it; the index stays unt
   `tokio::signal::unix` and sd-notify; jemalloc off MSVC; directory fsync.
 - macOS in CI.
 - A second signal that ends the drain, as the comment at `daemon.rs:526` says.
+- A `SIGTERM` drain that ends in exit 0 every time: in 1.1.0 header sync's chain watch can close
+  before the follower sees the cancel, and the `assert!` at
+  `packages/zingod-sync/src/follower.rs:143` (and `packages/zingod-nfs/src/nfs.rs:118`) aborts
+  zingod ([How Zeal runs zingod](#how-zeal-runs-zingod)).
 - Docs: `tip_stale` in `docs/running.md`, which the code reports as `tip_unvouched`, and the index
   default in `config.rs:322`'s comment.
 - A `NOTICE` file and the full licence text.
@@ -2582,9 +2704,9 @@ herd's peer counts (whether the counters split by zone is unconfirmed).
   a test that no plan step makes a network request; pauses with their hysteresis and resume
   rules (zebrad behind or restarting, the name elsewhere, the cap, a third attack); evidence
   ages, and DNS-01 never counting; the endpoint's key present only while the service is on; the
-  branch check; Zodl's check over `LightdInfo` bytes captured from zebrad's endpoint (and from
-  zingod in Z2), with field numbers pinned to a vendored `service.proto`; `PublicHostname` and
-  `SeedZone`. zingod's are in [Tests for zingod](#tests-for-zingod).
+  branch check; Zodl's check over `LightdInfo` bytes captured from zebrad's endpoint, with
+  field numbers pinned to a vendored `service.proto`; `PublicHostname` and `SeedZone`. zingod's
+  are in [Tests for zingod](#tests-for-zingod).
 - **Adapters**: zebrad's managed key, written while the service is on, removed when it is off,
   a hand edit overridden, a non-loopback value refused, a hand-set loopback value kept while no
   service is set up; the `Opened lightwalletd gRPC endpoint at` and bind-failure lines from

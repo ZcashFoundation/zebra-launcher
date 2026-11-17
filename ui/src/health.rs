@@ -487,6 +487,10 @@ impl<'a> Facts<'a> {
                     Action::ShowInLogs(log_filter(detail, "zebrad")),
                 ]
             }
+            // zingod's classes: a node never ends with them.
+            ExitClass::DiskFull | ExitClass::IndexBroken => {
+                vec![Action::ShowInLogs(log_filter(detail, "Error:"))]
+            }
             ExitClass::Crash => vec![
                 Action::Start,
                 Action::ShowInLogs(log_filter(detail, "panicked")),

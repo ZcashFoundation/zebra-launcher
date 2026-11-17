@@ -19,6 +19,7 @@ pub mod secrets;
 pub mod selftest;
 pub mod service;
 pub mod store;
+pub mod zingod;
 
 pub use service::{EndpointHost, Options, PublicServices, Wiring, prepare_launch};
 

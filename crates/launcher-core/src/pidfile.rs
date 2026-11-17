@@ -144,6 +144,25 @@ pub fn terminate(pid: u32) -> io::Result<()> {
     process::terminate_pid(pid)
 }
 
+/// Kills `stale` and, on Unix, its process group ([`process::kill_pid`]), if it is still
+/// alive and still runs its recorded binary: a pid that has since gone, or now runs another
+/// program, is left alone. Refuses pid 0 and the launcher's own pid.
+pub fn kill(stale: &StaleProcess) -> io::Result<()> {
+    if is_own_or_group(stale.pid) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to kill pid {}: it is not a separate process",
+                stale.pid
+            ),
+        ));
+    }
+    if !is_alive(stale.pid) || !runs_binary(stale.pid, &stale.binary) {
+        return Ok(());
+    }
+    process::kill_pid(stale.pid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -184,7 +184,11 @@ async fn the_probe_names_each_run_until_it_is_finalized() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stdin_close_mode_stops_gracefully_on_every_platform() {
     let mut fx = fixture("ok");
-    fx.config.command.shutdown_on_stdin_close = true;
+    fx.config
+        .command
+        .zebrad_mut()
+        .expect("zebrad")
+        .shutdown_on_stdin_close = true;
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
     assert!(handle.status().stop_is_graceful);
     within(handle.start()).await.expect("start");
@@ -214,6 +218,8 @@ async fn hanging_child_is_killed_after_the_grace_period() {
     // shutdown requests from the start.
     fx.config
         .command
+        .zebrad_mut()
+        .expect("zebrad")
         .env
         .push(("FAKE_ZEBRAD_STARTUP_DELAY_MS".into(), "5000".into()));
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
@@ -260,7 +266,11 @@ async fn hanging_child_is_killed_after_the_grace_period() {
 async fn a_crash_during_a_graceful_stop_is_not_clean() {
     let mut fx = fixture("crash-on-stop");
     // The graceful path on every platform, so the stop is never forced.
-    fx.config.command.shutdown_on_stdin_close = true;
+    fx.config
+        .command
+        .zebrad_mut()
+        .expect("zebrad")
+        .shutdown_on_stdin_close = true;
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
     within(handle.start()).await.expect("start");
     within(handle.stop()).await.expect("stop");
@@ -299,7 +309,7 @@ async fn a_crash_during_a_graceful_stop_is_not_clean() {
 fn draining_crash_fixture(linger: Duration) -> Fixture {
     let mut fx = fixture("crash");
     fx.config.exit_drain = Duration::from_millis(1500);
-    fx.config.command.env.push((
+    fx.config.command.zebrad_mut().expect("zebrad").env.push((
         "FAKE_ZEBRAD_LINGER_MS".into(),
         linger.as_millis().to_string().into(),
     ));
@@ -769,7 +779,13 @@ async fn stale_pidfile_blocks_start_unless_killed() {
     let mut orphan = Command::new(fake_zebrad())
         .args([
             "-c",
-            &fx.config.command.config.display().to_string(),
+            &fx.config
+                .command
+                .zebrad()
+                .expect("zebrad")
+                .config
+                .display()
+                .to_string(),
             "start",
         ])
         .env("FAKE_ZEBRAD_MODE", "ok")
@@ -819,7 +835,13 @@ async fn the_actor_answers_commands_while_a_stale_zebrad_is_terminated() {
     let mut orphan = Command::new(fake_zebrad())
         .args([
             "-c",
-            &fx.config.command.config.display().to_string(),
+            &fx.config
+                .command
+                .zebrad()
+                .expect("zebrad")
+                .config
+                .display()
+                .to_string(),
             "start",
         ])
         .env("FAKE_ZEBRAD_MODE", "hang-on-signal")
@@ -894,6 +916,28 @@ async fn the_actor_answers_commands_while_a_stale_zebrad_is_terminated() {
     within(handle.shutdown()).await.expect("shutdown");
 }
 
+/// A stop sent once `send_start` has returned is handled after the start, so it stops what the
+/// start launched rather than finding nothing to stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_after_send_start_stops_what_it_launched() {
+    let fx = fixture("ok");
+    let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");
+    let answer = within(handle.send_start(StartOptions::default()))
+        .await
+        .expect("the start is sent");
+    within(handle.stop()).await.expect("stop");
+    // Whether zebrad logged `Starting zebrad` before the stop reached it or not.
+    let _ = within(answer).await;
+    let status = handle.status();
+    assert_eq!(status.phase, Phase::Stopped);
+    assert_eq!(status.pid, None);
+    let exit = status.last_exit.expect("the launched zebrad exited");
+    assert!(exit.requested, "{exit:?}");
+    let history = within(handle.history_since(0)).await.expect("history");
+    assert!(contains(&history, "zebrad started (pid "));
+    within(handle.shutdown()).await.expect("shutdown");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_stops_zebrad_and_closes_the_actor() {
     let fx = fixture("ok");
@@ -918,6 +962,8 @@ async fn stop_during_startup_and_restart() {
     let mut fx = fixture("ok");
     fx.config
         .command
+        .zebrad_mut()
+        .expect("zebrad")
         .env
         .push(("FAKE_ZEBRAD_STARTUP_DELAY_MS".into(), "1500".into()));
     let handle = supervisor::spawn(fx.config.clone()).expect("spawn supervisor");

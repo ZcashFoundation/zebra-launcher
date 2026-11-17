@@ -90,6 +90,29 @@ pub fn free_space(path: &Path) -> io::Result<u64> {
     Ok(volume(path)?.available)
 }
 
+/// The inodes available to this user on the volume holding `path`
+/// (`statvfs`'s `f_favail`), like [`free_space`]. `None` where the
+/// filesystem keeps no count (it reports no inodes at all, as btrfs does) and
+/// on Windows.
+pub fn free_inodes(path: &Path) -> io::Result<Option<u64>> {
+    let existing = nearest_existing(path)?;
+    platform_free_inodes(&existing)
+}
+
+#[cfg(unix)]
+fn platform_free_inodes(dir: &Path) -> io::Result<Option<u64>> {
+    let stat = nix::sys::statvfs::statvfs(dir).map_err(io::Error::from)?;
+    // The field types differ between Linux and macOS.
+    #[allow(clippy::unnecessary_cast)]
+    let (total, available) = (stat.files() as u64, stat.files_available() as u64);
+    Ok((total > 0).then_some(available))
+}
+
+#[cfg(windows)]
+fn platform_free_inodes(_dir: &Path) -> io::Result<Option<u64>> {
+    Ok(None)
+}
+
 /// `path` or its closest ancestor that exists, as a directory.
 fn nearest_existing(path: &Path) -> io::Result<PathBuf> {
     for ancestor in path.ancestors() {
@@ -650,6 +673,17 @@ mod tests {
                 "{}",
                 volume.label
             );
+        }
+    }
+
+    #[test]
+    fn free_inodes_are_read_where_the_filesystem_counts_them() {
+        let dir = tempdir();
+        let inodes = free_inodes(&dir.path().join("a/b")).expect("free inodes");
+        if cfg!(windows) {
+            assert_eq!(inodes, None);
+        } else if let Some(inodes) = inodes {
+            assert!(inodes > 0);
         }
     }
 

@@ -16,9 +16,61 @@
 //! The exact wording matched here is pinned by the fixtures in `tests/fixtures`;
 //! re-capture them when the bundled zebrad changes.
 
-use std::net::SocketAddr;
+use std::{borrow::Cow, net::SocketAddr};
 
 use launcher_types::{ExitClass, LogEvent, LogLevel, LogLine, LogStream};
+
+use crate::{process::Launch, zingod};
+
+/// The reader of a supervised program's output, which its [`Launch`] picks: zebrad's parser,
+/// [`Detector`] and classifier, or zingod's ([`zingod::logs`]). One per run for detection.
+#[derive(Debug)]
+pub enum Reader {
+    Zebrad(Detector),
+    Zingod(zingod::logs::Detector),
+}
+
+impl Reader {
+    /// A new reader for `launch`'s program.
+    pub fn for_launch(launch: &Launch) -> Self {
+        match launch {
+            Launch::Zebrad(_) => Reader::Zebrad(Detector::new()),
+            Launch::Zingod(_) => Reader::Zingod(zingod::logs::Detector::new()),
+        }
+    }
+
+    /// `raw` as the ring and the log file get it: zebrad's unchanged, zingod's without txids.
+    pub fn redact<'a>(&self, raw: &'a str) -> Cow<'a, str> {
+        match self {
+            Reader::Zebrad(_) => Cow::Borrowed(raw),
+            Reader::Zingod(_) => zingod::logs::redact(raw),
+        }
+    }
+
+    /// Parses one line of the program's output.
+    pub fn parse_line(&self, seq: u64, stream: LogStream, raw: &str) -> LogLine {
+        match self {
+            Reader::Zebrad(_) => parse_line(seq, stream, raw),
+            Reader::Zingod(_) => zingod::logs::parse_line(seq, stream, raw),
+        }
+    }
+
+    /// Feeds one parsed line and returns the event it carries, if any.
+    pub fn detect(&mut self, line: &LogLine) -> Option<LogEvent> {
+        match self {
+            Reader::Zebrad(detector) => detector.detect(line),
+            Reader::Zingod(detector) => detector.detect(line),
+        }
+    }
+
+    /// The deterministic exit class `event` implies, if any.
+    pub fn classify_event(&self, event: &LogEvent) -> Option<ExitClass> {
+        match self {
+            Reader::Zebrad(_) => classify_event(event),
+            Reader::Zingod(_) => zingod::logs::classify_event(event),
+        }
+    }
+}
 
 /// Parses one line of zebrad output.
 ///
@@ -606,6 +658,39 @@ mod tests {
         ] {
             assert_eq!(classify_event(&event), None, "{event:?}");
         }
+    }
+
+    #[test]
+    fn each_program_gets_its_own_reader() {
+        use crate::{process::ZebradCommand, zingod::ZingodCommand};
+
+        let raw = "2026-01-01T00:00:00Z  INFO zebra_rpc::queue: sent txid=abcd";
+        let zebrad = Reader::for_launch(&Launch::from(ZebradCommand::new("zebrad", "z.toml")));
+        assert_eq!(zebrad.redact(raw), raw, "zebrad's lines stay as they are");
+        assert_eq!(
+            zebrad
+                .parse_line(1, LogStream::Stdout, raw)
+                .target
+                .as_deref(),
+            Some("zebra_rpc::queue")
+        );
+        let zingod = Reader::for_launch(&Launch::from(ZingodCommand::new(
+            "zeal-zingod",
+            "z.toml",
+            "/h",
+        )));
+        assert_eq!(zingod.redact("ts=1 txid=abcd x=1"), "ts=1 txid=[txid] x=1");
+        assert_eq!(
+            zingod
+                .parse_line(
+                    1,
+                    LogStream::Stdout,
+                    "ts=1 level=info message=x component=Grpc"
+                )
+                .target
+                .as_deref(),
+            Some("Grpc")
+        );
     }
 
     #[test]

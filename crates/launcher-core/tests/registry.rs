@@ -116,7 +116,7 @@ fn configure_fake(
     mode: fn(&NodeSpec) -> &'static str,
 ) -> RegistryConfig {
     config.customize = Some(Arc::new(move |spec, supervisor| {
-        supervisor.command.env = vec![
+        supervisor.command.zebrad_mut().expect("zebrad").env = vec![
             ("FAKE_ZEBRAD_MODE".into(), mode(spec).into()),
             ("FAKE_ZEBRAD_HEARTBEAT_MS".into(), "50".into()),
         ];
@@ -243,11 +243,13 @@ async fn each_bundled_channel_resolves_and_starts_its_own_zebrad() {
             fast(spec, supervisor);
             let (channel, _) = binaries
                 .iter()
-                .find(|(_, binary)| binary == &supervisor.command.binary)
+                .find(|(_, binary)| binary == supervisor.command.binary())
                 .expect("the supervisor uses a resolved channel binary");
             let version = format!("{}+{}", channel.version(), channel.as_str());
             supervisor
                 .command
+                .zebrad_mut()
+                .expect("zebrad")
                 .env
                 .push(("FAKE_ZEBRAD_VERSION".into(), version.into()));
         }));
@@ -435,6 +437,8 @@ async fn each_node_samples_its_own_process_tree() {
             if spec.network == Network::Testnet {
                 supervisor
                     .command
+                    .zebrad_mut()
+                    .expect("zebrad")
                     .env
                     .push(("FAKE_ZEBRAD_ALLOC_MB".into(), "128".into()));
             }

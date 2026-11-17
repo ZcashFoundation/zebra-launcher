@@ -234,7 +234,7 @@ impl LogLine {
     }
 }
 
-/// A notable event detected in zebrad output.
+/// A notable event detected in a supervised program's output: zebrad's, or zingod's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LogEvent {
@@ -272,6 +272,12 @@ pub enum LogEvent {
     PortInUse { message: String },
     /// Any other panic.
     Panic { message: String },
+    /// zingod's gRPC listener is bound (`Listening` with `component=Grpc`): its configuration
+    /// loaded, and it answers at `addr`.
+    IndexerListening { addr: SocketAddr },
+    /// zingod's last words, an `Error:` line or a panic, with the class its reader gave them.
+    /// A deterministic class decides the run's exit class.
+    Failure { class: ExitClass, message: String },
 }
 
 /// Why a zebrad run ended, derived from its exit status and the detected events.
@@ -291,6 +297,11 @@ pub enum ExitClass {
     PortInUse,
     /// The process could not be started at all, for example because the binary is missing.
     SpawnFailed,
+    /// zingod: an index's disk or quota is full. Waits for space, or for the user.
+    DiskFull,
+    /// zingod: an index is damaged, of another chain or of a format this build can't read.
+    /// Only a rebuild of the index helps.
+    IndexBroken,
     /// An unexpected exit: a non-zero code, a signal, or a panic with no known cause.
     Crash,
 }
@@ -305,6 +316,8 @@ impl ExitClass {
                 | ExitClass::DbLocked
                 | ExitClass::PortInUse
                 | ExitClass::SpawnFailed
+                | ExitClass::DiskFull
+                | ExitClass::IndexBroken
         )
     }
 }
@@ -1202,6 +1215,17 @@ pub struct UpdateInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zingods_exit_classes_are_deterministic() {
+        for (class, wire) in [
+            (ExitClass::DiskFull, "disk_full"),
+            (ExitClass::IndexBroken, "index_broken"),
+        ] {
+            assert!(class.is_deterministic(), "{class:?}");
+            assert_eq!(serde_json::to_value(class).unwrap(), wire);
+        }
+    }
 
     #[test]
     fn eos_window_bounds() {

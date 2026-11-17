@@ -512,3 +512,85 @@ async fn a_zebrad_without_getdeprecationinfo_is_asked_once_per_interval() {
     }
     assert_eq!(deprecation_calls(&fake).await, 1);
 }
+
+#[path = "../src/bin/fake/chain.rs"]
+mod chain;
+
+/// `getblockhash` answers up to the tip with the hash fake-zingod also uses, and zebrad's
+/// error above it.
+#[tokio::test]
+async fn getblockhash_answers_up_to_the_tip() {
+    let fake = spawn_fake().await;
+    let client = RpcClient::new(fake.addr, fake.cookie_file.clone()).expect("client");
+    for height in [0, 1, chain::TIP] {
+        let hash: String = timeout(T, client.call("getblockhash", json!([height])))
+            .await
+            .expect("in time")
+            .expect("a hash");
+        assert_eq!(hash, chain::block_hash(height), "{height}");
+    }
+    for params in [json!([chain::TIP + 1]), json!([-1]), json!([])] {
+        let above = timeout(T, client.call::<String>("getblockhash", params.clone()))
+            .await
+            .expect("in time");
+        assert!(
+            matches!(above, Err(RpcError::Rpc { code: -8, .. })),
+            "{params}: {above:?}"
+        );
+    }
+}
+
+/// One request with `authorization`, as raw HTTP, and what came back.
+async fn raw_request(addr: SocketAddr, authorization: Option<&str>) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"getinfo","params":[]}"#;
+    let auth = authorization
+        .map(|value| format!("Authorization: {value}\r\n"))
+        .unwrap_or_default();
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connects");
+    stream
+        .write_all(
+            format!(
+                "POST / HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n{auth}Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("request sent");
+    let mut answer = Vec::new();
+    timeout(T, stream.read_to_end(&mut answer))
+        .await
+        .expect("in time")
+        .expect("read");
+    answer
+}
+
+/// zebrad 7.0.0 drops a connection with a wrong cookie without an answer; fake-zebrad does so
+/// in `close-on-wrong-cookie`, and answers 401 otherwise.
+#[tokio::test]
+async fn a_wrong_cookie_is_refused_by_401_or_by_closing() {
+    let answering = spawn_fake().await;
+    let answer = raw_request(answering.addr, Some("Basic d3Jvbmc6Y29va2ll")).await;
+    assert!(
+        String::from_utf8_lossy(&answer).starts_with("HTTP/1.1 401"),
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+
+    let closing = spawn_fake_with(&[("FAKE_ZEBRAD_MODE", "close-on-wrong-cookie")]).await;
+    assert!(
+        raw_request(closing.addr, Some("Basic d3Jvbmc6Y29va2ll"))
+            .await
+            .is_empty()
+    );
+    assert!(raw_request(closing.addr, None).await.is_empty());
+    let client = RpcClient::new(closing.addr, closing.cookie_file.clone()).expect("client");
+    let info: Value = timeout(T, client.call("getinfo", json!([])))
+        .await
+        .expect("in time")
+        .expect("the right cookie still gets answers");
+    assert_eq!(info["blocks"], 2_500_000);
+}

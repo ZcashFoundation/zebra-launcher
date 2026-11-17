@@ -25,7 +25,7 @@ use super::{
 use crate::{
     clock,
     logfile::LogFileWriter,
-    logs::{Detector, classify_event, classify_exit, parse_line},
+    logs::{Reader, classify_exit},
     pidfile::{self, StaleProcess},
     policy::{Decision, RestartTracker},
     process::{ChildHandle, SpawnedChild, Spawner, StopMethod, TreeProbe},
@@ -52,11 +52,13 @@ enum ChildEvent {
         run: u64,
         status: io::Result<std::process::ExitStatus>,
     },
-    /// The stale zebrad `pid` was asked to stop [`STALE_KILL_WAIT`] ago;
-    /// `alive` says whether it is still there.
+    /// The stale zebrad `pid` was asked to stop [`STALE_KILL_WAIT`] ago, or
+    /// for a stale zingod was `killed` after the stop grace; `alive` says
+    /// whether it is still there.
     StaleTerminated {
         pid: u32,
         alive: bool,
+        killed: bool,
     },
 }
 
@@ -157,7 +159,8 @@ impl RunReplies {
 struct Run {
     id: u64,
     handle: ChildHandle,
-    detector: Detector,
+    /// The program's reader, for this run's events.
+    reader: Reader,
     /// The first deterministic cause of failure logged in this run, which
     /// decides the exit class over the exit code.
     deterministic_cause: Option<ExitClass>,
@@ -187,6 +190,8 @@ pub(super) struct Actor {
     restarts: RestartTracker,
     child_tx: mpsc::Sender<ChildEvent>,
     child_rx: mpsc::Receiver<ChildEvent>,
+    /// The program's reader for parsing and redaction, which keep no state.
+    lines: Reader,
     run: Option<Run>,
     next_run_id: u64,
     backoff_until: Option<Instant>,
@@ -213,6 +218,7 @@ impl Actor {
             .transpose()?;
         let (logs, _) = broadcast::channel(config.broadcast_capacity.max(1));
         let (child_tx, child_rx) = mpsc::channel(1024);
+        let lines = Reader::for_launch(&config.command);
         Ok(Self {
             restarts: RestartTracker::new(config.restart.clone()),
             history: VecDeque::with_capacity(config.history_capacity.min(10_000)),
@@ -227,6 +233,7 @@ impl Actor {
             log_file,
             child_tx,
             child_rx,
+            lines,
             run: None,
             next_run_id: 1,
             backoff_until: None,
@@ -378,8 +385,9 @@ impl Actor {
     }
 
     /// Asks the stale zebrad to stop and waits for it off the actor loop, so
-    /// commands keep being answered meanwhile; the outcome arrives as
-    /// [`ChildEvent::StaleTerminated`].
+    /// commands keep being answered meanwhile; a stale zingod still there
+    /// once the stop grace has passed is killed ([`kill_stale`]). The outcome
+    /// arrives as [`ChildEvent::StaleTerminated`].
     fn terminate_stale(
         &mut self,
         stale: StaleProcess,
@@ -387,16 +395,30 @@ impl Actor {
     ) {
         let pid = stale.pid;
         if let Err(err) = pidfile::terminate(pid) {
-            tracing::warn!(?err, pid, "could not terminate stale zebrad");
+            let program = self.config.command.program();
+            tracing::warn!(?err, pid, program, "could not terminate the stale process");
         }
+        // A stale zingod that outlives the request is killed once the stop grace has passed.
+        let kill_at = self
+            .config
+            .command
+            .kills_stale()
+            .then(|| Instant::now() + self.config.stop_grace);
+        let target = stale.clone();
         let tx = self.child_tx.clone();
         tokio::spawn(async move {
             let deadline = Instant::now() + STALE_KILL_WAIT;
             while pidfile::is_alive(pid) && Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+            let killed = match kill_at {
+                Some(kill_at) if pidfile::is_alive(pid) => kill_stale(&target, kill_at).await,
+                _ => false,
+            };
             let alive = pidfile::is_alive(pid);
-            let _ = tx.send(ChildEvent::StaleTerminated { pid, alive }).await;
+            let _ = tx
+                .send(ChildEvent::StaleTerminated { pid, alive, killed })
+                .await;
         });
         self.pending_stale = Some(PendingStale {
             stale,
@@ -404,27 +426,39 @@ impl Actor {
         });
     }
 
-    async fn on_stale_terminated(&mut self, pid: u32, alive: bool) {
+    async fn on_stale_terminated(&mut self, pid: u32, alive: bool, killed: bool) {
         let Some(pending) = self.pending_stale.take_if(|p| p.stale.pid == pid) else {
             return;
         };
+        let program = self.config.command.program();
         if alive {
+            if killed {
+                self.note(format!(
+                    "the {program} left behind by an earlier run (pid {pid}) is still there after SIGKILL"
+                ));
+            }
             self.report_stale(&pending.stale, pending.start_replies);
             return;
         }
         if let Some(path) = &self.config.pidfile {
             let _ = pidfile::remove(path);
         }
-        self.note(format!(
-            "terminated a zebrad left behind by an earlier run (pid {pid})"
-        ));
+        self.note(if killed {
+            let grace = self.config.stop_grace;
+            format!(
+                "killed a {program} left behind by an earlier run (pid {pid}): it did not stop within {grace:?}"
+            )
+        } else {
+            format!("terminated a {program} left behind by an earlier run (pid {pid})")
+        });
         self.launch(pending.start_replies).await;
     }
 
-    /// Spawns zebrad; the stale check has passed. A listener address that
+    /// Spawns the program; the stale check has passed. A listener address that
     /// another program holds fails the start first.
     async fn launch(&mut self, start_replies: Vec<oneshot::Sender<Result<(), SupervisorError>>>) {
         self.status.send_modify(|s| s.stale = None);
+        let program = self.config.command.program();
 
         let taken = first_taken(&self.config.listeners.borrow());
         if let Some(taken) = taken {
@@ -433,7 +467,7 @@ impl Actor {
                 taken.role.label(),
                 taken.addr
             );
-            self.note(format!("not starting zebrad: {detail}"));
+            self.note(format!("not starting {program}: {detail}"));
             let info = ExitInfo {
                 code: None,
                 class: ExitClass::PortInUse,
@@ -456,7 +490,7 @@ impl Actor {
         match self.spawner.spawn(self.config.command.clone()).await {
             Ok(spawned) => self.install_run(spawned, start_replies),
             Err(err) => {
-                self.note(format!("could not start zebrad: {err}"));
+                self.note(format!("could not start {program}: {err}"));
                 let info = ExitInfo {
                     code: None,
                     class: ExitClass::SpawnFailed,
@@ -499,6 +533,7 @@ impl Actor {
         let spawned = Instant::now();
         let probe = handle.probe(id, spawned_at, spawned);
 
+        let program = self.config.command.program();
         let tasks = vec![
             tokio::spawn(pump(stdout, id, LogStream::Stdout, self.child_tx.clone())),
             tokio::spawn(pump(stderr, id, LogStream::Stderr, self.child_tx.clone())),
@@ -506,15 +541,15 @@ impl Actor {
         ];
 
         if let Some(path) = &self.config.pidfile
-            && let Err(err) = pidfile::write(path, pid, &self.config.command.binary)
+            && let Err(err) = pidfile::write(path, pid, self.config.command.binary())
         {
-            tracing::warn!(?err, "could not write the zebrad pid file");
+            tracing::warn!(?err, program, "could not write the pid file");
         }
 
         self.run = Some(Run {
             id,
             handle,
-            detector: Detector::new(),
+            reader: Reader::for_launch(&self.config.command),
             deterministic_cause: None,
             detail: None,
             stdout_eof: false,
@@ -533,10 +568,11 @@ impl Actor {
             s.metrics_addr = None;
             s.lightwalletd_addr = None;
         });
-        self.note(format!("zebrad started (pid {pid})"));
+        self.note(format!("{program} started (pid {pid})"));
     }
 
     fn on_stop(&mut self, replies: Vec<oneshot::Sender<()>>) {
+        let program = self.config.command.program();
         if let Some(run) = self.run.as_mut() {
             match &mut run.state {
                 RunState::Starting | RunState::Running => {
@@ -546,12 +582,14 @@ impl Actor {
                         Ok(StopMethod::Signal) => "stop requested (SIGTERM)".to_string(),
                         Ok(StopMethod::Terminated) => {
                             forced = true;
-                            "stop requested (terminated: this zebrad cannot stop gracefully on this platform)".to_string()
+                            format!(
+                                "stop requested (terminated: this {program} cannot stop gracefully on this platform)"
+                            )
                         }
                         Err(err) => {
                             forced = true;
                             let _ = run.handle.kill();
-                            format!("could not ask zebrad to stop ({err}); killed it")
+                            format!("could not ask {program} to stop ({err}); killed it")
                         }
                     };
                     run.state = RunState::Stopping(StopState {
@@ -578,10 +616,9 @@ impl Actor {
                         .get_or_insert_with(Vec::new)
                         .extend(replies);
                     if first {
-                        self.note(
-                            "stop requested after zebrad exited; it will not be restarted"
-                                .to_string(),
-                        );
+                        self.note(format!(
+                            "stop requested after {program} exited; it will not be restarted"
+                        ));
                     }
                 }
             }
@@ -616,6 +653,7 @@ impl Actor {
 
     async fn on_timer(&mut self) {
         let now = Instant::now();
+        let program = self.config.command.program();
         if let Some(run) = self.run.as_mut() {
             match &mut run.state {
                 RunState::Stopping(stop) if !stop.escalated && now >= stop.deadline => {
@@ -624,8 +662,8 @@ impl Actor {
                     let killed = run.handle.kill();
                     let grace = self.config.stop_grace;
                     self.note(match killed {
-                        Ok(()) => format!("zebrad did not stop within {grace:?}; killed it"),
-                        Err(err) => format!("could not kill zebrad: {err}"),
+                        Ok(()) => format!("{program} did not stop within {grace:?}; killed it"),
+                        Err(err) => format!("could not kill {program}: {err}"),
                     });
                 }
                 RunState::Exited(exited) if now >= exited.drain_deadline => {
@@ -665,7 +703,7 @@ impl Actor {
                         signal: unix_signal(&status),
                     },
                     Err(err) => {
-                        tracing::warn!(?err, "waiting for zebrad failed");
+                        tracing::warn!(?err, "waiting for the child failed");
                         ExitOutcome {
                             code: None,
                             signal: None,
@@ -678,8 +716,8 @@ impl Actor {
                 }
                 self.maybe_finalize().await;
             }
-            ChildEvent::StaleTerminated { pid, alive } => {
-                self.on_stale_terminated(pid, alive).await
+            ChildEvent::StaleTerminated { pid, alive, killed } => {
+                self.on_stale_terminated(pid, alive, killed).await
             }
             // Events from a previous run that are still draining.
             _ => {}
@@ -752,16 +790,17 @@ impl Actor {
             forced: stop.forced,
         });
 
+        let program = self.config.command.program();
         if let Some(path) = &self.config.pidfile
             && let Err(err) = pidfile::remove(path)
         {
-            tracing::warn!(?err, "could not remove the zebrad pid file");
+            tracing::warn!(?err, program, "could not remove the pid file");
         }
         let code = exit
             .code
             .map_or_else(|| "no exit code".to_string(), |c| format!("exit code {c}"));
         self.note(format!(
-            "zebrad exited ({code}, {class:?}{})",
+            "{program} exited ({code}, {class:?}{})",
             if requested { ", stop requested" } else { "" }
         ));
 
@@ -806,7 +845,7 @@ impl Actor {
             Decision::GiveUp => {
                 self.status
                     .send_modify(|s| s.phase = Phase::Failed { class });
-                self.note(format!("not restarting zebrad ({class:?})"));
+                self.note(format!("not restarting {program} ({class:?})"));
             }
             Decision::RestartAfter(delay) => {
                 let crashes = self.restarts.recent_crashes(now);
@@ -817,20 +856,24 @@ impl Actor {
                         crashes,
                     }
                 });
-                self.note(format!("restarting zebrad in {delay:?}"));
+                self.note(format!("restarting {program} in {delay:?}"));
             }
         }
         replies.send();
     }
 
-    /// Records a line of zebrad output: on disk, in the history, to live
-    /// subscribers, and through the event detector of the current run.
+    /// Records a line of the program's output: on disk, in the history, to
+    /// live subscribers, and through the event detector of the current run.
+    /// The reader's redaction comes first, so neither the file nor the ring
+    /// holds what it removes.
     fn push_line(&mut self, stream: LogStream, text: String) {
+        let text = self.lines.redact(&text).into_owned();
         if let Some(log_file) = &self.log_file {
             log_file.write_line(stream, text.trim_end_matches(['\r', '\n']));
         }
         let seq = self.take_seq();
-        self.record(Arc::new(parse_line(seq, stream, &text)));
+        let line = self.lines.parse_line(seq, stream, &text);
+        self.record(Arc::new(line));
     }
 
     /// Records a launcher line: on disk in zebrad's line format, behind the
@@ -890,10 +933,10 @@ impl Actor {
         let _ = self.logs.send(line.clone());
 
         if let Some(run) = self.run.as_mut()
-            && let Some(event) = run.detector.detect(&line)
+            && let Some(event) = run.reader.detect(&line)
         {
             if run.deterministic_cause.is_none() {
-                run.deterministic_cause = classify_event(&event);
+                run.deterministic_cause = run.reader.classify_event(&event);
             }
             self.apply_event(event);
         }
@@ -903,8 +946,15 @@ impl Actor {
         let Some(run) = self.run.as_mut() else {
             return;
         };
+        // zingod's gRPC listener is the light client endpoint it serves.
+        if let LogEvent::IndexerListening { addr } = &event {
+            self.status
+                .send_modify(|s| s.lightwalletd_addr = Some(*addr));
+        }
         match event {
-            LogEvent::StartingZebrad => match run.state {
+            // `Running` starts at zebrad's `Starting zebrad` or zingod's gRPC listener: each
+            // reader emits only its own program's event.
+            LogEvent::StartingZebrad | LogEvent::IndexerListening { .. } => match run.state {
                 RunState::Starting => {
                     run.state = RunState::Running;
                     self.status.send_modify(|s| s.phase = Phase::Running);
@@ -912,8 +962,8 @@ impl Actor {
                         let _ = reply.send(Ok(()));
                     }
                 }
-                // A stop is under way: the callers learn zebrad came up, the
-                // phase stays Stopping.
+                // A stop is under way: the callers learn the program came up,
+                // the phase stays Stopping.
                 RunState::Stopping(_) => {
                     for reply in run.start_replies.drain(..) {
                         let _ = reply.send(Ok(()));
@@ -935,7 +985,8 @@ impl Actor {
             | LogEvent::Panic { message }
             | LogEvent::DbLocked { message }
             | LogEvent::PortInUse { message }
-            | LogEvent::EosHalt { message } => {
+            | LogEvent::EosHalt { message }
+            | LogEvent::Failure { message, .. } => {
                 run.detail.get_or_insert(message);
             }
             _ => {}
@@ -951,6 +1002,25 @@ impl Actor {
             message: text,
         });
     }
+}
+
+/// Waits until `kill_at` for the stale process to exit, then kills it and waits up to
+/// [`STALE_KILL_WAIT`] for it to go. Returns whether it was killed.
+async fn kill_stale(stale: &StaleProcess, kill_at: Instant) -> bool {
+    while pidfile::is_alive(stale.pid) && Instant::now() < kill_at {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !pidfile::is_alive(stale.pid) {
+        return false;
+    }
+    if let Err(err) = pidfile::kill(stale) {
+        tracing::warn!(?err, pid = stale.pid, "could not kill the stale process");
+    }
+    let deadline = Instant::now() + STALE_KILL_WAIT;
+    while pidfile::is_alive(stale.pid) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    true
 }
 
 /// The first of `listeners` whose address another program holds

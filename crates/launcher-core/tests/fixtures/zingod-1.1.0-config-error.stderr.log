@@ -1,0 +1,1 @@
+Error: configuration error: parsing configuration: unknown field `bogus`, expected one of `network`, `validator_client`, `metrics`, `trusted_validators`, `serve`, `grpc`, `submission`, `p2p`, `sync`, `index`, `snapshot`
