@@ -750,8 +750,17 @@ fn volume_of_dir(dir: &str) -> (String, u64, u64) {
             3_412_700_000_000,
         )
     } else {
-        let label: std::path::PathBuf = path.components().take(3).collect();
-        (label.display().to_string(), 500_100_000_000, FREE_ELSEWHERE)
+        // The mock's folders are Unix paths on every host, so the label is
+        // split on `/` rather than by `Path`, which joins with `\` on Windows.
+        let label = format!(
+            "/{}",
+            dir.split('/')
+                .filter(|part| !part.is_empty())
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        (label, 500_100_000_000, FREE_ELSEWHERE)
     }
 }
 
