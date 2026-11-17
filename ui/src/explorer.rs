@@ -59,7 +59,14 @@ pub fn Explorer() -> impl IntoView {
     let node_id = Memo::new(move |_| app.node().info.with(|info| info.id.clone()));
     let network = Signal::derive(move || app.node().info.with(|info| info.network));
     let nav = Signal::derive(move || explorers.of(&node_id.get()));
-    let cards = HoverCards::provide(node_id.into());
+    let card_tip = Signal::derive(move || {
+        nav.get().live.with(|live| {
+            live.as_ref()
+                .and_then(|live| live.tip)
+                .map(|tip| (tip.epoch, tip.height))
+        })
+    });
+    let cards = HoverCards::provide(node_id.into(), network, card_tip);
     // A page that changes takes its links' card with it.
     Effect::new(move |_| {
         nav.get().route();

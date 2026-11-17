@@ -2,12 +2,14 @@
 //! focus rests on it. The facts are asked for after 120 ms, from one cheap read on the
 //! explorer's prefetch lane, which also fills its cache for the page the link opens; the card
 //! shows at 300 ms. One card at a time, drawn by the shell under the link; leaving the link,
-//! Escape or the wheel hides it.
+//! Escape or the wheel hides it. The facts are kept while the chain they were read on holds:
+//! another network or a reorganisation drops them all, and a new tip those of transactions
+//! not in a block yet.
 
 use std::{collections::HashMap, time::Duration};
 
 use launcher_types::{
-    NodeId,
+    Network, NodeId,
     explorer::{Card, CardTarget, ExplorerRequest, ExplorerResponse, TxKind, TxStatus},
 };
 use leptos::{ev, prelude::*, task::spawn_local};
@@ -35,20 +37,41 @@ pub struct HoverCards {
     node: Signal<NodeId>,
     /// The card shown: what about, and where (left, top) in the window.
     shown: RwSignal<Option<(CardTarget, (f64, f64))>>,
-    /// The facts read so far, this session, per node.
+    /// The facts read, per node, on the chain the node has now.
     cards: RwSignal<HashMap<(NodeId, CardTarget), Card>>,
     generation: StoredValue<u64>,
 }
 
 impl HoverCards {
-    /// Gives the Explorer's links their cards, for the node `node` names.
-    pub fn provide(node: Signal<NodeId>) -> Self {
+    /// Gives the Explorer's links their cards, for the node `node` names, on its `network`,
+    /// at its explorer's `tip` (epoch and height).
+    pub fn provide(
+        node: Signal<NodeId>,
+        network: Signal<Network>,
+        tip: Signal<Option<(u64, u32)>>,
+    ) -> Self {
         let cards = HoverCards {
             node,
             shown: RwSignal::new(None),
             cards: RwSignal::new(HashMap::new()),
             generation: StoredValue::new(0),
         };
+        // Facts of another chain do not hold: another network, or the epoch a reorganisation
+        // bumps, drops them all. At a new tip, a transaction not yet in a block may be in one.
+        Effect::new(move |previous: Option<(Network, Option<(u64, u32)>)>| {
+            let now = (network.get(), tip.get());
+            if let Some((was_network, was_tip)) = previous {
+                let epoch = |tip: Option<(u64, u32)>| tip.map(|(epoch, _)| epoch);
+                if was_network != now.0 || epoch(was_tip) != epoch(now.1) {
+                    cards.cards.update(HashMap::clear);
+                } else if was_tip != now.1 {
+                    cards
+                        .cards
+                        .update(|known| known.retain(|_, card| holds_at_a_new_tip(card)));
+                }
+            }
+            now
+        });
         provide_context(cards);
         cards
     }
@@ -109,6 +132,15 @@ impl HoverCards {
         if self.shown.with_untracked(Option::is_some) {
             self.shown.set(None);
         }
+    }
+}
+
+/// Whether a card read before a new tip still holds: anything but a transaction not yet in a
+/// block of the best chain.
+fn holds_at_a_new_tip(card: &Card) -> bool {
+    match card {
+        Card::Block { .. } => true,
+        Card::Tx { status, .. } => matches!(status, TxStatus::Mined { .. }),
     }
 }
 
@@ -215,4 +247,41 @@ pub fn HoverCard() -> impl IntoView {
         }}
     }
     .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use launcher_types::explorer::{Hash32, TxKind};
+
+    use super::*;
+
+    #[test]
+    fn a_new_tip_drops_the_cards_of_transactions_not_yet_in_a_block() {
+        let block = Card::Block {
+            height: 3_550_990,
+            hash: Hash32([1; 32]),
+            time: 1_800_000_000,
+            tx_count: 12,
+            size: Some(40_000),
+        };
+        let tx = |status| Card::Tx {
+            txid: Hash32([2; 32]),
+            kind: TxKind::Transparent,
+            status,
+            inputs: 1,
+            outputs: 2,
+            pools: Vec::new(),
+            size: Some(226),
+        };
+        assert!(holds_at_a_new_tip(&block));
+        assert!(holds_at_a_new_tip(&tx(TxStatus::Mined {
+            block: Hash32([1; 32]),
+            height: 3_550_990,
+            time: None
+        })));
+        assert!(!holds_at_a_new_tip(&tx(TxStatus::Mempool)));
+        assert!(!holds_at_a_new_tip(&tx(TxStatus::SideChain {
+            block: None
+        })));
+    }
 }

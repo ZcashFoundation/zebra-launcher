@@ -1379,7 +1379,9 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
 - **Outpoints.** `tx/<txid>?out=n` marks the output, brings it into view and lights its node
   in V6 on hover; its spent status and "Find the spending transaction" come with P4.
 - **Hover cards** are on every link to a block or a transaction and on the table's rows, not
-  on the strip's tiles; the UI keeps the cards it read for the session.
+  on the strip's tiles. The UI keeps the cards it read while the chain they were read on
+  holds: another network or a reorganisation (a new epoch) drops them all, and a new tip the
+  cards of transactions not in a best-chain block.
 - **The synthetic chain** funds every transparent input with an output it has (a coinbase's,
   or one of a transaction without transparent inputs, from 100 blocks back), so the fees the
   explorer works out from spent outputs are what the transactions paid; an output may be spent
