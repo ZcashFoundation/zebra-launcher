@@ -467,6 +467,31 @@ async fn a_low_disk_stops_zingod_until_there_is_room() {
     setup.finish().await;
 }
 
+/// zingod doesn't start before its index's disk is read: a disk below the low mark keeps it
+/// from ever starting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn zingod_waits_for_the_first_reading_of_its_disk() {
+    let setup = setup("ok", "serving", |options| {
+        let read = options.disk.clone();
+        options.disk = Arc::new(move |path| {
+            std::thread::sleep(Duration::from_millis(300));
+            read(path)
+        });
+    })
+    .await;
+    setup.disk.set(5 * GB);
+    setup.give_plan(0);
+    setup
+        .facts_stay("no start on a low disk", Duration::from_secs(1), |f| {
+            f.phase == Phase::Stopped && f.last_exit.is_none()
+        })
+        .await;
+    assert!(!setup.runner.facts().borrow().disk_allows);
+    setup.disk.set(25 * GB);
+    setup.facts_until("zingod running", running).await;
+    setup.finish().await;
+}
+
 /// After `DiskFull` zingod restarts by itself only when bytes ran out and came back; a quota
 /// waits for the user's Try again, a new attempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

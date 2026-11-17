@@ -305,7 +305,11 @@ enum Internal {
         pid: Option<u32>,
         status: Option<IndexerStatus>,
     },
-    Disk(Option<DiskReading>),
+    /// The disk of the index folder `dir`.
+    Disk {
+        dir: PathBuf,
+        reading: Option<DiskReading>,
+    },
     /// The disk just after the `DiskFull` exit at `at`.
     FailedDisk {
         at: SystemTime,
@@ -329,10 +333,8 @@ impl ZingodRunner {
     /// Starts the runner. zingod runs while `plan` holds a plan.
     pub fn spawn(options: RunnerOptions, plan: watch::Receiver<Option<ZingodPlan>>) -> Self {
         let (cmd, cmds) = mpsc::channel(8);
-        let (facts_tx, facts) = watch::channel(ZingodFacts {
-            disk_allows: true,
-            ..ZingodFacts::default()
-        });
+        // `disk_allows` is false until the index's disk is first read.
+        let (facts_tx, facts) = watch::channel(ZingodFacts::default());
         let (internal_tx, internal) = mpsc::channel(64);
         let shutdown_cap = supervisor::shutdown_cap(options.stop_grace);
         let runner = Runner {
@@ -351,6 +353,8 @@ impl ZingodRunner {
             last_config: None,
             last_exit_at: None,
             run_pid: None,
+            disk_dir: None,
+            disk_read: false,
         };
         let task = tokio::spawn(runner.run());
         ZingodRunner {
@@ -435,6 +439,11 @@ struct Runner {
     last_exit_at: Option<SystemTime>,
     /// The pid of the run the facts describe.
     run_pid: Option<u32>,
+    /// The index folder the disk facts describe.
+    disk_dir: Option<PathBuf>,
+    /// A reading of `disk_dir`'s disk has come back, failed or not: zingod doesn't start on a
+    /// disk not yet read.
+    disk_read: bool,
 }
 
 /// Waits for a change of `rx`, or forever without one.
@@ -521,7 +530,16 @@ impl Runner {
                     .send_modify(|facts| facts.ports_tried = vec![plan.config.listen.port()]);
             }
         }
-        // A new index folder needs its first readings.
+        // A new index folder needs its first readings, and its disk starts from none.
+        let dir = self.index_dir();
+        if dir != self.disk_dir {
+            self.disk_dir = dir;
+            self.disk_read = false;
+            self.facts.send_modify(|facts| {
+                facts.disk = None;
+                facts.disk_allows = false;
+            });
+        }
         self.read_disk();
         self.read_size();
     }
@@ -568,7 +586,7 @@ impl Runner {
             }
             return;
         }
-        if !facts.disk_allows {
+        if !self.disk_read || !facts.disk_allows {
             return;
         }
         match phase {
@@ -750,11 +768,21 @@ impl Runner {
                     None => facts.misses = facts.misses.saturating_add(1),
                 });
             }
-            Internal::Disk(reading) => {
+            Internal::Disk { dir, reading } => {
+                // A reading of the folder before a plan moved the index.
+                if self.disk_dir.as_ref() != Some(&dir) {
+                    return;
+                }
+                // The first reading of a disk starts the hysteresis: below the low mark blocks,
+                // anything else (no reading included) allows.
+                let first = !self.disk_read;
+                self.disk_read = true;
                 self.facts.send_modify(|facts| {
                     facts.disk = reading.or(facts.disk);
-                    facts.disk_allows =
-                        disk_allows(facts.disk_allows, reading.map(|reading| reading.free_bytes));
+                    facts.disk_allows = disk_allows(
+                        first || facts.disk_allows,
+                        reading.map(|reading| reading.free_bytes),
+                    );
                 });
             }
             Internal::FailedDisk { at, kind, reading } => {
@@ -867,11 +895,12 @@ impl Runner {
         let disk = self.options.disk.clone();
         let tx = self.internal_tx.clone();
         tokio::spawn(async move {
-            let reading = tokio::task::spawn_blocking(move || disk(&dir).ok())
+            let read = dir.clone();
+            let reading = tokio::task::spawn_blocking(move || disk(&read).ok())
                 .await
                 .ok()
                 .flatten();
-            let _ = tx.send(Internal::Disk(reading)).await;
+            let _ = tx.send(Internal::Disk { dir, reading }).await;
         });
     }
 

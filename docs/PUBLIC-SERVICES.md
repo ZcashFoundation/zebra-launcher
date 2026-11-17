@@ -1372,6 +1372,9 @@ command line and the reader) and `Launch` in the supervisor and the spawner; `Di
 - **The start barrier** is the zebrad run's RPC line, not the cookie's time ([When zingod
   runs](#when-zingod-runs)). The run's identity is its pid and `started_at`: `Status` has no run
   serial, and the supervisor sets both in the update that clears the run's addresses.
+- **The disk's first reading**: zingod doesn't start on an index folder whose disk hasn't been
+  read yet, at Zeal's start or when a plan moves the index. That reading starts the hysteresis
+  over: below 10 GB keeps zingod stopped, anything else (a failed read included) lets it start.
 - **A full disk** restarts zingod by itself only on evidence that covers it ([Disk, memory and
   the first build](#disk-memory-and-the-first-build)); launcher-core's `free_inodes` reads the
   inodes beside `free_space`. Every exit clears the evidence of the one before, and a reading
