@@ -87,6 +87,12 @@ mod start {
             .port()
     }
 
+    /// The system's error `errno` as Rust prints it, as zingod's texts carry it: the numbers
+    /// differ between Linux and macOS (`EADDRINUSE` is 98 on Linux, 48 on macOS).
+    fn os_error(errno: nix::errno::Errno) -> String {
+        std::io::Error::from_raw_os_error(errno as i32).to_string()
+    }
+
     /// A fake-zebrad with its RPC server and cookie, in `mode`.
     struct Zebrad {
         child: Child,
@@ -339,7 +345,10 @@ mod start {
 
         assert_eq!(
             failure(&config),
-            "Error: binding the gRPC listener: Address already in use (os error 98)\n"
+            format!(
+                "Error: binding the gRPC listener: {}\n",
+                os_error(nix::errno::Errno::EADDRINUSE)
+            )
         );
         let other = write_config(dir.path(), zebrad.addr, &zebrad.cookie, free_port());
         let locked = failure(&other);
@@ -372,8 +381,9 @@ mod start {
         assert_eq!(
             failure(&cookie),
             format!(
-                "Error: cannot read validator cookie {}: Is a directory (os error 21)\n",
-                folder.join(".cookie").display()
+                "Error: cannot read validator cookie {}: {}\n",
+                folder.join(".cookie").display(),
+                os_error(nix::errno::Errno::EISDIR)
             )
         );
 
