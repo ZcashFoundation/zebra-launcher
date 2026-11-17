@@ -1,17 +1,18 @@
 //! The Explorer's words and numbers: amounts in ZEC (TAZ on Testnet), pool movements, block
 //! and transaction sentences, budgets, confirmations, search hints and refusals; a block's
-//! rows and their fees, and Show RPC's reads. Pure, tested natively. A hidden amount
+//! rows, a transaction's flow (V6) and its fee card. Pure, tested natively. A hidden amount
 //! has no number here: callers show "hidden" instead.
 
 use explorer_model::{
     classify::{Classified, Later},
+    flow::{Balance, Flow, FlowKey},
     zip317,
 };
 use launcher_types::{
     Network, Phase,
     explorer::{
         BlockSummary, Budget, LedgerCheck, LogicalActions, NotFoundHint, PerPool, Pool, PoolPart,
-        ReorgNotice, SecretKind, Shown, SourceCall, TxKind, TxPage, TxRow, UnknownWhy,
+        ReorgNotice, SecretKind, Shown, SourceCall, TxKind, TxPage, TxRow, TxStatus, UnknownWhy,
     },
 };
 
@@ -678,6 +679,231 @@ pub fn multiple_text(multiple: f64) -> String {
     }
 }
 
+/// The logical actions part by part, as zebrad adds them up: `max(⌈296 / 150⌉, ⌈68 / 34⌉)
+/// = 2 transparent + 2 Ironwood = 4`.
+pub fn actions_breakdown(actions: &LogicalActions) -> String {
+    let mut parts = Vec::new();
+    if actions.in_bytes + actions.out_bytes > 0 {
+        parts.push(format!(
+            "max(⌈{} / 150⌉, ⌈{} / 34⌉) = {} transparent",
+            thousands(u64::from(actions.in_bytes)),
+            thousands(u64::from(actions.out_bytes)),
+            zip317::transparent_actions(actions)
+        ));
+    }
+    if actions.joinsplits > 0 {
+        parts.push(format!("2 × {} JoinSplit", actions.joinsplits));
+    }
+    if actions.sapling_spends + actions.sapling_outputs > 0 {
+        parts.push(format!(
+            "{} Sapling (the larger of {} spends and {} outputs)",
+            actions.sapling_spends.max(actions.sapling_outputs),
+            actions.sapling_spends,
+            actions.sapling_outputs
+        ));
+    }
+    if actions.orchard_actions > 0 {
+        parts.push(format!("{} Orchard", actions.orchard_actions));
+    }
+    if actions.ironwood_actions > 0 {
+        parts.push(format!("{} Ironwood", actions.ironwood_actions));
+    }
+    let total = zip317::logical_actions(actions);
+    match parts.len() {
+        0 => "0".to_owned(),
+        1 if parts[0].ends_with(&format!("= {total} transparent")) => {
+            format!("{} = {total}", parts[0])
+        }
+        _ => format!("{} = {total}", parts.join(" + ")),
+    }
+}
+
+/// What the fee card says of a fee: whether it pays zebrad's conventional fee, for a mined
+/// transaction or a waiting one. Never "invalid": blocks may hold what the mempool would not.
+pub fn fee_verdict(figures: &FeeFigures, status: &TxStatus) -> String {
+    let pays = if figures.unpaid == 0 {
+        format!(
+            "{} zebrad's conventional fee",
+            multiple_text(figures.multiple)
+        )
+    } else {
+        format!(
+            "less than zebrad's conventional fee: {} of its {} actions unpaid",
+            figures.unpaid, figures.paid
+        )
+    };
+    match status {
+        TxStatus::Mempool => format!("Pays {pays}."),
+        _ => format!("Paid {pays}."),
+    }
+}
+
+/// The node of a flow, in words: what it is, without its amount.
+pub fn flow_label(key: &FlowKey, page: &TxPage) -> String {
+    match key {
+        FlowKey::Inputs { address, count } => format!(
+            "{} · {} input{}",
+            address
+                .as_deref()
+                .map_or("no address".to_owned(), short_address),
+            count,
+            if *count == 1 { "" } else { "s" }
+        ),
+        FlowKey::MoreInputs { count } => format!("{count} more inputs"),
+        FlowKey::UnknownInputs { count } => format!(
+            "{count} input{}: value not read",
+            if *count == 1 { "" } else { "s" }
+        ),
+        FlowKey::Output { n } => {
+            let address = page
+                .outputs
+                .iter()
+                .find(|output| output.n == *n)
+                .and_then(|output| output.address.as_deref())
+                .map_or("no address".to_owned(), short_address);
+            format!("#{n} {address}")
+        }
+        FlowKey::MoreOutputs { count } => format!("{count} more outputs"),
+        FlowKey::Pool { pool } => {
+            let counts = page
+                .shielded
+                .iter()
+                .find(|part| part.pool == *pool)
+                .map(part_counts)
+                .unwrap_or_default();
+            format!("{} · {counts}", pool.label())
+        }
+        FlowKey::Fee => "Fee".to_owned(),
+        FlowKey::Subsidy => "Block subsidy".to_owned(),
+        FlowKey::BlockFees => "The block's fees".to_owned(),
+        FlowKey::FromLockbox => "From the lockbox".to_owned(),
+        FlowKey::IntoLockbox => "Into the lockbox".to_owned(),
+        FlowKey::Burned => "Burned".to_owned(),
+    }
+}
+
+/// A pool part's counts: `2 actions`, `1 spend · 2 outputs`, `1 JoinSplit`.
+pub fn part_counts(part: &PoolPart) -> String {
+    let plural =
+        |count: u32, one: &str| format!("{count} {one}{}", if count == 1 { "" } else { "s" });
+    match part.pool {
+        Pool::Sapling => format!(
+            "{} · {}",
+            plural(part.spends, "spend"),
+            plural(part.outputs, "output")
+        ),
+        Pool::Sprout => plural(part.joinsplits, "JoinSplit"),
+        _ => plural(part.actions, "action"),
+    }
+}
+
+/// An address cut to its ends, for a label: `t1Ab3…x9Qz`.
+pub fn short_address(address: &str) -> String {
+    let chars: Vec<char> = address.chars().collect();
+    if chars.len() <= 14 {
+        return address.to_owned();
+    }
+    let head: String = chars[..6].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+/// One side's part of the conservation line, summed by kind: `1.2 from transparent inputs`,
+/// `1.5 into Orchard`, `0.0001 fee`.
+fn side_parts(flow: &Flow, left: bool, unit: Unit) -> Vec<String> {
+    let nodes = if left { &flow.left } else { &flow.right };
+    let mut transparent = 0u64;
+    let mut parts = Vec::new();
+    for node in nodes {
+        let Some(zat) = node.zat else { continue };
+        let amount = unit.number(zat as i64);
+        match &node.key {
+            FlowKey::Inputs { .. } | FlowKey::MoreInputs { .. } => transparent += zat,
+            FlowKey::Output { .. } | FlowKey::MoreOutputs { .. } => transparent += zat,
+            FlowKey::Pool { pool } if zat > 0 => parts.push(if left {
+                format!("{amount} out of {}", pool.label())
+            } else {
+                format!("{amount} into {}", pool.label())
+            }),
+            FlowKey::Pool { .. } | FlowKey::UnknownInputs { .. } => {}
+            FlowKey::Fee => parts.push(format!("{amount} fee")),
+            FlowKey::Subsidy => parts.push(format!("{amount} subsidy")),
+            FlowKey::BlockFees => parts.push(format!("{amount} in fees")),
+            FlowKey::FromLockbox => parts.push(format!("{amount} from the lockbox")),
+            FlowKey::IntoLockbox => parts.push(format!("{amount} into the lockbox")),
+            FlowKey::Burned => parts.push(format!("{amount} burned")),
+        }
+    }
+    if transparent > 0 {
+        let amount = unit.number(transparent as i64);
+        parts.insert(
+            0,
+            if left {
+                format!("{amount} from transparent inputs")
+            } else {
+                format!("{amount} to transparent outputs")
+            },
+        );
+    }
+    parts
+}
+
+/// The line under V6: what went in and what came out, and whether they balance: `1.5001 ZEC
+/// in = 1.5 into Orchard + 0.0001 fee ✓`.
+pub fn conservation_text(flow: &Flow, unit: Unit) -> String {
+    match flow.balance {
+        Balance::Balanced { total } => {
+            let right = side_parts(flow, false, unit);
+            let left = side_parts(flow, true, unit);
+            let left = if left.len() > 1 {
+                left.join(" + ")
+            } else {
+                format!("{} in", amount(total as i64, unit))
+            };
+            format!("{left} = {} ✓", right.join(" + "))
+        }
+        Balance::Unknown => {
+            let unread = flow.left.iter().find_map(|node| match node.key {
+                FlowKey::UnknownInputs { count } => Some(count),
+                _ => None,
+            });
+            match unread {
+                Some(1) => "1 input's value is not read, so the balance is unknown".to_owned(),
+                Some(count) => {
+                    format!("{count} inputs' values are not read, so the balance is unknown")
+                }
+                None => "zebrad has no value-pool row for this block or its parent, so its fees \
+                         and the balance are unknown"
+                    .to_owned(),
+            }
+        }
+        Balance::Off { left, right } if left > right => format!(
+            "{} in, {} out: the miner left {} unclaimed",
+            amount(left as i64, unit),
+            amount(right as i64, unit),
+            amount((left - right) as i64, unit)
+        ),
+        Balance::Off { left, right } => format!(
+            "Unverified: {} in, {} out",
+            amount(left as i64, unit),
+            amount(right as i64, unit)
+        ),
+    }
+}
+
+/// How long since an output was made, in blocks: `1,204 blocks`, `in this block`, `waiting`.
+pub fn coin_age(spent_at: Option<u32>, status: &TxStatus) -> String {
+    match (spent_at, status) {
+        (None, _) => "waiting".to_owned(),
+        (Some(made), TxStatus::Mined { height, .. }) => match height.saturating_sub(made) {
+            0 => "in this block".to_owned(),
+            1 => "1 block".to_owned(),
+            blocks => format!("{} blocks", thousands(u64::from(blocks))),
+        },
+        (Some(_), _) => "–".to_owned(),
+    }
+}
+
 /// A read for Show RPC: `getblock ["3549000",1]`.
 pub fn source_text(call: &SourceCall) -> String {
     format!("{} {}", call.method, call.params)
@@ -705,7 +931,7 @@ pub fn source_cost(call: &SourceCall) -> String {
 #[cfg(test)]
 mod tests {
     use explorer_model::classify::classify_query;
-    use launcher_types::explorer::{BlockLedger, Hash32, TxStatus};
+    use launcher_types::explorer::{BlockLedger, Hash32};
 
     use super::*;
 
@@ -716,6 +942,10 @@ mod tests {
     const TAZ: Unit = Unit {
         coin: "TAZ",
         zat: false,
+    };
+    const ZAT: Unit = Unit {
+        coin: "ZEC",
+        zat: true,
     };
 
     #[test]
@@ -915,6 +1145,136 @@ mod tests {
     }
 
     #[test]
+    fn the_fee_card_counts_as_zebrad_does() {
+        // Two standard inputs and one output into Ironwood with two actions: 4 actions.
+        let actions = LogicalActions {
+            in_bytes: 296,
+            out_bytes: 34,
+            ironwood_actions: 2,
+            ..LogicalActions::default()
+        };
+        let figures = FeeFigures::new(10_000, &actions);
+        assert_eq!((figures.logical, figures.paid), (4, 4));
+        assert_eq!(figures.conventional, 4_000);
+        assert_eq!(figures.per_action, 2_500);
+        assert_eq!(multiple_text(figures.multiple), "2.5×");
+        assert_eq!(figures.ratio, 2.5);
+        assert_eq!(
+            actions_breakdown(&actions),
+            "max(⌈296 / 150⌉, ⌈34 / 34⌉) = 2 transparent + 2 Ironwood = 4"
+        );
+        assert_eq!(
+            fee_verdict(&figures, &TxStatus::Mempool),
+            "Pays 2.5× zebrad's conventional fee."
+        );
+        // A mined one that paid less is said to, never called invalid.
+        let short = FeeFigures::new(1_000, &actions);
+        assert_eq!(short.unpaid, 3);
+        assert_eq!(
+            fee_verdict(
+                &short,
+                &TxStatus::Mined {
+                    block: Hash32([2; 32]),
+                    height: 1,
+                    time: None
+                }
+            ),
+            "Paid less than zebrad's conventional fee: 3 of its 4 actions unpaid."
+        );
+        assert_eq!(multiple_text(1.0), "1×");
+        assert_eq!(multiple_text(250.0), "250×");
+        assert_eq!(
+            fee_figures(
+                Some(Shown::Unknown {
+                    why: UnknownWhy::InputValues
+                }),
+                &actions
+            ),
+            None
+        );
+        // Grace actions: a tiny transaction pays for two.
+        let tiny = LogicalActions {
+            in_bytes: 148,
+            out_bytes: 34,
+            ..LogicalActions::default()
+        };
+        assert_eq!(FeeFigures::new(2_000, &tiny).paid, 2);
+        assert_eq!(
+            actions_breakdown(&tiny),
+            "max(⌈148 / 150⌉, ⌈34 / 34⌉) = 1 transparent = 1"
+        );
+    }
+
+    #[test]
+    fn the_flow_line_says_what_balances() {
+        use explorer_model::flow::FlowNode;
+        let node = |key, zat| FlowNode { key, zat };
+        let shielding = Flow {
+            left: vec![node(
+                FlowKey::Inputs {
+                    address: Some("t1abc".into()),
+                    count: 2,
+                },
+                Some(150_010_000),
+            )],
+            right: vec![
+                node(
+                    FlowKey::Pool {
+                        pool: Pool::Orchard,
+                    },
+                    Some(150_000_000),
+                ),
+                node(FlowKey::Fee, Some(10_000)),
+            ],
+            balance: Balance::Balanced { total: 150_010_000 },
+        };
+        assert_eq!(
+            conservation_text(&shielding, ZEC),
+            "1.5001 ZEC in = 1.5 into Orchard + 0.0001 fee ✓"
+        );
+        let coinbase = Flow {
+            left: vec![
+                node(FlowKey::Subsidy, Some(300)),
+                node(FlowKey::BlockFees, Some(100)),
+            ],
+            right: vec![
+                node(FlowKey::Output { n: 0 }, Some(340)),
+                node(FlowKey::Burned, Some(60)),
+            ],
+            balance: Balance::Balanced { total: 400 },
+        };
+        assert_eq!(
+            conservation_text(&coinbase, ZAT),
+            "300 subsidy + 100 in fees = 340 to transparent outputs + 60 burned ✓"
+        );
+        let unread = Flow {
+            left: vec![node(FlowKey::UnknownInputs { count: 1 }, None)],
+            right: vec![node(FlowKey::Fee, None)],
+            balance: Balance::Unknown,
+        };
+        assert_eq!(
+            conservation_text(&unread, ZEC),
+            "1 input's value is not read, so the balance is unknown"
+        );
+        let unclaimed = Flow {
+            balance: Balance::Off {
+                left: 400,
+                right: 390,
+            },
+            ..coinbase
+        };
+        assert_eq!(
+            conservation_text(&unclaimed, ZAT),
+            "400 zat in, 390 zat out: the miner left 10 zat unclaimed"
+        );
+        assert_eq!(
+            short_address("t1abcdefghijklmnopqrstuvwxyz12345678"),
+            "t1abcd…5678"
+        );
+        assert_eq!(short_address("t1abc"), "t1abc");
+    }
+
+    #[test]
     fn show_rpc_says_where_each_answer_came_from() {
         let call = SourceCall {
             method: "getblock".into(),
@@ -939,6 +1299,14 @@ mod tests {
             ..call
         };
         assert_eq!(source_cost(&failed), "12 ms · no answer");
+        let mined = TxStatus::Mined {
+            block: Hash32([2; 32]),
+            height: 1_204,
+            time: None,
+        };
+        assert_eq!(coin_age(Some(1_000), &mined), "204 blocks");
+        assert_eq!(coin_age(Some(1_204), &mined), "in this block");
+        assert_eq!(coin_age(None, &TxStatus::Mempool), "waiting");
     }
 
     #[test]

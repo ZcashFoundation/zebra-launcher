@@ -768,6 +768,106 @@ button.link.ex-link {
   font-weight: 600;
 }
 
+/* The transaction's flow (V6): strands meet in the middle; pools are outlined boxes, values
+   not known dashed. Strands are lighter than their nodes, and the lit one is darker. */
+
+/* Drawn at about its own size: its text keeps the page's. */
+.ex-flow-wrap {
+  max-width: 900px;
+  overflow-x: auto;
+}
+
+.ex-flow-svg {
+  display: block;
+  width: 100%;
+  min-width: 680px;
+  height: auto;
+}
+
+.ex-strand {
+  opacity: 0.4;
+}
+
+.ex-strand.ex-lit {
+  opacity: 0.75;
+}
+
+.ex-flow-svg .ex-dim {
+  opacity: 0.18;
+}
+
+.ex-flow-node {
+  outline: none;
+}
+
+.ex-flow-node:focus-visible .ex-flow-box {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.ex-flow-link {
+  cursor: pointer;
+}
+
+.ex-flow-box.ex-flow-pool {
+  fill-opacity: 0.25;
+  stroke-width: 2;
+}
+
+.ex-flow-box.ex-flow-unknown {
+  fill: none;
+  stroke: var(--text-secondary);
+  stroke-dasharray: 3 2;
+}
+
+.ex-flow-middle {
+  fill: var(--text-secondary);
+}
+
+.ex-flow-label {
+  fill: var(--text);
+  font-size: 12px;
+}
+
+.ex-flow-amount {
+  fill: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ex-c-transparent { fill: var(--pool-transparent); stroke: var(--pool-transparent); }
+.ex-c-sprout { fill: var(--pool-sprout); stroke: var(--pool-sprout); }
+.ex-c-sapling { fill: var(--pool-sapling); stroke: var(--pool-sapling); }
+.ex-c-orchard { fill: var(--pool-orchard); stroke: var(--pool-orchard); }
+.ex-c-ironwood { fill: var(--pool-ironwood); stroke: var(--pool-ironwood); }
+.ex-c-lockbox { fill: var(--pool-lockbox); stroke: var(--pool-lockbox); }
+.ex-c-fees { fill: var(--reward-miner); stroke: var(--reward-miner); }
+.ex-c-subsidy { fill: var(--reward-stream); stroke: var(--reward-stream); }
+.ex-c-none { fill: none; stroke: var(--text-secondary); }
+
+.ex-conservation {
+  margin: 8px 0 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.ex-unresolved {
+  margin: 8px 0 0;
+  color: var(--warn);
+}
+
+.ex-unresolved button {
+  margin-left: 6px;
+}
+
+/* A table row whose node in the flow is lit, and the other way round. */
+.ex-row-lit {
+  background: var(--hover);
+}
+
+.ex-fee-rows dd {
+  font-variant-numeric: tabular-nums;
+}
+
 /* Show RPC: the toggle in the source line, and each page's list of its reads. */
 
 .ex-rpc-toggle {
@@ -844,5 +944,11 @@ button.link.ex-link {
   .ex-meter-fill {
     forced-color-adjust: none;
     border: 1px solid CanvasText;
+  }
+
+  .ex-strand,
+  .ex-flow-box {
+    forced-color-adjust: none;
+    stroke: CanvasText;
   }
 }

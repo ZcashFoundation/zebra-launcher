@@ -11,6 +11,7 @@
 mod block;
 mod cards;
 mod chain;
+mod flow_diagram;
 mod history;
 mod parts;
 mod prefs;
