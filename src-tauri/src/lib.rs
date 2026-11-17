@@ -301,7 +301,9 @@ async fn start(app: &AppHandle) -> Result<(AppState, bool), StartupError> {
         sidecar::resolve(&sidecar_paths, channel)
     });
     config.customize = Some(Arc::new(move |_node, supervisor| {
-        supervisor.command.shutdown_on_stdin_close = stdin_close;
+        if let Some(zebrad) = supervisor.command.zebrad_mut() {
+            zebrad.shutdown_on_stdin_close = stdin_close;
+        }
     }));
     config.sizes = sizes.clone();
     let registry = registry::spawn(config, settings.clone())?;

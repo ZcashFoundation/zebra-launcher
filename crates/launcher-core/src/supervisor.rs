@@ -1,5 +1,6 @@
-//! The zebrad supervisor: one actor task owns the child process and publishes
-//! its state.
+//! The supervisor: one actor task owns the child process, zebrad or zingod
+//! ([`Launch`]), and publishes its state. The program's [`Reader`] parses,
+//! redacts and classifies its output.
 //!
 //! Commands arrive over an `mpsc` channel, state leaves over a `watch` channel,
 //! and log lines fan out over a `broadcast` channel with a bounded history for
@@ -35,11 +36,11 @@ use std::{
 use launcher_types::{ExitInfo, LogLevel, LogLine, PortRole, Status};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+#[cfg(doc)]
+use crate::logs::Reader;
+pub use crate::process::Launch;
 use crate::{
-    logfile::RotatingLogConfig,
-    pidfile::StaleProcess,
-    policy::RestartPolicy,
-    process::{TreeProbe, ZebradCommand},
+    logfile::RotatingLogConfig, pidfile::StaleProcess, policy::RestartPolicy, process::TreeProbe,
 };
 
 mod actor;
@@ -57,11 +58,11 @@ pub fn shutdown_cap(grace: Duration) -> Duration {
     (grace + SHUTDOWN_MARGIN).max(MIN_SHUTDOWN_CAP)
 }
 
-/// How the supervisor runs zebrad.
+/// How the supervisor runs zebrad or zingod.
 #[derive(Clone, Debug)]
 pub struct SupervisorConfig {
-    /// The zebrad command line.
-    pub command: ZebradCommand,
+    /// The program and its command line.
+    pub command: Launch,
     /// How long a requested stop may take before zebrad is killed. Fixed for
     /// the supervisor's lifetime; [`SupervisorHandle::stop_grace`] reports it.
     pub stop_grace: Duration,
@@ -126,9 +127,9 @@ impl SupervisorConfig {
     /// Production defaults around `command`: a 60 s stop grace (zebrad's own
     /// task shutdown timeout is 20 s), 10 000 lines of history, the default
     /// restart policy, no pid file, no log file and no listeners to check.
-    pub fn new(command: ZebradCommand) -> Self {
+    pub fn new(command: impl Into<Launch>) -> Self {
         Self {
-            command,
+            command: command.into(),
             stop_grace: Duration::from_secs(60),
             exit_drain: Duration::from_secs(2),
             history_capacity: 10_000,

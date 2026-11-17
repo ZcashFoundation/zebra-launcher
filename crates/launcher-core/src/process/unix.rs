@@ -9,21 +9,38 @@ use nix::{
     unistd::Pid,
 };
 
-/// Puts zebrad in its own process group, so an escalated kill reaches anything
-/// it started, and on Linux makes the kernel send it `SIGTERM` if the
-/// spawning thread dies.
-pub(super) fn prepare(cmd: &mut tokio::process::Command) {
+/// Puts the child in its own process group, so an escalated kill reaches
+/// anything it started, on Linux makes the kernel send it `SIGTERM` if the
+/// spawning thread dies, and sets its nice value when it isn't 0 (zingod's
+/// 10).
+pub(super) fn prepare(cmd: &mut tokio::process::Command, nice: i32) {
     cmd.process_group(0);
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: the closure runs in the forked child before exec and only
-        // performs the prctl syscall, which is async-signal-safe.
-        unsafe {
-            cmd.pre_exec(|| {
-                nix::sys::prctl::set_pdeathsig(Signal::SIGTERM).map_err(io::Error::from)
-            });
-        }
+    // Elsewhere zebrad spawns without a hook, as it always has.
+    if !cfg!(target_os = "linux") && nice == 0 {
+        return;
     }
+    // SAFETY: the closure runs in the forked child before exec and only makes
+    // the prctl and setpriority system calls: no allocation and no lock.
+    unsafe {
+        cmd.pre_exec(move || {
+            #[cfg(target_os = "linux")]
+            nix::sys::prctl::set_pdeathsig(Signal::SIGTERM).map_err(io::Error::from)?;
+            set_nice(nice)
+        });
+    }
+}
+
+/// Sets the calling process's nice value; 0 leaves it alone.
+fn set_nice(nice: i32) -> io::Result<()> {
+    if nice == 0 {
+        return Ok(());
+    }
+    // SAFETY: setpriority reads no memory of ours; `who` 0 is this process.
+    let result = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn pid(pid: u32) -> io::Result<Pid> {
@@ -106,6 +123,33 @@ pub(super) fn executable_of(_pid: u32) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A child prepared with a nice value runs at it, and one with 0 at ours.
+    #[test]
+    fn the_child_runs_at_its_nice_value() {
+        let nice_of = |nice: i32| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            runtime.block_on(async {
+                let mut cmd = tokio::process::Command::new("sh");
+                cmd.args(["-c", "ps -o ni= -p $$"]);
+                cmd.stdout(std::process::Stdio::piped());
+                prepare(&mut cmd, nice);
+                let out = cmd.output().await.expect("sh runs");
+                String::from_utf8(out.stdout)
+                    .expect("UTF-8")
+                    .trim()
+                    .parse::<i32>()
+                    .expect("a nice value")
+            })
+        };
+        // SAFETY: getpriority reads no memory of ours.
+        let ours = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        assert_eq!(nice_of(0), ours);
+        assert_eq!(nice_of(10), (ours + 10).min(19));
+    }
 
     #[test]
     fn signalling_an_exited_process_is_not_an_error() {

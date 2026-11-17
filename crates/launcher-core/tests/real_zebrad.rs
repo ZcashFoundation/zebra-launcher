@@ -361,7 +361,7 @@ async fn second_instance_on_the_same_state_fails_with_db_locked() {
 /// Adds zebrad's light wallet endpoint at `addr` to the instance's config, as the launcher
 /// writes it while a light client server is on.
 fn add_light_endpoint(node: &Instance, addr: SocketAddr) {
-    let path = &node.config.command.config;
+    let path = &node.config.command.zebrad().expect("zebrad").config;
     let text = std::fs::read_to_string(path).expect("read zebrad.toml");
     let text = text.replacen(
         "[rpc]\n",

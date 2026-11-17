@@ -326,7 +326,11 @@ async fn the_job_closes_when_the_run_is_finalized() {
         &[("FAKE_ZEBRAD_LINGER_MS", "30000")],
         Duration::from_millis(50),
         |config| {
-            config.command.shutdown_on_stdin_close = true;
+            config
+                .command
+                .zebrad_mut()
+                .expect("zebrad")
+                .shutdown_on_stdin_close = true;
             config.exit_drain = Duration::from_millis(1500);
         },
     )
