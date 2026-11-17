@@ -2549,46 +2549,129 @@ async fn the_logs_never_carry_what_was_asked_for() {
     let _second = tracing::Dispatch::new(capture::Capture::new(lines.clone()));
     let _guard = tracing::subscriber::set_default(capture::Capture::new(lines));
     tracing::callsite::rebuild_interest_cache();
-    let harness = harness();
-    let (block, txid) = {
-        let chain = harness.chain.borrow();
-        let block = chain.block(BlockId::Height(TIP - 77)).unwrap();
-        (block.hash, block.tx[0])
+    // Big blocks too, so the rows of one are read one by one with the outputs they spend.
+    let harness = harness_with(
+        SynthChain::new(Network::Mainnet, TIP, NOW).with_big_blocks(10),
+        |_| {},
+    );
+    let chain = harness.chain.borrow().clone();
+    let (height, big_height) = (TIP - 77, TIP - 70);
+    assert!(!chain.is_big(height) && chain.is_big(big_height));
+    let block = chain.block(BlockId::Height(height)).unwrap();
+    let big = chain.block(BlockId::Height(big_height)).unwrap();
+    let txid = block.tx[0];
+    // What else is asked for: a transaction with inputs, read whole and carded, one of the next
+    // block, read ahead, and a made-up one spending from more than 16, read in full.
+    let spending = txid_where(&chain, height, true);
+    let ahead = txid_where(&chain, height + 1, true);
+    let (many, made_up) = spending_from(&chain, 6, 20, Some(big_height));
+    let many_id = many.txid;
+    harness.add_txs(made_up.iter().cloned().chain([many]));
+    let traced = |request| ExplorerCall {
+        request,
+        trace: true,
     };
-    let height = TIP - 77;
-    harness
-        .reply(ExplorerRequest::Block {
-            id: BlockId::Height(height),
-        })
-        .await;
-    harness
-        .reply(ExplorerRequest::Tx {
-            txid,
-            resolve: false,
-        })
-        .await;
-    harness
-        .reply(ExplorerRequest::Resolve {
-            query: block.to_hex(),
-        })
-        .await;
-    let _ = harness
-        .ask(ExplorerRequest::Tx {
-            txid: Hash32([0x5a; 32]),
-            resolve: false,
-        })
-        .await;
+    let node = mainnet();
+    let ask = |request| harness.explorer.call(&node, traced(request));
+    ask(ExplorerRequest::Block {
+        id: BlockId::Height(height),
+    })
+    .await
+    .expect("a block page");
+    ask(ExplorerRequest::Tx {
+        txid,
+        resolve: false,
+    })
+    .await
+    .expect("a coinbase page");
+    ask(ExplorerRequest::Resolve {
+        query: block.hash.to_hex(),
+    })
+    .await
+    .expect("a resolution");
+    let _ = ask(ExplorerRequest::Tx {
+        txid: Hash32([0x5a; 32]),
+        resolve: false,
+    })
+    .await;
+    // P2's reads: a small block's rows (verbosity 3), a big block's (one by one, then with the
+    // outputs they spend), cards, prefetches, and every earlier transaction of one page.
+    let rows = |hash, with_fees| ExplorerRequest::BlockTxs {
+        hash,
+        offset: 0,
+        limit: 25,
+        with_fees,
+    };
+    ask(rows(block.hash, false)).await.expect("small rows");
+    ask(rows(big.hash, false)).await.expect("big rows");
+    ask(rows(big.hash, true)).await.expect("big rows with fees");
+    for target in [
+        CardTarget::Block {
+            id: BlockId::Height(height - 1),
+        },
+        CardTarget::Tx { txid: spending },
+    ] {
+        ask(ExplorerRequest::Card { target }).await.expect("a card");
+    }
+    ask(ExplorerRequest::Prefetch {
+        targets: vec![
+            PrefetchTarget::Block {
+                id: BlockId::Height(height + 2),
+            },
+            PrefetchTarget::Tx { txid: ahead },
+            PrefetchTarget::BlockTxs {
+                hash: big.hash,
+                offset: 25,
+                limit: 25,
+            },
+        ],
+    })
+    .await
+    .expect("advice taken");
+    ask(ExplorerRequest::Tx {
+        txid: many_id,
+        resolve: true,
+    })
+    .await
+    .expect("a page read in full");
+    // The reads made behind the answers end too.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     drop(harness);
     let text: Vec<String> = captured.try_iter().collect();
     assert!(!text.is_empty(), "the reads are logged");
+    let rows_and_parents = big.tx[..50]
+        .iter()
+        .chain(&block.tx)
+        .flat_map(|txid| {
+            let parents: Vec<TxId> = chain
+                .tx(txid)
+                .map(|tx| tx.vin.iter().filter_map(|input| input.txid).collect())
+                .unwrap_or_default();
+            parents.into_iter().chain([*txid])
+        })
+        .map(|txid| txid.to_hex());
+    let secrets: Vec<String> = [
+        block.hash.to_hex(),
+        big.hash.to_hex(),
+        txid.to_hex(),
+        spending.to_hex(),
+        ahead.to_hex(),
+        many_id.to_hex(),
+        Hash32([0x5a; 32]).to_hex(),
+        chain.hash(height - 1).unwrap().to_hex(),
+        chain.hash(height + 2).unwrap().to_hex(),
+        height.to_string(),
+        big_height.to_string(),
+        (height - 1).to_string(),
+        (height + 2).to_string(),
+    ]
+    .into_iter()
+    .chain(made_up.iter().map(|tx| tx.txid.to_hex()))
+    .chain(rows_and_parents)
+    .collect();
     for line in &text {
-        for secret in [
-            block.to_hex(),
-            txid.to_hex(),
-            Hash32([0x5a; 32]).to_hex(),
-            height.to_string(),
-        ] {
-            assert!(!line.contains(&secret), "{line}");
+        for secret in &secrets {
+            assert!(!line.contains(secret), "{line}");
         }
     }
 }
