@@ -34,7 +34,11 @@
 //! | `?readerpanic` | The resource reader panics 30 s into the first run: the samples stop while zebrad keeps running, so the Resources card says it is not measured until zebrad's next run, which Restart starts ([`resources::reader_panicked`]). |
 //! | `?backfill` | zebrad's run started 45 minutes before the page loaded, and its resource samples and the computer's of the 40 minutes before the load reach the page at once, so the Resources card's charts have history from the start ([`resources::backfill`]). |
 //! | `?lowdisk` | The volume with the main node's data has 1.4 GB free: "Disk almost full", and the Disk tile's warning tone ([`resources::volumes`]). With `?crashloop` each crash says so. |
-//! | `?lowmem` | Other programs leave 4 % of the memory available (critical pressure on macOS, the commit charge at 96 % of its limit on Windows), with `?backfill`'s history: "Memory nearly exhausted", and the Memory tile's warning tone ([`resources::short_of_memory`]). With `?crashloop`, zebrad is killed by signal 9 instead of panicking (on Windows it still crashes), and each exit says the memory was almost out. |
+//! | `?lowdisk=low` | That volume has 12 GB free: "Disk space low" after a minute, at once with `?backfill`. |
+//! | `?lowmem` | Other programs leave 4 % of the memory available (critical pressure on macOS, the commit charge at 96 % of its limit on Windows), with `?backfill`'s history: "Memory nearly exhausted", and the Memory tile's warning tone ([`resources::short_of_memory`]). On Windows the available memory gives the reason. With `?crashloop`, zebrad is killed by signal 9 instead of panicking (on Windows it still crashes), and each exit says the memory was almost out. |
+//! | `?lowmem=low` | 8 % available (warning pressure on macOS), with `?backfill`'s history: "Memory low". |
+//! | `?lowmem=commit` | Windows (it brings `?os=windows` along): the memory available as usual and the commit charge at 96 % of its limit, with `?backfill`'s history: "Memory nearly exhausted" for the commit charge ("Windows has committed 23 of 24 GiB (96 %)"). With `?crashloop` each crash says Windows was almost out of memory to commit. |
+//! | `?lowmem=restart` | As `?lowmem`, on an 8 GiB computer whose syncing zebrad holds most of it, as in zebra#9699: the verdict offers Restart. |
 //! | `?nofit` | The volume with the main node's data has 40 GB free beside its 248.3 GB of state while it syncs Mainnet: "The chain may not fit" after a minute, at once with `?backfill`. |
 //! | `?leftover` | Removing a node with its chain state deleted takes it off the list but leaves its folder behind, as when the backend cannot delete a file: the error banner names the folder. |
 //! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). Each node's process tree has samples of its own, and the computer has 16 CPUs and 32 GiB ([`resources`]). |
@@ -87,7 +91,7 @@ use crate::{clock, format};
 use config::SAMPLE_CONFIG;
 use log_lines::{sample_line, startup_left};
 use metrics::MetricsInput;
-use resources::{MockTree, OsFlag};
+use resources::{LowDisk, LowMemory, MockTree, OsFlag};
 pub use resources::{get_machine_resources, on_machine_resources};
 use updates::{MOCK_RELEASES_URL, MOCK_VERSION, UpdateFlag, health_failure};
 pub use updates::{
@@ -205,10 +209,10 @@ struct Flags {
     reader_panic: bool,
     /// `?backfill`, or `?lowmem`, which brings it along.
     backfill: bool,
-    /// `?lowdisk`.
-    low_disk: bool,
-    /// `?lowmem`.
-    low_memory: bool,
+    /// `?lowdisk` or `?lowdisk=low`.
+    low_disk: Option<LowDisk>,
+    /// `?lowmem`, `?lowmem=low`, `commit` or `restart`.
+    low_memory: Option<LowMemory>,
     /// `?nofit`.
     no_fit: bool,
     /// `?leftover`.
@@ -240,6 +244,7 @@ impl Flags {
                 .iter()
                 .find_map(|(key, value)| (key == name).then_some(value.as_str()))
         };
+        let low_memory = flag("lowmem").then(|| LowMemory::parse(value("lowmem")));
         Flags {
             first_run: flag("firstrun"),
             stored_dir: flag("storeddir"),
@@ -253,13 +258,17 @@ impl Flags {
             stalled: flag("stalled"),
             no_peers: flag("nopeers"),
             crash_loop: flag("crashloop"),
-            os: OsFlag::parse(value("os")),
+            // `?lowmem=commit` is about Windows' commit charge.
+            os: match value("os") {
+                None if low_memory == Some(LowMemory::Commit) => OsFlag::Windows,
+                os => OsFlag::parse(os),
+            },
             children: flag("children"),
             unreadable: flag("unreadable"),
             reader_panic: flag("readerpanic"),
             backfill: flag("backfill") || flag("lowmem"),
-            low_disk: flag("lowdisk"),
-            low_memory: flag("lowmem"),
+            low_disk: flag("lowdisk").then(|| LowDisk::parse(value("lowdisk"))),
+            low_memory,
             no_fit: flag("nofit"),
             leftover: flag("leftover"),
             herd: flag("herd") || flag("agree"),
@@ -730,13 +739,15 @@ impl Mock {
     }
 
     /// `?crashloop`: zebrad panics, the launcher notes the exit and schedules a restart with a
-    /// backoff that doubles with every crash. With `?lowmem` on Linux and macOS the system kills
-    /// it with signal 9 instead, as the OOM killer and jetsam do, and it says nothing.
+    /// backoff that doubles with every crash. With `?lowmem` (or `=restart`) on Linux and macOS
+    /// the system kills it with signal 9 instead, as the OOM killer and jetsam do, and it says
+    /// nothing.
     fn crash(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
         let crashes = self.crashes.fetch_add(1, Ordering::Relaxed) + 1;
         let delay = (FIRST_BACKOFF * 2u32.pow(crashes - 1)).min(MAX_BACKOFF);
-        let killed = self.flags.low_memory && self.flags.os != OsFlag::Windows;
+        let killed =
+            self.flags.low_memory.is_some_and(LowMemory::kills) && self.flags.os != OsFlag::Windows;
         if killed {
             self.note("zebrad exited (no exit code, Crash)");
         } else {
@@ -1262,8 +1273,8 @@ mod tests {
                 unreadable: true,
                 reader_panic: true,
                 backfill: true,
-                low_disk: true,
-                low_memory: true,
+                low_disk: Some(LowDisk::Full),
+                low_memory: Some(LowMemory::Exhausted),
                 no_fit: true,
                 leftover: true,
                 herd: true,
@@ -1292,6 +1303,23 @@ mod tests {
         assert_eq!(Flags::parse("?crashloop").scenario(), Scenario::Normal);
         assert_eq!(Flags::parse("?eos=soon").eos, EosFlag::Soon);
         assert_eq!(Flags::parse("?os=macos").os, OsFlag::Macos);
+        // The values of `?lowdisk` and `?lowmem`; `?lowmem` brings `?backfill` along.
+        assert_eq!(Flags::parse("?lowdisk=low").low_disk, Some(LowDisk::Low));
+        assert_eq!(Flags::parse("?lowdisk=lots").low_disk, Some(LowDisk::Full));
+        for (value, low) in [
+            ("", LowMemory::Exhausted),
+            ("=low", LowMemory::Low),
+            ("=commit", LowMemory::Commit),
+            ("=restart", LowMemory::Restart),
+        ] {
+            let flags = Flags::parse(&format!("?lowmem{value}"));
+            assert_eq!(flags.low_memory, Some(low), "{value}");
+            assert!(flags.backfill, "{value}");
+        }
+        // `?lowmem=commit` is about Windows, unless the query names another OS.
+        assert_eq!(Flags::parse("?lowmem=commit").os, OsFlag::Windows);
+        assert_eq!(Flags::parse("?lowmem").os, OsFlag::Linux);
+        assert_eq!(Flags::parse("?lowmem=commit&os=macos").os, OsFlag::Macos);
         // Unknown values and flags are ignored.
         assert_eq!(
             Flags::parse("?eos=never&update=bogus&os=plan9&beta=available&other"),

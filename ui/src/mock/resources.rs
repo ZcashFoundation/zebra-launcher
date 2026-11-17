@@ -45,9 +45,11 @@
 //! read every 30 s: `/` with the launcher's data folder (212.4 GB free of 1,000.2 GB),
 //! `/mnt/storage` with the folder picker's (1,834.5 GB of 4,000.8 GB), `/mnt/zcash` with the
 //! herd's (3,412.7 GB of 8,001.6 GB), and for any other folder its first two parts (120 GB of
-//! 500.1 GB). `?lowdisk` leaves 1.4 GB on the main node's volume and `?nofit` 40 GB;
-//! `?lowmem` leaves 4 % of the memory available, with critical pressure on macOS and the
-//! commit charge at 96 % of its limit on Windows ([`short_of_memory`]).
+//! 500.1 GB). `?lowdisk` leaves 1.4 GB on the main node's volume, `?lowdisk=low` 12 GB and
+//! `?nofit` 40 GB; `?lowmem` leaves 4 % of the memory available, with critical pressure on
+//! macOS and the commit charge at 96 % of its limit on Windows, `?lowmem=low` 8 %,
+//! `?lowmem=commit` only the commit charge at 96 %, and `?lowmem=restart` 4 % of an 8 GiB
+//! computer ([`LowMemory`], [`short_of_memory`]).
 
 use std::{
     cell::RefCell,
@@ -77,6 +79,58 @@ pub(super) enum OsFlag {
     Linux,
     Macos,
     Windows,
+}
+
+/// `?lowdisk=…`: how little the main node's volume has free ([`volumes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LowDisk {
+    /// `?lowdisk`: [`LOW_DISK_FREE`], rule 19's problem at once.
+    Full,
+    /// `?lowdisk=low`: [`LOW_DISK_SPACE`], rule 19's warning after a minute.
+    Low,
+}
+
+impl LowDisk {
+    /// The value of `?lowdisk=`; anything else is `Full`.
+    pub(super) fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("low") => LowDisk::Low,
+            _ => LowDisk::Full,
+        }
+    }
+}
+
+/// `?lowmem=…`: what the computer is short of ([`short_of_memory`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LowMemory {
+    /// `?lowmem`: 4 % of the memory available, critical pressure on macOS and the commit
+    /// charge at 96 % of its limit on Windows: rule 20's problem.
+    Exhausted,
+    /// `?lowmem=low`: 8 % available, warning pressure on macOS: rule 20's warning.
+    Low,
+    /// `?lowmem=commit`: Windows' commit charge at 96 % of its limit with the memory available
+    /// as usual: rule 20's problem for the commit charge. It brings `?os=windows` along.
+    Commit,
+    /// `?lowmem=restart`: as `?lowmem`, on an 8 GiB computer ([`SMALL_COMPUTER`]), where the
+    /// syncing zebrad holds most of the memory, as in zebra#9699: the verdict offers Restart.
+    Restart,
+}
+
+impl LowMemory {
+    /// The value of `?lowmem=`; anything else is `Exhausted`.
+    pub(super) fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("low") => LowMemory::Low,
+            Some("commit") => LowMemory::Commit,
+            Some("restart") => LowMemory::Restart,
+            _ => LowMemory::Exhausted,
+        }
+    }
+
+    /// Whether the system kills zebrad for want of memory, as the OOM killer and jetsam do.
+    pub(super) fn kills(self) -> bool {
+        matches!(self, LowMemory::Exhausted | LowMemory::Restart)
+    }
 }
 
 impl OsFlag {
@@ -142,6 +196,25 @@ pub(super) const HERD_COMPUTER: Computer = Computer {
     memory_gib: 32.0,
     commit_limit_gib: 48.0,
 };
+
+/// `?lowmem=restart`'s computer: 8 logical CPUs and 8 GiB, the size zebra#9699 ran out on.
+pub(super) const SMALL_COMPUTER: Computer = Computer {
+    logical_cpus: 8,
+    memory_gib: 8.0,
+    commit_limit_gib: 12.0,
+};
+
+/// The computer `flags` ask for: [`SMALL_COMPUTER`] with `?lowmem=restart`, [`HERD_COMPUTER`]
+/// with `?herd`, [`ONE_NODE`] otherwise.
+fn computer(flags: Flags) -> Computer {
+    if flags.low_memory == Some(LowMemory::Restart) {
+        SMALL_COMPUTER
+    } else if flags.herd {
+        HERD_COMPUTER
+    } else {
+        ONE_NODE
+    }
+}
 
 /// What the other programs on the computer use.
 const OTHER_MEMORY_GIB: f64 = 5.2;
@@ -684,13 +757,16 @@ fn volume_of_dir(dir: &str) -> (String, u64, u64) {
 
 /// `?lowdisk`: what the main node's volume has free.
 pub(super) const LOW_DISK_FREE: u64 = 1_400_000_000;
+/// `?lowdisk=low`: what it has free, under rule 19's warning threshold of 20 GB on its
+/// 1,000.2 GB and above the problem's 3 GB.
+pub(super) const LOW_DISK_SPACE: u64 = 12_000_000_000;
 /// `?nofit`: what the main node's volume has free while zebrad syncs Mainnet beside its
 /// 248.3 GB of state.
 const NO_FIT_FREE: u64 = 40_000_000_000;
 
 /// The volumes that hold `dirs` (each node and its data folder, in the list's order), read at
-/// the newest 30 s mark at or before `at`; the one that holds `main_dir` has what `?lowdisk`
-/// and `?nofit` leave.
+/// the newest 30 s mark at or before `at`; the one that holds `main_dir` has what `?lowdisk`,
+/// `?lowdisk=low` and `?nofit` leave.
 pub(super) fn volumes(
     dirs: &[(NodeId, String)],
     main_dir: &str,
@@ -712,8 +788,11 @@ pub(super) fn volumes(
         }
         let free = if label != main_label {
             free
-        } else if flags.low_disk {
-            LOW_DISK_FREE
+        } else if let Some(low) = flags.low_disk {
+            match low {
+                LowDisk::Full => LOW_DISK_FREE,
+                LowDisk::Low => LOW_DISK_SPACE,
+            }
         } else if flags.no_fit {
             NO_FIT_FREE
         } else {
@@ -730,15 +809,29 @@ pub(super) fn volumes(
     volumes
 }
 
-/// `?lowmem`: other programs leave 4 % of the memory available; macOS reports critical
-/// pressure and Windows a commit charge at 96 % of its limit.
-pub(super) fn short_of_memory(machine: MachineResources) -> MachineResources {
-    let available = machine.memory_total_bytes / 25;
-    MachineResources {
-        memory_available_bytes: Some(available),
-        pressure: machine.pressure.map(|_| MemoryPressure::Critical),
-        commit_bytes: machine.commit_limit_bytes.map(|limit| limit / 100 * 96),
-        ..machine
+/// `?lowmem=…`: what other programs leave ([`LowMemory`]). `?lowmem` and `?lowmem=restart`
+/// leave 4 % of the memory available, with critical pressure on macOS and a commit charge at
+/// 96 % of its limit on Windows; `?lowmem=low` leaves 8 %, with warning pressure on macOS;
+/// `?lowmem=commit` leaves the memory as it is and puts the commit charge at 96 %.
+pub(super) fn short_of_memory(machine: MachineResources, low: LowMemory) -> MachineResources {
+    let total = machine.memory_total_bytes;
+    let committed = machine.commit_limit_bytes.map(|limit| limit / 100 * 96);
+    match low {
+        LowMemory::Exhausted | LowMemory::Restart => MachineResources {
+            memory_available_bytes: Some(total / 25),
+            pressure: machine.pressure.map(|_| MemoryPressure::Critical),
+            commit_bytes: committed,
+            ..machine
+        },
+        LowMemory::Low => MachineResources {
+            memory_available_bytes: Some(total / 100 * 8),
+            pressure: machine.pressure.map(|_| MemoryPressure::Warning),
+            ..machine
+        },
+        LowMemory::Commit => MachineResources {
+            commit_bytes: committed,
+            ..machine
+        },
     }
 }
 
@@ -746,10 +839,9 @@ pub(super) fn short_of_memory(machine: MachineResources) -> MachineResources {
 /// the nodes' data folders now.
 fn as_published(machine: MachineResources) -> MachineResources {
     let mock = mock();
-    let machine = if mock.flags.low_memory {
-        short_of_memory(machine)
-    } else {
-        machine
+    let machine = match mock.flags.low_memory {
+        Some(low) => short_of_memory(machine, low),
+        None => machine,
     };
     let dirs: Vec<(NodeId, String)> = nodes::list()
         .into_iter()
@@ -817,12 +909,8 @@ impl super::Mock {
             status.rpc_addr = "127.0.0.1:8232".parse().ok();
             status.metrics_addr = "127.0.0.1:9999".parse().ok();
         });
-        let computer = if self.flags.herd {
-            HERD_COMPUTER
-        } else {
-            ONE_NODE
-        };
-        let (tree, nodes, machines) = backfill(self.flags, pid, started_at, now, computer);
+        let (tree, nodes, machines) =
+            backfill(self.flags, pid, started_at, now, computer(self.flags));
         // The computer's count goes on, so its first live sample has a busy figure.
         self.resource_seconds.store(
             machines.len() as u64 * INTERVAL.as_secs(),
@@ -910,13 +998,13 @@ impl super::Mock {
             let main = unpublished.or_else(|| self.resources.get_untracked());
             let herd = herd_samples();
             let nodes: Vec<&NodeResources> = main.iter().chain(&herd).collect();
-            let computer = if self.flags.herd {
-                HERD_COMPUTER
-            } else {
-                ONE_NODE
-            };
-            self.machine
-                .set(Some(machine(now, count, self.flags.os, computer, &nodes)));
+            self.machine.set(Some(machine(
+                now,
+                count,
+                self.flags.os,
+                computer(self.flags),
+                &nodes,
+            )));
         }
     }
 }
@@ -1393,7 +1481,7 @@ mod tests {
             &dirs,
             DEFAULT_DATA_DIR,
             Flags {
-                low_disk: true,
+                low_disk: Some(LowDisk::Full),
                 ..Flags::default()
             },
             at,
@@ -1404,6 +1492,22 @@ mod tests {
             "the verdict's problem"
         );
         assert_eq!(low[1].free_bytes, 3_412_700_000_000);
+        // `?lowdisk=low`: under the warning's threshold, min(5 % of the volume, 20 GB), and
+        // above where the problem clears.
+        let tight = volumes(
+            &dirs,
+            DEFAULT_DATA_DIR,
+            Flags {
+                low_disk: Some(LowDisk::Low),
+                ..Flags::default()
+            },
+            at,
+        );
+        let threshold = ((tight[0].total_bytes as f64 * crate::health::resources::DISK_LOW_SHARE)
+            as u64)
+            .min(crate::health::resources::DISK_LOW_BYTES);
+        assert!(tight[0].free_bytes < threshold, "{threshold}");
+        assert!(tight[0].free_bytes > crate::health::resources::DISK_FULL_CLEARS);
         let tight = volumes(
             &dirs,
             "/mnt/zcash/zebrad-testnet",
@@ -1418,18 +1522,53 @@ mod tests {
     }
 
     #[test]
-    fn short_of_memory_leaves_four_percent() {
+    fn short_of_memory_leaves_what_each_value_asks() {
+        use crate::health::resources::{
+            COMMIT_FULL_SHARE, MEMORY_LOW_SHARE, MEMORY_OUT_CLEARS, MEMORY_OUT_SHARE,
+        };
         let at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
-        let linux = short_of_memory(machine(at, 3, OsFlag::Linux, ONE_NODE, &[]));
-        let share = linux.memory_available_bytes.unwrap() as f64 / linux.memory_total_bytes as f64;
-        assert!((0.039..0.041).contains(&share), "{share}");
+        let short = |os, low| short_of_memory(machine(at, 3, os, ONE_NODE, &[]), low);
+        let available = |machine: &MachineResources| {
+            machine.memory_available_bytes.unwrap() as f64 / machine.memory_total_bytes as f64
+        };
+        let commit = |machine: &MachineResources| {
+            machine.commit_bytes.unwrap() as f64 / machine.commit_limit_bytes.unwrap() as f64
+        };
+        // `?lowmem`: 4 %, critical pressure, the commit charge at 96 %.
+        let linux = short(OsFlag::Linux, LowMemory::Exhausted);
+        assert!((0.039..0.041).contains(&available(&linux)));
+        assert!(available(&linux) < MEMORY_OUT_SHARE);
         assert_eq!(linux.pressure, None);
-        let mac = short_of_memory(machine(at, 3, OsFlag::Macos, ONE_NODE, &[]));
+        let mac = short(OsFlag::Macos, LowMemory::Exhausted);
         assert_eq!(mac.pressure, Some(MemoryPressure::Critical));
-        let windows = short_of_memory(machine(at, 3, OsFlag::Windows, ONE_NODE, &[]));
-        let commit =
-            windows.commit_bytes.unwrap() as f64 / windows.commit_limit_bytes.unwrap() as f64;
-        assert!(commit > 0.95, "{commit}");
+        let windows = short(OsFlag::Windows, LowMemory::Exhausted);
+        assert!(commit(&windows) > COMMIT_FULL_SHARE);
+        // `?lowmem=low`: between the problem's leave threshold and the warning's.
+        let low = short(OsFlag::Linux, LowMemory::Low);
+        assert!(available(&low) > MEMORY_OUT_CLEARS && available(&low) < MEMORY_LOW_SHARE);
+        let mac = short(OsFlag::Macos, LowMemory::Low);
+        assert_eq!(mac.pressure, Some(MemoryPressure::Warning));
+        let windows = short(OsFlag::Windows, LowMemory::Low);
+        assert!(commit(&windows) < 0.93, "the commit charge as usual");
+        // `?lowmem=commit`: the memory as usual, the commit charge at 96 %.
+        let usual = machine(at, 3, OsFlag::Windows, ONE_NODE, &[]);
+        let windows = short(OsFlag::Windows, LowMemory::Commit);
+        assert_eq!(windows.memory_available_bytes, usual.memory_available_bytes);
+        assert!(available(&windows) > MEMORY_LOW_SHARE);
+        assert!(commit(&windows) > COMMIT_FULL_SHARE);
+        // `?lowmem=restart`: the small computer, where the syncing zebrad has more than half.
+        let flags = Flags::parse("?lowmem=restart");
+        assert_eq!(computer(flags), SMALL_COMPUTER);
+        assert_eq!(computer(Flags::parse("?lowmem&herd")), HERD_COMPUTER);
+        let zebrad = load(&RunState {
+            run_secs: 45.0 * 60.0,
+            stopping: false,
+            at_tip: false,
+            scenario: Scenario::Normal,
+            count: 540,
+        });
+        assert!(zebrad.memory * 2 >= gib(SMALL_COMPUTER.memory_gib));
+        assert!(LowMemory::Restart.kills() && !LowMemory::Low.kills());
     }
 
     #[test]

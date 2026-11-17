@@ -1036,7 +1036,11 @@ New flags. Each goes into `Flags`, the module's flag table, `ui/README.md` and
 | `?os=macos`, `?os=windows` | The platform's labels and fields (pressure on macOS; commit, handles and no threads on Windows). Linux is the default. |
 | `?backfill` | Replays 40 minutes of resource and machine samples at load, with the run started 45 minutes ago, so charts and sustained rules show at once. Mock-only. |
 | `?lowdisk` | The data volume has 1.4 GB free: rule 19, Problem. |
+| `?lowdisk=low` | 12 GB free: rule 19, Attention, after a minute (at once with `?backfill`). |
 | `?lowmem` | Other programs leave 4 % available, implying `?backfill`: rule 20, Problem. |
+| `?lowmem=low` | 8 % available (warning pressure on macOS): rule 20, Attention. |
+| `?lowmem=commit` | Windows, implied: the memory available as usual, the commit charge at 96 % of its limit: rule 20, Problem, for the commit charge. |
+| `?lowmem=restart` | As `?lowmem` on an 8 GiB computer, where the syncing zebrad holds most of the memory: rule 20, Problem, with Restart. |
 | `?nofit` | 40 GB free while syncing Mainnet, beside the mock's 248.3 GB state (`SYNCED_STATE_BYTES`): rule 21, Attention. |
 
 ## Health
@@ -1683,7 +1687,8 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - The sustain helpers (`available_below_for`, `pressure_at_least_for`,
      `commit_above_for`) and `Episode` in `machine_history.rs`.
    - The exit sentences, and the Disk tile's free space.
-   - `?lowdisk`, `?lowmem` and `?nofit`.
+   - `?lowdisk`, `?lowmem` and `?nofit`, with values for each verdict: `?lowdisk=low`,
+     `?lowmem=low`, `?lowmem=commit` and `?lowmem=restart`.
 
    Screenshots of each verdict. Ships: Zeal warns before the data disk or the memory runs
    out, and says so when a crash followed either.
@@ -1765,7 +1770,12 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      parts (120 of 500.1 GB). `?nofit` shows after a minute, at once with `&backfill`.
      `?lowmem` makes macOS's pressure critical and Windows' commit charge 96 % of its limit,
      and with `?crashloop` the system kills zebrad with signal 9 on Linux and macOS, so the
-     exit's memory sentence shows; `?lowdisk&crashloop` shows the disk's.
+     exit's memory sentence shows; `?lowdisk&crashloop` shows the disk's. With `?lowmem` on
+     Windows the available memory gives the reason, so `?lowmem=commit` (which implies
+     `?os=windows`) leaves the memory as usual and only the commit charge high. `?lowdisk=low`
+     (12 GB) and `?lowmem=low` (8 %) give the Attention forms, and `?lowmem=restart` runs on
+     an 8 GiB computer (`SMALL_COMPUTER`), where the syncing zebrad's 6 GiB or more offer
+     Restart.
 6. **Overview.**
    - `MachineStrip` with its volume lines.
    - The card lines and sparklines.

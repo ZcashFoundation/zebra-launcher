@@ -743,9 +743,11 @@ Resources card those platforms' figures and labels, and `?backfill` starts its r
 before the page loaded, with the samples of the 40 minutes before the load, so the card's
 charts have history at once. The computer's samples list the volumes of the nodes' data
 folders, and the resource rules come from `?lowdisk` (1.4 GB free on the main node's
-volume: "Disk almost full"), `?lowmem` (4 % of the memory available, with `?backfill`:
-"Memory nearly exhausted"; with `?crashloop` zebrad is killed by signal 9) and `?nofit` (40
-GB free beside the state while syncing Mainnet: "The chain may not fit"). The Explorer's
+volume: "Disk almost full"; `=low`, 12 GB: "Disk space low"), `?lowmem` (4 % of the memory
+available, with `?backfill`: "Memory nearly exhausted"; with `?crashloop` zebrad is killed by
+signal 9; `=low`, 8 %: "Memory low"; `=commit`, Windows' commit charge at 96 %; `=restart`,
+an 8 GiB computer, so Restart is offered) and `?nofit` (40 GB free beside the state while
+syncing Mainnet: "The chain may not fit"). The Explorer's
 chains come from `?attip`, `?tip=<h>`, `?explorer=slow|empty|nobi` and `?reorg`. The herd's
 agreement comes from `?herd&agree` and `&agree=behind|stall|fork|race|split|impl|channels|
 restart|deepfork|silent|herdstall|replaced|pair|otherchain` (see [The herd](#the-herd)).
