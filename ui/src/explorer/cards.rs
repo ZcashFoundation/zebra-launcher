@@ -8,7 +8,7 @@ use std::{collections::HashMap, time::Duration};
 
 use launcher_types::{
     NodeId,
-    explorer::{Card, CardTarget, ExplorerRequest, ExplorerResponse, TxStatus},
+    explorer::{Card, CardTarget, ExplorerRequest, ExplorerResponse, TxKind, TxStatus},
 };
 use leptos::{ev, prelude::*, task::spawn_local};
 use wasm_bindgen::JsCast;
@@ -187,11 +187,8 @@ pub fn HoverCard() -> impl IntoView {
                         TxStatus::Mempool => "waiting in your node's mempool".to_owned(),
                         TxStatus::SideChain { .. } => "in a block outside the best chain".to_owned(),
                     };
-                    let mut parts = vec![
-                        format!("{inputs} input{}", if inputs == 1 { "" } else { "s" }),
-                        format!("{outputs} output{}", if outputs == 1 { "" } else { "s" }),
-                    ];
-                    parts.extend(pools.iter().map(|pool| pool.label().to_owned()));
+                    let coinbase = matches!(kind, TxKind::Coinbase { .. });
+                    let mut parts = text::card_counts(inputs, outputs, &pools, coinbase);
                     if let Some(size) = size {
                         parts.push(bytes(u64::from(size)));
                     }

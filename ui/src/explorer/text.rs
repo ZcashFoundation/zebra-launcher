@@ -914,6 +914,21 @@ pub fn coin_age(spent_at: Option<u32>, status: &TxStatus) -> String {
     }
 }
 
+/// A transaction card's counts: its transparent inputs and outputs, left out when it has none
+/// (a coinbase's input spends nothing), and the shielded pools it touches: `2 transparent
+/// inputs · 1 transparent output · Orchard`.
+pub fn card_counts(inputs: u32, outputs: u32, pools: &[Pool], coinbase: bool) -> Vec<String> {
+    let mut parts = Vec::new();
+    if inputs > 0 && !coinbase {
+        parts.push(format!("{inputs} transparent input{}", plural(inputs)));
+    }
+    if outputs > 0 {
+        parts.push(format!("{outputs} transparent output{}", plural(outputs)));
+    }
+    parts.extend(pools.iter().map(|pool| pool.label().to_owned()));
+    parts
+}
+
 /// A read for Show RPC: `getblock ["3549000",1]`.
 pub fn source_text(call: &SourceCall) -> String {
     format!("{} {}", call.method, call.params)
@@ -1358,6 +1373,21 @@ mod tests {
         assert_eq!(coin_age(Some(1_000), &mined), "204 blocks");
         assert_eq!(coin_age(Some(1_204), &mined), "in this block");
         assert_eq!(coin_age(None, &TxStatus::Mempool), "waiting");
+    }
+
+    #[test]
+    fn a_cards_counts_are_of_its_transparent_parts() {
+        assert_eq!(
+            card_counts(2, 1, &[Pool::Orchard], false).join(" · "),
+            "2 transparent inputs · 1 transparent output · Orchard"
+        );
+        // Fully shielded: no "0 inputs · 0 outputs", which reads as nothing at all.
+        assert_eq!(card_counts(0, 0, &[Pool::Orchard], false), ["Orchard"]);
+        // A coinbase's input spends nothing.
+        assert_eq!(
+            card_counts(1, 3, &[Pool::Ironwood], true).join(" · "),
+            "3 transparent outputs · Ironwood"
+        );
     }
 
     #[test]
