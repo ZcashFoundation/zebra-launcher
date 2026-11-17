@@ -581,6 +581,11 @@ async fn a_second_full_disk_waits_for_its_own_evidence() {
 
 /// How many times zingod was started.
 async fn starts(setup: &Setup) -> usize {
+    lines_starting(setup, "zingod started (pid ").await
+}
+
+/// How many lines of zingod's log start with `prefix`.
+async fn lines_starting(setup: &Setup, prefix: &str) -> usize {
     let history = timeout(LIMIT, setup.runner.subscribe())
         .await
         .unwrap()
@@ -588,7 +593,7 @@ async fn starts(setup: &Setup) -> usize {
         .history;
     history
         .iter()
-        .filter(|line| line.message.starts_with("zingod started (pid "))
+        .filter(|line| line.message.starts_with(prefix))
         .count()
 }
 
@@ -609,7 +614,68 @@ async fn a_taken_port_moves_zingod_once() {
     let moved = facts.port.unwrap();
     assert!(moved > taken);
     assert_eq!(facts.ports_tried, [taken, moved]);
+
+    // The move holds for the attempt: a new zebrad run restarts zingod on the moved port.
+    timeout(LIMIT, setup.zebrad.restart())
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(LIMIT, setup.zebrad.wait_until(|s| s.rpc_addr.is_some()))
+        .await
+        .unwrap()
+        .unwrap();
+    let second = setup.give_plan(0);
+    let facts = setup
+        .facts_until("zingod on the new run", |f| {
+            running(f) && f.running_for == Some(second.zebrad)
+        })
+        .await;
+    assert_eq!(facts.port, Some(moved));
+    assert_eq!(facts.ports_tried, [taken, moved]);
+    assert_eq!(
+        lines_starting(&setup, "not starting zingod").await,
+        1,
+        "the taken port was tried once"
+    );
     drop(holder);
+    setup.finish().await;
+}
+
+/// A failure that waits for the user stays through zebrad's restarts: only a new attempt
+/// starts zingod again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failure_waits_for_a_new_attempt_not_a_new_zebrad_run() {
+    let setup = setup("ok", "index-broken", |_| {}).await;
+    let broken = Phase::Failed {
+        class: ExitClass::IndexBroken,
+    };
+    setup.give_plan(0);
+    setup
+        .facts_until("the damaged index", |f| f.phase == broken)
+        .await;
+    timeout(LIMIT, setup.zebrad.restart())
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(LIMIT, setup.zebrad.wait_until(|s| s.rpc_addr.is_some()))
+        .await
+        .unwrap()
+        .unwrap();
+    setup.give_plan(0);
+    setup
+        .facts_stay(
+            "no start on a new zebrad run",
+            Duration::from_millis(800),
+            |f| f.phase == broken,
+        )
+        .await;
+    assert_eq!(starts(&setup).await, 1);
+
+    setup.settings("FAKE_ZINGOD_MODE=serving\nFAKE_ZINGOD_POLL_MS=50\n");
+    setup.give_plan(1);
+    setup
+        .facts_until("zingod running after Try again", running)
+        .await;
     setup.finish().await;
 }
 

@@ -1379,10 +1379,13 @@ command line and the reader) and `Launch` in the supervisor and the spawner; `Di
   its own reading arrives.
 - **The plan** (`ZingodPlan`) carries an `attempt` besides the configuration and zebrad's run.
   Z3 bumps it for the user's Try again and for the restarts its rules decide (the stall rule,
-  no validator for 30 s); a new attempt starts zingod again after a failure. The runner itself
-  makes the one port move, keeps the disk's hysteresis and applies the `DiskFull` recovery, with
-  the herd's functions that `want()` uses. The moved port is in `ZingodFacts.port`, for Z3 to
-  record in the spec; a new zebrad run or attempt starts again from the plan's port.
+  no validator for 30 s). A new zebrad run restarts a running zingod, but only a new attempt
+  starts it again after a failure, so a failure that waits for the user (rule 5 of [When
+  zingod runs](#when-zingod-runs)) stays through zebrad's restarts. The runner itself makes the
+  one port move per attempt, keeps the disk's hysteresis and applies the `DiskFull` recovery,
+  with the herd's functions that `want()` uses. The moved port is in `ZingodFacts.port`, for Z3
+  to record in the spec; a new zebrad run keeps it, and a new attempt starts again from the
+  plan's port.
 - **nice** adds 10 to the nice value zingod inherits from Zeal, capped at 19, rather than
   setting 10: zingod stays below zebrad at any nice Zeal runs at, and raising a nice value
   needs no privilege, where lowering one (Zeal at nice 15, say) fails the spawn.

@@ -177,7 +177,7 @@ pub struct ZingodFacts {
     pub resources: Option<ZingodResources>,
     /// The port zingod listens on now.
     pub port: Option<u16>,
-    /// The ports tried since the plan was given, after `PortInUse`.
+    /// The ports tried under the plan's attempt, after `PortInUse`.
     pub ports_tried: Vec<u16>,
 }
 

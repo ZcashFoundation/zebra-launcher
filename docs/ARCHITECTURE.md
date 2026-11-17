@@ -925,8 +925,9 @@ listed in PUBLIC-SERVICES.md ("PS1 as built").
   `<log dir>/zingod-<network>.log`, the check of `127.0.0.1:<port>` before each spawn) and
   follows a `watch<Option<ZingodPlan>>`: the configuration, its port, the zebrad run it reads
   and an attempt. It writes `<app data>/public/zingod-<network>.toml` before every start
-  (`zingod::config`, always with the node's cookie), restarts zingod for a new zebrad run or
-  attempt, moves once to the next free port after `PortInUse`, stops zingod below 10 GB free
+  (`zingod::config`, always with the node's cookie), restarts a running zingod for a new zebrad
+  run or attempt, starts a failed one again only for a new attempt, moves once per attempt to
+  the next free port after `PortInUse`, stops zingod below 10 GB free
   and starts it again above 20 GB, and after `DiskFull` restarts it only on evidence that
   covers the failure. It reads `/status` every 5 s (hyper, HTTP/1.1, a new connection, 2 s),
   the disk every minute, the index's size every 10 minutes (50,000 entries at most, in

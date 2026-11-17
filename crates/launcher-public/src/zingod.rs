@@ -8,16 +8,16 @@
 //!         supervisor (Launch::Zingod) ── zeal-zingod -c <app data>/public/zingod-<network>.toml start
 //! ```
 //!
-//! The plan names the configuration, its port and the zebrad run zingod reads; a new zebrad
-//! run, or a new attempt (the user's Try again, or a restart Z3's rules decide), restarts
-//! zingod, and no plan stops it. The runner writes the configuration before every start,
-//! moves to the next free port once after `PortInUse`, stops zingod while the index's disk is
-//! low and starts it again once it isn't ([`disk_allows`]), and restarts it after `DiskFull`
-//! only on evidence that covers the failure ([`disk_full_recovery`]). It reads `/status` every
-//! 5 s, the free space every minute and the index's size every 10 minutes, and turns the
-//! process tree's figures into integers. There are no locks: the plan comes on a `watch`, the
-//! commands on an `mpsc` with `oneshot` replies, and every slow read runs in a task that
-//! reports back on a channel.
+//! The plan names the configuration, its port and the zebrad run zingod reads. A new zebrad
+//! run, or a new attempt (the user's Try again, or a restart Z3's rules decide), restarts a
+//! running zingod; after a failure only a new attempt starts it again; no plan stops it. The
+//! runner writes the configuration before every start, moves to the next free port once per
+//! attempt after `PortInUse`, stops zingod while the index's disk is low and starts it again
+//! once it isn't ([`disk_allows`]), and restarts it after `DiskFull` only on evidence that
+//! covers the failure ([`disk_full_recovery`]). It reads `/status` every 5 s, the free space
+//! every minute and the index's size every 10 minutes, and turns the process tree's figures
+//! into integers. There are no locks: the plan comes on a `watch`, the commands on an `mpsc`
+//! with `oneshot` replies, and every slow read runs in a task that reports back on a channel.
 
 use std::{
     io,
@@ -84,7 +84,8 @@ const MAX_STATUS: usize = 64 * 1024;
 pub struct ZingodPlan {
     /// The configuration; its `listen` port is the one Z3 keeps in the service's spec.
     pub config: ZingodConfig,
-    /// The zebrad run zingod reads: a new one restarts zingod.
+    /// The zebrad run zingod reads: a new one restarts a running zingod, and doesn't start a
+    /// failed one.
     pub zebrad: ZebradRun,
     /// Bumped for the user's Try again and for a restart the rules decide: a new attempt
     /// starts zingod again after a failure.
@@ -424,7 +425,7 @@ struct Runner {
     starting: bool,
     /// The port zingod gets, after a move.
     port: Option<u16>,
-    /// The one move after `PortInUse` was made for this key.
+    /// The one move after `PortInUse` was made for this attempt.
     moved: bool,
     /// After Delete: stopped until the plan changes.
     held: bool,
@@ -512,7 +513,8 @@ impl Runner {
     fn on_plan(&mut self) {
         if let Some(plan) = self.plan() {
             self.last_config = Some(plan.config.clone());
-            if self.started != Some(plan.key()) {
+            // The port move is per attempt: a new zebrad run keeps the moved port.
+            if self.started.map(|(_, attempt)| attempt) != Some(plan.attempt) {
                 self.port = None;
                 self.moved = false;
                 self.facts
@@ -556,6 +558,10 @@ impl Runner {
             }
         }
         let current = self.started == Some(plan.key());
+        // A failure waits for a new attempt: a new zebrad run doesn't start zingod again.
+        let same_attempt = self
+            .started
+            .is_some_and(|(_, attempt)| attempt == plan.attempt);
         if phase.is_active() {
             if !current || !facts.disk_allows {
                 self.stop().await;
@@ -566,7 +572,7 @@ impl Runner {
             return;
         }
         match phase {
-            Phase::Failed { class } if current => match class {
+            Phase::Failed { class } if same_attempt => match class {
                 ExitClass::PortInUse if !self.moved => {
                     self.moved = true;
                     let from = self.port.unwrap_or(plan.config.listen.port());
