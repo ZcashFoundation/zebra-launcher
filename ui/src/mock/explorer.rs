@@ -14,7 +14,8 @@
 //! `?explorer=slow` makes each answer take 300 to 800 ms instead of 20 to 80, `?explorer=nobi`
 //! takes zebrad's value-pool row from every seventh block (so the next one shows the zero-diff
 //! case), `?explorer=big` gives every tenth block 4,600 more transactions (nearly 2 MB, read
-//! row by row), and `?reorg` replaces the main node's top two blocks about every 90 s.
+//! row by row), `?reorg` replaces the main node's top two blocks about every 90 s, and
+//! `?rowsfail` fails the first read of the second of every five pages of a block's rows.
 //! `?attip`, `?tip=` and `?explorer=empty` choose the main node's height (mock.rs).
 
 mod reads;
@@ -81,6 +82,16 @@ thread_local! {
     static LISTENERS: RefCell<Vec<Listener>> = const { RefCell::new(Vec::new()) };
     static TICKING: Cell<bool> = const { Cell::new(false) };
     static LAST_REORG: Cell<u64> = const { Cell::new(0) };
+    /// With `?rowsfail`, the pages of rows whose first read failed.
+    static ROWS_FAILED: RefCell<HashSet<(BlockHash, u32)>> = RefCell::new(HashSet::new());
+}
+
+/// The pages of a block's rows a slow node does not answer at first, with `?rowsfail`: the
+/// second of every five, once each.
+fn rows_fail(hash: BlockHash, offset: u32) -> bool {
+    mock().flags.rows_fail
+        && (offset / 25) % 5 == 1
+        && ROWS_FAILED.with_borrow_mut(|failed| failed.insert((hash, offset)))
 }
 
 /// What the explorer reads of a node.
@@ -493,7 +504,15 @@ fn answer(
             offset,
             limit,
             with_fees,
-        } => block_txs(reads, hash, offset, limit, with_fees).map(ExplorerResponse::BlockTxs),
+        } => {
+            if !with_fees && rows_fail(hash, offset) {
+                return Err(ExplorerError::new(
+                    ExplorerErrorKind::Timeout,
+                    "zebrad did not answer in time",
+                ));
+            }
+            block_txs(reads, hash, offset, limit, with_fees).map(ExplorerResponse::BlockTxs)
+        }
         ExplorerRequest::Tx { txid, resolve } => {
             let tx = reads.tx(&txid).ok_or_else(|| {
                 not_found(

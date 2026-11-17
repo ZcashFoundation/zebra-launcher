@@ -6,7 +6,7 @@
 //! side are read ahead, so ◀ and ▶ open at once.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -472,18 +472,19 @@ fn BudgetMeter(ledger: BlockLedger) -> impl IntoView {
 }
 
 /// What the table has read: its rows, the chunks whose fees are on their way, how the block
-/// is read, and Show RPC's reads. `Copy`.
+/// is read, Show RPC's reads, and the chunks whose last read failed. `Copy`.
 #[derive(Clone, Copy)]
 struct Rows {
     rows: RwSignal<HashMap<u32, TxRow>>,
     pending: RwSignal<HashSet<u32>>,
     read: RwSignal<Option<RowsRead>>,
     sources: RwSignal<Option<Vec<SourceCall>>>,
-    failed: RwSignal<Option<ExplorerError>>,
+    failed: RwSignal<BTreeMap<u32, ExplorerError>>,
 }
 
 /// Reads chunk `chunk` of block `hash`'s rows, then again with their fees when the first answer
-/// came without them. A chunk that failed is forgotten from `asked`, so scrolling asks again.
+/// came without them. A chunk that failed is forgotten from `asked`, so scrolling asks again,
+/// and its fees are no longer on their way; its failure shows until it is read.
 async fn read_rows(
     node: NodeId,
     hash: BlockHash,
@@ -525,12 +526,25 @@ async fn read_rows(
                         pending.remove(&chunk);
                     }
                 });
+                if store
+                    .failed
+                    .with_untracked(|failed| failed.contains_key(&chunk))
+                {
+                    store.failed.try_update(|failed| {
+                        failed.remove(&chunk);
+                    });
+                }
                 if !page.fees_pending {
                     return;
                 }
             }
             Err(error) => {
-                store.failed.try_set(Some(error));
+                store.failed.try_update(|failed| {
+                    failed.insert(chunk, error);
+                });
+                store.pending.try_update(|pending| {
+                    pending.remove(&chunk);
+                });
                 asked.try_update_value(|asked| {
                     asked.remove(&chunk);
                 });
@@ -555,7 +569,7 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
         pending: RwSignal::new(HashSet::new()),
         read: RwSignal::new(None),
         sources: RwSignal::new(None),
-        failed: RwSignal::new(None),
+        failed: RwSignal::new(BTreeMap::new()),
     };
     let asked = StoredValue::new(HashSet::<u32>::new());
     let reader = node.clone();
@@ -723,7 +737,13 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
                 {format!("Transactions ({})", thousands(u64::from(total)))}
             </h2>
             {move || reading().map(|reading| view! { <p class="muted ex-caption" role="status">{reading}</p> })}
-            {move || store.failed.get().map(|error| view! { <Failure error /> })}
+            // The first chunk whose last read failed, until it is read.
+            {move || {
+                store
+                    .failed
+                    .with(|failed| failed.values().next().cloned())
+                    .map(|error| view! { <Failure error /> })
+            }}
             <VirtualList
                 total
                 rows_shown=ROWS_SHOWN

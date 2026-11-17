@@ -210,7 +210,10 @@ every node command and event carries a node's id, and the mock's zebrad below is
   The mock reads as the backend does (a small block whole, a
   transaction's earlier ones, a coinbase's block) and remembers what it read as the backend's
   cache would, so Show RPC lists the same reads, made-up times included, and "from memory"
-  the second time. `?reorg` replaces the main node's top two blocks about every 90 s at the tip (with
+  the second time. `?rowsfail` (with `?explorer=big`) fails the first read of rows 25 to 49
+  of a big block, and of every fifth page after them, as when zebrad does not answer in time:
+  the table shows the failure until it scrolls back and the page reads. `?reorg` replaces the
+  main node's top two blocks about every 90 s at the tip (with
   `?attip`), and the Explorer shows the banner. With `?herd` the other nodes' Explorer tabs
   say that the Explorer reads only the node that was first when Zeal started: each node gets
   its own in P6. The mock's zebrad runs on its node's network as it was when it started, as
