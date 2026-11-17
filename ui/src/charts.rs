@@ -1120,6 +1120,86 @@ mod tests {
         );
     }
 
+    /// Two of the dashboard's charts drawn in full: the Blocks behind the tip chart and the
+    /// Peers chart by direction, at two widths. Every path, tick and label is written out, so
+    /// a change to the chart code that moves any of them shows here.
+    #[test]
+    fn the_dashboards_charts_keep_their_drawing() {
+        let samples: Vec<Sample> = [
+            (0, 2_950_000, 8, 5, 3),
+            (5, 2_950_120, 9, 6, 3),
+            (10, 2_950_260, 9, 6, 3),
+            (15, 2_950_300, 11, 7, 4),
+            (20, 2_950_480, 12, 8, 4),
+        ]
+        .into_iter()
+        .map(|(secs, height, peers, outbound, inbound)| Sample {
+            peers_outbound: Some(outbound),
+            peers_inbound: Some(inbound),
+            ..sample(secs, height, peers)
+        })
+        .collect();
+        let behind =
+            ChartData::from_samples(&samples, &[("Behind", "chart-series-1", Field::Behind)]);
+        let peers = ChartData::from_samples(
+            &samples,
+            &[
+                ("Outbound", "chart-series-1", Field::PeersOutbound),
+                ("Inbound", "chart-series-2", Field::PeersInbound),
+            ],
+        );
+        let owned = |pairs: &[(f64, &str)]| -> Vec<(f64, String)> {
+            pairs
+                .iter()
+                .map(|(at, label)| (*at, (*label).to_owned()))
+                .collect()
+        };
+
+        let g = geometry(&behind, true, |_| 0, VIEW_W).unwrap();
+        assert_eq!(
+            g.lines,
+            vec!["M64.0,40.4 L194.0,40.5 L324.0,40.6 L454.0,40.7 L584.0,40.8"]
+        );
+        assert_eq!(
+            g.area,
+            "M64.0,40.4 L194.0,40.5 L324.0,40.6 L454.0,40.7 L584.0,40.8 L584.0,190.0 L64.0,190.0 Z"
+        );
+        assert_eq!(
+            g.y_ticks,
+            owned(&[(190.0, "0"), (102.0, "100K"), (14.0, "200K")])
+        );
+        assert_eq!(g.x_ticks, owned(&[(64.0, "00:00:00"), (454.0, "00:00:15")]));
+        assert_eq!((g.end_label_series, g.end_label.as_str()), (0, "170K"));
+        assert_eq!(
+            summary("Blocks behind the tip", &behind, |_| 0),
+            "Blocks behind the tip: 5 samples from 00:00:00 to 00:00:20. Latest: Behind 169,520."
+        );
+
+        let g = geometry(&peers, true, |_| 0, 470.0).unwrap();
+        assert_eq!(
+            g.lines,
+            vec![
+                "M64.0,102.0 L151.5,84.4 L239.0,84.4 L326.5,66.8 L414.0,49.2",
+                "M64.0,137.2 L151.5,137.2 L239.0,137.2 L326.5,119.6 L414.0,119.6"
+            ]
+        );
+        assert_eq!(
+            g.area,
+            "M64.0,102.0 L151.5,84.4 L239.0,84.4 L326.5,66.8 L414.0,49.2 L414.0,190.0 L64.0,190.0 Z"
+        );
+        assert_eq!(
+            g.y_ticks,
+            owned(&[(190.0, "0"), (102.0, "5"), (14.0, "10")])
+        );
+        assert_eq!(g.x_ticks, owned(&[(64.0, "00:00:00"), (326.5, "00:00:15")]));
+        assert_eq!((g.end_label_series, g.end_label.as_str()), (0, "8"));
+        assert_eq!(g.ys[1][4], 119.6);
+        assert_eq!(
+            summary("Peers", &peers, |_| 0),
+            "Peers: 5 samples from 00:00:00 to 00:00:20. Latest: Outbound 8, Inbound 4."
+        );
+    }
+
     #[test]
     fn time_labels_follow_each_instants_zone() {
         // An autumn daylight-saving switch at 02:00 UTC: UTC+2 before it, UTC+1 from then on.
