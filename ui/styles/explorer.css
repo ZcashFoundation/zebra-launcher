@@ -757,7 +757,6 @@ button.link.ex-link {
   background: var(--panel);
   box-shadow: 0 4px 16px var(--shadow);
   font-size: 13px;
-  pointer-events: none;
 }
 
 .ex-hovercard p {

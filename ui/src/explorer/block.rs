@@ -672,8 +672,7 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
                 .pending
                 .with(|pending| pending.contains(&(index.get() / CHUNK)))
         };
-        let (enter, leave, escape) =
-            hover_handlers(move || txid().map(|txid| CardTarget::Tx { txid }));
+        let (enter, leave) = hover_handlers(move || txid().map(|txid| CardTarget::Tx { txid }));
         let fee = move || {
             let unit = unit();
             row.with(|row| match row.as_ref().map(|row| row.fee) {
@@ -714,7 +713,6 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
                     on:focus=move |event| enter(event.into())
                     on:mouseleave=move |event| leave(event.into())
                     on:blur=move |event| leave(event.into())
-                    on:keydown=escape
                 >
                     <code>{move || txid().map_or_else(|| "…".to_owned(), |txid| short_hash(&txid.to_hex()))}</code>
                 </button>

@@ -77,7 +77,7 @@ pub fn RouteLink(nav: NodeExplorer, route: ExplorerRoute, children: Children) ->
     let target = card_target(&route);
     let has_card = target.is_some();
     let target = StoredValue::new(target);
-    let (enter, leave, escape) = hover_handlers(move || target.get_value());
+    let (enter, leave) = hover_handlers(move || target.get_value());
     view! {
         <button
             type="button"
@@ -88,7 +88,6 @@ pub fn RouteLink(nav: NodeExplorer, route: ExplorerRoute, children: Children) ->
             on:focus=move |event| enter(event.into())
             on:mouseleave=move |event| leave(event.into())
             on:blur=move |event| leave(event.into())
-            on:keydown=escape
         >
             {children()}
         </button>

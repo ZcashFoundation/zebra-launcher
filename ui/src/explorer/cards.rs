@@ -1,8 +1,9 @@
 //! Hover cards: a few facts about the block or transaction a link leads to, once the pointer or
 //! focus rests on it. The facts are asked for after 120 ms, from one cheap read on the
 //! explorer's prefetch lane, which also fills its cache for the page the link opens; the card
-//! shows at 300 ms. One card at a time, drawn by the shell under the link; leaving the link,
-//! Escape or the wheel hides it. The facts are kept while the chain they were read on holds:
+//! shows at 300 ms. One card at a time, drawn by the shell under the link. It stays while the
+//! pointer moves onto it, and goes 300 ms after the pointer or focus leaves both the link and
+//! the card, at once on Escape wherever focus is, and when anything scrolls. The facts are kept while the chain they were read on holds:
 //! another network or a reorganisation drops them all, and a new tip those of transactions
 //! not in a block yet.
 
@@ -15,7 +16,7 @@ use launcher_types::{
     },
 };
 use leptos::{ev, prelude::*, task::spawn_local};
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, closure::Closure};
 
 use super::text;
 use crate::{
@@ -26,8 +27,11 @@ use crate::{
 
 /// How long the pointer or focus rests before the card's facts are asked for...
 const ASK_AFTER: Duration = Duration::from_millis(120);
-/// ... and before the card shows.
+/// ... and before the card shows...
 const SHOW_AFTER: Duration = Duration::from_millis(300);
+/// ... and how long it stays once the pointer or focus has left the link, so the pointer can
+/// move onto it.
+const HIDE_AFTER: Duration = Duration::from_millis(300);
 /// The card's width, to keep it inside the window.
 const CARD_WIDTH: f64 = 280.0;
 /// The id the links point their `aria-describedby` at.
@@ -47,6 +51,8 @@ pub struct HoverCards {
     /// one asks again.
     failed: RwSignal<Option<(u64, CardTarget, ExplorerErrorKind)>>,
     generation: StoredValue<u64>,
+    /// The pointer is on the card.
+    on_card: StoredValue<bool>,
 }
 
 impl HoverCards {
@@ -61,6 +67,7 @@ impl HoverCards {
             node,
             tip,
             failed: RwSignal::new(None),
+            on_card: StoredValue::new(false),
             shown: RwSignal::new(None),
             cards: RwSignal::new(HashMap::new()),
             generation: StoredValue::new(0),
@@ -144,12 +151,34 @@ impl HoverCards {
         );
     }
 
-    /// The pointer or focus left the link, or the card was dismissed.
+    /// The card was dismissed, or what it was under has moved: it goes now.
     pub fn leave(self) {
         self.generation.set_value(self.generation.get_value() + 1);
+        self.on_card.set_value(false);
         if self.shown.with_untracked(Option::is_some) {
             self.shown.set(None);
         }
+    }
+
+    /// The pointer or focus left the link, or the pointer left the card: a card not shown yet
+    /// is not shown, and one shown goes in a moment, unless the pointer is on it by then or has
+    /// rested on another link.
+    pub fn leave_soon(self) {
+        if self.shown.with_untracked(Option::is_none) {
+            self.leave();
+            return;
+        }
+        let mine = self.generation.get_value();
+        set_timeout(
+            move || {
+                if self.generation.try_get_value() == Some(mine)
+                    && self.on_card.try_get_value() == Some(false)
+                {
+                    self.leave();
+                }
+            },
+            HIDE_AFTER,
+        );
     }
 }
 
@@ -162,14 +191,13 @@ fn holds_at_a_new_tip(card: &Card) -> bool {
     }
 }
 
-/// The handlers a link with a hover card takes: rest, leave and Escape. `target` names what
-/// the link leads to when it is entered (a table row's link changes as the table scrolls).
+/// The handlers a link with a hover card takes: rest and leave. `target` names what the link
+/// leads to when it is entered (a table row's link changes as the table scrolls).
 pub fn hover_handlers(
     target: impl Fn() -> Option<CardTarget> + Copy + 'static,
 ) -> (
     impl Fn(web_sys::Event) + Copy + 'static,
     impl Fn(web_sys::Event) + Copy + 'static,
-    impl Fn(web_sys::KeyboardEvent) + Copy + 'static,
 ) {
     let cards = HoverCards::get();
     let enter = move |event: web_sys::Event| {
@@ -185,17 +213,10 @@ pub fn hover_handlers(
     };
     let leave = move |_: web_sys::Event| {
         if let Some(cards) = cards {
-            cards.leave();
+            cards.leave_soon();
         }
     };
-    let escape = move |event: web_sys::KeyboardEvent| {
-        if event.key() == "Escape"
-            && let Some(cards) = cards
-        {
-            cards.leave();
-        }
-    };
-    (enter, leave, escape)
+    (enter, leave)
 }
 
 /// The card itself, where the shell draws it: under the link, above the page.
@@ -205,8 +226,34 @@ pub fn HoverCard() -> impl IntoView {
     let Some(cards) = HoverCards::get() else {
         return ().into_any();
     };
+    // Escape dismisses the card wherever focus is (WCAG 1.4.13), and the wheel moves what it
+    // is under.
+    let escape = window_event_listener(ev::keydown, move |event| {
+        if event.key() == "Escape" && cards.shown.with_untracked(Option::is_some) {
+            cards.leave();
+        }
+    });
     let wheel = window_event_listener(ev::wheel, move |_| cards.leave());
-    on_cleanup(move || wheel.remove());
+    on_cleanup(move || {
+        escape.remove();
+        wheel.remove();
+    });
+    // So does a scroll of anything, by keys included: scroll events do not bubble, so this one
+    // listens as they go down. The Explorer is mounted once for the app's lifetime, so the
+    // closure is deliberately leaked, as the theme's media-query listener is.
+    if let Some(window) = web_sys::window() {
+        let scrolled = Closure::<dyn Fn()>::new(move || {
+            if cards.shown.try_with_untracked(Option::is_some) == Some(true) {
+                cards.leave();
+            }
+        });
+        let _ = window.add_event_listener_with_callback_and_bool(
+            "scroll",
+            scrolled.as_ref().unchecked_ref(),
+            true,
+        );
+        scrolled.forget();
+    }
     view! {
         {move || {
             let (target, (left, top)) = cards.shown.get()?;
@@ -264,6 +311,11 @@ pub fn HoverCard() -> impl IntoView {
                     id=CARD_ID
                     style:left=format!("{left:.0}px")
                     style:top=format!("{top:.0}px")
+                    on:mouseenter=move |_| cards.on_card.set_value(true)
+                    on:mouseleave=move |_| {
+                        cards.on_card.set_value(false);
+                        cards.leave_soon();
+                    }
                 >
                     {lines
                         .into_iter()

@@ -1379,7 +1379,9 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
 - **Outpoints.** `tx/<txid>?out=n` marks the output, brings it into view and lights its node
   in V6 on hover; its spent status and "Find the spending transaction" come with P4.
 - **Hover cards** are on every link to a block or a transaction and on the table's rows, not
-  on the strip's tiles. The UI keeps the cards it read while the chain they were read on
+  on the strip's tiles. As WCAG 1.4.13 asks, the pointer can move onto a card, which stays
+  until 300 ms after it leaves both, and Escape, wherever focus is, or any scroll hides it. The
+  UI keeps the cards it read while the chain they were read on
   holds: another network or a reorganisation (a new epoch) drops them all, and a new tip the
   cards of transactions not in a best-chain block. A card whose read failed says why ("Block
   N is not mined yet", "Not in your node yet", "Your node is not running") on that hover
