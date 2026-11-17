@@ -281,10 +281,12 @@ has not brought yet is dropped; that node's snapshots cover it.
 
 **Explorer IPC.** The block explorer has one command and one event. `explorer {node,
 call}` takes an `ExplorerCall` (an `ExplorerRequest`: `Status`, `Interest`, `Chain
-{with_fees}`, `Block`, `BlockTxs`, `Tx` or `Resolve`) and answers an `ExplorerReply` (the
-`ChainView` it was read against, and the `ExplorerResponse`), or rejects with an
-`ExplorerError {kind, message}`. The Chain page first answers without the fees of rows whose
-coinbases are not read yet (`fees_pending`), then the UI asks `with_fees`. `explorer_live`
+{with_fees}`, `Block`, `BlockTxs`, `Tx`, `Resolve`, `Card` or `Prefetch`, and `trace`) and
+answers an `ExplorerReply` (the `ChainView` it was read against, the `ExplorerResponse`, and
+with `trace` the reads it took, for Show RPC), or rejects with an `ExplorerError {kind,
+message}`. The Chain page first answers without the fees of rows whose coinbases are not read
+yet (`fees_pending`), then the UI asks `with_fees`; a big block's rows (`BlockTxs`) do the
+same with the outputs they spend. `Prefetch` answers at once and reads behind the answer. `explorer_live`
 carries an `ExplorerLiveEvent {node, live}` when the explorer's state (not running, syncing,
 at the tip, zebrad still on the other network), tip, tip time or last reorganisation changes, at most
 every 250 ms, and always the latest value. Its snapshot is the `Status` request, which the
@@ -749,7 +751,7 @@ available, with `?backfill`: "Memory nearly exhausted"; with `?crashloop` zebrad
 signal 9; `=low`, 8 %: "Memory low"; `=commit`, Windows' commit charge at 96 %; `=restart`,
 an 8 GiB computer, so Restart is offered) and `?nofit` (40 GB free beside the state while
 syncing Mainnet: "The chain may not fit"). The Explorer's
-chains come from `?attip`, `?tip=<h>`, `?explorer=slow|empty|nobi` and `?reorg`. The herd's
+chains come from `?attip`, `?tip=<h>`, `?explorer=slow|empty|nobi|big` and `?reorg`. The herd's
 agreement comes from `?herd&agree` and `&agree=behind|stall|fork|race|split|impl|channels|
 restart|deepfork|silent|herdstall|replaced|pair|otherchain` (see [The herd](#the-herd)).
 
@@ -901,7 +903,7 @@ listed in PUBLIC-SERVICES.md ("PS1 as built").
 
 The Explorer tab is a block explorer over the node's own RPC: nothing it shows comes from
 anywhere else, and nothing searched leaves the computer. [EXPLORER.md](EXPLORER.md) is its
-design; phases P0 and P1 are built, and its "Built so far" section lists where the code
+design; phases P0, P1 and P2 are built, and its "Built so far" section lists where the code
 differs.
 
 - **Backend.** `launcher-core/src/explorer.rs` spawns one actor (`ExplorerHandle`, Tauri
@@ -918,11 +920,18 @@ differs.
   The actor owns, without locks, the source (`RpcSource` over an `OwnedSession`, rebuilt
   when `rpc_addr` or `started_at` changes), the `ChainIndex`, a byte-weighted LRU (64 MiB;
   8 MiB after 10 minutes hidden), the reads in flight and the scheduler. Reads run as
-  tasks that hold a semaphore permit (six, four while the node syncs; the reads of pages
-  and of the tip follower first, the newest first, and the Chain page's coinbases in what
-  is left), their results come back over a channel, and reads of one key merge.
-  `assemble.rs` builds each page from explorer-model's views, and `source.rs` names every
-  RPC method in a closed `ReadCall`, so nothing from IPC picks a method.
+  tasks that hold semaphore permits (six, four while the node syncs; a heavy read, `getblock`
+  at verbosity 3, takes three; the reads of pages and of the tip follower first, the newest
+  first, and prefetches, hover cards and the Chain page's coinbases in what is left), their
+  results come back over a channel, and reads of one key merge. `assemble.rs` builds each
+  page from explorer-model's views, and `source.rs` names every RPC method in a closed
+  `ReadCall`, so nothing from IPC picks a method.
+- **Transaction detail.** The outputs a transaction's inputs spend come from its block at
+  verbosity 3, cached whole by hash, or from the earlier transactions (16 at once, all on
+  request). A block of up to 256 transactions and 512 KB is read whole for its table, which
+  brings every fee; a bigger one row by row, its rows' fees in a second ask. A request with
+  `trace` has a channel of its own on which each read it takes reports its method,
+  parameters, time, size and whether the cache answered; the cookie is never part of it.
 - **Reads only when asked.** Nothing is read until a page asks, and the pages ask only
   once the tab has been opened. The UI sends `Interest` when the tab or the document is
   shown or hidden; while shown and at the tip, the actor polls `getbestblockheightandhash`
@@ -934,15 +943,22 @@ differs.
   into the search are refused by the classifier, in the UI before anything is sent and
   again in the backend.
 - **UI.** `ui/src/explorer.rs` is the shell (back and forward, the search box, the source
-  line and one banner) and `ui/src/explorer/` holds the pages (Chain, Block, Transaction,
-  Search), their parts, text and per-node state; `ui/styles/explorer.css` uses the
-  `--pool-*` colour tokens. The tab is offered for nodes that keep the chain
+  line with Show RPC, one banner and the hover card) and `ui/src/explorer/` holds the pages
+  (Chain, Block, Transaction, Search), their parts, text and per-node state: the Block page's
+  transactions on a virtual list (`virtual_list.rs`, slots reused as it scrolls, rows read
+  as they come into view), a transaction's flow (V6) drawn as SVG from explorer-model's
+  `flow` layout (`flow_diagram.rs`), and hover cards (`cards.rs`); `ui/styles/explorer.css`
+  uses the `--pool-*` colour tokens. The tab is offered for nodes that keep the chain
   (`NodeKind::has_explorer`), and amounts are in ZEC, or TAZ on Testnet, or in zatoshis, with
   times local, UTC or Unix: the source line's toggles, kept in `localStorage`
   (`ui/src/explorer/prefs.rs`) as the Grafana page keeps its pickers.
 - **Mock.** `ui/src/mock/explorer.rs` answers the same requests from explorer-model's
-  synthetic chain, for the first node only as the backend does (`?herd`'s other nodes get
-  its answer), and the dashboard's details read the same chain. The mock's zebrad reports
+  synthetic chain, reading it as the backend reads zebrad and naming each read as its RPC
+  call (`mock/explorer/reads.rs`), for the first node only as the backend does (`?herd`'s
+  other nodes get its answer), and the dashboard's details read the same chain. Every
+  transparent input of the synthetic chain spends an output it has, so fees worked out from
+  spent outputs are the ones paid; `?explorer=big` adds 5,000 transactions to every tenth
+  block. The mock's zebrad reports
   its node's network as it was at its start, so a network change shows `OtherNetwork` until
   a restart, which gives a new chain on the new network.
 

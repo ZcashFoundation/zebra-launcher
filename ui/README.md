@@ -189,10 +189,13 @@ every node command and event carries a node's id, and the mock's zebrad below is
 - the Explorer (Ctrl/Cmd+3, or Ctrl+K, Cmd+K on macOS, for its search): as in the backend it
   serves the first node, the mock's own zebrad, over a synthetic chain from explorer-model,
   answered with the backend's own page builders, and the dashboard's best block, pools,
-  supply, difficulty and upgrades read the same chain.
-  Amounts are in ZEC, or TAZ on Testnet; the source line's toggles switch amounts to zatoshis
-  and times to UTC or Unix seconds, and the browser's localStorage keeps the choice
-  (`explorer.unit`, `explorer.time`). The default mock syncs, so the Explorer shows what the
+  supply, difficulty and upgrades read the same chain. A Block page lists its transactions as
+  rows on a virtual list, with their kinds, pools and fees; a Transaction page shows where its
+  value went (V6) with its conservation line, the outputs its inputs spend, and a fee card;
+  links to blocks and transactions have hover cards. Amounts are in ZEC, or TAZ on Testnet;
+  the source line's toggles switch amounts to zatoshis and times to UTC or Unix seconds, and
+  Show RPC lists under each page the reads it took; the browser's localStorage keeps the
+  choices (`explorer.unit`, `explorer.time`, `explorer.rpc`). The default mock syncs, so the Explorer shows what the
   node has and does not follow the tip. `?attip` puts zebrad at the tip near block 3,551,000
   (past NU7, a block every 25 s), so Ironwood, the burn and the shielded budget show;
   `?tip=<h>` does the same at height `h`. `?explorer=slow` makes every answer take 300 to
@@ -330,7 +333,7 @@ to the CSP when it serves the bundled assets.
 | `src/config_view.rs` | Helpers for the Configure page's file pane: changed lines, where a key is written, how far to scroll. Pure, tested natively |
 | `src/components/` | `nav.rs` (header and tabs), `sidebar.rs` and `herd_header.rs` (the shell for several nodes), `add_node.rs` (the add-node dialog), `status_strip.rs` (phase, progress, Start/Stop/Restart), `stale_banner.rs`, `updates.rs` (update banner, buttons, "Check for updates", recovery panel), `update_mode_choice.rs` (radio buttons shared by the wizard and Settings), `config_form.rs` (the two-view configuration editor), `log_insights.rs` (analysis cards), `reset_config.rs`, `tooltip.rs` |
 | `src/pages/` | The pages (`overview.rs` with several nodes, `dashboard.rs`, `logs.rs`, `docs.rs` with the Book/Config/Changes sections and sandboxed themed iframe, `grafana.rs`, `configure.rs`, `node_settings.rs` with several nodes, `settings.rs`) and the first-run wizard (`first_run.rs`) |
-| `src/explorer.rs`, `src/explorer/` | The Explorer tab: the shell (back and forward, the search box, the source line, the banner) and the Chain, Block, Transaction and Search pages, with their shared parts, text (pure, tested natively), navigation history, per-node state and the unit and time choices (`prefs.rs`, kept in localStorage) |
+| `src/explorer.rs`, `src/explorer/` | The Explorer tab: the shell (back and forward, the search box, the source line, the banner, the hover card) and the Chain, Block, Transaction and Search pages, with their shared parts, text (pure, tested natively), navigation history, per-node state, the unit, time and Show RPC choices (`prefs.rs`, kept in localStorage), the virtual list of a block's transactions (`virtual_list.rs`), a transaction's flow, V6 (`flow_diagram.rs`) and hover cards (`cards.rs`) |
 | `styles/explorer.css` | The Explorer's styles, with the `--pool-*` colour tokens from `styles.css` |
 
 The crate also compiles natively so `cargo clippy --workspace --all-targets` and

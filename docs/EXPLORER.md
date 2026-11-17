@@ -1,9 +1,10 @@
 # Block explorer
 
-> **Status: P0 and P1 built, 2026-11-03, for the first node only until P6; P2 onward is a
-> proposal.** It builds on [MULTI-NODE.md](MULTI-NODE.md). [ARCHITECTURE.md](ARCHITECTURE.md)
-> stays the description of what is built and is updated phase by phase as this lands. [Built
-> so far](#built-so-far) says what P0 and P1 built and where the code differs from this design.
+> **Status: P0 and P1 built, 2026-11-03, and P2, 2026-11-16, for the first node only until
+> P6; P3 onward is a proposal.** It builds on [MULTI-NODE.md](MULTI-NODE.md).
+> [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built and is updated
+> phase by phase as this lands. [Built so far](#built-so-far) says what P0, P1 and P2 built
+> and where the code differs from this design.
 
 The maintainer asked for "a block explorer too, a highly performant one that offers highly
 functional, flexible, and intuitive visualizations, search features, and UX". This document
@@ -1187,10 +1188,10 @@ Each phase is one PR that leaves the app working, with screenshots from the mock
    `?explorer=slow|empty|nobi`, `?reorg`; details.rs reads synth; call budgets as tests. Not
    yet: V9 and the Sol/s tile, and fake-zebrad's synthetic mode. Screenshots: Chain, Block,
    Transaction, light and dark, with `?attip`, `?attip&reorg`, `?explorer=nobi`, `?herd`.
-3. **P2, transaction detail.** The Block page's table on `VirtualList` (v3, visible rows first
-   for big blocks); prevouts; V6 with its conservation line; the fee card; outpoints; hover
-   cards; Show RPC; prefetching. Screenshots: fully shielded, shielding with change, Orchard →
-   Ironwood, a coinbase, `?explorer=big`, Show RPC.
+3. **P2, transaction detail. Built.** The Block page's table on `VirtualList` (v3, visible rows
+   first for big blocks); prevouts; V6 with its conservation line; the fee card; outpoints;
+   hover cards; Show RPC; prefetching. Screenshots: fully shielded, shielding with change,
+   Orchard → Ironwood, a coinbase, `?explorer=big`, Show RPC.
 4. **P3, live views.** Blocks over the whole chain, with filters and V5 over the loaded rows
    until P5's sweep fills the recent 10,000 blocks, and jump to height (to a date with P5's date
    search); the mempool tracker and page (V11 without the projection); the next-block tile;
@@ -1217,8 +1218,8 @@ Each phase is one PR that leaves the app working, with screenshots from the mock
 
 ## Built so far
 
-P0 and P1, for the first node only until P6 (see [Several nodes](#several-nodes)). Where the
-code differs from the design above:
+P0, P1 and P2, for the first node only until P6 (see [Several nodes](#several-nodes)). Where
+the code differs from the design above, P0 and P1 first, then [P2](#p2-transaction-detail):
 
 - **RPC client.** The typed decode, `OwnedSession`, per-call timeouts (`call_timeout`, with
   `HEAVY_REQUEST_TIMEOUT` at 60 s) and the cookie re-read are in rpc.rs. A call reads the cookie
@@ -1230,10 +1231,10 @@ code differs from the design above:
 - **Moves.** `short_hash`, `zec_text`, `pools_text` and the at-tip rule moved as planned.
   `spawn_fake_with` stays in rpc_monitor.rs and fake-zebrad in one file: nothing in this phase
   needs them elsewhere, and two other branches change fake-zebrad.
-- **Wire types** in `launcher_types::explorer` carry P1's requests only: `Status`, `Interest`,
-  `Chain { with_fees }`, `Block`, `BlockTxs`, `Tx` and `Resolve`. `ExplorerCall` has no `scope`
-  (cancelling paged requests) or `trace` (Show RPC, P2) yet, and there is no `explorer_job`
-  command until the first job (P4). `ExplorerLive` carries the tip block's time
+- **Wire types** in `launcher_types::explorer` carry the requests P1 and P2 use: `Status`,
+  `Interest`, `Chain { with_fees }`, `Block`, `BlockTxs`, `Tx`, `Resolve`, and from P2 `Card`
+  and `Prefetch`. `ExplorerCall` has `trace` (Show RPC, P2) but no `scope` (cancelling paged
+  requests), and there is no `explorer_job` command until the first job (P4). `ExplorerLive` carries the tip block's time
   (`tip_time`) for the source line, and `LiveState::OtherNetwork` while zebrad still runs on
   the network its node had before.
 - **explorer-model's modules** are `shapes`, `upgrades`, `ledger` (with the ZIP 218 budget from
@@ -1255,8 +1256,9 @@ code differs from the design above:
   zebrad's next start. Hiding the window to
   the tray does not send `Interest` yet: the tab and the document's visibility do.
 - **The actor.** Two lanes, interactive (pages, and the follower, which pages wait for) and
-  prefetch (the Chain page's coinbases); every P1 read weighs one, since P1 makes no heavy call,
-  and the background lane comes with the store (P5). Six permits, four while the node syncs; no
+  prefetch (the Chain page's coinbases, and from P2 hover cards, prefetches and the outputs a
+  big block's rows spend); every P1 read weighs one, since P1 makes no heavy call (P2's heavy
+  reads weigh three), and the background lane comes with the store (P5). Six permits, four while the node syncs; no
   HTTP 429 back-off yet, since six reads never come near zebrad's 100. A new network clears
   everything, where the design says a new genesis hash: reads under way on the old one fail, and
   their answers are dropped when they come. Hashes above the final 1,000 are trusted for 10 s
@@ -1276,8 +1278,8 @@ code differs from the design above:
   best chain" line.
 - **Not yet:** the store, stale replies while the node is stopped (the explorer answers "not
   running"), the search's 150 ms previews, suggestions and recent searches, the "3 new blocks"
-  pill, V9, the Sol/s tile, the route cache (back and forward ask the explorer again, which
-  answers from its cache) and hover cards.
+  pill, V9, the Sol/s tile and the route cache (back and forward ask the explorer again, which
+  answers from its cache).
 - **Call budgets** are pinned by launcher-core's actor tests over an in-memory synthetic source
   that counts its calls: the Chain page costs 1 tip, 25 coinbases, 1 header, at most 27 blocks
   (26, and the one before NU7 once past it) and at most 2 subsidies over its two asks (the first
@@ -1289,23 +1291,22 @@ code differs from the design above:
   [Testing](#testing), only the store's wait, for the store (P5). fake-zebrad's synthetic mode
   and the end-to-end tests through `fakegetcallcounts` wait with the move above.
 - **The UI** is `ui/src/explorer.rs` (the shell) and `ui/src/explorer/` (`chain`, `block`, `tx`,
-  `search`, `parts`, `state`, `history`, `prefs`, `text`), with `ui/styles/explorer.css`. Each
+  `search`, `parts`, `state`, `history`, `prefs`, `text`, and from P2 `cards`,
+  `flow_diagram` and `virtual_list`), with `ui/styles/explorer.css`. Each
   node's place lives in the Explorer tab (`Explorers`), not in `NodeState`. Nothing is read
   before the tab is first opened. The source line has the tip's age and the unit and time
   toggles, each a radio group (one Tab stop; the arrow keys choose). The search box shows a `/`
-  keycap but none for Ctrl K, and there is no "Show RPC" (P2). A node the Explorer does not
+  keycap but none for Ctrl K. A node the Explorer does not
   serve gets the reason as its one banner, in every phase, and its pages add nothing.
   After a link is followed, focus moves to the new page's heading. While the page reads, focus
   rests on the page and moves on once the heading is drawn, however long the read takes,
-  unless focus has gone elsewhere meanwhile. The Transaction page lists transparent inputs as
-  links to the outputs they spend, without values, and shows the fee only for a transaction
-  without transparent inputs.
+  unless focus has gone elsewhere meanwhile.
 - **Visualizations, in part.** P1 draws V1 to V4 as HTML, not SVG, and leaves out these parts
   of them, which come with the phases named:
   - V1, the strip: twelve tiles, rebuilt at each answer rather than keyed by hash; no
     next-block tile (P3), no six turnstile ticks per tile, no "replaced" badge (the fork log,
-    P3), no hover cards (P2), and it does not hold still under the pointer ("+1 new block",
-    P3).
+    P3), no hover cards (its tiles are not links but buttons of their own), and it does not
+    hold still under the pointer ("+1 new block", P3).
   - V2, the turnstile: no miner-share row (fees and the burn have theirs), only the change
     column gives exact zatoshis (as a title), and a pool does not open its page (P5).
   - V3, the reward split: no coinbase text ("text chosen by the miner") and no address links
@@ -1317,6 +1318,73 @@ code differs from the design above:
   backend it serves the first node only, so `?herd`'s other nodes show the backend's answer
   until P6. The synthetic chain's subsidy leaves out the slow start; the explorer reads the
   real one from `getblocksubsidy`.
+
+### P2, transaction detail
+
+- **Wire types.** `BlockTxs { hash, offset, limit, with_fees }` answers a `TxRowPage` of
+  `TxRow`s rather than txids, and how it was read (`RowsRead::Block` or `OneByOne`); it has no
+  `filter` or `sort` (`ListFilter` comes with P3). A row is the design's `TxShape` with its
+  ZIP 317 parts (`LogicalActions`: input and output bytes, JoinSplits, Sapling spends and
+  outputs, Orchard and Ironwood actions) in place of `FeeFacts`, and its fee as a `Shown`;
+  explorer-model's `zip317` adds them up. `TxPage` gains each input's `SpentOutput`, the
+  `actions`, `unresolved` and `resolvable` inputs, `burns_fees` and a coinbase's
+  `CoinbaseClaim` (subsidy, block fees, burned share, lockbox change). Hover cards have a
+  request of their own, `Card { target }` (a block or a transaction, from one read), and
+  `Prefetch` reads a Block page, a transaction or a big block's rows ahead. `SourceCall` also
+  says whether the node answered (`ok`).
+- **Spent outputs** have no cache of their own by outpoint: they come from the block at
+  verbosity 3, kept whole (reduced) by its hash, or from the earlier transactions, kept as
+  transactions. A small block is one of up to 256 transactions and 512 KB, the design's
+  thresholds until the P0 bench measures v3; its body is decoded on the read's task, not in
+  `spawn_blocking`. A big block's rows are read with `getrawtransaction(txid, 1)` without the
+  block hash, so they share the transaction cache with the Transaction page. A waiting
+  transaction reads its earlier ones with `getrawtransaction` too: there is no mempool
+  snapshot until P3. "Read them all" reads past the first 16 on the prefetch lane.
+- **The scheduler** weighs in units: a heavy read, only `getblock` at verbosity 3 so far, takes
+  three of the six (its timeout is 60 s); one runs while other interactive reads wait, two
+  otherwise, and one waiting for room holds the reads behind it. A prefetch heavier than its
+  lane's cap goes in the interactive lane, so it cannot block that lane. Queued reads whose
+  pages have gone are not skipped, there is no `Scope` to cancel paged requests, and no 429
+  back-off yet.
+- **Show RPC** lists, for each answer, the reads it took in the order they ended: method,
+  parameters as sent, the time from asking to the answer (the page's wait, queueing
+  included), the answer's size and whether the cache answered. The tip check is listed as
+  `getbestblockheightandhash`, from memory when a recent check vouched for it. Reads made in
+  the background (the Chain page's coinbases, prefetches) are not listed. The table lists its
+  own reads, folded, under a count.
+- **V6** groups inputs by the address they spend from, the largest first, twelve nodes a side
+  with the rest merged; outputs keep their order, the first eleven and then "N more". The
+  flow and its layout are explorer-model's (`flow`), drawn by the UI as SVG with direct labels
+  and the tables beside it as the table view. An input group of one input opens the earlier
+  transaction at its output; outputs start no spender search until P4. The fee is one node,
+  not split into the miner's 40 % and the burned 60 %: the caption says the split applies to
+  the block's total. A coinbase takes its block's subsidy and fees (and NU6.1's lockbox payout)
+  in and pays its outputs, the lockbox's share and the burned fees out, so its line checks the
+  block's books.
+- **VirtualList** has a fixed height of 14 rows, so it needs no `ResizeObserver`; rows are
+  asked for 25 at a time once scrolling has rested for 120 ms, rather than at most two
+  viewports a second. No re-anchoring: a block has at most about 10,000 rows. There are no
+  `j` and `k` keys (P3's shortcuts); the scroller takes focus, so the browser's scrolling
+  keys work. The table has no sort or filter, and the block's sentence no counts by kind.
+- **Prefetching** reads ahead a Block page's neighbours (◀ ▶), a big block's next 25 rows,
+  and whatever a hover card is about. The Chain page's rows are not read ahead.
+- **Outpoints.** `tx/<txid>?out=n` marks the output, brings it into view and lights its node
+  in V6 on hover; its spent status and "Find the spending transaction" come with P4.
+- **Hover cards** are on every link to a block or a transaction and on the table's rows, not
+  on the strip's tiles; the UI keeps the cards it read for the session.
+- **The synthetic chain** funds every transparent input with an output it has (a coinbase's,
+  or one of a transaction without transparent inputs, from 100 blocks back), so the fees the
+  explorer works out from spent outputs are what the transactions paid; an output may be spent
+  more than once, which nothing checks. `?explorer=big` gives every tenth block (heights
+  ending in 0) 5,000 two-in, two-out payments, about 2 MB; the 200,000-transaction address
+  waits for P4. The mock names its reads as the backend's RPC calls, with made-up times and
+  sizes, and remembers them as the backend's cache would, for Show RPC.
+- **Call budgets** pinned by the actor's tests: a small block's rows are one heavy read with
+  every fee, after which a transaction of the block is one read; a transaction with inputs is
+  one read and one per earlier transaction, then nothing; a coinbase's page makes the Block
+  page's reads; a big block's 25 rows are 25 reads and one per earlier transaction, never the
+  whole block; a heavy read leaves room for three cheap ones; prefetches and cards fill the
+  cache the pages then read.
 
 ## Open questions for the maintainer
 
