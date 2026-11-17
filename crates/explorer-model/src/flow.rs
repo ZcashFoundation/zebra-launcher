@@ -9,7 +9,10 @@ use std::collections::HashMap;
 
 use launcher_types::explorer::{Pool, Shown, TxPage};
 
-/// The most nodes a side shows; the smallest of the rest are merged into one.
+/// The most transparent nodes a side shows: input groups on the left, the smallest of the rest
+/// merged into one, and outputs on the right, the first eleven and then the rest as one. The
+/// pools, the lockbox and the fee (or a coinbase's subsidy, fees and burn) are added beside
+/// them.
 pub const MAX_STRANDS: usize = 12;
 
 /// What a node of the flow stands for.

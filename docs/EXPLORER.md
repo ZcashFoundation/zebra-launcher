@@ -1358,8 +1358,9 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
   `getbestblockheightandhash`, from memory when a recent check vouched for it. Reads made in
   the background (the Chain page's coinbases, prefetches) are not listed. The table lists its
   own reads, folded, under a count.
-- **V6** groups inputs by the address they spend from, the largest first, twelve nodes a side
-  with the rest merged; outputs keep their order, the first eleven and then "N more". The
+- **V6** groups inputs by the address they spend from, the largest first, at most twelve
+  groups with the smallest merged; outputs keep their order, the first eleven and then "N
+  more"; the pools, the lockbox and the fee are drawn beside them. The
   flow and its layout are explorer-model's (`flow`), drawn by the UI as SVG with direct labels
   and the tables beside it as the table view. An input group of one input opens the earlier
   transaction at its output; outputs start no spender search until P4. The fee is one node,
