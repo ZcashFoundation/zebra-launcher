@@ -12,6 +12,8 @@ use crate::{
         sync_percent, thousands,
     },
     pages::docs::DocsSection,
+    public_state::PublicContext,
+    public_text::{ZINGOD_READS, ZINGOD_RESTARTS},
 };
 
 /// Extra words for the badge: the restart countdown or the failure reason.
@@ -85,6 +87,19 @@ pub fn StatusStrip() -> impl IntoView {
         });
     };
     let can = move || state.node().status.with(|status| controls(&status.phase));
+    // The zebrad zingod reads: its restarts restart zingod, which waits for the tip again.
+    let public = PublicContext::get();
+    let zingod_reads = Memo::new(move |_| {
+        let node = state.node().info.with(|info| info.id.clone());
+        public.statuses.with(|statuses| {
+            statuses.iter().any(|status| {
+                status.node == node
+                    && status.switch_on
+                    && status.backend == launcher_types::public::LightBackend::Zingod
+            })
+        })
+    });
+    let restarts_title = move || zingod_reads.get().then_some(ZINGOD_RESTARTS);
 
     let stat = move |pick: fn(&NodeStats) -> String| {
         move || {
@@ -107,6 +122,11 @@ pub fn StatusStrip() -> impl IntoView {
                     .status
                     .with(|status| phase_detail(status, state.now.get()))
                     .map(|detail| view! { <span class="phase-detail">{detail}</span> })
+            }}
+            {move || {
+                zingod_reads
+                    .get()
+                    .then(|| view! { <span class="phase-detail zingod-reads">{ZINGOD_READS}</span> })
             }}
             <dl class="stats">
                 <div>
@@ -187,11 +207,16 @@ pub fn StatusStrip() -> impl IntoView {
                 >
                     "Start"
                 </button>
-                <button disabled=move || busy.get() || !can().stop on:click=move |_| run(Command::Stop)>
+                <button
+                    disabled=move || busy.get() || !can().stop
+                    title=restarts_title
+                    on:click=move |_| run(Command::Stop)
+                >
                     "Stop"
                 </button>
                 <button
                     disabled=move || busy.get() || !can().restart
+                    title=restarts_title
                     on:click=move |_| run(Command::Restart)
                 >
                     "Restart"

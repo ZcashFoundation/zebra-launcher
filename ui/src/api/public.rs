@@ -145,6 +145,22 @@ pub async fn forget_public_service(
     Ok(tauri::invoke("forget_public_service", &args).await?)
 }
 
+/// Rebuilds zingod's index: hours of "try again" for wallets.
+pub async fn rebuild_public_index() -> ApiResult<()> {
+    if !is_tauri() {
+        return mock::public::rebuild_public_index().await.map_err(ApiError);
+    }
+    Ok(tauri::invoke0("rebuild_public_index").await?)
+}
+
+/// Deletes zingod's index, kept after switching back to Zebra's built-in server.
+pub async fn delete_public_index() -> ApiResult<()> {
+    if !is_tauri() {
+        return mock::public::delete_public_index().await.map_err(ApiError);
+    }
+    Ok(tauri::invoke0("delete_public_index").await?)
+}
+
 #[derive(Serialize)]
 struct SignupArgs {
     provider: DnsProvider,

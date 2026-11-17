@@ -4,15 +4,16 @@
 
 use std::time::{Duration, SystemTime};
 
-use launcher_herd::public::zingod::{CATCHING_UP_BLOCKS, DISK_HIGH};
+use launcher_herd::public::zingod::{CATCHING_UP_BLOCKS, DISK_HIGH, space_needed};
 use launcher_types::{
-    ExitClass, Network,
+    ExitClass, Network, Phase,
     public::{
-        AcmeProblem, CheckId, CheckOutcome, DdnsProblem, DegradedReason, DownReason,
-        EvidenceSource, FailDetail, Finding, FirewallTool, IndexerWait, LightBackend,
+        AcmeProblem, CheckId, CheckOutcome, CheckResult, DdnsProblem, DegradedReason, DownReason,
+        EvidenceSource, FailDetail, Finding, FirewallTool, IndexerStats, IndexerWait, LightBackend,
         LocalTestProblem, NotAvailable, PauseReason, PublicState, PublicStatus, Reachability,
-        StepId, StepState, WalletProblem,
+        StepId, StepState, WalletProblem, ZingodChoice,
     },
+    zingod::IndexerState,
 };
 
 use crate::format::{bytes, local_date_short, relative, rough_duration, thousands};
@@ -414,7 +415,10 @@ pub fn state_line(status: &PublicStatus, now: SystemTime) -> (Tone, String) {
         ),
         PublicState::SettingUp { step } => (
             Tone::Neutral,
-            format!("Setting up · {}", step_name(*step).to_lowercase()),
+            format!(
+                "Setting up · {}",
+                backend_step_name(*step, status.backend).to_lowercase()
+            ),
         ),
         PublicState::Serving => {
             let tone = match status.reach {
@@ -542,6 +546,14 @@ pub fn step_name(step: StepId) -> &'static str {
     }
 }
 
+/// A step's short name for the service's backend: zingod's Service step is zingod's.
+pub fn backend_step_name(step: StepId, backend: LightBackend) -> &'static str {
+    match (step, backend) {
+        (StepId::Service, LightBackend::Zingod) => "zingod",
+        _ => step_name(step),
+    }
+}
+
 /// A step's line in the checklist, with the real names and addresses once they are known.
 pub fn step_title(step: StepId, status: &PublicStatus) -> String {
     let lan = status
@@ -553,6 +565,10 @@ pub fn step_title(step: StepId, status: &PublicStatus) -> String {
         );
     match step {
         StepId::Consent if status.consent.is_some() => "You agreed to what becomes public".into(),
+        StepId::Service if status.backend == LightBackend::Zingod => format!(
+            "zingod serves light wallets on this computer, reading Zebra · {}",
+            network_name(status.network)
+        ),
         StepId::Service => format!(
             "Zebra · {} serves light wallets on this computer",
             network_name(status.network)
@@ -906,8 +922,10 @@ pub fn check_line(check: CheckId, outcome: &CheckOutcome, status: Option<&Public
     }
 }
 
-/// The consent screen's lines: what becomes public, for good, then what the user takes on.
-pub fn consent_lines(status: &PublicStatus) -> (Vec<String>, Vec<String>) {
+/// The consent screen's lines for `backend`: what becomes public, for good, then what the user
+/// takes on. With zingod, its lines take the place of Zebra's software, "experimental" and port
+/// lines, and the index's and the public status's join them; nothing names Zebra's version.
+pub fn consent_lines(status: &PublicStatus, backend: LightBackend) -> (Vec<String>, Vec<String>) {
     let (name, sentence) = match &status.name {
         Some(name) => (name.to_string(), format!("The name {name}")),
         None => (
@@ -923,13 +941,19 @@ pub fn consent_lines(status: &PublicStatus) -> (Vec<String>, Vec<String>) {
             || "Your home internet address".to_owned(),
             |wan| format!("Your home internet address, {wan}"),
         );
-    let version = status
-        .zebrad_version
-        .as_deref()
-        .map(|version| version.trim_start_matches('v'))
-        .map(|version| version.split('+').next().unwrap_or(version).to_owned())
-        .unwrap_or_else(|| "its version".into());
-    let public = vec![
+    let software = match backend {
+        LightBackend::ZebradEndpoint => {
+            let version = status
+                .zebrad_version
+                .as_deref()
+                .map(|version| version.trim_start_matches('v'))
+                .map(|version| version.split('+').next().unwrap_or(version).to_owned())
+                .unwrap_or_else(|| "its version".into());
+            format!("Zebra {version}")
+        }
+        LightBackend::Zingod => format!("zingod {}", zingod_version(status)),
+    };
+    let mut public = vec![
         format!("{address}, under {name}. DNS history services keep it after you stop."),
         format!(
             "{sentence}, in public certificate logs, minutes after Zeal gets its certificate. \
@@ -937,30 +961,345 @@ pub fn consent_lines(status: &PublicStatus) -> (Vec<String>, Vec<String>) {
         ),
         format!(
             "That this computer runs Zcash software: every wallet that connects is told it is \
-             Zebra {version}."
+             {software}."
         ),
     ];
-    let yours = vec![
-        "Zebra's light wallet server is experimental: wallets may not work with it yet, and a \
-         Zebra update may change it."
+    let experimental = match backend {
+        LightBackend::ZebradEndpoint => "Zebra's light wallet server is experimental: wallets may \
+                                         not work with it yet, and a Zebra update may change it."
             .to_owned(),
+        LightBackend::Zingod => "zingod is experimental: Zingo Labs say it is in development and \
+                                 not for production Mainnet use. They publish no binaries, so \
+                                 Zeal builds it from their source."
+            .to_owned(),
+    };
+    let port = match backend {
+        LightBackend::ZebradEndpoint => "While the light client server is switched on, including \
+                                         during setup and automatic pauses, programs on this \
+                                         computer can use Zebra's light wallet port without a \
+                                         password. Web pages in a browser can't."
+            .to_owned(),
+        LightBackend::Zingod => "While the light client server is switched on, including during \
+                                 setup and automatic pauses, programs on this computer can use \
+                                 zingod's port without a password. Web pages in a browser can't \
+                                 use its wallet methods, but they can read its public status."
+            .to_owned(),
+    };
+    let mut yours = vec![experimental];
+    if backend == LightBackend::Zingod {
+        public.push(
+            "While it serves, your server's status page is public: its state, its version, its \
+             block heights and how much it sent in each 10 minutes."
+                .to_owned(),
+        );
+        let place = status.indexer.as_ref().map_or_else(
+            || format!("beside {}'s data", zebra_name(status.network)),
+            |indexer| format!("in {}", indexer.dir.display()),
+        );
+        yours.push(format!(
+            "zingod keeps its own index of the chain {place}, and needs {} free there to build \
+             it. The build can take hours.",
+            bytes(space_needed(status.network))
+        ));
+    }
+    yours.extend([
         "Wallets that use your server show it their address, the blocks they download, the \
          transparent addresses they look up and the transactions they send. Zeal keeps no \
          client addresses, but anyone who controls this computer could."
             .to_owned(),
-        "While the light client server is switched on, including during setup and automatic \
-         pauses, programs on this computer can use Zebra's light wallet port without a \
-         password. Web pages in a browser can't."
-            .to_owned(),
+        port,
         "Your internet plan may not allow servers, and the traffic counts toward any data cap. \
          Check its terms, and your local law."
             .to_owned(),
         "Zeal gets the certificate from Let's Encrypt, so you accept its Subscriber Agreement."
             .to_owned(),
         "Zeal talks to your router, your DNS provider and Let's Encrypt. No one else.".to_owned(),
-    ];
+    ]);
     (public, yours)
 }
+
+/// The consent screen's choice of server: each backend's label and hint, for `RadioChoice`.
+/// No card says "recommended", and zingod's says nothing about Zingo wallets until the wallet
+/// runs confirm it.
+pub const BACKEND_CHOICES: [(LightBackend, &str, &str); 2] = [
+    (
+        LightBackend::ZebradEndpoint,
+        "Zebra's built-in server · experimental",
+        "Serves as soon as Zebra is at the tip, with no extra disk. Sends wallets no \
+         transparent data.",
+    ),
+    (
+        LightBackend::Zingod,
+        "zingod, by Zingo Labs · experimental · bundled with Zeal",
+        "The current light wallet protocol, with transparent data and fees. Builds its own \
+         index first, which can take hours.",
+    ),
+];
+
+/// Why zingod can't be chosen here, `None` when it can.
+pub fn zingod_choice_text(choice: &ZingodChoice) -> Option<String> {
+    match choice {
+        ZingodChoice::Offered => None,
+        ZingodChoice::NotBundled => Some("zingod runs on Linux only for now".into()),
+        ZingodChoice::NotOnNetwork { .. } => Some("zingod is being tested on Testnet first".into()),
+        ZingodChoice::Untested {
+            version,
+            zebrad,
+            network,
+        } => Some(format!(
+            "zingod {version} isn't tested with Zebra {zebrad} on {} yet",
+            network_name(*network)
+        )),
+    }
+}
+
+/// zingod's card's extra line on the consent screen: why it is disabled, or what it needs.
+pub fn zingod_choice_note(status: &PublicStatus) -> String {
+    zingod_choice_text(&status.zingod_choice).unwrap_or_else(|| {
+        format!(
+            "Needs {} free beside {}'s data.",
+            bytes(space_needed(status.network)),
+            zebra_name(status.network)
+        )
+    })
+}
+
+/// The Service step's line for one of zingod's checks: what passed, or what it found.
+pub fn service_check_line(check: &CheckResult, status: &PublicStatus) -> String {
+    if let CheckOutcome::Warn { finding } | CheckOutcome::Fail { finding } = &check.outcome {
+        return finding_text(finding, Some(status));
+    }
+    let zebra = zebra_name(status.network);
+    let version = zingod_version(status);
+    match check.id {
+        CheckId::ZingodTested => {
+            let zebrad = status
+                .zebrad_version
+                .as_deref()
+                .map(|version| version.trim_start_matches('v'))
+                .map(|version| version.split('+').next().unwrap_or(version).to_owned())
+                .unwrap_or_default();
+            format!("{zebra} {zebrad} with zingod {version} is a pair Zeal tested")
+        }
+        CheckId::UpgradesKnown => format!("zingod knows every upgrade {zebra} lists"),
+        CheckId::IndexSpace => match status.indexer.as_ref() {
+            Some(IndexerStats {
+                free_bytes: Some(free),
+                dir,
+                ..
+            }) => format!(
+                "{} free in {}: zingod's index needs {} there",
+                bytes(*free),
+                dir.display(),
+                bytes(space_needed(status.network))
+            ),
+            _ => "Room for zingod's index".into(),
+        },
+        CheckId::AtTip => format!("{zebra} is at the tip"),
+        CheckId::EndpointOpened => format!("zingod {version} is running, reading {zebra}"),
+        CheckId::IndexReady => "zingod serves at Zebra's tip".into(),
+        CheckId::TipMatches => "zingod's tip matches Zebra's".into(),
+        CheckId::WalletCheck => "zingod answers the wallet check".into(),
+        other => check_name(other).to_owned(),
+    }
+}
+
+/// A check's mark in a step's list: under way for zebrad syncing and zingod's build, which
+/// the setup goes on through, and `!` for another warning.
+pub fn check_mark(outcome: &CheckOutcome) -> &'static str {
+    match outcome {
+        CheckOutcome::Pass => "✓",
+        CheckOutcome::Warn {
+            finding: Finding::Syncing { .. } | Finding::IndexBuilding { .. },
+        }
+        | CheckOutcome::Running => "●",
+        CheckOutcome::Warn { .. } => "!",
+        CheckOutcome::NotRun => "○",
+        CheckOutcome::Fail { .. } => "✕",
+    }
+}
+
+/// What the panel offers beside a zingod problem's line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexerAction {
+    OpenLog,
+    TryAgain,
+    Rebuild,
+    CopyDiagnostics,
+}
+
+impl IndexerAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            IndexerAction::OpenLog => "Open the log",
+            IndexerAction::TryAgain => "Try again",
+            IndexerAction::Rebuild => "Rebuild…",
+            IndexerAction::CopyDiagnostics => "Copy diagnostics",
+        }
+    }
+}
+
+/// The buttons a zingod problem gets: the log for what zingod said, Try again for what the user
+/// fixes, Rebuild for an index that can't be used, the diagnostics for Zeal's own bug.
+pub fn indexer_actions(why: &DegradedReason) -> &'static [IndexerAction] {
+    use IndexerAction::*;
+    match why {
+        DegradedReason::IndexerStuck { .. } | DegradedReason::IndexerDown { .. } => &[OpenLog],
+        DegradedReason::IndexBroken | DegradedReason::ChainMismatch { .. } => &[Rebuild],
+        DegradedReason::IndexerFailed {
+            class: ExitClass::ConfigError,
+            detail: FailDetail::None,
+        } => &[CopyDiagnostics],
+        DegradedReason::IndexerFailed {
+            class: ExitClass::Crash | ExitClass::SpawnFailed,
+            ..
+        } => &[OpenLog, TryAgain],
+        DegradedReason::IndexerFailed { .. } => &[TryAgain],
+        _ => &[],
+    }
+}
+
+/// The Server card's lines: zingod's version and state, the heights, the index, memory and CPU.
+pub fn server_lines(status: &PublicStatus) -> Vec<String> {
+    let Some(indexer) = &status.indexer else {
+        return Vec::new();
+    };
+    let state = match (&indexer.phase, indexer.status.as_ref().map(|s| &s.state)) {
+        (Phase::Running, Some(IndexerState::Serving)) => "serving",
+        (Phase::Running, Some(IndexerState::Syncing { .. })) => "building its index",
+        (Phase::Running, Some(IndexerState::Provisioning)) | (Phase::Starting, _) => "starting",
+        (Phase::Running, Some(IndexerState::Degraded { .. })) => "serving, degraded",
+        (Phase::Running, Some(_)) => "down",
+        (Phase::Running, None) => "starting",
+        (Phase::Backoff { .. }, _) => "restarting after a crash",
+        (Phase::Failed { .. }, _) => "stopped, waiting for you",
+        (Phase::Stopping, _) => "stopping",
+        (Phase::Stopped, _) => "stopped",
+    };
+    let mut lines = vec![format!("zingod {} · {state}", indexer.version)];
+    let zebra = status.light.as_ref().and_then(|light| light.height);
+    let served = indexer.status.as_ref().and_then(|status| status.served);
+    match (served, zebra) {
+        (Some(served), Some(zebra)) => lines.push(format!(
+            "block {} · Zebra {}",
+            thousands(served),
+            thousands(zebra)
+        )),
+        (None, Some(zebra)) => lines.push(format!("Zebra at block {}", thousands(zebra))),
+        _ => {}
+    }
+    let index = match indexer.index_bytes {
+        Some(size) if indexer.index_partial => format!("index at least {}", bytes(size)),
+        Some(size) => format!("index {}", bytes(size)),
+        None => "no index yet".into(),
+    };
+    lines.push(format!("{index} in {}", indexer.dir.display()));
+    if let Some(resources) = indexer.resources {
+        lines.push(format!(
+            "{} memory · {} % CPU",
+            bytes(resources.rss_bytes),
+            resources.cpu_millicores / 10
+        ));
+    }
+    lines
+}
+
+/// The line under the panel's cards: Zebra's height, the backend's address and the front door.
+pub fn server_footer(status: &PublicStatus) -> Option<String> {
+    let indexer = status.indexer.as_ref()?;
+    let zebra = status
+        .light
+        .as_ref()
+        .and_then(|light| light.height)
+        .map(|height| format!("Zebra at block {}", thousands(height)))
+        .unwrap_or_else(|| "Zebra".into());
+    let door = if status.gateway.is_some() {
+        "front door running"
+    } else {
+        "front door closed"
+    };
+    Some(format!(
+        "{zebra} · zingod 127.0.0.1:{} · {door}",
+        indexer.port
+    ))
+}
+
+/// The index kept after switching back to Zebra's built-in server, with Delete beside it.
+pub fn kept_index_line(status: &PublicStatus) -> Option<String> {
+    let indexer = status.indexer.as_ref()?;
+    let size = indexer.index_bytes.filter(|bytes| *bytes > 0)?;
+    (status.backend == LightBackend::ZebradEndpoint).then(|| {
+        format!(
+            "zingod's index is still on disk: {} in {}. Switching back to zingod is quick while \
+             it is there.",
+            bytes(size),
+            indexer.dir.display()
+        )
+    })
+}
+
+/// "Turn off and forget"'s box for zingod's index, ticked: the index holds nothing of the
+/// user's and rebuilds from Zebra's chain.
+pub fn forget_index_label(status: &PublicStatus) -> Option<String> {
+    let indexer = status.indexer.as_ref()?;
+    let size = indexer
+        .index_bytes
+        .map(|size| format!("{} in ", bytes(size)))
+        .unwrap_or_default();
+    Some(format!(
+        "Delete zingod's index ({size}{})",
+        indexer.dir.display()
+    ))
+}
+
+/// Above the consent screen that "Server software…" opens.
+pub const CHOOSE_AGAIN: &str = "Choose the server that answers wallets. What becomes public \
+                                depends on it, so Zeal asks you to agree again.";
+
+/// What "Turn off and forget" does, for the service's backend.
+pub fn forget_text(backend: LightBackend) -> &'static str {
+    match backend {
+        LightBackend::ZebradEndpoint => {
+            "Zeal closes the front door, removes Zebra's light wallet endpoint and forgets the \
+             setup."
+        }
+        LightBackend::Zingod => "Zeal closes the front door, stops zingod and forgets the setup.",
+    }
+}
+
+/// What Rebuild costs, before the button that does it.
+pub fn rebuild_text(status: &PublicStatus) -> String {
+    let place = status
+        .indexer
+        .as_ref()
+        .map(|indexer| format!(" in {}", indexer.dir.display()))
+        .unwrap_or_default();
+    format!(
+        "Rebuilding deletes zingod's index{place} and builds it again from Zebra's chain. That \
+         takes hours, and wallets are told to try again meanwhile."
+    )
+}
+
+/// The Share section's last words: what the wallet needs, and which server it reaches.
+pub fn share_note(backend: LightBackend) -> &'static str {
+    match backend {
+        LightBackend::ZebradEndpoint => {
+            "The wallet must know NU7, and Zodl's Automatic mode also sends transactions to its \
+             other servers. This is Zebra's experimental light wallet server."
+        }
+        LightBackend::Zingod => {
+            "The wallet must know NU7, and Zodl's Automatic mode also sends transactions to its \
+             other servers. This is zingod, an experimental light wallet server."
+        }
+    }
+}
+
+/// What the serving zebrad's header says while zingod reads it.
+pub const ZINGOD_READS: &str = "zingod reads this node";
+
+/// What Stop and Restart say on the zebrad zingod reads.
+pub const ZINGOD_RESTARTS: &str = "zingod restarts with Zebra and waits for it to reach the tip: \
+                                   wallets are told to try again meanwhile";
 
 /// The use card's lines: connections, handshakes and this month's upload.
 pub fn use_lines(status: &PublicStatus) -> Vec<String> {
@@ -1358,7 +1697,7 @@ mod tests {
     fn consent_names_the_real_things() {
         let mut status = base();
         status.zebrad_version = Some("v7.0.0+git.e8db87e".into());
-        let (public, yours) = consent_lines(&status);
+        let (public, yours) = consent_lines(&status, LightBackend::ZebradEndpoint);
         assert!(
             public[1].starts_with("The name zec-alice.duckdns.org, in")
                 && public[0].contains("under zec-alice.duckdns.org"),
@@ -1366,5 +1705,157 @@ mod tests {
         );
         assert!(public[2].ends_with("Zebra 7.0.0."), "{public:?}");
         assert!(yours.iter().any(|line| line.contains("without a password")));
+    }
+
+    /// zingod's consent tells what zingod sends and makes public: no Zebra version, no Zebra
+    /// port outside Z4's switch, its index and its public status page with the egress.
+    #[test]
+    fn zingods_consent_names_zingod_and_no_zebra_version_or_port() {
+        let mut status = base();
+        status.network = Network::Testnet;
+        status.zebrad_version = Some("v7.0.0+git.e8db87e".into());
+        let (public, yours) = consent_lines(&status, LightBackend::Zingod);
+        let all = public
+            .iter()
+            .chain(&yours)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            public[2].ends_with(&format!(
+                "told it is zingod {}.",
+                launcher_types::zingod::version()
+            )),
+            "{public:?}"
+        );
+        assert!(!all.contains("7.0.0"), "no Zebra version: {all}");
+        assert!(!all.contains("Zebra's light wallet port"), "{all}");
+        assert!(all.contains("zingod's port without a password"), "{all}");
+        assert!(
+            all.contains("including during setup and automatic pauses"),
+            "{all}"
+        );
+        assert!(
+            all.contains("can't use its wallet methods, but they can read its public status"),
+            "{all}"
+        );
+        assert!(
+            public
+                .iter()
+                .any(|line| line.contains("how much it sent in each 10 minutes")),
+            "the egress on the public status page: {public:?}"
+        );
+        assert!(
+            yours
+                .iter()
+                .any(|line| line.starts_with("zingod keeps its own index"))
+        );
+        assert!(yours[0].starts_with("zingod is experimental"), "{yours:?}");
+        assert!(!all.contains("recommended"));
+        assert!(
+            !all.contains("Zingo wallet"),
+            "the Zingo sentence waits for the wallet runs"
+        );
+        // Zebra's consent is PS1's, word for word.
+        let (zebra_public, zebra_yours) = consent_lines(&status, LightBackend::ZebradEndpoint);
+        assert_eq!(zebra_public.len(), 3);
+        assert_eq!(zebra_yours.len(), 6);
+    }
+
+    #[test]
+    fn the_choice_says_why_zingod_is_disabled() {
+        assert_eq!(zingod_choice_text(&ZingodChoice::Offered), None);
+        assert_eq!(
+            zingod_choice_text(&ZingodChoice::NotOnNetwork {
+                network: Network::Mainnet
+            })
+            .as_deref(),
+            Some("zingod is being tested on Testnet first")
+        );
+        assert_eq!(
+            zingod_choice_text(&ZingodChoice::NotBundled).as_deref(),
+            Some("zingod runs on Linux only for now")
+        );
+        assert!(
+            BACKEND_CHOICES
+                .iter()
+                .all(|(_, label, hint)| !label.contains("recommended")
+                    && !hint.contains("recommended")
+                    && !hint.contains("Zingo wallet"))
+        );
+    }
+
+    #[test]
+    fn the_server_card_reads_the_indexer() {
+        use std::path::PathBuf;
+
+        use launcher_types::public::{IndexerResources, IndexerStats, LightStats};
+        let mut status = base();
+        status.backend = LightBackend::Zingod;
+        status.light = Some(LightStats {
+            endpoint: None,
+            height: Some(4_612_019),
+            tip: Some(4_612_019),
+            info: None,
+            checked_at: None,
+            gateway: Default::default(),
+            month_bytes_up: 0,
+        });
+        status.indexer = Some(IndexerStats {
+            version: "1.1.0".into(),
+            phase: Phase::Running,
+            status: Some(launcher_types::zingod::IndexerStatus {
+                state: IndexerState::Serving,
+                served: Some(4_612_019),
+                tip: Some(4_612_019),
+                network: "testnet".into(),
+                trusted: Some(1),
+                answering: Some(1),
+                alarms: Vec::new(),
+                version: "1.1.0".into(),
+            }),
+            dir: PathBuf::from("/mnt/zebra/zingod/testnet"),
+            port: 18137,
+            index_bytes: Some(18_400_000_000),
+            index_partial: false,
+            free_bytes: Some(412_000_000_000),
+            resources: Some(IndexerResources {
+                rss_bytes: 1_400_000_000,
+                cpu_millicores: 30,
+                read_bytes: 0,
+                written_bytes: 0,
+            }),
+            last_exit: None,
+        });
+        assert_eq!(
+            server_lines(&status),
+            [
+                "zingod 1.1.0 · serving",
+                "block 4,612,019 · Zebra 4,612,019",
+                "index 18.4 GB in /mnt/zebra/zingod/testnet",
+                "1.4 GB memory · 3 % CPU",
+            ]
+        );
+        assert_eq!(
+            forget_index_label(&status).as_deref(),
+            Some("Delete zingod's index (18.4 GB in /mnt/zebra/zingod/testnet)")
+        );
+        assert_eq!(kept_index_line(&status), None, "zingod still serves");
+        status.backend = LightBackend::ZebradEndpoint;
+        assert!(
+            kept_index_line(&status).is_some_and(|line| line.contains("18.4 GB")),
+            "after switching back"
+        );
+        assert_eq!(
+            indexer_actions(&DegradedReason::IndexBroken),
+            &[IndexerAction::Rebuild]
+        );
+        assert_eq!(
+            indexer_actions(&DegradedReason::IndexerFailed {
+                class: ExitClass::ConfigError,
+                detail: FailDetail::None,
+            }),
+            &[IndexerAction::CopyDiagnostics]
+        );
     }
 }

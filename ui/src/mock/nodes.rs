@@ -561,8 +561,8 @@ async fn remove_main(delete_data: bool) -> Result<u64, String> {
 
 /// The main node at first: Zebra on Mainnet in the launcher's own folders, with zebrad's
 /// default ports.
-pub(super) fn first_node(data_dir: &str) -> NodeInfo {
-    let (kind, network) = (NodeKind::Zebrad, launcher_types::Network::Mainnet);
+pub(super) fn first_node(data_dir: &str, network: launcher_types::Network) -> NodeInfo {
+    let kind = NodeKind::Zebrad;
     NodeInfo {
         id: NodeId::suggest(kind, network, &Vec::new()),
         name: NodeInfo::default_name(kind, network),
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn names_keep_the_backends_rules() {
-        let first = first_node(DEFAULT_DATA_DIR);
+        let first = first_node(DEFAULT_DATA_DIR, launcher_types::Network::Mainnet);
         assert!(check_name("  ", &[]).is_err());
         assert!(check_name("zebra · mainnet", std::slice::from_ref(&first)).is_err());
         assert_eq!(

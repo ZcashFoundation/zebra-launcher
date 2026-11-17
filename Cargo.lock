@@ -5917,6 +5917,7 @@ dependencies = [
  "leptos",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "toml_edit 0.25.17+spec-1.1.0",
  "wasm-bindgen",
  "wasm-bindgen-futures",
