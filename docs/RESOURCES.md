@@ -1729,7 +1729,9 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - The exit has no field for its signal. The supervisor's detail names it ("killed by
      signal 9") when zebrad logged no reason, so the memory sentence needs an exit without
      a code whose detail is that or none. The commit sentence counts for any crash, not only
-     a kill. The sentences are parts of the reason, as its other parts are, so they start in
+     a kill. Every sentence needs an unrequested exit classed `Crash` (an unrequested
+     `SIGKILL` is one): rule 2's other failures (a port in use, a configuration error, a
+     locked database, a failed spawn, the end of support) have causes of their own. The sentences are parts of the reason, as its other parts are, so they start in
      lower case: "the computer was almost out of memory just before; the system may have
      stopped it", "only 1.2 GB was free on its disk".
    - The memory verdict goes only on the largest consumer. Until the overview's

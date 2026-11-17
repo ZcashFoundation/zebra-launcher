@@ -2802,6 +2802,31 @@ mod tests {
             verdict.reason,
             "zebrad crashed 20 min ago · only 1.2 GB was free on its disk"
         );
+
+        // A port in use has a cause of its own: neither a full disk nor the commit charge
+        // at its limit is mentioned.
+        let mut scene = Scene::syncing(1200);
+        scene.status.phase = Phase::Failed {
+            class: ExitClass::PortInUse,
+        };
+        scene.status.last_exit = Some(ExitInfo {
+            detail: None,
+            ..exit(ExitClass::PortInUse, Some(1), 1190, false)
+        });
+        scene.machine_with(1150, 1190, |secs, machine| {
+            machine.commit_bytes = Some(97);
+            machine.commit_limit_bytes = Some(100);
+            machine.memory_available_bytes = Some(AVAILABLE_4);
+            machine.volumes = vec![volume(secs / 30 * 30, 1_400_000_000)];
+        });
+        let verdict = scene.verdict();
+        assert_eq!(verdict.rule, 2);
+        assert!(
+            !verdict.reason.contains("free on its disk"),
+            "{}",
+            verdict.reason
+        );
+        assert!(!verdict.reason.contains("memory"), "{}", verdict.reason);
     }
 
     #[test]

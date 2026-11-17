@@ -394,12 +394,14 @@ impl Facts<'_> {
 }
 
 impl Facts<'_> {
-    /// What the computer's history says about an exit the user did not ask for, from the
+    /// What the computer's history says about a crash the user did not ask for, from the
     /// minute before it (rules 2, 3 and 15): memory almost out when a signal ended the node
-    /// (the Linux OOM killer and macOS jetsam send `SIGKILL`), Windows' commit charge near its
-    /// limit at a crash, and under 2 GB free on the node's disk at a crash.
+    /// (the Linux OOM killer and macOS jetsam send `SIGKILL`, which is classed a crash),
+    /// Windows' commit charge near its limit, and under 2 GB free on the node's disk. The
+    /// other failures (a port in use, a configuration error, a locked database, a failed
+    /// spawn, the end of support) have causes of their own, so they get none.
     pub(super) fn exit_context(&self, exit: &ExitInfo) -> Option<String> {
-        if exit.requested || exit.class == ExitClass::Clean {
+        if exit.requested || exit.class != ExitClass::Crash {
             return None;
         }
         let resources = self.resources();
