@@ -1639,8 +1639,11 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      a rate's is whole from 10 up (`95 MB/s`), and the tooltip has one decimal (`95.0 MB/s`).
    - `LineChart` also gains `separate`: the tooltip's total of two lines, which the Peers
      chart has, is left out where the lines are of different quantities (the CPU and Memory
-     charts). Only a lone line has its area washed, as before, so "This node" is washed only
-     while the computer's line is missing.
+     charts), and a lone line of such a chart is named in a legend, since it could be either
+     (the whole computer's when the OS does not report the node's CPU); the other charts
+     keep their legend from two lines up. Only a lone first series has its area washed, so
+     "This node" is washed only while the computer's line is missing, and the computer's
+     muted line alone never is: washed, it read as this node's CPU.
    - A gap is a point half way between the two samples with no value in any series, so the
      tooltip and the table show a dash there. A line's end dot and the end label sit on its
      last finite value.
@@ -1649,8 +1652,12 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      line breaks where the node's does. A series with no value in the range is left out: CPU
      or I/O the system does not report, or a computer that is not read. The charts sit in
      the card between the tiles and the process table, three across from 1200 px and stacked
-     under, and their empty frame says "Measuring… every 5 s" (`chart_empty_text` in
-     `resources.rs`, beside the dashboard's own).
+     under. Each chart's empty frame has its own text (`resource_chart_empty_text`): "CPU
+     not available" when the newest sample has no CPU and the chart no computer line, "The
+     system does not report disk I/O" ("I/O" on Windows) when it has neither I/O counter,
+     as the tiles above say; otherwise "Measuring… every 5 s" (`chart_empty_text` in
+     `resources.rs`, beside the dashboard's own). One text for the three, read from the
+     Memory chart, left the Disk chart "Measuring…" for good under `?unreadable`.
    - `MachineHistory` keeps every sample whole for 4 h; a sample published again with the
      same time replaces the newest. `busy_cores(span, now)` is the mean of the samples'
      figures in the span. The card's footer now shows that average over the last minute.

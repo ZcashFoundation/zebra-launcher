@@ -14,7 +14,7 @@ use leptos::prelude::*;
 
 use crate::{
     charts::{
-        Range, Unit, byte_rate, hhmm,
+        ChartData, Range, Unit, byte_rate, hhmm,
         line_chart::LineChart,
         tz_offset_min_at, uptime_text,
         widgets::{StatTile, Tone},
@@ -276,6 +276,33 @@ pub fn chart_empty_text(has_history: bool, window_empty: bool, range: Range) -> 
     }
 }
 
+/// What one of the card's charts says while it has fewer than two points to draw: that the
+/// system does not report what it plots (the newest sample has no CPU figure and the chart no
+/// computer line either, or no I/O counters at all), and otherwise [`chart_empty_text`].
+pub fn resource_chart_empty_text(
+    kind: ChartKind,
+    latest: Option<&NodeResources>,
+    data: &ChartData,
+    range: Range,
+) -> String {
+    match (kind, latest) {
+        (ChartKind::Cpu, Some(sample)) if sample.cpu_cores.is_none() && data.series.is_empty() => {
+            "CPU not available".to_owned()
+        }
+        (ChartKind::Io, Some(sample))
+            if sample.read_bytes.is_none() && sample.written_bytes.is_none() =>
+        {
+            match sample.platform {
+                Platform::Linux | Platform::Macos => {
+                    "The system does not report disk I/O".to_owned()
+                }
+                Platform::Windows => "The system does not report I/O".to_owned(),
+            }
+        }
+        _ => chart_empty_text(latest.is_some(), data.len() == 0, range),
+    }
+}
+
 /// The subtitle of the Disk (or I/O) chart.
 pub fn io_chart_subtitle(platform: Platform) -> &'static str {
     match platform {
@@ -528,12 +555,15 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
         chart(ChartKind::Memory),
         chart(ChartKind::Io),
     );
-    let chart_empty = Signal::derive(move || {
-        // Memory is always read, so its chart is empty only without a sample in the range.
-        let has_history = latest.with(Option::is_some);
-        let window_empty = memory_chart.with(|data| data.len() == 0);
-        chart_empty_text(has_history, window_empty, dash.range.get())
-    });
+    // Each chart says why it is empty: CPU or I/O the system does not report, or no samples.
+    let chart_empty = move |kind: ChartKind, data: Memo<ChartData>| {
+        Signal::derive(move || {
+            let range = dash.range.get();
+            latest.with(|sample| {
+                data.with(|data| resource_chart_empty_text(kind, sample.as_ref(), data, range))
+            })
+        })
+    };
 
     view! {
         <Show when=shown>
@@ -614,7 +644,7 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                                 title="CPU"
                                 subtitle="Cores busy: this node's processes and the whole computer"
                                 data=cpu_chart
-                                empty=chart_empty
+                                empty=chart_empty(ChartKind::Cpu, cpu_chart)
                                 unit=Unit::Cores
                                 from_zero=true
                                 area=true
@@ -624,7 +654,7 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                                 title="Memory"
                                 subtitle="This node's processes, and what is in use on the computer"
                                 data=memory_chart
-                                empty=chart_empty
+                                empty=chart_empty(ChartKind::Memory, memory_chart)
                                 unit=Unit::Memory
                                 from_zero=true
                                 area=true
@@ -634,7 +664,7 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                                 title=platform.io_label()
                                 subtitle=io_chart_subtitle(platform)
                                 data=io_chart
-                                empty=chart_empty
+                                empty=chart_empty(ChartKind::Io, io_chart)
                                 unit=Unit::BytesPerSec
                                 from_zero=true
                             />
@@ -1061,6 +1091,81 @@ mod tests {
         assert_eq!(
             io_chart_subtitle(Platform::Windows),
             "Read and written per second: files, network and devices"
+        );
+    }
+
+    #[test]
+    fn a_chart_of_what_the_system_does_not_report_says_so() {
+        let sample = NodeResources {
+            run: 1,
+            at: at(1000),
+            run_secs: 600.0,
+            platform: Platform::Linux,
+            cpu_secs: 0.0,
+            cpu_cores: None,
+            memory_bytes: GIB,
+            peak_memory_bytes: GIB,
+            committed_bytes: None,
+            read_bytes: None,
+            written_bytes: None,
+            processes: 1,
+            threads: None,
+            descriptors: None,
+            members: vec![member(4242, None, "zebrad")],
+        };
+        let empty = ChartData::default();
+        let text = |kind, sample: &NodeResources, data: &ChartData| {
+            resource_chart_empty_text(kind, Some(sample), data, Range::Hour1)
+        };
+        assert_eq!(
+            text(ChartKind::Io, &sample, &empty),
+            "The system does not report disk I/O"
+        );
+        let windows = NodeResources {
+            platform: Platform::Windows,
+            ..sample.clone()
+        };
+        assert_eq!(
+            text(ChartKind::Io, &windows, &empty),
+            "The system does not report I/O"
+        );
+        // No CPU and no computer line: nothing will come.
+        assert_eq!(text(ChartKind::Cpu, &sample, &empty), "CPU not available");
+        // The computer's line alone, still gathering its second point: it is coming.
+        let computer = ChartData {
+            times: vec![at(1000)],
+            series: vec![crate::charts::Series {
+                name: "Whole computer",
+                class: "chart-series-muted",
+                values: vec![2.5],
+            }],
+        };
+        assert_eq!(
+            text(ChartKind::Cpu, &sample, &computer),
+            "Measuring… every 5 s"
+        );
+        // Memory is always read.
+        assert_eq!(
+            text(ChartKind::Memory, &sample, &empty),
+            "No samples in the last hour"
+        );
+        // A sample that reads them: the usual text.
+        let read = NodeResources {
+            cpu_cores: Some(1.0),
+            written_bytes: Some(0),
+            ..sample
+        };
+        assert_eq!(
+            text(ChartKind::Io, &read, &empty),
+            "No samples in the last hour"
+        );
+        assert_eq!(
+            text(ChartKind::Cpu, &read, &empty),
+            "No samples in the last hour"
+        );
+        assert_eq!(
+            resource_chart_empty_text(ChartKind::Io, None, &empty, Range::Hour1),
+            "Measuring… every 5 s"
         );
     }
 

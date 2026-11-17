@@ -15,6 +15,20 @@ fn px(value: f64) -> String {
     format!("{value:.1}")
 }
 
+/// Whether the chart names its lines above the plot: always for two or more, and for a lone
+/// line of a chart of `separate` quantities, whose one line could be either (the whole
+/// computer's when this node's is not read).
+fn shows_legend(series: usize, separate: bool) -> bool {
+    series >= 2 || (separate && series == 1)
+}
+
+/// Whether the area under the line is washed: an `area` chart's lone line, when it is the
+/// first series. A muted line (the whole computer's) is context, and a wash would make it read
+/// as the chart's subject.
+fn washes(area: bool, classes: &[&str]) -> bool {
+    area && classes == ["chart-series-1"]
+}
+
 /// A chart card. `data` is the range's samples; `empty` is what the frame says while there are
 /// fewer than two of them.
 #[component]
@@ -26,8 +40,8 @@ pub fn LineChart(
     /// Start the y axis at zero (counts) instead of around the data (heights).
     #[prop(optional)]
     from_zero: bool,
-    /// Wash the area under the line. Only a lone line is washed: under one of two the wash
-    /// would read as emphasis.
+    /// Wash the area under the line. Only a lone first series is washed: under one of two the
+    /// wash would read as emphasis, and under a muted line as the chart's subject.
     #[prop(optional)]
     area: bool,
     /// What the Table button shows, when the table has columns the plot does not (a chart of
@@ -42,7 +56,7 @@ pub fn LineChart(
     #[prop(optional)]
     unit: Unit,
     /// The lines are of different quantities (a node and the whole computer), so the tooltip
-    /// gives no total of them.
+    /// gives no total of them, and a lone line is named in the legend.
     #[prop(optional)]
     separate: bool,
 ) -> impl IntoView {
@@ -59,7 +73,7 @@ pub fn LineChart(
         data.with(|d| geometry(d, from_zero, unit, tz_offset_min_at, width.get()))
     });
     let label = Memo::new(move |_| data.with(|d| summary(title, d, unit, tz_offset_min_at)));
-    let legend = move || data.with(|d| d.series.len() >= 2);
+    let legend = move || data.with(|d| shows_legend(d.series.len(), separate));
 
     view! {
         <div class="card chart-card">
@@ -218,7 +232,7 @@ fn Plot(
             let g = l.as_ref()?;
             let classes = classes();
             let first_class = classes.first().copied().unwrap_or("chart-series-1");
-            let wash = area && classes.len() == 1;
+            let wash = washes(area, &classes);
             let right = g.width - PAD_R;
             let label_end = g.ends[g.end_label_series].unwrap_or(g.xs.len() - 1);
             Some(view! {
@@ -435,5 +449,22 @@ fn DataTable(title: &'static str, data: Signal<ChartData>, unit: Unit) -> impl I
                 </tbody>
             </table>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lone_line_of_separate_quantities_is_named_and_a_muted_one_never_washed() {
+        assert!(!shows_legend(1, false), "the dashboard's one-line charts");
+        assert!(shows_legend(2, false));
+        assert!(shows_legend(1, true), "the whole computer's line alone");
+        assert!(!shows_legend(0, true));
+        assert!(washes(true, &["chart-series-1"]));
+        assert!(!washes(false, &["chart-series-1"]));
+        assert!(!washes(true, &["chart-series-muted"]));
+        assert!(!washes(true, &["chart-series-1", "chart-series-muted"]));
     }
 }
