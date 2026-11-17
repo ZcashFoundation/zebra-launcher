@@ -1154,7 +1154,8 @@ both ports are open:
   use. They publish no binaries, so Zeal builds it from their source";
 - "zingod keeps its own index of the chain on /mnt/zebra, about 71 GB on Mainnet";
 - "while it serves, your server's status page is public: its state, its version, its block
-  heights and how much it sent in each 10 minutes";
+  heights, its alarms (one says when Zebra's release reaches its end of support within a week)
+  and how much it sent in each 10 minutes";
 - "while the light client server is switched on, including during setup and automatic pauses,
   programs on this computer can use zingod's port without a password. Web pages in a browser
   can't use its wallet methods, but they can read its public status".

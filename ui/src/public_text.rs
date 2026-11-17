@@ -1016,7 +1016,8 @@ pub fn consent_lines(status: &PublicStatus, backend: LightBackend) -> (Vec<Strin
     if backend == LightBackend::Zingod {
         public.push(
             "While it serves, your server's status page is public: its state, its version, its \
-             block heights and how much it sent in each 10 minutes."
+             block heights, its alarms (one says when Zebra's release reaches its end of support \
+             within a week) and how much it sent in each 10 minutes."
                 .to_owned(),
         );
         let place = status.indexer.as_ref().map_or_else(
@@ -1878,6 +1879,11 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("how much it sent in each 10 minutes")),
             "the egress on the public status page: {public:?}"
+        );
+        assert!(
+            public.iter().any(|line| line.contains("its alarms")
+                && line.contains("Zebra's release reaches its end of support")),
+            "the alarm that dates Zebra's release: {public:?}"
         );
         assert!(
             yours
