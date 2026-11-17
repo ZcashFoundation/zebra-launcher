@@ -245,13 +245,7 @@ fn LightServer(
         })
     });
     let agree = Callback::new(move |()| {
-        act(busy, note, async move {
-            api::public::answer_public_step(StepAnswer::Consent {
-                version: CONSENT_VERSION,
-            })
-            .await
-            .map_err(|error| error.to_string())
-        });
+        act(busy, note, agree_with());
     });
     let network =
         Memo::new(move |_| status.with(|s| s.as_ref().map_or(Network::Mainnet, |s| s.network)));
@@ -475,6 +469,15 @@ fn StepBody(step: StepId, status: Memo<Option<PublicStatus>>) -> impl IntoView {
             {move || note.get().map(|note| view! { <p class="error">{note}</p> })}
         </div>
     }
+}
+
+/// The answer for agreeing: the consent for the text the screen showed.
+async fn agree_with() -> Result<(), String> {
+    api::public::answer_public_step(StepAnswer::Consent {
+        version: CONSENT_VERSION,
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// What becomes public, for good, and the tick that agrees to it.
