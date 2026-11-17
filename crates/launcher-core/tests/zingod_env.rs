@@ -72,6 +72,9 @@ fn only_the_five_variables_reach_zingod() {
             .iter()
             .filter_map(|line| line.message.strip_prefix("env "))
             .filter_map(|pair| pair.split_once('='))
+            // macOS gives every process this one when its environment lacks it; Zeal doesn't
+            // pass it, and zingod ships on Linux only.
+            .filter(|(name, _)| !(cfg!(target_os = "macos") && *name == "__CF_USER_TEXT_ENCODING"))
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
         (env, home)
