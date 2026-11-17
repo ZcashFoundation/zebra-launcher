@@ -136,34 +136,6 @@ pub(super) fn executable_of(_pid: u32) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// A child prepared with a nice value runs at ours plus that value, capped
-    /// at 19, and one with 0 at ours.
-    #[test]
-    fn the_child_runs_at_its_nice_value() {
-        let nice_of = |nice: i32| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("a runtime");
-            runtime.block_on(async {
-                let mut cmd = tokio::process::Command::new("sh");
-                cmd.args(["-c", "ps -o ni= -p $$"]);
-                cmd.stdout(std::process::Stdio::piped());
-                prepare(&mut cmd, nice);
-                let out = cmd.output().await.expect("sh runs");
-                String::from_utf8(out.stdout)
-                    .expect("UTF-8")
-                    .trim()
-                    .parse::<i32>()
-                    .expect("a nice value")
-            })
-        };
-        // SAFETY: getpriority reads no memory of ours.
-        let ours = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
-        assert_eq!(nice_of(0), ours);
-        assert_eq!(nice_of(10), (ours + 10).min(19));
-    }
-
     #[test]
     fn signalling_an_exited_process_is_not_an_error() {
         let mut child = std::process::Command::new("true")

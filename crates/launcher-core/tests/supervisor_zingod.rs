@@ -197,6 +197,48 @@ async fn zingods_failures_have_their_classes() {
     within(handle.shutdown()).await.unwrap();
 }
 
+/// zingod runs at 10 above the launcher's nice value, capped at 19, and zebrad at the
+/// launcher's. Checked here rather than in launcher-core's unit tests, whose
+/// `reads_this_process` reads the children of its own process, which a child of another unit
+/// test can make unreadable for a moment.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zingod_runs_10_above_our_nice_value_and_zebrad_at_it() {
+    let ours = nice_of("self");
+    let fx = fixture("serving");
+    let zingod = supervisor::spawn(fx.config.clone()).unwrap();
+    within(zingod.start()).await.expect("zingod starts");
+    let pid = zingod.status().pid.expect("zingod's pid");
+    assert_eq!(nice_of(&pid.to_string()), (ours + 10).min(19));
+    within(zingod.shutdown()).await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("zebrad.toml");
+    std::fs::write(&config_path, "[network]\nnetwork = \"Regtest\"\n").unwrap();
+    let zebrad = supervisor::spawn(fast_supervisor_config(fake_zebrad_command(
+        "ok",
+        &config_path,
+    )))
+    .unwrap();
+    within(zebrad.start()).await.expect("zebrad starts");
+    let pid = zebrad.status().pid.expect("zebrad's pid");
+    assert_eq!(nice_of(&pid.to_string()), ours);
+    within(zebrad.shutdown()).await.unwrap();
+}
+
+/// The nice value of the process `/proc/<pid>` names: the 19th field of its `stat`.
+#[cfg(target_os = "linux")]
+fn nice_of(pid: &str) -> i32 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    // The fields after the command name, which may hold spaces, start at the 3rd.
+    let (_, fields) = stat.rsplit_once(") ").expect("a stat line");
+    fields
+        .split(' ')
+        .nth(19 - 3)
+        .and_then(|nice| nice.parse().ok())
+        .expect("a nice value")
+}
+
 /// A zingod an earlier Zeal left that ignores `SIGTERM` is killed, with its process group, once
 /// the stop grace has passed, and the start goes ahead. A stale zebrad isn't
 /// (supervisor.rs's `the_actor_answers_commands_while_a_stale_zebrad_is_terminated`).
