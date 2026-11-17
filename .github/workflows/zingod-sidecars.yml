@@ -6,7 +6,8 @@
 # copied from the build's own sources) and zingod-build-info.txt. The x86_64
 # job also packs the vendored source as zingod-src-<version>.tar.zst with its
 # sha256, uploaded as `zingod-src-<version>`, and reports the advisories in
-# zingod's Cargo.lock in its summary; they never fail the job.
+# zingod's Cargo.lock in its summary; neither they nor a failed report ever
+# fail the job.
 #
 # Linux only: zingod 1.1.0 doesn't compile for Windows and has never been built
 # for macOS (docs/SIDECARS.md). Each target builds in ubuntu:22.04, so the
@@ -212,21 +213,40 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
       # A report for the bump review, not a gate (docs/SIDECARS.md): the
-      # findings go in the summary and never fail the job. The whole workspace
-      # and every target, with an empty config, so nothing upstream's deny.toml
-      # might ignore is left out. cargo-deny's release binary is pinned by
-      # version and sha256 in .github/tool-versions.env.
+      # findings go in the summary and never fail the job. Nor does a
+      # cargo-deny that can't be fetched or checked: the summary and a warning
+      # say so. continue-on-error and the timeout cover anything else, so the
+      # attestation and upload steps always run. The whole workspace and every
+      # target, with an empty config, so nothing upstream's deny.toml might
+      # ignore is left out. cargo-deny's release binary is pinned by version
+      # and sha256 in .github/tool-versions.env.
       - name: Report the advisories in zingod's dependencies
         if: env.PRIMARY == 'true'
+        continue-on-error: true
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           pin() { sed -n "s/^$1=//p" .github/tool-versions.env | tr -d '\r'; }
+          # no_report REASON: says why there is no report, and ends the step.
+          no_report() {
+            echo "::warning title=zingod advisories::$1; see the job summary"
+            {
+              echo "### Advisories in zingod ${VERSION}'s Cargo.lock"
+              echo
+              echo "No report: $1."
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          }
           version="$(pin CARGO_DENY_VERSION)"
           name="cargo-deny-${version}-x86_64-unknown-linux-musl"
-          curl --proto '=https' --tlsv1.2 -sSfL --retry 3 -o "${RUNNER_TEMP}/cargo-deny.tar.gz" \
-            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${version}/${name}.tar.gz"
-          echo "$(pin CARGO_DENY_SHA256_X86_64_LINUX)  ${RUNNER_TEMP}/cargo-deny.tar.gz" | sha256sum -c -
-          tar -xzf "${RUNNER_TEMP}/cargo-deny.tar.gz" -C "${RUNNER_TEMP}" "${name}/cargo-deny"
+          tarball="${RUNNER_TEMP}/cargo-deny.tar.gz"
+          curl --proto '=https' --tlsv1.2 -sSfL --retry 3 -o "${tarball}" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${version}/${name}.tar.gz" ||
+            no_report "cargo-deny ${version} could not be downloaded"
+          echo "$(pin CARGO_DENY_SHA256_X86_64_LINUX)  ${tarball}" | sha256sum -c - ||
+            no_report "cargo-deny ${version} does not match its sha256 pin"
+          tar -xzf "${tarball}" -C "${RUNNER_TEMP}" "${name}/cargo-deny" ||
+            no_report "cargo-deny ${version} could not be unpacked"
           : > "${RUNNER_TEMP}/empty-deny.toml"
           report="${RUNNER_TEMP}/advisories.txt"
           status=0
