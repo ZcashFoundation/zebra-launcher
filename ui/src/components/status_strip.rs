@@ -87,13 +87,18 @@ pub fn StatusStrip() -> impl IntoView {
         });
     };
     let can = move || state.node().status.with(|status| controls(&status.phase));
-    // The zebrad zingod reads: its restarts restart zingod, which waits for the tip again.
+    // The zebrad zingod reads: its restarts restart zingod, which waits for the tip again. A
+    // node that moved to the other network isn't read: the service is held on its own.
     let public = PublicContext::get();
     let zingod_reads = Memo::new(move |_| {
-        let node = state.node().info.with(|info| info.id.clone());
+        let (node, network) = state
+            .node()
+            .info
+            .with(|info| (info.id.clone(), info.network));
         public.statuses.with(|statuses| {
             statuses.iter().any(|status| {
                 status.node == node
+                    && status.network == network
                     && status.switch_on
                     && status.backend == launcher_types::public::LightBackend::Zingod
             })

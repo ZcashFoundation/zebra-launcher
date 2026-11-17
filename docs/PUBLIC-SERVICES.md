@@ -1591,7 +1591,9 @@ screens with the 29 `zingod…` mock flags. Where it differs from the sections a
   `cross_check` against the fakes.
 - **The UI.** `RadioChoice` gains disabled options and a note per option. Stop and Restart say
   that zingod restarts with Zebra in their tooltip, beside "zingod reads this node" in the
-  zebrad strip. The Server card shows CPU in whole percent of a core. The mock's first node is
+  zebrad strip, only on the network the service serves: a first node moved to the other
+  network holds the service, and zingod with it. The Server card shows CPU in whole percent of
+  a core. The mock's first node is
   on Testnet for the `zingod…` flags, and on Mainnet for `zingod-mainnet`.
 - **Not in Z3**, as planned: Mainnet, the scheduled-upgrade countdown and pause, switching
   while Zebra's endpoint keeps serving (Z4), a live log view, choosing the index's folder, and
