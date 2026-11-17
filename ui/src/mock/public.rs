@@ -654,6 +654,13 @@ impl World {
                 };
                 runner.status = None;
                 runner.listening = None;
+                runner.last_exit = Some(ExitInfo {
+                    code: Some(101),
+                    class: ExitClass::Crash,
+                    detail: Some("task ended before shutdown".into()),
+                    at: now - Duration::from_secs(2),
+                    requested: false,
+                });
             }
             ZingodFlag::Crashloop => fail(
                 &mut world,

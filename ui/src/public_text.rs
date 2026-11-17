@@ -1160,6 +1160,32 @@ pub fn check_mark(outcome: &CheckOutcome) -> &'static str {
     }
 }
 
+/// The last error zingod's exit gave, under the line of a zingod that stopped, crashed or broke
+/// its index, when that line doesn't carry it already: the exit's text, which the reader
+/// redacted. A zingod that runs and says it is down has its own message in its line instead.
+pub fn last_error_line(why: &DegradedReason, status: &PublicStatus) -> Option<String> {
+    let shown = match why {
+        DegradedReason::IndexerFailed { detail, .. } => matches!(
+            detail,
+            FailDetail::None | FailDetail::Ports { .. } | FailDetail::Dir { .. }
+        ),
+        DegradedReason::IndexerStarting {
+            waiting: IndexerWait::Backoff,
+        }
+        | DegradedReason::IndexBroken => true,
+        _ => false,
+    };
+    let detail = status
+        .indexer
+        .as_ref()?
+        .last_exit
+        .as_ref()?
+        .detail
+        .as_deref()?
+        .trim();
+    (shown && !detail.is_empty()).then(|| format!("zingod's last error: {detail}"))
+}
+
 /// A check's mark in words, for screen readers, which skip the mark: its state before the
 /// check's line, as [`check_mark`] shows it.
 pub fn check_state_word(outcome: &CheckOutcome) -> &'static str {
@@ -1220,7 +1246,8 @@ pub fn indexer_actions(why: &DegradedReason) -> &'static [IndexerAction] {
     }
 }
 
-/// The Server card's lines: zingod's version and state, the heights, the index, memory and CPU.
+/// The Server card's lines: zingod's version and state, the heights, the index, memory, CPU and
+/// what it read and wrote since it started.
 pub fn server_lines(status: &PublicStatus) -> Vec<String> {
     let Some(indexer) = &status.indexer else {
         return Vec::new();
@@ -1256,8 +1283,17 @@ pub fn server_lines(status: &PublicStatus) -> Vec<String> {
     };
     lines.push(format!("{index} in {}", indexer.dir.display()));
     if let Some(resources) = indexer.resources {
+        let disk = if resources.read_bytes > 0 || resources.written_bytes > 0 {
+            format!(
+                " · {} read, {} written",
+                bytes(resources.read_bytes),
+                bytes(resources.written_bytes)
+            )
+        } else {
+            String::new()
+        };
         lines.push(format!(
-            "{} memory · {} % CPU",
+            "{} memory · {} % CPU{disk}",
             bytes(resources.rss_bytes),
             resources.cpu_millicores / 10
         ));
@@ -1991,6 +2027,74 @@ mod tests {
                 "1.4 GB memory · 3 % CPU",
             ]
         );
+        if let Some(resources) = status
+            .indexer
+            .as_mut()
+            .and_then(|indexer| indexer.resources.as_mut())
+        {
+            resources.read_bytes = 2_100_000_000;
+            resources.written_bytes = 18_900_000_000;
+        }
+        assert_eq!(
+            server_lines(&status)[3],
+            "1.4 GB memory · 3 % CPU · 2.1 GB read, 18.9 GB written"
+        );
+        // The last exit's text, under the line that doesn't name it.
+        if let Some(indexer) = status.indexer.as_mut() {
+            indexer.phase = Phase::Failed {
+                class: ExitClass::Crash,
+            };
+            indexer.last_exit = Some(launcher_types::ExitInfo {
+                code: Some(101),
+                class: ExitClass::Crash,
+                detail: Some("task ended before shutdown".into()),
+                at: at(NOW),
+                requested: false,
+            });
+        }
+        let crash = DegradedReason::IndexerFailed {
+            class: ExitClass::Crash,
+            detail: FailDetail::None,
+        };
+        assert_eq!(
+            last_error_line(&crash, &status).as_deref(),
+            Some("zingod's last error: task ended before shutdown")
+        );
+        assert!(
+            last_error_line(
+                &DegradedReason::IndexerStarting {
+                    waiting: IndexerWait::Backoff
+                },
+                &status
+            )
+            .is_some()
+        );
+        let cookie = DegradedReason::IndexerFailed {
+            class: ExitClass::ConfigError,
+            detail: FailDetail::Cookie {
+                path: PathBuf::from("/mnt/zebra/testnet/rpc/.cookie"),
+                error: "Is a directory (os error 21)".into(),
+            },
+        };
+        assert_eq!(
+            last_error_line(&cookie, &status),
+            None,
+            "its line names the error already"
+        );
+        assert_eq!(
+            last_error_line(
+                &DegradedReason::IndexerDown {
+                    why: DownReason::NoAnswer
+                },
+                &status
+            ),
+            None,
+            "a running zingod's down isn't an earlier exit's"
+        );
+        if let Some(indexer) = status.indexer.as_mut() {
+            indexer.phase = Phase::Running;
+            indexer.last_exit = None;
+        }
         assert_eq!(
             forget_index_label(&status).as_deref(),
             Some("Delete zingod's index (18.4 GB in /mnt/zebra/zingod/testnet)")

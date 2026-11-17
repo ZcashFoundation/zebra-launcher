@@ -1594,6 +1594,12 @@ screens with the 29 `zingod…` mock flags. Where it differs from the sections a
   shortened (`Options.mismatch_span`) instead. One or two mismatches clearing, as in a reorg,
   are launcher-herd's `CrossCheck` test; a height above zebrad's tip is skipped through
   `cross_check` against the fakes.
+- **The last error line.** Under a zingod that stopped, crashed or broke its index, the panel
+  and the Service step show its exit's last text, which the reader redacted ("zingod's last
+  error: …"), unless the line already names it (the cookie, the open-file limit, a folder
+  Zeal couldn't set up). A zingod that runs and says it is down shows its own message instead,
+  since its last exit may be an earlier run's. The Server card adds what zingod read and wrote
+  since it started.
 - **The UI.** `RadioChoice` gains disabled options and a note per option. Stop and Restart say
   that zingod restarts with Zebra in their tooltip, beside "zingod reads this node" in the
   zebrad strip, only on the network the service serves: a first node moved to the other

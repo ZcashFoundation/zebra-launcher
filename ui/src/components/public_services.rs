@@ -24,8 +24,9 @@ use crate::{
     public_text::{
         self, BACKEND_CHOICES, IndexerAction, SERVICE_NAME, Tone, cert_needs_retry, cert_text,
         check_line, check_mark, check_state_word, consent_lines, finding_text, forget_index_label,
-        indexer_actions, kept_index_line, network_name, reach_text, server_footer, server_lines,
-        service_check_line, state_line, step_mark, step_title, use_lines, zingod_choice_note,
+        indexer_actions, kept_index_line, last_error_line, network_name, reach_text, server_footer,
+        server_lines, service_check_line, state_line, step_mark, step_title, use_lines,
+        zingod_choice_note,
     },
 };
 
@@ -297,6 +298,16 @@ fn LightServer(
                     })
             }}
             {move || {
+                status
+                    .with(|s| {
+                        s.as_ref().and_then(|s| match &s.state {
+                            PublicState::Degraded { why } => last_error_line(why, s),
+                            _ => None,
+                        })
+                    })
+                    .map(|line| view! { <p class="muted">{line}</p> })
+            }}
+            {move || {
                 let actions = degraded_actions.get();
                 (!actions.is_empty()).then(|| view! { <IndexerActions actions /> })
             }}
@@ -496,6 +507,11 @@ fn StepBody(step: StepId, status: Memo<Option<PublicStatus>>) -> impl IntoView {
     let body = match step {
         StepId::Consent => view! { <ConsentScreen status busy on_agree=agree /> }.into_any(),
         StepId::Service => view! {
+            {move || {
+                problem()
+                    .and_then(|why| status.with(|s| s.as_ref().and_then(|s| last_error_line(&why, s))))
+                    .map(|line| view! { <p class="muted">{line}</p> })
+            }}
             {move || {
                 let actions = problem_actions.get();
                 (!actions.is_empty()).then(|| view! { <IndexerActions actions /> })
