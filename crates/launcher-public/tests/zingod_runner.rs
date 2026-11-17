@@ -530,6 +530,16 @@ async fn a_stale_zingod_that_cant_be_ended_waits_for_a_new_attempt() {
         .facts_until("the stale zingod", |f| f.stale.is_some())
         .await;
     assert_eq!(facts.stale.unwrap().pid, pid);
+    // Delete leaves the index alone while the stale zingod could still hold it open.
+    let indexes = setup.index_dir.join("indexes");
+    std::fs::create_dir_all(&indexes).unwrap();
+    std::fs::write(indexes.join("seg-1"), b"index").unwrap();
+    let refused = timeout(LIMIT, setup.runner.delete()).await.unwrap();
+    assert!(
+        refused.as_ref().is_err_and(|err| err.contains(&pid.to_string())),
+        "{refused:?}"
+    );
+    assert!(indexes.join("seg-1").exists(), "the index stays");
     zombie.wait().unwrap();
     setup
         .facts_stay(

@@ -761,6 +761,18 @@ impl Runner {
         let Some(dir) = self.index_dir() else {
             return Ok(());
         };
+        // A zingod left behind (one a start found and could not end) still holds the index
+        // open, and Linux lets its files be removed under it. Leave them until it has gone.
+        let pidfile = self.options.pidfile.clone();
+        if let Ok(Ok(Some(stale))) =
+            tokio::task::spawn_blocking(move || launcher_core::pidfile::check(&pidfile)).await
+        {
+            return Err(format!(
+                "zingod (pid {}) is still running from an earlier start, so its index was \
+                 left as it is",
+                stale.pid
+            ));
+        }
         let removed = tokio::task::spawn_blocking(move || remove_index(&dir))
             .await
             .map_err(|err| err.to_string())?
