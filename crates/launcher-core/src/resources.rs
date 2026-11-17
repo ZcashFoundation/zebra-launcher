@@ -506,6 +506,7 @@ async fn sample_machine(
                     commit_bytes: reading.commit,
                     commit_limit_bytes: reading.commit_limit,
                     pressure: reading.pressure,
+                    volumes: Vec::new(),
                 }));
             }
             Ok(Err(err)) if err.kind() == io::ErrorKind::Unsupported => {

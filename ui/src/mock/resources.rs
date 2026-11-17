@@ -686,6 +686,7 @@ pub(super) fn machine(
         commit_bytes: windows.then(|| gib(OTHER_COMMIT_GIB) + node_commit),
         commit_limit_bytes: windows.then(|| gib(computer.commit_limit_gib)),
         pressure: (os == OsFlag::Macos).then_some(MemoryPressure::Normal),
+        volumes: Vec::new(),
     }
 }
 

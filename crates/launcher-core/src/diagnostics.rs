@@ -840,6 +840,7 @@ mod tests {
             commit_bytes: None,
             commit_limit_bytes: None,
             pressure: None,
+            volumes: Vec::new(),
         };
         assert_eq!(
             machine_section(Some(&machine)),
