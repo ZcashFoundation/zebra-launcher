@@ -20,17 +20,25 @@ host="$(host_triple)"
 # CARGO_TARGET_DIR and CARGO_BUILD_TARGET. Diagnostics still go to stderr.
 messages="$(cargo build --manifest-path "${root}/Cargo.toml" -p launcher-core --bin fake-zebrad \
     --message-format=json-render-diagnostics)"
-built="$(
-    { printf '%s\n' "${messages}" | grep '"reason":"compiler-artifact"' | grep '"name":"fake-zebrad"' |
-        grep -o '"executable":"[^"]*"' | tail -n 1; } || true
-)"
-built="${built#\"executable\":\"}"
-built="${built%\"}"
-[ -n "${built}" ] || die "cargo did not report where it built fake-zebrad"
+
+# built NAME: prints where cargo built the binary NAME.
+built() {
+    local path
+    path="$(
+        { printf '%s\n' "${messages}" | grep '"reason":"compiler-artifact"' | grep "\"name\":\"$1\"" |
+            grep -o '"executable":"[^"]*"' | tail -n 1; } || true
+    )"
+    path="${path#\"executable\":\"}"
+    path="${path%\"}"
+    [ -n "${path}" ] || die "cargo did not report where it built $1"
+    printf '%s\n' "${path}"
+}
+
+fake_zebrad="$(built fake-zebrad)"
 for channel in stable beta nightly; do
     suffix=""
     [ "${channel}" = stable ] || suffix="-${channel}"
     out="${root}/src-tauri/binaries/zeal-zebrad${suffix}-${host}"
-    install_atomic "${built}" "${out}"
+    install_atomic "${fake_zebrad}" "${out}"
     echo "installed ${channel} fake-zebrad ($("${out}" --version)) at ${out}"
 done
