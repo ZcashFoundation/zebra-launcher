@@ -54,7 +54,8 @@ kept as the historical design record; where the two differ, this file describes 
 
 Single sources of truth: `[workspace.package] version` in [`Cargo.toml`](../Cargo.toml)
 for the launcher version; `ZEBRAD_VERSION`/`ZEBRAD_COMMIT`/`ZEBRAD_DATE` for Stable and
-the `ZEBRAD_BETA_*` and `ZEBRAD_NIGHTLY_*` root pins for the other channels; and
+the `ZEBRAD_BETA_*` and `ZEBRAD_NIGHTLY_*` root pins for the other channels;
+`ZINGOD_VERSION`/`ZINGOD_COMMIT`/`ZINGOD_DATE` for the zingod bundled on Linux; and
 [`rust-toolchain.toml`](../rust-toolchain.toml) for the toolchain.
 
 ## Nodes

@@ -15,7 +15,10 @@
 #   - a one-off `--version` given to the build and fetch scripts, the `version`
 #     input of zebrad-sidecars.yml, or a beta/nightly pin may carry a
 #     pre-release suffix such as 7.0.0-rc.0 (is_zebrad_version). Beta pins must
-#     have that suffix (is_prerelease_version).
+#     have that suffix (is_prerelease_version);
+#   - the ZINGOD_VERSION pin, the bundled zingod's, is a release like
+#     ZEBRAD_VERSION (is_stable_version); its commit and date use is_full_sha
+#     and is_iso_date, as every channel's do.
 
 # read_pin FILE: prints FILE with all whitespace removed, or nothing if it is
 # missing.
