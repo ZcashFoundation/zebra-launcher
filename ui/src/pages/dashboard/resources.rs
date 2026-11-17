@@ -9,7 +9,7 @@
 
 use std::time::SystemTime;
 
-use launcher_types::{MachineResources, NodeId, NodeResources, Platform};
+use launcher_types::{MachineResources, NodeId, NodeInfo, NodeResources, Platform};
 use leptos::prelude::*;
 
 use crate::{
@@ -177,6 +177,20 @@ pub fn last_run_text(summary: &RunSummary) -> String {
     }
     parts.push(uptime_text(summary.length));
     format!("last run: {}", parts.join(" · "))
+}
+
+/// The name the card gives the node's first process: its kind's program, else the name the
+/// newest sample has for it, else `The node`.
+pub fn root_name(info: &NodeInfo, latest: Option<&NodeResources>) -> String {
+    info.kind
+        .program()
+        .map(str::to_owned)
+        .or_else(|| {
+            latest
+                .and_then(|sample| sample.members.first())
+                .map(|member| member.name.clone())
+        })
+        .unwrap_or_else(|| "The node".to_owned())
 }
 
 /// The line under the tiles while no sample is live: the last run's line, unless the newest
@@ -528,19 +542,9 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                 let platform = latest
                     .with_untracked(|sample| sample.as_ref().map(|sample| sample.platform))
                     .unwrap_or(Platform::Linux);
-                let root = state
-                    .node()
-                    .info
-                    .with_untracked(|info| info.kind.program().map(str::to_owned))
-                    .or_else(|| {
-                        latest.with_untracked(|sample| {
-                            sample
-                                .as_ref()
-                                .and_then(|sample| sample.members.first())
-                                .map(|member| member.name.clone())
-                        })
-                    })
-                    .unwrap_or_else(|| "The node".to_owned());
+                let root = state.node().info.with_untracked(|info| {
+                    latest.with_untracked(|sample| root_name(info, sample.as_ref()))
+                });
                 let idle_root = root.clone();
                 let threads = platform != Platform::Windows;
                 let columns = if threads { "8" } else { "7" };
