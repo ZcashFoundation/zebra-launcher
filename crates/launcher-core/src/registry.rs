@@ -534,6 +534,43 @@ impl RegistryHandle {
         self.summaries.clone()
     }
 
+    /// Each node's data folder, in the list's order, following a node added,
+    /// removed or given another folder: whose volumes the machine sampler
+    /// reads. A task keeps it up to date until the registry or every receiver
+    /// is gone. Must be called inside a Tokio runtime.
+    pub fn watch_data_dirs(&self) -> watch::Receiver<Vec<resources::DataDir>> {
+        let mut summaries = self.watch_summaries();
+        let dirs = |summaries: &[NodeSummary]| -> Vec<resources::DataDir> {
+            summaries
+                .iter()
+                .map(|summary| resources::DataDir {
+                    node: summary.info.id.clone(),
+                    path: PathBuf::from(&summary.info.data_dir),
+                })
+                .collect()
+        };
+        let (tx, rx) = watch::channel(dirs(&summaries.borrow_and_update()));
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    changed = summaries.changed() => if changed.is_err() {
+                        return;
+                    },
+                    () = tx.closed() => return,
+                }
+                let next = dirs(&summaries.borrow_and_update());
+                tx.send_if_modified(|current| {
+                    let changed = *current != next;
+                    if changed {
+                        *current = next;
+                    }
+                    changed
+                });
+            }
+        });
+        rx
+    }
+
     /// How long a caller should wait for [`Self::shutdown`]: the longest of
     /// the nodes' shutdown caps, as they stop side by side.
     pub fn shutdown_cap(&self) -> Duration {

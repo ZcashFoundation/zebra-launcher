@@ -442,7 +442,8 @@ fn push_tree(out: &mut String, node: Option<&NodeResources>) {
 }
 
 /// The "Computer" section that `copy_diagnostics` appends after the nodes' parts: the
-/// computer's newest sample, `None` while there is none.
+/// computer's newest sample, `None` while there is none, with a line per volume that holds a
+/// node's data folder.
 pub fn machine_section(machine: Option<&MachineResources>) -> String {
     let mut out = String::from("\n== Computer ==\n");
     match machine {
@@ -470,6 +471,18 @@ pub fn machine_section(machine: Option<&MachineResources>) -> String {
                 let _ = write!(out, "; memory pressure {}", pressure.as_str());
             }
             out.push('\n');
+            for volume in &machine.volumes {
+                let nodes: Vec<String> = volume.nodes.iter().map(ToString::to_string).collect();
+                let _ = writeln!(
+                    out,
+                    "volume {}: {} bytes free of {} bytes, read {}; data folders of {}",
+                    volume.label,
+                    volume.free_bytes,
+                    volume.total_bytes,
+                    clock::rfc3339(volume.measured_at),
+                    nodes.join(", ")
+                );
+            }
         }
         None => out.push_str("(none: this platform is not measured yet)\n"),
     }
@@ -850,6 +863,26 @@ mod tests {
         assert_eq!(
             machine_section(None),
             "\n== Computer ==\n(none: this platform is not measured yet)\n"
+        );
+        let with_volume = MachineResources {
+            volumes: vec![launcher_types::VolumeUsage {
+                label: "/mnt/zcash".into(),
+                total_bytes: 4_000_800_000_000,
+                free_bytes: 1_834_500_000_000,
+                nodes: vec![
+                    NodeId::new("zebrad-mainnet").unwrap(),
+                    NodeId::new("zebrad-testnet").unwrap(),
+                ],
+                measured_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+            }],
+            ..machine
+        };
+        assert!(
+            machine_section(Some(&with_volume)).ends_with(
+                "\nvolume /mnt/zcash: 1834500000000 bytes free of 4000800000000 bytes, read 2027-01-15T08:00:00.000000Z; data folders of zebrad-mainnet, zebrad-testnet\n"
+            ),
+            "{}",
+            machine_section(Some(&with_volume))
         );
     }
 

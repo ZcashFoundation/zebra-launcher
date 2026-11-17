@@ -22,6 +22,7 @@ use launcher_core::{
     pidfile,
     policy::RestartPolicy,
     registry::{self, RegistryConfig, RegistryHandle, StartError},
+    resources,
     settings::{SettingsHandle, SettingsStore},
     supervisor::{Note, StartOptions, SupervisorError},
 };
@@ -657,6 +658,55 @@ async fn a_new_node_can_keep_its_chain_in_a_folder_of_the_users_choosing() {
     .expect("add");
     assert_eq!(added.id.as_str(), "zebrad-testnet-2");
     assert_eq!(fx.settings.nodes()[2].data_dir, None);
+    within(fx.registry.shutdown()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_data_folders_follow_the_nodes() {
+    let fx = fixture().await;
+    let mut dirs = fx.registry.watch_data_dirs();
+    let first = fx.registry.infos()[0].clone();
+    let listed = |dirs: &[resources::DataDir]| -> Vec<(String, String)> {
+        dirs.iter()
+            .map(|dir| (dir.node.to_string(), dir.path.display().to_string()))
+            .collect()
+    };
+    assert_eq!(
+        listed(&dirs.borrow_and_update()),
+        vec![(first.id.to_string(), first.data_dir.clone())]
+    );
+    // A node added on a disk of its own comes next.
+    let big = fx.dir.path().join("big-disk");
+    let added = within(fx.registry.add(NodeDraft {
+        data_dir: Some(big.display().to_string()),
+        ..draft(Network::Testnet, "Zebra · Testnet")
+    }))
+    .await
+    .expect("add");
+    within(dirs.wait_for(|dirs| dirs.len() == 2))
+        .await
+        .expect("the registry runs");
+    assert_eq!(
+        listed(&dirs.borrow_and_update())[1],
+        (added.id.to_string(), big.display().to_string())
+    );
+    // Another folder for it, then its removal.
+    let other = fx.dir.path().join("other-disk");
+    within(
+        fx.registry
+            .choose_data_dir(&added.id, &other.display().to_string()),
+    )
+    .await
+    .expect("another folder");
+    within(dirs.wait_for(|dirs| dirs.get(1).is_some_and(|dir| dir.path == other)))
+        .await
+        .expect("the registry runs");
+    within(fx.registry.remove(&added.id, false))
+        .await
+        .expect("removed");
+    within(dirs.wait_for(|dirs| dirs.len() == 1))
+        .await
+        .expect("the registry runs");
     within(fx.registry.shutdown()).await;
 }
 

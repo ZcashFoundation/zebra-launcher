@@ -4,7 +4,8 @@
 //! - [`ResourceSampler`] follows the supervisor's [`TreeProbe`] watch: from the spawn until
 //!   the run is finalized it reads the tree every [`INTERVAL`] and publishes
 //!   `watch<Option<NodeResources>>`; between runs it publishes `None`.
-//! - [`MachineSampler`] reads the computer's CPU and memory every [`INTERVAL`] and publishes
+//! - [`MachineSampler`] reads the computer's CPU and memory every [`INTERVAL`], and the volumes
+//!   that hold the nodes' data folders every [`VOLUME_INTERVAL`], and publishes
 //!   `watch<Option<MachineResources>>`.
 //!
 //! The reads are blocking system calls, so each one runs in `spawn_blocking`, taking its inputs
@@ -19,19 +20,34 @@
 //!                                     │ Fold
 //!                                     ▼
 //!                            watch<Option<NodeResources>>
+//!
+//!   watch<Vec<DataDir>> ──▶ MachineSampler ──spawn_blocking──▶ MachineReader::machine
+//!                                │          ──spawn_blocking──▶ MachineReader::volume
+//!                                ▼          (one volume read at a time; it may hang)
+//!                       watch<Option<MachineResources>>
 //! ```
 
 use std::{
     io,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 
-use launcher_types::{MachineResources, MemoryPressure, NodeResources, Platform};
-use tokio::{sync::watch, time::MissedTickBehavior};
+use launcher_types::{
+    MachineResources, MemoryPressure, NodeId, NodeResources, Platform, VolumeUsage,
+};
+use tokio::{
+    sync::watch,
+    task::{JoinError, JoinHandle},
+    time::MissedTickBehavior,
+};
 use tracing::Instrument;
 
-use crate::process::TreeProbe;
+use crate::{
+    firstrun::{self, Volume},
+    process::TreeProbe,
+};
 
 mod fold;
 #[cfg(target_os = "linux")]
@@ -47,6 +63,16 @@ use fold::Fold;
 
 /// How often both samplers read: the RPC monitor's cadence.
 pub const INTERVAL: Duration = Duration::from_secs(5);
+
+/// How often the machine sampler reads the volumes that hold the nodes' data folders.
+pub const VOLUME_INTERVAL: Duration = Duration::from_secs(30);
+
+/// A node's data folder, whose volume the machine sampler reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DataDir {
+    pub node: NodeId,
+    pub path: PathBuf,
+}
 
 /// A process as the OS has it: its pid and its start time in the OS's unit (clock ticks since
 /// boot on Linux, microseconds since 1970 on macOS, 100 ns since 1601 on Windows), which tells
@@ -159,10 +185,16 @@ pub struct MachineReading {
     pub pressure: Option<MemoryPressure>,
 }
 
-/// Reads the computer's CPU and memory.
+/// Reads the computer's CPU and memory, and the volumes that hold folders.
 pub trait MachineReader: Send + Sync + 'static {
     /// [`io::ErrorKind::Unsupported`] means this platform has no reader.
     fn machine(&self) -> io::Result<MachineReading>;
+
+    /// The volume that holds `dir` ([`firstrun::volume`]). It can hang on a dead network
+    /// mount, so the sampler reads volumes on a task of their own.
+    fn volume(&self, dir: &Path) -> io::Result<Volume> {
+        firstrun::volume(dir)
+    }
 }
 
 /// The platform the readers of this build report.
@@ -445,20 +477,137 @@ fn log_denied(logged: &mut Denied, denied: Denied) {
 pub struct MachineSampler;
 
 impl MachineSampler {
-    /// The computer's CPU and memory every [`INTERVAL`], with this platform's reader. Must be
-    /// called inside a Tokio runtime.
-    pub fn spawn() -> watch::Receiver<Option<MachineResources>> {
-        Self::spawn_with(INTERVAL, platform_machine_reader())
+    /// The computer's CPU and memory every [`INTERVAL`], and the volumes that hold `data_dirs`
+    /// every [`VOLUME_INTERVAL`] and whenever the folders change, with this platform's reader.
+    /// Must be called inside a Tokio runtime.
+    pub fn spawn(
+        data_dirs: watch::Receiver<Vec<DataDir>>,
+    ) -> watch::Receiver<Option<MachineResources>> {
+        Self::spawn_with(
+            data_dirs,
+            INTERVAL,
+            VOLUME_INTERVAL,
+            platform_machine_reader(),
+        )
     }
 
-    /// Like [`MachineSampler::spawn`], with another interval or reader (tests).
+    /// Like [`MachineSampler::spawn`], with other intervals or another reader (tests).
     pub fn spawn_with(
+        data_dirs: watch::Receiver<Vec<DataDir>>,
         interval: Duration,
+        volume_interval: Duration,
         reader: Arc<dyn MachineReader>,
     ) -> watch::Receiver<Option<MachineResources>> {
         let (tx, rx) = watch::channel(None);
-        tokio::spawn(sample_machine(interval, reader, tx));
+        tokio::spawn(sample_machine(
+            data_dirs,
+            interval,
+            volume_interval,
+            reader,
+            tx,
+        ));
         rx
+    }
+}
+
+/// The volumes of `dirs`, one entry per volume, in the order of its first folder, each listing
+/// its nodes in the folders' order. A folder whose volume cannot be read is left out, with the
+/// error.
+fn read_volumes(
+    reader: &dyn MachineReader,
+    dirs: &[DataDir],
+) -> (Vec<VolumeUsage>, Option<io::Error>) {
+    let mut volumes: Vec<(String, VolumeUsage)> = Vec::new();
+    let mut failed = None;
+    for dir in dirs {
+        let volume = match reader.volume(&dir.path) {
+            Ok(volume) => volume,
+            Err(err) => {
+                failed = Some(err);
+                continue;
+            }
+        };
+        match volumes.iter_mut().find(|(key, _)| *key == volume.key) {
+            Some((_, usage)) => {
+                if !usage.nodes.contains(&dir.node) {
+                    usage.nodes.push(dir.node.clone());
+                }
+            }
+            None => volumes.push((
+                volume.key,
+                VolumeUsage {
+                    label: volume.label,
+                    total_bytes: volume.total,
+                    free_bytes: volume.available,
+                    nodes: vec![dir.node.clone()],
+                    measured_at: SystemTime::now(),
+                },
+            )),
+        }
+    }
+    (
+        volumes.into_iter().map(|(_, usage)| usage).collect(),
+        failed,
+    )
+}
+
+/// What a volume read gives: the volumes and the last folder's error, if any.
+type VolumeRead = (Vec<VolumeUsage>, Option<io::Error>);
+
+/// The machine sampler's volume reads: at most one at a time, on its own blocking task, so a
+/// volume that hangs delays only its own result. The actor owns it.
+struct VolumeReads {
+    reader: Arc<dyn MachineReader>,
+    /// The read in flight.
+    job: Option<JoinHandle<VolumeRead>>,
+    /// The folders changed while a read was in flight: read again when it ends.
+    again: bool,
+    /// The newest volumes read.
+    volumes: Vec<VolumeUsage>,
+    /// A failure was logged as a warning; later ones log at debug.
+    warned: bool,
+}
+
+impl VolumeReads {
+    /// Reads `dirs`' volumes now, or once the read in flight ends.
+    fn start(&mut self, dirs: Vec<DataDir>) {
+        if self.job.is_some() {
+            self.again = true;
+            return;
+        }
+        let reader = Arc::clone(&self.reader);
+        self.job = Some(tokio::task::spawn_blocking(move || {
+            read_volumes(&*reader, &dirs)
+        }));
+    }
+
+    /// The read in flight's end; pending without one.
+    async fn finished(&mut self) -> Result<VolumeRead, JoinError> {
+        match &mut self.job {
+            Some(job) => job.await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Takes a finished read's result: the volumes, unless the read failed.
+    fn take(&mut self, joined: Result<VolumeRead, JoinError>) {
+        self.job = None;
+        let failure = match joined {
+            Ok((volumes, failed)) => {
+                self.volumes = volumes;
+                failed.map(|err| err.to_string())
+            }
+            // A panic in the reader is a bug; the panic hook has logged it already.
+            Err(err) => Some(err.to_string()),
+        };
+        if let Some(err) = failure {
+            if self.warned {
+                tracing::debug!(%err, "reading a data folder's volume failed");
+            } else {
+                self.warned = true;
+                tracing::warn!(%err, "reading a data folder's volume failed; trying again every 30 s");
+            }
+        }
     }
 }
 
@@ -473,19 +622,58 @@ fn busy_cores(before: &MachineReading, now: &MachineReading) -> Option<f64> {
 }
 
 /// The machine sampler's task. It ends when every receiver is dropped, when the platform has
-/// no reader, or when the reader panics.
+/// no reader, or when the reader panics while reading the CPU and memory.
 async fn sample_machine(
+    mut data_dirs: watch::Receiver<Vec<DataDir>>,
     interval: Duration,
+    volume_interval: Duration,
     reader: Arc<dyn MachineReader>,
     tx: watch::Sender<Option<MachineResources>>,
 ) {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut volume_ticker = tokio::time::interval(volume_interval);
+    volume_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut volumes = VolumeReads {
+        reader: Arc::clone(&reader),
+        job: None,
+        again: false,
+        volumes: Vec::new(),
+        warned: false,
+    };
+    // The folders' sender is gone: the folders stay as they are.
+    let mut dirs_open = true;
     let mut previous: Option<MachineReading> = None;
     let mut warned = false;
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
+            _ = volume_ticker.tick() => {
+                volumes.start(data_dirs.borrow_and_update().clone());
+                continue;
+            }
+            changed = data_dirs.changed(), if dirs_open => {
+                match changed {
+                    Ok(()) => volumes.start(data_dirs.borrow_and_update().clone()),
+                    Err(_) => dirs_open = false,
+                }
+                continue;
+            }
+            joined = volumes.finished() => {
+                volumes.take(joined);
+                let read = volumes.volumes.clone();
+                tx.send_if_modified(|sample| match sample {
+                    Some(sample) if sample.volumes != read => {
+                        sample.volumes = read;
+                        true
+                    }
+                    _ => false,
+                });
+                if std::mem::take(&mut volumes.again) {
+                    volumes.start(data_dirs.borrow().clone());
+                }
+                continue;
+            }
             () = tx.closed() => return,
         }
         let reader = Arc::clone(&reader);
@@ -506,7 +694,7 @@ async fn sample_machine(
                     commit_bytes: reading.commit,
                     commit_limit_bytes: reading.commit_limit,
                     pressure: reading.pressure,
-                    volumes: Vec::new(),
+                    volumes: volumes.volumes.clone(),
                 }));
             }
             Ok(Err(err)) if err.kind() == io::ErrorKind::Unsupported => {
@@ -800,7 +988,13 @@ mod tests {
         let reader = Arc::new(Machine {
             calls: AtomicU32::new(0),
         });
-        let mut rx = MachineSampler::spawn_with(Duration::from_millis(20), reader);
+        let (_dirs_tx, dirs) = watch::channel(Vec::new());
+        let mut rx = MachineSampler::spawn_with(
+            dirs,
+            Duration::from_millis(20),
+            Duration::from_secs(3600),
+            reader,
+        );
         let first = loop {
             tokio::time::timeout(LIMIT, rx.changed())
                 .await
@@ -822,6 +1016,171 @@ mod tests {
         assert_eq!(second.commit_bytes, Some(9 << 30));
         assert_eq!(second.commit_limit_bytes, Some(24 << 30));
         assert_eq!(second.pressure, Some(MemoryPressure::Warning));
+    }
+
+    /// A computer whose folders' volumes are their paths' first parts (`/a/x` is on `a`, with
+    /// 100 of 1,000 bytes free), whose reads of `/missing` fail, and whose volume reads wait
+    /// while `hold` is set.
+    struct Volumes {
+        machine: Machine,
+        hold: std::sync::atomic::AtomicBool,
+        reads: AtomicU32,
+    }
+
+    impl Volumes {
+        fn new(hold: bool) -> Arc<Self> {
+            Arc::new(Volumes {
+                machine: Machine {
+                    calls: AtomicU32::new(0),
+                },
+                hold: std::sync::atomic::AtomicBool::new(hold),
+                reads: AtomicU32::new(0),
+            })
+        }
+    }
+
+    impl MachineReader for Volumes {
+        fn machine(&self) -> io::Result<MachineReading> {
+            self.machine.machine()
+        }
+
+        fn volume(&self, dir: &Path) -> io::Result<Volume> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            while self.hold.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let key = dir
+                .components()
+                .nth(1)
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if key == "missing" {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            Ok(Volume {
+                label: format!("/{key}"),
+                key,
+                available: 100,
+                total: 1000,
+            })
+        }
+    }
+
+    fn dir(node: &str, path: &str) -> DataDir {
+        DataDir {
+            node: NodeId::new(node).expect("an id"),
+            path: PathBuf::from(path),
+        }
+    }
+
+    /// The volumes of the next sample that `pick` accepts, as labels and their nodes.
+    async fn volumes_until(
+        rx: &mut watch::Receiver<Option<MachineResources>>,
+        pick: impl Fn(&[VolumeUsage]) -> bool,
+    ) -> Vec<(String, Vec<String>)> {
+        let sample = tokio::time::timeout(
+            LIMIT,
+            rx.wait_for(|sample| sample.as_ref().is_some_and(|s| pick(&s.volumes))),
+        )
+        .await
+        .expect("volumes in time")
+        .expect("the sampler is alive")
+        .clone()
+        .expect("a sample");
+        sample
+            .volumes
+            .iter()
+            .map(|volume| {
+                (
+                    volume.label.clone(),
+                    volume.nodes.iter().map(ToString::to_string).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn volumes_are_grouped_by_device_and_follow_the_folders() {
+        let reader = Volumes::new(false);
+        let (dirs_tx, dirs) = watch::channel(vec![
+            dir("zebrad-mainnet", "/a/x"),
+            dir("zebrad-testnet", "/b/z"),
+            dir("zakura-mainnet", "/a/y"),
+        ]);
+        let mut rx = MachineSampler::spawn_with(
+            dirs,
+            Duration::from_millis(20),
+            Duration::from_secs(3600),
+            reader,
+        );
+        let owned = |rows: &[(&str, &[&str])]| -> Vec<(String, Vec<String>)> {
+            rows.iter()
+                .map(|(label, nodes)| {
+                    (
+                        (*label).to_owned(),
+                        nodes.iter().map(|node| (*node).to_owned()).collect(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            volumes_until(&mut rx, |volumes| !volumes.is_empty()).await,
+            owned(&[
+                ("/a", &["zebrad-mainnet", "zakura-mainnet"]),
+                ("/b", &["zebrad-testnet"])
+            ])
+        );
+        let sample = rx.borrow().clone().expect("a sample");
+        assert_eq!(
+            (sample.volumes[0].free_bytes, sample.volumes[0].total_bytes),
+            (100, 1000)
+        );
+        // A change of the folders is read at once; a folder whose volume cannot be read is
+        // left out.
+        dirs_tx.send_replace(vec![
+            dir("zebrad-testnet", "/b/z"),
+            dir("zebrad-mainnet", "/missing/q"),
+        ]);
+        assert_eq!(
+            volumes_until(&mut rx, |volumes| volumes.len() == 1).await,
+            owned(&[("/b", &["zebrad-testnet"])])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hung_volume_read_does_not_hold_up_the_computers_readings() {
+        let reader = Volumes::new(true);
+        let (dirs_tx, dirs) = watch::channel(vec![dir("zebrad-mainnet", "/a/x")]);
+        let mut rx = MachineSampler::spawn_with(
+            dirs,
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+            reader.clone(),
+        );
+        for _ in 0..5 {
+            tokio::time::timeout(LIMIT, rx.changed())
+                .await
+                .expect("a sample in time")
+                .expect("the sampler is alive");
+            assert!(
+                rx.borrow_and_update()
+                    .as_ref()
+                    .is_some_and(|s| s.volumes.is_empty())
+            );
+        }
+        dirs_tx.send_replace(vec![dir("zebrad-mainnet", "/c/x")]);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(reader.reads.load(Ordering::SeqCst), 1, "one read at a time");
+        reader.hold.store(false, Ordering::SeqCst);
+        // The read in flight ends, and the folders that changed meanwhile are read again.
+        let volumes = volumes_until(&mut rx, |volumes| {
+            volumes.first().is_some_and(|volume| volume.label == "/c")
+        })
+        .await;
+        assert_eq!(
+            volumes,
+            vec![("/c".to_owned(), vec!["zebrad-mainnet".to_owned()])]
+        );
     }
 
     #[test]
