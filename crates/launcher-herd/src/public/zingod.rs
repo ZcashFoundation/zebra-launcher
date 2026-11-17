@@ -158,7 +158,7 @@ pub struct ZingodFacts {
     /// zingod's supervisor.
     pub phase: Phase,
     pub last_exit: Option<ExitInfo>,
-    /// The zebrad run the running zingod was started for.
+    /// The zebrad run zingod's last start was for.
     pub running_for: Option<ZebradRun>,
     /// The last `/status` answer of this run.
     pub status: Option<IndexerStatus>,

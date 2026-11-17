@@ -534,7 +534,7 @@ flag (`?public=<flag>`).
 | zingod can't read zebrad's cookie: the path is a folder, or not readable | `ConfigError` with the cookie text | no restart | "zingod can't read Zebra · Testnet's cookie at /mnt/zebra/testnet/rpc/.cookie: Is a directory (os error 21). [Try again]" | the user's Try again | `zingod-cookie` |
 | zingod's port is taken | the check before the spawn, or `PortInUse` | moves to the next free port, once | "Other programs use ports 18137 and 18138. [Try again]" | the user | `zingod-port` |
 | another program holds the index | `DbLocked`, after the pid file ended Zeal's own leftover | waits | "Another program holds zingod's index in /mnt/zebra/zingod/testnet. [Try again]" | the user | `zingod-locked` |
-| the disk fills | free space every 60 s; `DiskFull` | stops zingod below 10 GB free, starts it above 20 GB | "Waiting for disk space: 6 GB free on /mnt/zebra. zingod starts again above 20 GB." | by itself | `zingod-disk` |
+| the disk fills | free space every 60 s; `DiskFull` | stops zingod below 10 GB free, starts it above 20 GB; after `DiskFull`, starts it again only when bytes ran out and are back, with inodes free | "Waiting for disk space: 6 GB free on /mnt/zebra. zingod starts again above 20 GB." | by itself, or the user's Try again after a quota or inodes ran out | `zingod-disk` |
 | the index is damaged, from another chain or of an older format | `IndexBroken` | no restart | "zingod's index is damaged. Rebuilding it takes hours, and wallets are told to try again meanwhile. [Rebuild]" | the user's Rebuild | `zingod-broken` |
 | zingod serves a block zebrad doesn't have | the tip cross-check | stops zingod | "zingod's chain doesn't match Zebra's at block 4,611,980. [Rebuild]" | the user's Rebuild | `zingod-mismatch` |
 | an upgrade zingod doesn't know is active | zebrad's upgrades against `ZINGOD_KNOWS` | doesn't start zingod; `BuildTooOld` | "zingod 1.1.0 doesn't know NU8, which is active. Wallets that use your server see an error until Zeal updates zingod." | a Zeal update | `zingod-tooold` |
@@ -583,7 +583,8 @@ these hold:
    tested, `zeal-zingod` is bundled, and no pause waits for the user.
 2. zebrad runs on the service's network, and this run has logged its RPC endpoint
    (`Status.rpc_addr`).
-3. zebrad's cookie exists, isn't empty, and was written at or after this run's `started_at`.
+3. zebrad's cookie exists and isn't empty. Its time isn't compared with the run's start
+   ([below](#when-zingod-runs)): the barrier is condition 2.
 4. zebrad has been at the tip, within 2 blocks, once in this run.
 5. No zingod failure waits for the user: a refused configuration, an unreadable cookie, a
    damaged index, a chain mismatch, a crash loop, a taken port or a held lock.
@@ -603,9 +604,15 @@ server unavailable, so the extra restart costs little.
 **Why the RPC line.** zebrad 7.0.0 logs `RPC auth cookie written to disk` just before
 `Opened RPC endpoint at` (fixtures `zebrad-7.0.0-lightwalletd-start-shutdown.stdout.log`, lines
 56-57, and `zebrad-7.0.0-regtest-start-shutdown.stdout.log`, lines 57-58), and the supervisor
-clears `Status.rpc_addr` at every spawn (`crates/launcher-core/src/supervisor/actor.rs:532,
-779`). So once `rpc_addr` is set, this run's cookie is on disk; the time check is the backstop. A
-zingod started on the previous run's cookie would never recover.
+clears `Status.rpc_addr` in the same status update that records a new run's pid and
+`started_at` (`install_run` in `crates/launcher-core/src/supervisor/actor.rs`), and again when
+the run ends (`finalize`). So a status whose `rpc_addr` is set names the run whose cookie is on
+disk: the run's identity (its pid and `started_at`) and the address come from that one status,
+and that is the readiness barrier (`launcher_public::zingod::zebrad_facts`). There is no time
+check behind it: the supervisor records `started_at` only once the asynchronous spawn has
+returned, so a quick zebrad can write its cookie before that moment, and a rule that wanted the
+cookie newer than `started_at` could hold zingod back for the whole run. A zingod started on the
+previous run's cookie would never recover, so the restart with each run stays.
 
 **Why the tip.** zingod can index only what zebrad has, and a first build beside a syncing zebrad
 doubles the heavy work. The wait applies after every zebrad restart too, where it is usually
@@ -618,6 +625,7 @@ short; the panel and zebrad's Stop and Restart say so.
 | switched off, a pause only the user ends, a network change, "Turn off and forget", the other backend chosen | stopped; the index stays |
 | any other automatic pause (the name, the LAN address, a VPN, the cap) | keeps running, so a resume serves at once, as PS1 keeps zebrad's endpoint |
 | less than 10 GB free on the index's disk | stopped with `SIGTERM`, so the indexes commit; started again above 20 GB |
+| zingod exits with `DiskFull` | started again above 20 GB only if bytes ran out (below 10 GB free just after the exit) and inodes are free; a quota, inodes, or bytes that were there all along wait for the user's Try again |
 | zingod exits on its own | [zingod's exits](#zingods-exits) |
 | Zeal quits | the front door closes first, within its 5 s cap (`src-tauri/src/exit.rs:108-111`); then zingod's stop runs beside the nodes', under the larger of the registry's cap and zingod's |
 
@@ -800,7 +808,7 @@ deletes hours of index.
 | `Error: cannot read validator cookie <path>: <error>` | `ConfigError` | no restart; the panel names the path and the error. zingod starts with a missing or empty cookie and retries each request (`packages/zingod-source/src/endpoint.rs:154-160`; `CHANGELOG.md:35-38`), so this means the path exists and can't be read: a folder, or a permission. Restarting can't fix it |
 | `Error: binding the gRPC listener: Address already in use (os error 98)` | `PortInUse` | the next free port, once; then the user |
 | `… <dir>/LOCK is held by another process`, matched before every index text below | `DbLocked` | the user: the pid file already ended Zeal's own leftover |
-| `<index> index commit failed: disk <dir> full`, a panic, then an abort; or `No space left on device (os error 28)` or `Disk quota exceeded (os error 122)` after `index io:`, `manifest io:`, `page io:` or `segment io:` | `DiskFull` (new, deterministic) | waits for space ([Disk](#disk-memory-and-the-first-build)) |
+| `<index> index commit failed: disk <dir> full`, a panic, then an abort; or `No space left on device (os error 28)` or `Disk quota exceeded (os error 122)` after `index io:`, `manifest io:`, `page io:` or `segment io:` | `DiskFull` (new, deterministic) | waits for space when bytes ran out, else for the user ([Disk](#disk-memory-and-the-first-build)) |
 | `ManifestError`'s texts (`packages/zingod-persistence/src/manifest.rs:58-79`): `MANIFEST slot does not start with the zingod manifest magic`, `MANIFEST checksum mismatch`, `MANIFEST is … bytes, not this build's two-slot layout`, `MANIFEST body claims … bytes, … present`, ``directory holds `…`, expected `…` ``, `directory holds format …, this build reads format …`, ``directory was built for `…`, opened for `…` `` and `… holds data but the directory has no MANIFEST`; `PageError`'s (`pages.rs:171-177`): `… is … bytes, the durable state needs …`, `…: tail page fails its checksum` and `…: page checksums differ from the digest the manifest committed`; the panic `… page …: checksum mismatch (on-disk corruption: …)` (`pages.rs:540`); and `(resync required)` (`FollowError::Diverged`, `packages/zingod-sync/src/follower.rs:33-36`) | `IndexBroken` (new, deterministic) | the user's Rebuild |
 | any other `index io:`, `manifest io:`, `page io:` or `segment io:` text, such as a refused permission or an I/O error | `Crash` | backoff; never Rebuild |
 | anything else: exit 1 or 2, a signal, another panic | `Crash` | backoff |
@@ -994,6 +1002,14 @@ for that zingod check it.
   `SIGTERM`, before a commit can fail, since a failed commit panics; above 20 GB it starts zingod
   again (proposals). zebrad usually shares the disk, so the stop leaves it room too. The index's
   size comes from a walk every 10 minutes, capped at 50,000 entries.
+- **After `DiskFull`** free bytes alone aren't evidence: a quota (`EDQUOT`) or the inodes
+  (`ENOSPC` with bytes free) can run out while the volume shows more than 20 GB free, and
+  `DiskFull` is deterministic, so a restart on free bytes would loop outside the crash-loop
+  protection. The runner reads the disk just after the exit, bytes and inodes (`statvfs`
+  `f_favail`; a filesystem that keeps no count, as btrfs, counts as free), and the herd's
+  `disk_full_recovery` restarts zingod by itself only when the text isn't a quota, bytes were
+  below 10 GB then, and are now above 20 GB with inodes free. Anything else waits for the user's
+  Try again.
 - **Memory.** No RSS figure exists. From the code: about 674 MiB of index write buffers, up to
   256 MiB of queue per index that lags, and the non-finalized blocks in RAM; 1 to 2 GiB is
   likely. The Service step warns below 8 GB of RAM (proposal), and the wallet runs measure the
