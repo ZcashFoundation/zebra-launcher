@@ -1,27 +1,31 @@
 //! The Resources card (docs/RESOURCES.md): what the node's process tree uses, from the samples
 //! the backend takes every 5 s from the spawn to the end of the run. Four tiles (CPU, Memory,
-//! Disk or I/O, Processes) with one-minute rates, the table of the tree's processes, and a line
-//! about the computer. The card stays hidden until the node's first sample; a stopped node
-//! shows its last run, never live-looking numbers, and a running node whose sampler stopped
-//! says it is not measured until the next run. No figure here takes a warning tone. The
-//! sentences are pure functions, tested natively.
+//! Disk or I/O, Processes) with one-minute rates, three charts over the dashboard's range, the
+//! table of the tree's processes, and a line about the computer. The card stays hidden until
+//! the node's first sample; a stopped node shows its last run, never live-looking numbers, and
+//! a running node whose sampler stopped says it is not measured until the next run. Only the
+//! Memory tile takes a tone: the warning while the verdict's memory rule holds
+//! ([`MEMORY_RULES`]). The sentences are pure functions, tested natively.
 
 use std::time::SystemTime;
 
-use launcher_types::{MachineResources, NodeResources, Platform};
+use launcher_types::{MachineResources, NodeId, NodeInfo, NodeResources, Platform};
 use leptos::prelude::*;
 
 use crate::{
     charts::{
-        byte_rate, hhmm, tz_offset_min_at, uptime_text,
+        ChartData, Range, Unit, byte_rate, hhmm,
+        line_chart::LineChart,
+        tz_offset_min_at, uptime_text,
         widgets::{StatTile, Tone},
     },
     format::{bytes, cores, cores_number, mem_bytes, mem_of, share, thousands},
     insights::SyncStage,
-    resource_history::{ProcessRate, RATE_WINDOW, RunSummary, SparkKind},
+    machine_history::volume_fresh,
+    resource_history::{ChartKind, ProcessRate, RATE_WINDOW, RunSummary, SparkKind},
 };
 
-use super::Dash;
+use super::{Dash, tiles::MEMORY_RULES};
 
 /// The card's subtitle: `zebrad and the processes it started · every 5 s`. On Windows the job
 /// holds every process the node starts, so it says `every process`; on Unix a process that
@@ -175,6 +179,20 @@ pub fn last_run_text(summary: &RunSummary) -> String {
     format!("last run: {}", parts.join(" · "))
 }
 
+/// The name the card gives the node's first process: its kind's program, else the name the
+/// newest sample has for it, else `The node`.
+pub fn root_name(info: &NodeInfo, latest: Option<&NodeResources>) -> String {
+    info.kind
+        .program()
+        .map(str::to_owned)
+        .or_else(|| {
+            latest
+                .and_then(|sample| sample.members.first())
+                .map(|member| member.name.clone())
+        })
+        .unwrap_or_else(|| "The node".to_owned())
+}
+
 /// The line under the tiles while no sample is live: the last run's line, unless the newest
 /// sample is of the run still going (its first process is the node's `pid`). The backend
 /// withdraws the sample when its reader panics, until the next run, and that run is not over.
@@ -195,14 +213,21 @@ pub fn idle_line(
 }
 
 /// The line about the computer: `This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB
-/// available · swap 0.3 of 2 GiB`, with the commit charge on Windows and the memory pressure
-/// on macOS.
-pub fn machine_text(machine: &MachineResources) -> String {
+/// available · swap 0.3 of 2 GiB · 212.4 GB free on the data disk`, with the commit charge on
+/// Windows and the memory pressure on macOS. `busy` is the CPUs it kept busy over the last
+/// minute; the data disk is the volume that holds `node`'s data folder, while its reading is
+/// fresh at `now` ([`volume_fresh`]).
+pub fn machine_text(
+    machine: &MachineResources,
+    busy: Option<f64>,
+    node: &NodeId,
+    now: SystemTime,
+) -> String {
     let cpus = match machine.logical_cpus {
         1 => "1 CPU".to_owned(),
         n => format!("{n} CPUs"),
     };
-    let cpu = match machine.cpu_busy_cores {
+    let cpu = match busy {
         Some(busy) if machine.logical_cpus > 0 => format!(
             "{cpus}, {} busy",
             share(busy / f64::from(machine.logical_cpus))
@@ -229,7 +254,61 @@ pub fn machine_text(machine: &MachineResources) -> String {
     if let Some(pressure) = machine.pressure {
         parts.push(format!("memory pressure {}", pressure.as_str()));
     }
+    if let Some(volume) = machine
+        .volume_of(node)
+        .filter(|volume| volume_fresh(volume, now))
+    {
+        parts.push(format!(
+            "{} free on the data disk",
+            bytes(volume.free_bytes)
+        ));
+    }
     format!("This computer: {}", parts.join(" · "))
+}
+
+/// What a chart's frame says with fewer than two samples: the history has slid past the
+/// range, or the samples are still coming.
+pub fn chart_empty_text(has_history: bool, window_empty: bool, range: Range) -> String {
+    if has_history && window_empty {
+        format!("No samples {}", range.phrase())
+    } else {
+        "Measuring… every 5 s".to_owned()
+    }
+}
+
+/// What one of the card's charts says while it has fewer than two points to draw: that the
+/// system does not report what it plots (the newest sample has no CPU figure and the chart no
+/// computer line either, or no I/O counters at all), and otherwise [`chart_empty_text`].
+pub fn resource_chart_empty_text(
+    kind: ChartKind,
+    latest: Option<&NodeResources>,
+    data: &ChartData,
+    range: Range,
+) -> String {
+    match (kind, latest) {
+        (ChartKind::Cpu, Some(sample)) if sample.cpu_cores.is_none() && data.series.is_empty() => {
+            "CPU not available".to_owned()
+        }
+        (ChartKind::Io, Some(sample))
+            if sample.read_bytes.is_none() && sample.written_bytes.is_none() =>
+        {
+            match sample.platform {
+                Platform::Linux | Platform::Macos => {
+                    "The system does not report disk I/O".to_owned()
+                }
+                Platform::Windows => "The system does not report I/O".to_owned(),
+            }
+        }
+        _ => chart_empty_text(latest.is_some(), data.len() == 0, range),
+    }
+}
+
+/// The subtitle of the Disk (or I/O) chart.
+pub fn io_chart_subtitle(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Linux | Platform::Macos => "Read and written per second, at the storage layer",
+        Platform::Windows => "Read and written per second: files, network and devices",
+    }
 }
 
 /// One row of the process table.
@@ -389,6 +468,19 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
             .get()
             .map_or_else(|| "—".to_owned(), |sample| mem_bytes(sample.memory_bytes))
     });
+    // The warning tone follows the verdict's memory rule, so tile and verdict agree.
+    let memory_tone = Signal::derive(move || {
+        if !live.get() {
+            Tone::Muted
+        } else if dash
+            .verdict
+            .with(|verdict| MEMORY_RULES.contains(&verdict.rule))
+        {
+            Tone::Warning
+        } else {
+            Tone::Normal
+        }
+    });
     let memory_detail = Signal::derive(move || {
         if !live.get() {
             return String::new();
@@ -449,6 +541,30 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
     });
     let more = Memo::new(move |_| latest.with(|sample| sample.as_ref().and_then(more_text)));
 
+    // The charts: every sample in the range, with the computer's figures beside the node's.
+    let chart = move |kind: ChartKind| {
+        Memo::new(move |_| {
+            let now = state.now.get();
+            state.machine_history.with(|machine| {
+                history().with(|history| history.chart(kind, dash.span(), now, machine))
+            })
+        })
+    };
+    let (cpu_chart, memory_chart, io_chart) = (
+        chart(ChartKind::Cpu),
+        chart(ChartKind::Memory),
+        chart(ChartKind::Io),
+    );
+    // Each chart says why it is empty: CPU or I/O the system does not report, or no samples.
+    let chart_empty = move |kind: ChartKind, data: Memo<ChartData>| {
+        Signal::derive(move || {
+            let range = dash.range.get();
+            latest.with(|sample| {
+                data.with(|data| resource_chart_empty_text(kind, sample.as_ref(), data, range))
+            })
+        })
+    };
+
     view! {
         <Show when=shown>
             {move || {
@@ -456,19 +572,9 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                 let platform = latest
                     .with_untracked(|sample| sample.as_ref().map(|sample| sample.platform))
                     .unwrap_or(Platform::Linux);
-                let root = state
-                    .node()
-                    .info
-                    .with_untracked(|info| info.kind.program().map(str::to_owned))
-                    .or_else(|| {
-                        latest.with_untracked(|sample| {
-                            sample
-                                .as_ref()
-                                .and_then(|sample| sample.members.first())
-                                .map(|member| member.name.clone())
-                        })
-                    })
-                    .unwrap_or_else(|| "The node".to_owned());
+                let root = state.node().info.with_untracked(|info| {
+                    latest.with_untracked(|sample| root_name(info, sample.as_ref()))
+                });
                 let idle_root = root.clone();
                 let threads = platform != Platform::Windows;
                 let columns = if threads { "8" } else { "7" };
@@ -517,7 +623,7 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                                 value=memory_value
                                 detail=memory_detail
                                 spark=spark(SparkKind::Memory)
-                                tone=tone
+                                tone=memory_tone
                             />
                             <StatTile
                                 label=platform.io_label()
@@ -531,6 +637,36 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                                 value=processes_value
                                 detail=processes_detail
                                 tone=tone
+                            />
+                        </div>
+                        <div class="dash-resources-charts">
+                            <LineChart
+                                title="CPU"
+                                subtitle="Cores busy: this node's processes and the whole computer"
+                                data=cpu_chart
+                                empty=chart_empty(ChartKind::Cpu, cpu_chart)
+                                unit=Unit::Cores
+                                from_zero=true
+                                area=true
+                                separate=true
+                            />
+                            <LineChart
+                                title="Memory"
+                                subtitle="This node's processes, and what is in use on the computer"
+                                data=memory_chart
+                                empty=chart_empty(ChartKind::Memory, memory_chart)
+                                unit=Unit::Memory
+                                from_zero=true
+                                area=true
+                                separate=true
+                            />
+                            <LineChart
+                                title=platform.io_label()
+                                subtitle=io_chart_subtitle(platform)
+                                data=io_chart
+                                empty=chart_empty(ChartKind::Io, io_chart)
+                                unit=Unit::BytesPerSec
+                                from_zero=true
                             />
                         </div>
                         <Show
@@ -581,9 +717,18 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                             </div>
                         </Show>
                         {move || {
+                            let now = state.now.get();
+                            let busy = state
+                                .machine_history
+                                .with(|history| history.busy_cores(RATE_WINDOW, now));
+                            let node = state.node().info.with(|info| info.id.clone());
                             machine.with(|machine| {
                                 machine.as_ref().map(|machine| {
-                                    view! { <p class="muted dash-resources-line">{machine_text(machine)}</p> }
+                                    view! {
+                                        <p class="muted dash-resources-line">
+                                            {machine_text(machine, busy, &node, now)}
+                                        </p>
+                                    }
                                 })
                             })
                         }}
@@ -791,10 +936,34 @@ mod tests {
             commit_bytes: None,
             commit_limit_bytes: None,
             pressure: None,
+            volumes: Vec::new(),
+        };
+        let node = NodeId::new("zebrad-mainnet").unwrap();
+        let now = at(0);
+        assert_eq!(
+            machine_text(&machine, Some(6.5), &node, now),
+            "This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB available · swap 0.3 of 2 GiB"
+        );
+        let with_disk = MachineResources {
+            volumes: vec![launcher_types::VolumeUsage {
+                label: "/".into(),
+                total_bytes: 1_000_200_000_000,
+                free_bytes: 212_400_000_000,
+                nodes: vec![node.clone()],
+                measured_at: at(0),
+            }],
+            ..machine.clone()
         };
         assert_eq!(
-            machine_text(&machine),
-            "This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB available · swap 0.3 of 2 GiB"
+            machine_text(&with_disk, Some(6.5), &node, now),
+            "This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB available · swap 0.3 of 2 GiB · 212.4 GB free on the data disk"
+        );
+        let other = NodeId::new("zebrad-testnet").unwrap();
+        assert!(!machine_text(&with_disk, None, &other, now).contains("data disk"));
+        // A reading that stopped coming, as from a folder whose read hangs, says nothing.
+        assert!(
+            !machine_text(&with_disk, None, &node, at(91)).contains("data disk"),
+            "a reading 91 s old"
         );
         let first = MachineResources {
             cpu_busy_cores: None,
@@ -803,7 +972,7 @@ mod tests {
             ..machine.clone()
         };
         assert_eq!(
-            machine_text(&first),
+            machine_text(&first, None, &node, now),
             "This computer: 8 CPUs · 16 GiB, 4.7 GiB available · no swap"
         );
         let windows = MachineResources {
@@ -814,7 +983,7 @@ mod tests {
             ..machine.clone()
         };
         assert_eq!(
-            machine_text(&windows),
+            machine_text(&windows, Some(6.5), &node, now),
             "This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB available · committed 14.1 of 24 GiB"
         );
         let mac = MachineResources {
@@ -822,9 +991,10 @@ mod tests {
             ..machine
         };
         assert!(
-            machine_text(&mac).ends_with(" · swap 0.3 of 2 GiB · memory pressure normal"),
+            machine_text(&mac, None, &node, now)
+                .ends_with(" · swap 0.3 of 2 GiB · memory pressure normal"),
             "{}",
-            machine_text(&mac)
+            machine_text(&mac, None, &node, now)
         );
     }
 
@@ -901,6 +1071,102 @@ mod tests {
             ..sample
         };
         assert_eq!(more_text(&all), None);
+    }
+
+    #[test]
+    fn chart_frames_say_why_they_are_empty() {
+        assert_eq!(
+            chart_empty_text(false, true, Range::Hour1),
+            "Measuring… every 5 s"
+        );
+        assert_eq!(
+            chart_empty_text(true, true, Range::Min15),
+            "No samples in the last 15 min"
+        );
+        assert_eq!(
+            chart_empty_text(true, false, Range::Hour1),
+            "Measuring… every 5 s",
+            "one sample in the range is still measuring"
+        );
+        assert_eq!(
+            io_chart_subtitle(Platform::Windows),
+            "Read and written per second: files, network and devices"
+        );
+    }
+
+    #[test]
+    fn a_chart_of_what_the_system_does_not_report_says_so() {
+        let sample = NodeResources {
+            run: 1,
+            at: at(1000),
+            run_secs: 600.0,
+            platform: Platform::Linux,
+            cpu_secs: 0.0,
+            cpu_cores: None,
+            memory_bytes: GIB,
+            peak_memory_bytes: GIB,
+            committed_bytes: None,
+            read_bytes: None,
+            written_bytes: None,
+            processes: 1,
+            threads: None,
+            descriptors: None,
+            members: vec![member(4242, None, "zebrad")],
+        };
+        let empty = ChartData::default();
+        let text = |kind, sample: &NodeResources, data: &ChartData| {
+            resource_chart_empty_text(kind, Some(sample), data, Range::Hour1)
+        };
+        assert_eq!(
+            text(ChartKind::Io, &sample, &empty),
+            "The system does not report disk I/O"
+        );
+        let windows = NodeResources {
+            platform: Platform::Windows,
+            ..sample.clone()
+        };
+        assert_eq!(
+            text(ChartKind::Io, &windows, &empty),
+            "The system does not report I/O"
+        );
+        // No CPU and no computer line: nothing will come.
+        assert_eq!(text(ChartKind::Cpu, &sample, &empty), "CPU not available");
+        // The computer's line alone, still gathering its second point: it is coming.
+        let computer = ChartData {
+            times: vec![at(1000)],
+            series: vec![crate::charts::Series {
+                name: "Whole computer",
+                class: "chart-series-muted",
+                values: vec![2.5],
+            }],
+        };
+        assert_eq!(
+            text(ChartKind::Cpu, &sample, &computer),
+            "Measuring… every 5 s"
+        );
+        // Memory is always read.
+        assert_eq!(
+            text(ChartKind::Memory, &sample, &empty),
+            "No samples in the last hour"
+        );
+        // A sample that reads them: the usual text.
+        let read = NodeResources {
+            cpu_cores: Some(1.0),
+            written_bytes: Some(0),
+            ..sample
+        };
+        assert_eq!(
+            text(ChartKind::Io, &read, &empty),
+            "No samples in the last hour"
+        );
+        assert_eq!(
+            text(ChartKind::Cpu, &read, &empty),
+            "No samples in the last hour"
+        );
+        assert_eq!(
+            resource_chart_empty_text(ChartKind::Io, None, &empty, Range::Hour1),
+            "Measuring… every 5 s"
+        );
     }
 
     #[test]

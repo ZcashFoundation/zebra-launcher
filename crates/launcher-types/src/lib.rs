@@ -30,6 +30,7 @@ pub use nodes::{
 };
 pub use resources::{
     MAX_MEMBERS, MachineResources, MemoryPressure, NodeResources, Platform, ProcessUsage,
+    VolumeUsage,
 };
 pub use zebrad::{NodeDocs, ZebradChannel};
 

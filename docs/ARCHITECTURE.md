@@ -264,7 +264,8 @@ when it appears and stops them when it leaves (by handle serial, so a node that 
 new id during the first run gets new ones). `node_resources` carries each node's `Option<NodeResources>` the same way (its process
 tree, read every 5 s from the spawn until the run is finalized), with the snapshot
 `get_node_resources {node}`; `machine_resources` carries no node id (every
-`Option<MachineResources>` change: the computer's CPU and memory, every 5 s), with the
+`Option<MachineResources>` change: the computer's CPU and memory every 5 s, with the volumes
+that hold the nodes' data folders, read every 30 s), with the
 snapshot `get_machine_resources`. For the updater there are
 `update_info` (every `UpdateInfo` change), `update_state` (its `UpdateState`, when that
 changed) and `update_health_failed` (an `UpdateHealthFailure` after an update that did not
@@ -521,7 +522,7 @@ directories; the commands in `src-tauri/src/commands.rs` call it off the async r
 | `import_legacy_state` | `ImportOutcome` | renames `dirs::cache_dir()/zebra/state` into the first node's state dir; across volumes it fails and asks the user to move it by hand, never copying |
 | `delete_legacy_state` | `u64` (bytes freed) | removes `dirs::cache_dir()/zebra/state` only (the peer cache stays), with the rules of `delete_node_data` and the zebra cache dir as the only root; refuses when a node's own state dir is inside that cache dir |
 | `delete_node_data(node)` | `u64` (bytes freed) | removes the node's `<data folder>/state` only, and only inside the launcher's data dir or the node's data folder; the bytes come from a size measured earlier in the session, 0 (unknown) otherwise, never from a walk of the whole state |
-| `copy_diagnostics` | `String` | versions, OS, the resolved zebrad binary, settings (URL credentials redacted), the updater record and pending-update marker, the launcher log, and for every node its spec, the stop grace in effect and in its settings, status and any stale zebrad, node statistics, `zebrad.toml` and the last 200 lines of its log, then the newest resource samples of the first node, with one line per process, and of the computer; never the RPC cookie |
+| `copy_diagnostics` | `String` | versions, OS, the resolved zebrad binary, settings (URL credentials redacted), the updater record and pending-update marker, the launcher log, and for every node its spec, the stop grace in effect and in its settings, status and any stale zebrad, node statistics, `zebrad.toml` and the last 200 lines of its log, then the newest resource samples of the first node, with one line per process, and of the computer with a line per data volume; never the RPC cookie |
 | `complete_first_run` | `()` | sets `first_run_done`; from then on the nodes that start at launch do |
 
 No node is started before the first run is complete: `firstrun::start_allowed` is the
@@ -600,7 +601,13 @@ node's runtime runs one, on its own supervisor's): from the spawn until the run 
 tree at once and then every 5 s, and publishes `watch<Option<NodeResources>>` (`None`
 between runs); unlike the RPC monitor and the metrics poller it does not wait for
 `Running`. `MachineSampler` reads the computer's CPU and memory every 5 s into
-`watch<Option<MachineResources>>`. Each read is a
+`watch<Option<MachineResources>>`, and every 30 s, and whenever the registry's data folders
+change (`RegistryHandle::watch_data_dirs`), the volumes that hold them (`firstrun::volume`:
+`statvfs` and the mount point on Unix, `GetDiskFreeSpaceExW` and `GetVolumePathNameW` on
+Windows), one read at a time for each folder, each on a task of its own, since a dead
+network mount can hang it: a hung folder keeps its last reading, with its time, and the
+other folders' readings go on.
+Each read is a
 `spawn_blocking` task that takes its inputs by value and returns an owned reading, and each
 sampler is an actor that owns its state. `resources/fold.rs` keeps the tree's totals
 continuous across exits: each live process counts its own CPU and its reaped children's,
@@ -628,9 +635,12 @@ disk and memory bytes, the network byte counters, ready and unready peers, downl
 flight, the checkpoint height and so on; 4 h of 10 s snapshots), the newest kept whole for
 the one-off gauges. `ui/src/resource_history.rs` holds the samples of the node's process tree
 (4 h of 5 s samples, the newest minute with their process lists) and answers the one-minute
-rates of CPU and disk I/O, each process's rates, the sparklines of the current run and the
-last run's summary. Tiles and charts read them over the range the user picks (15 min, 1 h,
-4 h, all); the sync hero's rate and ETA use a fixed 15 min window (`HERO_RATE_WINDOW`), so
+rates of CPU and disk I/O, each process's rates, the sparklines of the current run, the
+charts of every sample in a range (with a gap at a restart or after 15 s without samples) and
+the last run's summary. `ui/src/machine_history.rs` holds the computer's samples (4 h of 5 s
+samples) and answers its CPU busy over a span, its figures beside a node's sample, and the
+episodes of the disk and memory verdicts, which it carries past the samples it lets go. Tiles
+and charts read them over the range the user picks (15 min, 1 h, 4 h, all); the sync hero's rate and ETA use a fixed 15 min window (`HERO_RATE_WINDOW`), so
 they do not move with the range control.
 
 **Health verdict.** `ui/src/health.rs` folds the status, the latest statistics, both
@@ -638,14 +648,19 @@ histories, the log analysis and the updater state (`HealthInput`) into one `Verd
 level (healthy, neutral, attention, urgent, problem), the rule that fired, a headline, a
 reason sentence and the actions that fix it (Start, Stop it and start, Start now, Restart,
 Show in logs with a filter, Open Configure, Reset the configuration, Check for updates,
-Install, Cancel, and the recovery actions of a failed launcher update). The 18 rules are
-tried in order and the first match wins, cause before symptom: a failed launcher update
-(1); every phase but running (2 to 6: failed, backoff or crash loop, stopping, stopped or
-an earlier zebrad still running, starting or a slow start); what can be wrong while running
-(7 to 16: a silent RPC, no peers, a stalled sync, no new block at the tip, an urgent end of
-support or an install countdown, few peers, a slow sync, recent errors in the log, a
-restart after a crash, the end-of-support warning); then syncing (17) and healthy at the
-tip (18). Rule 0, `Verdict::connecting`, stands in before the first status. The thresholds
+Install, Cancel, Open data folder, and the recovery actions of a failed launcher update).
+The 21 rules are tried in order and the first match wins, cause before symptom: a failed
+launcher update (1); every phase but running (2 to 6: failed, backoff or crash loop,
+stopping, stopped or an earlier zebrad still running, starting or a slow start); what can be
+wrong while running: the disk with the node's data almost full (19) and the computer's
+memory nearly exhausted (20, on the node that carries the memory verdict), before 7 to 16
+(a silent RPC, no peers, a stalled sync, no new block at the tip, an urgent end of support
+or an install countdown, few peers, a slow sync, recent errors in the log, a restart after
+a crash) and, between 15 and 16, the disk space low (19) and the memory low (20), which
+cause none of 7 to 14, and a syncing Mainnet zebrad whose chain may not fit its disk (21),
+then the end-of-support warning (16); then syncing (17) and healthy at the tip (18). The resource rules (`ui/src/health/resources.rs`, docs/RESOURCES.md) each have
+a sustain time and a leave margin (`machine_history::Episode`), and rules 2, 3 and 15 add a
+sentence when the memory or the disk had run short in the minute before an exit. Rule 0, `Verdict::connecting`, stands in before the first status. The thresholds
 are the named constants at the top of the file (`STALE_AFTER` 30 s, `RPC_FIRST_ANSWER`
 60 s, `RPC_SILENT_PROBLEM` and `SLOW_START` 5 min, `NO_PEERS_FOR` 2 min, `FEW_PEERS` 3 for
 `FEW_PEERS_FOR` 5 min, `STALL_ATTENTION` 2 min and `STALL_PROBLEM` 10 min behind the tip,
@@ -653,8 +668,9 @@ are the named constants at the top of the file (`STALE_AFTER` 30 s, `RPC_FIRST_A
 `EOS_URGENT` 3 days). `NodeState.phase_since` records when the phase or the rule last
 changed, for the "for N min" in the reason. `summary_text` builds the plain-text report
 that "Copy summary" puts on the clipboard (verdict, versions, phase, sync, peers, mempool,
-disk, ports, end of support, the newest problems and the run's events, with absolute local
-times) from the same input, so it cannot disagree with the page.
+disk, the node's resources and the computer's, ports, end of support, the newest problems and
+the run's events, with absolute local times) from the same input, so it cannot disagree with
+the page.
 
 **Dashboard page.** `ui/src/pages/dashboard.rs` holds the signals the cards share, the
 chart data and the page order; the cards are in `ui/src/pages/dashboard/`. `status_card.rs`
@@ -662,17 +678,24 @@ shows the verdict with its actions and the Copy summary button beside the sync h
 (figure, meter, rate, ETA, last block, and the checkpoint or full-validation line from the
 metrics and the log). `tiles.rs` holds the range row with its freshness sentence and the
 six stat tiles with sparklines (Height, Blocks per minute, Peers, Mempool, Disk, Uptime)
-from the statistics history, the metrics (Disk) and the status (Uptime). The page itself
+from the statistics history, the metrics and the free space on the node's data volume
+(Disk) and the status (Uptime); the Peers and Disk tiles take the warning tone while the
+verdict's peer or disk rules hold. The page itself
 mounts the two inline SVG line charts (`ui/src/charts.rs`, no chart library; hover
 crosshair, keyboard navigation and a table view): "Blocks behind the tip" and "Peers" by
-direction, whose table adds the peer set's ready and unready counts from the metrics.
-`resources.rs` is the Resources card under the charts (see
+direction, whose table adds the peer set's ready and unready counts from the metrics. A
+chart's `Unit` (counts, the default; cores; memory in binary units with ticks on whole GiB;
+bytes per second) writes its axis, end label, tooltip, table and summary, and a non-finite
+value is a gap in its line. `resources.rs` is the Resources card under the charts (see
 [RESOURCES.md](RESOURCES.md)): four tiles (CPU, Memory, Disk or I/O, Processes) with rates
-over the last minute, the table of the node's processes in tree order, and a line about the
-computer's CPUs, memory and swap (commit on Windows, memory pressure on macOS). It stays
+over the last minute, three charts on the range control (CPU and memory beside the
+computer's, and disk I/O read and written), the table of the node's processes in tree order,
+and a line about the computer's CPUs (busy over the last minute), memory and swap (commit on
+Windows, memory pressure on macOS). It stays
 hidden until the node's first sample, a stopped node shows its last run instead of live
 values, and a running node whose sampler stopped after a panic says it is not measured until
-the next run; none of its figures takes a tone. `activity.rs` is the activity row: Recent problems and This run (views from
+the next run; only its Memory tile takes a tone, the warning while the verdict's memory rule
+holds. `activity.rs` is the activity row: Recent problems and This run (views from
 `ui/src/components/log_insights.rs`) and the Peers card with its caption, the table of
 connected peers from `NodeDetails` and the handshake and obsolete-peer counters from the
 metrics. `details.rs` holds the Node and Chain cards, each with Copy, from the status, the
@@ -717,7 +740,15 @@ restarts on This run), `?eos=soon` and `?eos=halt` (the end-of-support warning a
 `?stale` (an earlier zebrad still running), and `?update=countdown` and `?update=health`
 (the install countdown and a launcher update that did not come back healthy). The mock samples
 its main zebrad's resources every 5 s while it has a pid; `?os=macos` and `?os=windows` give the
-Resources card those platforms' figures and labels.
+Resources card those platforms' figures and labels, and `?backfill` starts its run 45 minutes
+before the page loaded, with the samples of the 40 minutes before the load, so the card's
+charts have history at once. The computer's samples list the volumes of the nodes' data
+folders, and the resource rules come from `?lowdisk` (1.4 GB free on the main node's
+volume: "Disk almost full"; `=low`, 12 GB: "Disk space low"), `?lowmem` (4 % of the memory
+available, with `?backfill`: "Memory nearly exhausted"; with `?crashloop` zebrad is killed by
+signal 9; `=low`, 8 %: "Memory low"; `=commit`, Windows' commit charge at 96 %; `=restart`,
+an 8 GiB computer, so Restart is offered) and `?nofit` (40 GB free beside the state while
+syncing Mainnet: "The chain may not fit"). The Explorer's
 chains come from `?attip`, `?tip=<h>`, `?explorer=slow|empty|nobi` and `?reorg`. The herd's
 agreement comes from `?herd&agree` and `&agree=behind|stall|fork|race|split|impl|channels|
 restart|deepfork|silent|herdstall|replaced|pair|otherchain` (see [The herd](#the-herd)).

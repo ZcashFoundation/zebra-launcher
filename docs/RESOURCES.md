@@ -1,9 +1,11 @@
 # Resource monitoring
 
-> **Status, 2026-11-16: phases 1 to 3 are built (the Resources card, live on Linux, macOS and
-> Windows), and of phase 7 the parts the node registry of MULTI-NODE phase 2a makes possible
-> (a sampler per node, the node-scoped event and command, the herd's figures in the mock);
-> phases 4 to 6 and the rest of phase 7 are the design.** Phase 3 was built on Linux, where the
+> **Status, 2026-11-16: phases 1 to 5 are built (the Resources card, live on Linux, macOS and
+> Windows, with its history charts; the data volumes' free space and the disk and memory
+> verdicts), and of phase 7 the parts the node registry of MULTI-NODE phase 2a makes possible
+> (a sampler per node, the node-scoped event and command, the herd's figures in the mock,
+> the machine sampler fed the registry's data folders); phase 6 and the rest of phase 7 are
+> the design.** Phase 3 was built on Linux, where the
 > macOS and Windows code is only type-checked; its tests run on CI's macos-15 and windows-2025
 > runners, and what neither could check is listed under [Phases](#phases), which says what
 > each built phase changed from this design. [ARCHITECTURE.md](ARCHITECTURE.md) stays the description of what is built
@@ -448,9 +450,12 @@ impl MachineSampler {
 
 - **One per app.** Each tick reads the CPU counters and memory in `spawn_blocking`. Busy
   cores are the growth of the counters over the interval.
-- **Volumes.** A separate blocking task reads the volumes every 30 s. An in-flight flag
-  owned by the actor means a hung network mount delays only its own result. Volumes are
-  grouped by device, and each lists the nodes it holds.
+- **Volumes.** Every 30 s, and when the folders change, each folder's volume is read on a
+  blocking task of its own. The actor keeps at most one read in flight per folder, so a hung
+  network mount delays only the folders on it: they keep their last reading, with its time,
+  while the others' readings go on. A folder that leaves the list is forgotten; its stuck
+  read can end on its own. Each read that ends regroups the newest readings by device, each
+  volume listing the nodes it holds, and publishes them.
 - **macOS host port.** The reader takes the host port with `mach_host_self` once and keeps
   it, because each call adds a send right.
 - **End.** The task ends when every receiver is dropped.
@@ -1031,7 +1036,11 @@ New flags. Each goes into `Flags`, the module's flag table, `ui/README.md` and
 | `?os=macos`, `?os=windows` | The platform's labels and fields (pressure on macOS; commit, handles and no threads on Windows). Linux is the default. |
 | `?backfill` | Replays 40 minutes of resource and machine samples at load, with the run started 45 minutes ago, so charts and sustained rules show at once. Mock-only. |
 | `?lowdisk` | The data volume has 1.4 GB free: rule 19, Problem. |
+| `?lowdisk=low` | 12 GB free: rule 19, Attention, after a minute (at once with `?backfill`). |
 | `?lowmem` | Other programs leave 4 % available, implying `?backfill`: rule 20, Problem. |
+| `?lowmem=low` | 8 % available (warning pressure on macOS): rule 20, Attention. |
+| `?lowmem=commit` | Windows, implied: the memory available as usual, the commit charge at 96 % of its limit: rule 20, Problem, for the commit charge. |
+| `?lowmem=restart` | As `?lowmem` on an 8 GiB computer, where the syncing zebrad holds most of the memory: rule 20, Problem, with Restart. |
 | `?nofit` | 40 GB free while syncing Mainnet, beside the mock's 248.3 GB state (`SYNCED_STATE_BYTES`): rule 21, Attention. |
 
 ## Health
@@ -1078,11 +1087,30 @@ gains their rows.
 | 21 The chain may not fit | Attention | Mainnet zebrad, not at the tip: free space + the state size (`zebra_state_rocksdb_total_disk_size_bytes`) under `LOW_SPACE_BYTES` (300 GB) × 1.05, for 1 min | Above × 1.10 | Open data folder |
 
 - **Order.**
-  - Rules 19 and 20 run first in the running chain, before rule 7 (RPC silent): a full
-    disk or exhausted memory is what makes RPC go quiet and the sync stall.
+  - Rules 19 and 20 at their Problem level ("Disk almost full", "Memory nearly exhausted")
+    run first in the running chain, before rule 7 (RPC silent): a full disk or exhausted
+    memory is what makes RPC go quiet and the sync stall.
+  - Their Attention level ("Disk space low", "Memory low") causes none of that: 15 GB free,
+    or under 10 % available for a whole Mainnet sync on an 8 or 16 GiB computer, leaves the
+    peers, the RPC and the sync alone. So they run after rule 15, before rule 21, and never
+    hide a running problem such as "No peers" and its actions.
   - Rule 21 is forward-looking, like the end-of-support warning, so it runs after rule 15
     and before rule 16.
-- **Staleness.** Rule 20 needs a computer sample younger than `STALE_AFTER` (30 s).
+- **Staleness.** Rule 20 needs a computer sample younger than `STALE_AFTER` (30 s), and
+  rules 19 and 21 a volume reading younger than three of its 30 s intervals.
+- **A moved data folder.** Rules 19 and 21 read only the volume the node's data is on now:
+  the newest run of its readings with the newest one's label. After the data folder moves
+  to another volume, their episodes start afresh there; the old volume's readings would
+  have kept its problem going on the new one, which never crossed the threshold. The exit's
+  disk sentence reads every reading, as the crash may have come before the move.
+- **Past the 4 h kept.** The computer's history keeps 4 h of samples, but it carries the
+  episodes of rules 19 and 20 past the samples it lets go, so a problem or a warning inside
+  its leave margin ends only at a reading past it, however long it holds, and its "for N"
+  can pass 4 h. Judged on the samples kept, 4 h at 6 % available after 2 min under 5 %
+  turned "Memory nearly exhausted" into "Memory low", though memory never went above 7 %.
+  Rule 21 adds the node's state size from its metrics history, which keeps 4 h too, so it
+  is judged on the readings kept: after 4 h inside its margin it is judged against its entry
+  threshold again.
 - **Reasons** name the facts:
   - "1.4 GB free on the disk with this node's data (/mnt/zcash). zebrad stops when a write
     fails; free some space or move the data folder."
@@ -1135,7 +1163,9 @@ question 3.
   - A stuck syncer is already caught by rule 9 (stall) and rule 8 (no peers).
 - **Machine-wide facts show once.**
   - The memory verdict goes only on the largest memory consumer among the running nodes
-    of both networks; the overview strip carries it for the rest, on either tab.
+    of both networks, which keeps it until another uses clearly more, so it never moves
+    back and forth between two nodes that use about as much; the overview strip carries it
+    for the rest, on either tab.
   - Disk verdicts go only on the nodes whose data is on that volume.
 - **No desktop notifications** in this design.
 
@@ -1187,7 +1217,8 @@ timebase path runs) and windows-2025 (`ci.yml`).
     warning per run.
   - Dropping the probe's sender ends the task.
   - The machine's busy cores come from two readings.
-  - A hung volume read does not block the CPU and memory ticks.
+  - A hung volume read does not block the CPU and memory ticks, nor the other folders'
+    volumes, also after its folder leaves the list.
   - Volumes are grouped by device and list their nodes.
 - **Supervisor** (`tests/supervisor.rs`).
   - `watch_probe()` is `Some`, with the same pid as `Status.pid`, from Starting until
@@ -1226,7 +1257,9 @@ config sets no `block_notify_command`), and its descriptor count is above zero.
   - NaN at run boundaries and gaps;
   - `process_rates`;
   - `last_run`.
-- **`machine_history`:** episodes with their leave margins, and a stale sample.
+- **`machine_history`:** episodes with their leave margins, and a stale sample; the
+  episodes it follows past the samples it lets go are the ones over every sample, and a
+  moved data folder starts its volume's afresh.
 - **Charts:**
   - the `Unit` labels ("6.1 GiB", "2.4 cores", "45 MB/s") and whole-GiB ticks;
   - `line_path` with a NaN gives two subpaths;
@@ -1381,10 +1414,9 @@ Each phase is one pull request that ships on its own, with screenshots from the 
 
    **Built.** As planned, with these differences:
 
-   - `MachineResources` has no `volumes` field yet, and `VolumeUsage` and
-     `NodeResourcesEvent` do not exist: they come with phases 5 and 7. The field defaults on
-     the wire, so adding it later breaks nothing. The card's footer line has no free-space
-     part until then.
+   - `MachineResources` had no `volumes` field and `VolumeUsage` did not exist until phase 5;
+     the field defaults on the wire. `NodeResourcesEvent` is not added (phase 7). The card's
+     footer line had no free-space part until phase 5.
    - `MemoryPressure::as_str` gives the footer's words; the macOS memory label reads "Memory
      as Activity Monitor shows it", the basis line's wording.
    - `format::mem_bytes` drops a trailing `.0`, so totals read "16 GiB" and a commit charge of
@@ -1406,8 +1438,8 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      slow or close to the tip) and the tree to use half the CPUs or more. zebrad says it
      syncs whenever it is behind the tip, also with no peers, so a stalled node or one
      without peers shows the run's average instead.
-   - The footer's busy share is the newest computer sample's (its last 5 s); one-minute
-     averages of the computer wait for `MachineHistory` (phase 4).
+   - The footer's busy share was the newest computer sample's (its last 5 s) until phase 4
+     brought `MachineHistory` and its one-minute average.
    - The mock has no flag for the tip: its sync reaches the tip after about 47 minutes, when
      the card shows the tip's figures.
    - Two mock flags the design did not plan show the card's other states: `?children`, a
@@ -1433,9 +1465,10 @@ Each phase is one pull request that ships on its own, with screenshots from the 
 
    - `TreeProbe` holds the run id, the pid and the spawn on both clocks; it has no job field,
      and `ChildHandle.job` stays a plain `Job`, until phase 3.
-   - `MachineSampler::spawn()` and `spawn_with(interval, reader)` take no data folders, and
-     `MachineReader` has only `machine()`: `DataDir`, the `data_dirs` mapping in src-tauri
-     and its test come with the volumes in phase 5.
+   - `MachineSampler::spawn()` and `spawn_with(interval, reader)` took no data folders, and
+     `MachineReader` had only `machine()`, until phase 5 brought the volumes and `DataDir`.
+     The data folders come from the registry rather than a mapping in src-tauri (see phase
+     5).
    - `TreeReading` has no `job` field and `MemberReading` no commit charge (Windows, phase
      3). The fold has Linux's rule only, CPU and I/O rolling into the parent; the `Rollup`
      modes of macOS and Windows come with their readers. `TreeReading.denied` says which
@@ -1443,6 +1476,11 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - After the scan, the reader reads each member in tree order, a parent before its
      children. A reap between two reads can then hide a child's time for one reading, which
      the never-decreasing total holds, but never count it twice.
+   - A process that is exiting, or a zombie, has no memory map left, and the kernel then gives
+     its `io` and `fd` to root. The reader does not count that as the OS refusing the fields:
+     the member has 0 open files, and its I/O keeps its last values in the fold. (Counting it
+     as a refusal made `reads_this_process` fail now and then, #113, when another test's
+     child was a zombie under the test process.)
    - The fold also covers a member that leaves in the same interval as its parent: it is
      checked against the nearest live ancestor, shallowest first, and growth that its
      departures leave unclaimed carries over to the waiting ones. zebrad running a
@@ -1611,16 +1649,162 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - `?backfill`.
 
    Ships: up to 4 h of resource history on the existing range control.
+
+   **Built.** As planned, with these differences:
+
+   - `Unit` has a fourth method, `tick_labels`, the labels of `ticks`; `Count` keeps the
+     dashboard's labels. Below 1 GiB the memory axis is on whole MiB, in decimal steps (500
+     MiB, not 512). The end label of a core count has no unit (`5.6`), as the axis has none;
+     a rate's is whole from 10 up (`95 MB/s`), and the tooltip has one decimal (`95.0 MB/s`).
+   - `LineChart` also gains `separate`: the tooltip's total of two lines, which the Peers
+     chart has, is left out where the lines are of different quantities (the CPU and Memory
+     charts), and a lone line of such a chart is named in a legend, since it could be either
+     (the whole computer's when the OS does not report the node's CPU); the other charts
+     keep their legend from two lines up. Only a lone first series has its area washed, so
+     "This node" is washed only while the computer's line is missing, and the computer's
+     muted line alone never is: washed, it read as this node's CPU.
+   - A gap is a point half way between the two samples with no value in any series, so the
+     tooltip and the table show a dash there, the tooltip's total too: a total needs a
+     reading of every line (`ChartData::total_at`), as the sum of what is there read "0
+     bytes/s" at every gap in the I/O chart. A line's end dot and the end label sit on its
+     last finite value.
+   - The charts' times are the node's samples. The computer's figures beside each are its
+     newest sample at or before it, within 15 s (`MachineHistory::at`), so the computer's
+     line breaks where the node's does. A series with no value in the range is left out: CPU
+     or I/O the system does not report, or a computer that is not read. The charts sit in
+     the card between the tiles and the process table, three across from 1200 px and stacked
+     under. Each chart's empty frame has its own text (`resource_chart_empty_text`): "CPU
+     not available" when the newest sample has no CPU and the chart no computer line, "The
+     system does not report disk I/O" ("I/O" on Windows) when it has neither I/O counter,
+     as the tiles above say; otherwise "Measuring… every 5 s" (`chart_empty_text` in
+     `resources.rs`, beside the dashboard's own). One text for the three, read from the
+     Memory chart, left the Disk chart "Measuring…" for good under `?unreadable`.
+   - `MachineHistory` keeps every sample whole for 4 h; a sample published again with the
+     same time replaces the newest. `busy_cores(span, now)` is the mean of the samples'
+     figures in the span. The card's footer now shows that average over the last minute.
+   - `HealthInput` gains `resources: ResourceInput` in this phase, with the node's sample and
+     history and the computer's sample and history, for the Copy summary lines. The node's
+     line adds the commit charge on Windows and names the I/O as the card does (`Disk 35.0
+     MB/s read, 95.0 MB/s written`). Without a live sample it is the card's line under the
+     tiles (`idle_line`, with the node's pid and `root_name`): the last run's line once the
+     node stopped, and "Not measured until zebrad's next run" while it runs on after a
+     reader panic. The computer's line is the card's footer line, so it has the busy share,
+     swap, commit and pressure; its free space comes with phase 5. The lines come from the
+     card's helpers (the dashboard's `resources` module is crate-visible for that), so the
+     summary cannot disagree with the card.
+   - `?backfill` also puts the mock's zebrad in Running at once, with the run started 45
+     minutes before the load (`Mock::start_at`); the launcher's "zebrad started" note and
+     zebrad's startup lines are stamped then (`Mock::backfilled_at`), and the startup lines
+     arrive in one batch, so This run, the Logs page and Uptime agree. Its statistics start
+     at the load. The 40 minutes of samples reach each new listener before the live ones. With
+     `?herd` the backfilled computer counts the main zebrad only.
 5. **Free space and verdicts.**
    - `firstrun::volume`, and volumes in `MachineResources` every 30 s.
    - Rules 19–21, `DISK_RULES` and `MEMORY_RULES`, and `Action::OpenDataFolder`.
    - The sustain helpers (`available_below_for`, `pressure_at_least_for`,
      `commit_above_for`) and `Episode` in `machine_history.rs`.
    - The exit sentences, and the Disk tile's free space.
-   - `?lowdisk`, `?lowmem` and `?nofit`.
+   - `?lowdisk`, `?lowmem` and `?nofit`, with values for each verdict: `?lowdisk=low`,
+     `?lowmem=low`, `?lowmem=commit` and `?lowmem=restart`.
 
    Screenshots of each verdict. Ships: Zeal warns before the data disk or the memory runs
    out, and says so when a crash followed either.
+
+   **Built.** As planned, with these differences:
+
+   - `firstrun::Volume` is as designed. On Unix the label is the topmost of the folder and
+     its ancestors on the folder's device, so a bind mount or a btrfs subvolume is a volume
+     of its own; on Windows the key is the volume path in lower case.
+   - `MachineReader::volume` has a default, `firstrun::volume`, which the platform readers
+     keep; tests script it. A `DataDir`'s path is the node's data folder, the folder Zeal
+     creates; the chain state inside it is on the same volume unless something is mounted
+     there.
+   - The data folders come from `RegistryHandle::watch_data_dirs` in launcher-core, which
+     follows the registry's summaries (a node added, removed or given another folder), not
+     from a `data_dirs` mapping of the settings in src-tauri, as several nodes have their own
+     folders; a registry test checks that it follows them.
+   - Each folder's volume is read on a blocking task of its own, at most one read in flight
+     per folder (a `JoinSet`, with the folder of each task's id), so a hung mount holds up
+     only the folders on it; they keep their last reading and its time. A volume's
+     `measured_at` is the newest reading among its folders. The newest volumes go into every
+     sample, and each read that ends updates the sample already published, so the UI's
+     history gets the sample again with the same time and replaces its newest. A folder whose
+     volume cannot be read is left out, with one warning per sampler and debug lines after
+     it. On a
+     platform without a machine reader the sampler stops at its first reading, as before,
+     and reads no volumes. `MachineResources::volume_of(node)` finds a node's volume, and Copy
+     diagnostics has a line per volume under the computer.
+   - `ResourceInput` also has the node's `info` (its id finds its volume, its name is in the
+     reasons) and `carries_memory`: whether the node is `AppState::memory_carrier`, one
+     `Memo` for the app, so every page agrees. The memo calls
+     `memory_carrier(memory, previous)` with every node of both networks and its mean memory
+     over the last minute (`ResourceHistory::memory_mean`, `None` without a run). The
+     largest carries the verdict, and the carrier so far keeps it while it has a run unless
+     another node uses 5 % more, at least 256 MiB (`CARRIER_MARGIN_SHARE`,
+     `CARRIER_MARGIN_BYTES`). Choosing on each node's newest sample let two nodes on their
+     own 5 s clocks, whose memory moves between samples, pass the verdict and the Memory
+     tile's tone back and forth from one sample to the next; the memo's previous value is
+     the hysteresis, with no new state elsewhere.
+   - `Episode` has `since` (the first reading of the run that began it) and `until` (the
+     newest reading), and `Episode::current(readings, enters, leaves, sustain, max_gap)` runs
+     the rule over readings oldest first. Readings more than `max_gap` apart (the computer
+     asleep, or not sampled) are not one run: an entering reading after a gap starts the run
+     afresh, and an episode that holds across a gap is counted from the reading after it, so
+     one low reading before a suspend and one after it are never the sustain time. Its loop is
+     `EpisodeFold`, whose `step` takes one reading, so a fold can go on later. Rule 20's
+     conditions are `MemoryCondition`s (`AvailableBelow`, `PressureAtLeast`, which ends below
+     its level, and `CommitAbove`, each with its entry threshold, sustain time and leave
+     threshold) and `MachineHistory::episode(condition)` gives the episode, with the charts'
+     `GAP` (15 s). Rule 19's are `FreeBelow`s (under so many bytes, or a share of the volume
+     where that is less, with a margin), on the readings of the volume a node's data is on
+     now (`free_episode(node, condition)`, each reading against its own volume's size); they
+     and rule 21 pass `VOLUME_GAP` (90 s, three of the volume sampler's 30 s intervals), as
+     `VOLUME_INTERVAL` is in launcher-core. The app's history is
+     `MachineHistory::following(memory, free)` with rules 19 and 20's conditions
+     (`health::resources::machine_history`): each sample it lets go past `MAX_SAMPLES` goes
+     into a fold per memory condition and, per node, a fold per free space condition, which
+     the episode then goes on from, so an episode outlasts the samples kept (see "Past the
+     4 h kept" under Rules). A node's folds start afresh when its volume's label changes,
+     and go once none of them is in a run or an episode, as the readings kept then say all
+     there is.
+     `MachineHistory` also gains `latest`, `volume_readings(node)` (one per reading, though
+     the samples carry each for 30 s), `current_volume_readings(node)` (the newest run of
+     them with one label, for rules 19 and 21) and `any_between` for the exit sentences.
+   - Rule 20 checks the computer sample's age, as designed. Rules 19 and 21, the Disk tile,
+     the card's footer (and Copy summary's computer line) and the exit's disk sentence leave
+     out a volume reading more than `VOLUME_GAP` (90 s) old (`volume_fresh`), since a folder
+     whose read hangs keeps its last reading in every sample. Rule 19's warning reads "12.0 GB free of 1,000.0 GB on
+     the disk with this node's data (/mnt/zcash) for 3 min. zebrad stops when a write
+     fails."; rule 20's on macOS "macOS reports critical memory pressure for 1 min; Zebra ·
+     Mainnet uses 6.1 GiB of it", and on Windows "Windows has committed 23 of 24 GiB (96 %)
+     for 3 min; Zebra · Mainnet commits 7 GiB of it". The thresholds are named constants in
+     `ui/src/health/resources.rs`.
+   - Rule 21 takes the state's size at each volume reading from the metrics history, and the
+     newest where the history has none; it needs this run's gauge.
+   - The exit has no field for its signal. The supervisor's detail names it ("killed by
+     signal 9") when zebrad logged no reason, so the memory sentence needs an exit without
+     a code whose detail is that or none. The commit sentence counts for any crash, not only
+     a kill. Every sentence needs an unrequested exit classed `Crash` (an unrequested
+     `SIGKILL` is one): rule 2's other failures (a port in use, a configuration error, a
+     locked database, a failed spawn, the end of support) have causes of their own. The sentences are parts of the reason, as its other parts are, so they start in
+     lower case: "the computer was almost out of memory just before; the system may have
+     stopped it", "only 1.2 GB was free on its disk".
+   - The memory verdict goes only on its carrier. Until the overview's
+     `MachineStrip` (phase 6), the other nodes show nothing about it, on either tab.
+   - The Disk tile takes the warning tone from `DISK_RULES` while the node runs, and adds the
+     free space also while it waits for zebrad's metrics. The card's footer, and with it Copy
+     summary's computer line, ends with "212.4 GB free on the data disk".
+   - The mock's volumes: `/` (212.4 GB free of 1,000.2 GB), `/mnt/storage` (1,834.5 of
+     4,000.8 GB), `/mnt/zcash` (3,412.7 of 8,001.6 GB) and, for any other folder, its first two
+     parts (120 of 500.1 GB). `?nofit` shows after a minute, at once with `&backfill`.
+     `?lowmem` makes macOS's pressure critical and Windows' commit charge 96 % of its limit,
+     and with `?crashloop` the system kills zebrad with signal 9 on Linux and macOS, so the
+     exit's memory sentence shows; `?lowdisk&crashloop` shows the disk's. With `?lowmem` on
+     Windows the available memory gives the reason, so `?lowmem=commit` (which implies
+     `?os=windows`) leaves the memory as usual and only the commit charge high. `?lowdisk=low`
+     (12 GB) and `?lowmem=low` (8 %) give the Attention forms, and `?lowmem=restart` runs on
+     an 8 GiB computer (`SMALL_COMPUTER`), where the syncing zebrad's 6 GiB or more offer
+     Restart.
 6. **Overview.**
    - `MachineStrip` with its volume lines.
    - The card lines and sparklines.
@@ -1654,8 +1838,7 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      `machine_resources` and `get_machine_resources` are unchanged. The bridge starts and
      stops a node's resource forwarder with its other forwarders.
    - The app keeps one `MachineSampler`, and `AppState` only its receiver: each node's
-     samples are in the registry. It is not fed the registry's data folders: it reads no
-     volumes until phase 5.
+     samples are in the registry. Since phase 5 it is fed the registry's data folders.
    - Copy diagnostics gives each node's newest sample, with one line per process, in a
      "resources" section of that node's part, after its statistics, and the computer's in a
      "Computer" section after the nodes' parts (`diagnostics::machine_section`), instead of
@@ -1676,9 +1859,8 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      that each node's samples name its own zebrad and only that node's show the memory
      (Linux, like the other live tests).
    - Not built yet: `NodeSummary`'s `cpu_cores` and `memory_bytes` (the tray shows no figures
-     per node before its per-node submenus, MULTI-NODE phase 2b), the machine sampler's data
-     folders (phase 5), Generic and Zebend trees (MULTI-NODE phase 4), `dir_size`, and
-     leftover processes after the root exits.
+     per node before its per-node submenus, MULTI-NODE phase 2b), Generic and Zebend trees
+     (MULTI-NODE phase 4), `dir_size`, and leftover processes after the root exits.
 
 Through every phase:
 

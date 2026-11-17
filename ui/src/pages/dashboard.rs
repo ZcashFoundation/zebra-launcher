@@ -8,7 +8,7 @@
 
 mod activity;
 mod details;
-mod resources;
+pub(crate) mod resources;
 mod status_card;
 mod tiles;
 
@@ -27,7 +27,7 @@ use crate::{
         updates::CheckForUpdate,
     },
     format::{local_date_short, relative, thousands},
-    health::{HealthInput, Level, Verdict, health_verdict},
+    health::{HealthInput, Level, ResourceInput, Verdict, health_verdict},
     metrics_history::{MetricsHistory, names},
     node_state::NodeState,
     stats_history::{Field, Sample},
@@ -154,25 +154,57 @@ pub(crate) fn with_health_input<R>(
     phase_since: SystemTime,
     f: impl FnOnce(&HealthInput<'_>) -> R,
 ) -> R {
-    state.node().status.with(|status| {
-        state.node().stats.with(|stats| {
-            state.node().history.with(|history| {
-                state.node().metrics.with(|metrics| {
-                    state.node().metrics_history.with(|metrics_history| {
-                        state.node().insights.with(|insights| {
-                            state.update.with(|update| {
-                                f(&HealthInput {
-                                    status,
-                                    stats: stats.as_ref(),
-                                    history,
-                                    metrics: metrics.as_ref(),
-                                    metrics_history,
-                                    insights,
-                                    update: update.as_ref(),
-                                    now,
-                                    phase_since,
+    let node = state.node();
+    with_resource_input(state, |resources| {
+        node.status.with(|status| {
+            node.stats.with(|stats| {
+                node.history.with(|history| {
+                    node.metrics.with(|metrics| {
+                        node.metrics_history.with(|metrics_history| {
+                            node.insights.with(|insights| {
+                                state.update.with(|update| {
+                                    f(&HealthInput {
+                                        status,
+                                        stats: stats.as_ref(),
+                                        history,
+                                        metrics: metrics.as_ref(),
+                                        metrics_history,
+                                        insights,
+                                        update: update.as_ref(),
+                                        resources,
+                                        now,
+                                        phase_since,
+                                    })
                                 })
                             })
+                        })
+                    })
+                })
+            })
+        })
+    })
+}
+
+/// Runs `f` with the selected node's resource facts and the computer's, borrowed from the
+/// state, as [`with_health_input`] does. The app's [`AppState::memory_carrier`] says whether
+/// the selected node carries the memory verdict.
+fn with_resource_input<R>(state: AppState, f: impl FnOnce(ResourceInput<'_>) -> R) -> R {
+    let node = state.node();
+    node.info.with(|info| {
+        let carries_memory = state
+            .memory_carrier
+            .with(|carrier| carrier.as_ref() == Some(&info.id));
+        node.resources.with(|sample| {
+            node.resource_history.with(|history| {
+                state.machine.with(|machine| {
+                    state.machine_history.with(|machine_history| {
+                        f(ResourceInput {
+                            info,
+                            carries_memory,
+                            node: sample.as_ref(),
+                            history,
+                            machine: machine.as_ref(),
+                            machine_history,
                         })
                     })
                 })

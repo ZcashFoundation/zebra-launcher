@@ -1,15 +1,13 @@
 //! A chart card: one or two lines over time, with a hover crosshair, keyboard navigation and
-//! a table view. The geometry comes from [`crate::charts::geometry`].
+//! a table view. The geometry comes from [`crate::charts::geometry`]; a non-finite value is a
+//! gap in its line, and a dash in the tooltip and the table.
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::{
-    charts::{
-        ChartData, Geometry, MAX_POINTS, PAD_B, PAD_L, PAD_R, PAD_T, VIEW_H, VIEW_W,
-        downsample_indices, geometry, hhmmss, nearest_index, summary, tz_offset_min_at,
-    },
-    format::thousands,
+use crate::charts::{
+    ChartData, Geometry, MAX_POINTS, PAD_B, PAD_L, PAD_R, PAD_T, Unit, VIEW_H, VIEW_W,
+    downsample_indices, geometry, hhmmss, nearest_index, summary, tz_offset_min_at,
 };
 
 /// A coordinate in `viewBox` units, as an attribute value.
@@ -17,14 +15,18 @@ fn px(value: f64) -> String {
     format!("{value:.1}")
 }
 
-/// A sample value in the tooltip and the table; a non-finite value is a cell without a
-/// reading (a metric before its first snapshot).
-fn whole(value: f64) -> String {
-    if value.is_finite() {
-        thousands(value.round().max(0.0) as u64)
-    } else {
-        "—".to_owned()
-    }
+/// Whether the chart names its lines above the plot: always for two or more, and for a lone
+/// line of a chart of `separate` quantities, whose one line could be either (the whole
+/// computer's when this node's is not read).
+fn shows_legend(series: usize, separate: bool) -> bool {
+    series >= 2 || (separate && series == 1)
+}
+
+/// Whether the area under the line is washed: an `area` chart's lone line, when it is the
+/// first series. A muted line (the whole computer's) is context, and a wash would make it read
+/// as the chart's subject.
+fn washes(area: bool, classes: &[&str]) -> bool {
+    area && classes == ["chart-series-1"]
 }
 
 /// A chart card. `data` is the range's samples; `empty` is what the frame says while there are
@@ -38,8 +40,8 @@ pub fn LineChart(
     /// Start the y axis at zero (counts) instead of around the data (heights).
     #[prop(optional)]
     from_zero: bool,
-    /// Wash the area under the line. Only a lone line is washed: under one of two the wash
-    /// would read as emphasis.
+    /// Wash the area under the line. Only a lone first series is washed: under one of two the
+    /// wash would read as emphasis, and under a muted line as the chart's subject.
     #[prop(optional)]
     area: bool,
     /// What the Table button shows, when the table has columns the plot does not (a chart of
@@ -50,6 +52,13 @@ pub fn LineChart(
     /// range`); the table stays available.
     #[prop(into, optional)]
     note: Option<Signal<Option<String>>>,
+    /// What the values measure: counts unless said otherwise.
+    #[prop(optional)]
+    unit: Unit,
+    /// The lines are of different quantities (a node and the whole computer), so the tooltip
+    /// gives no total of them, and a lone line is named in the legend.
+    #[prop(optional)]
+    separate: bool,
 ) -> impl IntoView {
     let table = RwSignal::new(false);
     let table_data = table_data.unwrap_or(data);
@@ -60,10 +69,11 @@ pub fn LineChart(
     let width = RwSignal::new(VIEW_W);
     // Times read in the browser's zone at each instant (see `tz_offset_min_at`), so the labels
     // stay right across a daylight-saving switch while the launcher runs.
-    let layout =
-        Memo::new(move |_| data.with(|d| geometry(d, from_zero, tz_offset_min_at, width.get())));
-    let label = Memo::new(move |_| data.with(|d| summary(title, d, tz_offset_min_at)));
-    let legend = move || data.with(|d| d.series.len() >= 2);
+    let layout = Memo::new(move |_| {
+        data.with(|d| geometry(d, from_zero, unit, tz_offset_min_at, width.get()))
+    });
+    let label = Memo::new(move |_| data.with(|d| summary(title, d, unit, tz_offset_min_at)));
+    let legend = move || data.with(|d| shows_legend(d.series.len(), separate));
 
     view! {
         <div class="card chart-card">
@@ -119,12 +129,12 @@ pub fn LineChart(
                                     }
                                 }
                             >
-                                <Plot layout data label hover width area />
+                                <Plot layout data label hover width area unit separate />
                             </Show>
                         }
                     }
                 >
-                    <DataTable title data=table_data />
+                    <DataTable title data=table_data unit />
                 </Show>
             </Show>
         </div>
@@ -140,6 +150,8 @@ fn Plot(
     hover: RwSignal<Option<usize>>,
     width: RwSignal<f64>,
     area: bool,
+    unit: Unit,
+    separate: bool,
 ) -> impl IntoView {
     let plot_ref = NodeRef::<leptos::html::Div>::new();
     let count = move || layout.with(|l| l.as_ref().map_or(0, |g| g.xs.len()));
@@ -220,9 +232,9 @@ fn Plot(
             let g = l.as_ref()?;
             let classes = classes();
             let first_class = classes.first().copied().unwrap_or("chart-series-1");
-            let wash = area && classes.len() == 1;
-            let n = g.xs.len();
+            let wash = washes(area, &classes);
             let right = g.width - PAD_R;
+            let label_end = g.ends[g.end_label_series].unwrap_or(g.xs.len() - 1);
             Some(view! {
                 <g class="chart-axes">
                     <line
@@ -271,17 +283,19 @@ fn Plot(
                 {g
                     .ys
                     .iter()
+                    .zip(&g.ends)
                     .zip(classes.iter())
-                    .map(|(ys, class)| {
-                        view! {
-                            <circle class=format!("chart-dot {class}") cx=px(g.xs[n - 1]) cy=px(ys[n - 1]) r="4.5" />
-                        }
+                    .filter_map(|((ys, end), class)| {
+                        let end = (*end)?;
+                        Some(view! {
+                            <circle class=format!("chart-dot {class}") cx=px(g.xs[end]) cy=px(ys[end]) r="4.5" />
+                        })
                     })
                     .collect_view()}
                 <text
                     class="chart-direct-label"
-                    x=px(g.xs[n - 1] + 10.0)
-                    y=px(g.ys[g.end_label_series][n - 1] + 4.0)
+                    x=px(g.xs[label_end] + 10.0)
+                    y=px(g.ys[g.end_label_series][label_end] + 4.0)
                 >
                     {g.end_label.clone()}
                 </text>
@@ -300,6 +314,7 @@ fn Plot(
                         .ys
                         .iter()
                         .zip(classes())
+                        .filter(|(ys, _)| ys[index].is_finite())
                         .map(|(ys, class)| {
                             view! { <circle class=format!("chart-dot {class}") cx=px(x) cy=px(ys[index]) r="4.5" /> }
                         })
@@ -321,19 +336,14 @@ fn Plot(
                         s.name,
                         s.values
                             .get(index)
-                            .map_or_else(|| "—".to_owned(), |v| whole(*v)),
+                            .map_or_else(|| "—".to_owned(), |v| unit.full(*v)),
                     )
                 })
                 .collect();
-            // Two lines of one quantity (peers by direction): their sum too.
-            if d.series.len() >= 2 {
-                let total: f64 = d
-                    .series
-                    .iter()
-                    .filter_map(|s| s.values.get(index))
-                    .filter(|value| value.is_finite())
-                    .sum();
-                rows.push(("chart-series-muted", "Total", whole(total)));
+            // Two lines of one quantity (peers by direction, bytes read and written): their
+            // sum too, a dash unless both have a reading.
+            if d.series.len() >= 2 && !separate {
+                rows.push(("chart-series-muted", "Total", unit.full(d.total_at(index))));
             }
             (d.times.get(index).copied(), rows)
         });
@@ -394,7 +404,7 @@ fn Plot(
 
 /// The chart's values as a table: at most [`MAX_POINTS`] rows, picked evenly.
 #[component]
-fn DataTable(title: &'static str, data: Signal<ChartData>) -> impl IntoView {
+fn DataTable(title: &'static str, data: Signal<ChartData>, unit: Unit) -> impl IntoView {
     view! {
         <div class="chart-table-wrap">
             <table class="chart-table" aria-label=format!("{title} samples")>
@@ -423,7 +433,7 @@ fn DataTable(title: &'static str, data: Signal<ChartData>) -> impl IntoView {
                                             {d
                                                 .series
                                                 .iter()
-                                                .map(|s| view! { <td>{whole(s.values[index])}</td> })
+                                                .map(|s| view! { <td>{unit.full(s.values[index])}</td> })
                                                 .collect_view()}
                                         </tr>
                                     }
@@ -434,5 +444,22 @@ fn DataTable(title: &'static str, data: Signal<ChartData>) -> impl IntoView {
                 </tbody>
             </table>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lone_line_of_separate_quantities_is_named_and_a_muted_one_never_washed() {
+        assert!(!shows_legend(1, false), "the dashboard's one-line charts");
+        assert!(shows_legend(2, false));
+        assert!(shows_legend(1, true), "the whole computer's line alone");
+        assert!(!shows_legend(0, true));
+        assert!(washes(true, &["chart-series-1"]));
+        assert!(!washes(false, &["chart-series-1"]));
+        assert!(!washes(true, &["chart-series-muted"]));
+        assert!(!washes(true, &["chart-series-1", "chart-series-muted"]));
     }
 }

@@ -1,6 +1,6 @@
 //! A short history of the samples of a node's process tree, for the Resources card: its
-//! one-minute rates, its sparklines and the last run of a stopped node. Pure Rust, tested
-//! natively.
+//! one-minute rates, its sparklines, its charts and the last run of a stopped node. Pure Rust,
+//! tested natively.
 
 use std::{
     collections::VecDeque,
@@ -9,7 +9,10 @@ use std::{
 
 use launcher_types::NodeResources;
 
-use crate::charts::{MAX_POINTS, downsample};
+use crate::{
+    charts::{ChartData, MAX_POINTS, Series, downsample},
+    machine_history::MachineHistory,
+};
 
 /// How many samples are kept: four hours of the sampler's 5-second readings.
 pub const MAX_SAMPLES: usize = 4 * 60 * 60 / 5;
@@ -25,6 +28,10 @@ pub const RATE_WINDOW: Duration = Duration::from_secs(60);
 /// first reads from disk into many MB/s.
 const MIN_RATE_SECS: f64 = 1.0;
 
+/// More than this between two samples is a gap in a chart's line: three of the sampler's
+/// intervals. A restart is one too.
+pub const GAP: Duration = Duration::from_secs(15);
+
 /// One sample reduced to its totals.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
@@ -37,6 +44,8 @@ pub struct Point {
     pub read: Option<u64>,
     pub written: Option<u64>,
     pub processes: u32,
+    /// The sample read CPU (it had a rate); `cpu_secs` is 0 otherwise.
+    pub cpu_known: bool,
 }
 
 impl Point {
@@ -51,8 +60,21 @@ impl Point {
             read: sample.read_bytes,
             written: sample.written_bytes,
             processes: sample.processes,
+            cpu_known: sample.cpu_cores.is_some(),
         }
     }
+}
+
+/// One of the Resources card's charts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChartKind {
+    /// Cores: this node's tree, and the whole computer.
+    Cpu,
+    /// Bytes: this node's tree, and what is in use on the computer (its total less what is
+    /// available).
+    Memory,
+    /// Bytes per second read and written by this node's tree.
+    Io,
 }
 
 /// What a sparkline plots, over the newest run.
@@ -309,6 +331,132 @@ impl ResourceHistory {
         downsample(&values, MAX_POINTS)
     }
 
+    /// A chart of the samples in the range (all of them for `None`): every sample, each rate
+    /// over the interval that ends at it (the first of a run's since the spawn, over at least
+    /// a second), the computer's figures from its newest sample at or before it. A restart, or
+    /// more than [`GAP`] between two samples, leaves a gap: a point between them without a
+    /// value. A series with no value in the range is left out: CPU or I/O the system does not
+    /// report, or a computer that is not read.
+    pub fn chart(
+        &self,
+        kind: ChartKind,
+        span: Option<Duration>,
+        now: SystemTime,
+        machine: &MachineHistory,
+    ) -> ChartData {
+        let (first, second) = match kind {
+            ChartKind::Cpu => (
+                ("This node", "chart-series-1"),
+                ("Whole computer", "chart-series-muted"),
+            ),
+            ChartKind::Memory => (
+                ("This node", "chart-series-1"),
+                ("In use on this computer", "chart-series-muted"),
+            ),
+            ChartKind::Io => (("Read", "chart-series-1"), ("Written", "chart-series-2")),
+        };
+        let window = self.window(span, now);
+        let cutoff = span.and_then(|span| now.checked_sub(span));
+        let mut times = Vec::with_capacity(window.len());
+        let mut values: [Vec<f64>; 2] = [
+            Vec::with_capacity(window.len()),
+            Vec::with_capacity(window.len()),
+        ];
+        let mut drawn: Option<&Point> = None;
+        for (index, point) in window.iter().enumerate() {
+            // The point before the range only starts the first interval.
+            if cutoff.is_some_and(|cutoff| point.at < cutoff) {
+                continue;
+            }
+            if let Some(last) = drawn {
+                let apart = point.at.duration_since(last.at).unwrap_or_default();
+                if point.run != last.run || apart > GAP {
+                    times.push(last.at + apart / 2);
+                    values[0].push(f64::NAN);
+                    values[1].push(f64::NAN);
+                }
+            }
+            drawn = Some(point);
+            let previous = index
+                .checked_sub(1)
+                .and_then(|i| window.get(i))
+                .filter(|previous| previous.run == point.run && previous.run_secs < point.run_secs);
+            let (secs, base) = match previous {
+                Some(p) => (point.run_secs - p.run_secs, Some(p)),
+                None => (point.run_secs.max(MIN_RATE_SECS), None),
+            };
+            let rate = |now: Option<u64>, then: Option<u64>| -> f64 {
+                let grown = match base {
+                    Some(_) => growth(then, now),
+                    None => now.map(|bytes| bytes as f64),
+                };
+                grown.map_or(f64::NAN, |bytes| bytes / secs)
+            };
+            let computer = machine.at(point.at, GAP);
+            let pair = match kind {
+                ChartKind::Cpu => (
+                    if point.cpu_known {
+                        (point.cpu_secs - base.map_or(0.0, |p| p.cpu_secs)).max(0.0) / secs
+                    } else {
+                        f64::NAN
+                    },
+                    computer
+                        .and_then(|machine| machine.cpu_busy_cores)
+                        .unwrap_or(f64::NAN),
+                ),
+                ChartKind::Memory => (
+                    point.memory as f64,
+                    computer
+                        .and_then(|machine| {
+                            let available = machine.memory_available_bytes?;
+                            Some(machine.memory_total_bytes.saturating_sub(available) as f64)
+                        })
+                        .unwrap_or(f64::NAN),
+                ),
+                ChartKind::Io => (
+                    rate(point.read, base.and_then(|p| p.read)),
+                    rate(point.written, base.and_then(|p| p.written)),
+                ),
+            };
+            times.push(point.at);
+            values[0].push(pair.0);
+            values[1].push(pair.1);
+        }
+        let series = [first, second]
+            .into_iter()
+            .zip(values)
+            .filter(|(_, values)| values.iter().any(|value| value.is_finite()))
+            .map(|((name, class), values)| Series {
+                name,
+                class,
+                values,
+            })
+            .collect::<Vec<_>>();
+        if series.is_empty() {
+            return ChartData::default();
+        }
+        ChartData { times, series }
+    }
+
+    /// The tree's mean memory over the `span` up to its newest sample, within the newest run:
+    /// steadier than one sample, for choosing the node that carries the memory verdict. `None`
+    /// without a sample.
+    pub fn memory_mean(&self, span: Duration) -> Option<u64> {
+        let newest = self.points.last()?;
+        let cutoff = newest.at.checked_sub(span);
+        let (sum, count) = self
+            .points
+            .iter()
+            .rev()
+            .take_while(|point| {
+                point.run == newest.run && cutoff.is_none_or(|cutoff| point.at >= cutoff)
+            })
+            .fold((0u128, 0u128), |(sum, count), point| {
+                (sum + u128::from(point.memory), count + 1)
+            });
+        u64::try_from(sum / count.max(1)).ok()
+    }
+
     /// The newest run as its last sample left it.
     pub fn last_run(&self) -> Option<RunSummary> {
         let point = self.points.last()?;
@@ -333,7 +481,7 @@ impl ResourceHistory {
 mod tests {
     use std::time::UNIX_EPOCH;
 
-    use launcher_types::{Platform, ProcessUsage};
+    use launcher_types::{MachineResources, Platform, ProcessUsage};
 
     use super::*;
 
@@ -564,6 +712,152 @@ mod tests {
                 .spark(SparkKind::Cpu, None, now)
                 .is_empty()
         );
+    }
+
+    /// The computer at `secs`, with `busy` cores and 4 GiB of 16 in use.
+    fn computer(secs: u64, busy: f64) -> MachineResources {
+        MachineResources {
+            at: at(secs),
+            logical_cpus: 8,
+            cpu_busy_cores: Some(busy),
+            memory_total_bytes: 16 << 30,
+            memory_available_bytes: Some(12 << 30),
+            swap_total_bytes: None,
+            swap_used_bytes: None,
+            commit_bytes: None,
+            commit_limit_bytes: None,
+            pressure: None,
+            volumes: Vec::new(),
+        }
+    }
+
+    fn values(data: &ChartData, series: usize) -> Vec<Option<f64>> {
+        data.series[series]
+            .values
+            .iter()
+            .map(|value| value.is_finite().then_some(*value))
+            .collect()
+    }
+
+    #[test]
+    fn charts_plot_every_sample_with_gaps() {
+        let mut history = ResourceHistory::default();
+        // Run 1 burns 2 cores and writes 1 MB/s; the UI misses its samples from 20 s to 60 s.
+        for secs in [5, 10, 15, 20, 60] {
+            history.push(&sample(1, secs, 2.0 * secs as f64, 1_000_000 * secs));
+        }
+        // Run 2 starts 40 s later and burns 1 core.
+        for secs in [5, 10] {
+            let mut s = sample(2, secs, secs as f64, 0);
+            s.at = at(1100 + secs);
+            history.push(&s);
+        }
+        let mut machine = MachineHistory::default();
+        for secs in (1000..=1110).step_by(5) {
+            machine.push(&computer(secs, 3.0));
+        }
+        let now = at(1110);
+        let cpu = history.chart(ChartKind::Cpu, None, now, &machine);
+        let names: Vec<_> = cpu.series.iter().map(|s| (s.name, s.class)).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("This node", "chart-series-1"),
+                ("Whole computer", "chart-series-muted")
+            ]
+        );
+        let two = Some(2.0);
+        assert_eq!(
+            values(&cpu, 0),
+            vec![two, two, two, two, None, two, None, Some(1.0), Some(1.0)],
+            "a gap after 40 s without samples, and at the restart"
+        );
+        assert_eq!(cpu.times[4], at(1040), "half way between the two samples");
+        assert_eq!(cpu.times[6], at(1083) - Duration::from_millis(500));
+        assert_eq!(values(&cpu, 1)[0], Some(3.0));
+        assert_eq!(values(&cpu, 1)[4], None);
+
+        let memory = history.chart(ChartKind::Memory, None, now, &machine);
+        assert_eq!(memory.series[1].name, "In use on this computer");
+        assert_eq!(values(&memory, 0)[0], Some(1005.0));
+        assert_eq!(values(&memory, 1)[0], Some((4u64 << 30) as f64));
+
+        let io = history.chart(ChartKind::Io, None, now, &machine);
+        let names: Vec<_> = io.series.iter().map(|s| (s.name, s.class)).collect();
+        assert_eq!(
+            names,
+            vec![("Read", "chart-series-1"), ("Written", "chart-series-2")]
+        );
+        let mb = Some(1_000_000.0);
+        assert_eq!(values(&io, 1)[..5], [mb, mb, mb, mb, None]);
+        assert_eq!(values(&io, 1)[5], mb, "over the 40 s it missed");
+        assert_eq!(values(&io, 0)[0], Some(500_000.0));
+        // The tooltip's total: of both lines at a sample, a dash at a gap and at the restart,
+        // where nothing was measured.
+        let total = |index| crate::charts::Unit::BytesPerSec.full(io.total_at(index));
+        assert_eq!(total(0), "1.5 MB/s");
+        assert_eq!((total(4).as_str(), total(6).as_str()), ("—", "—"));
+
+        // A range: its first rate is over the interval that ends in it.
+        let recent = history.chart(ChartKind::Cpu, Some(Duration::from_secs(7)), now, &machine);
+        assert_eq!(recent.times, vec![at(1105), at(1110)]);
+        assert_eq!(values(&recent, 0), vec![Some(1.0), Some(1.0)]);
+    }
+
+    #[test]
+    fn charts_leave_out_what_is_not_read() {
+        let mut history = ResourceHistory::default();
+        for secs in [5, 10] {
+            let mut blind = sample(1, secs, 0.0, 0);
+            blind.cpu_cores = None;
+            blind.read_bytes = None;
+            blind.written_bytes = None;
+            history.push(&blind);
+        }
+        let now = at(1010);
+        // No computer either: the CPU chart has nothing to draw.
+        let none = MachineHistory::default();
+        assert_eq!(
+            history.chart(ChartKind::Cpu, None, now, &none),
+            ChartData::default()
+        );
+        assert_eq!(
+            history.chart(ChartKind::Io, None, now, &none),
+            ChartData::default()
+        );
+        let memory = history.chart(ChartKind::Memory, None, now, &none);
+        assert_eq!(memory.series.len(), 1);
+        assert_eq!(memory.series[0].name, "This node");
+        // With the computer, its line alone.
+        let mut machine = MachineHistory::default();
+        machine.push(&computer(1004, 2.5));
+        machine.push(&computer(1009, 2.5));
+        let cpu = history.chart(ChartKind::Cpu, None, now, &machine);
+        assert_eq!(cpu.series.len(), 1);
+        assert_eq!(cpu.series[0].name, "Whole computer");
+        assert!(
+            ResourceHistory::default()
+                .chart(ChartKind::Memory, None, now, &machine)
+                .series
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn memory_is_averaged_over_the_newest_runs_minute() {
+        assert_eq!(ResourceHistory::default().memory_mean(RATE_WINDOW), None);
+        let mut history = ResourceHistory::default();
+        // Run 1's memory is 1000 + its seconds: 1005 to 1100.
+        for secs in (5..=100).step_by(5) {
+            history.push(&sample(1, secs, 0.0, 0));
+        }
+        // The samples from 40 s to 100 s: 1040 to 1100.
+        assert_eq!(history.memory_mean(RATE_WINDOW), Some(1070));
+        // A new run's first sample stands alone.
+        let mut first = sample(2, 5, 0.0, 0);
+        first.at = at(1200);
+        history.push(&first);
+        assert_eq!(history.memory_mean(RATE_WINDOW), Some(1005));
     }
 
     #[test]

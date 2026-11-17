@@ -16,7 +16,7 @@ use crate::{
     insights::{Insights, RunEvent, events::status_events},
     log_view::LogBuffer,
     metrics_history::MetricsHistory,
-    resource_history::ResourceHistory,
+    resource_history::{RATE_WINDOW, ResourceHistory},
     stats_history::StatsHistory,
 };
 
@@ -156,6 +156,17 @@ impl NodeState {
                 .update(|history| history.push(snapshot));
         }
         self.metrics.set(snapshot);
+    }
+
+    /// Its processes' mean memory over the last minute of samples, tracked: what decides which
+    /// node carries the memory verdict ([`crate::health::memory_carrier`]). `None` while it
+    /// has no run.
+    pub fn memory_figure(&self) -> Option<u64> {
+        if self.resources.with(Option::is_none) {
+            return None;
+        }
+        self.resource_history
+            .with(|history| history.memory_mean(RATE_WINDOW))
     }
 
     /// Publishes a sample of the node's process tree and keeps it in the history.

@@ -5,6 +5,8 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+use crate::NodeId;
+
 /// The most processes one sample lists; [`NodeResources::processes`] still counts them all.
 pub const MAX_MEMBERS: usize = 32;
 
@@ -150,6 +152,34 @@ pub struct MachineResources {
     /// macOS only.
     #[serde(default)]
     pub pressure: Option<MemoryPressure>,
+    /// The volumes that hold a node's data folder, read every 30 s; the newest reading of each
+    /// goes with every sample. Empty until the first reading.
+    #[serde(default)]
+    pub volumes: Vec<VolumeUsage>,
+}
+
+/// A volume that holds the data folder of one node or more.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeUsage {
+    /// For display: a mount point (`/mnt/zcash`) or a volume path (`D:\`).
+    pub label: String,
+    pub total_bytes: u64,
+    /// Available to this user.
+    pub free_bytes: u64,
+    /// The nodes whose data folder is on it, in the node list's order.
+    pub nodes: Vec<NodeId>,
+    /// When it was read: the newest read of its folders. A folder whose read hangs keeps its
+    /// last reading, so an old time means old figures.
+    pub measured_at: SystemTime,
+}
+
+impl MachineResources {
+    /// The volume that holds `node`'s data folder, from the newest reading.
+    pub fn volume_of(&self, node: &NodeId) -> Option<&VolumeUsage> {
+        self.volumes
+            .iter()
+            .find(|volume| volume.nodes.contains(node))
+    }
 }
 
 /// macOS's memory pressure level (`kern.memorystatus_vm_pressure_level`).
@@ -244,9 +274,26 @@ mod tests {
             commit_bytes: None,
             commit_limit_bytes: None,
             pressure: Some(MemoryPressure::Warning),
+            volumes: vec![VolumeUsage {
+                label: "/mnt/zcash".into(),
+                total_bytes: 4_000_800_000_000,
+                free_bytes: 1_834_500_000_000,
+                nodes: vec![NodeId::new("zebrad-mainnet").unwrap()],
+                measured_at: at(1_799_999_990),
+            }],
         };
         let json = serde_json::to_value(&machine).unwrap();
         assert_eq!(json["pressure"], "warning");
+        assert_eq!(json["volumes"][0]["nodes"][0], "zebrad-mainnet");
+        let mainnet = NodeId::new("zebrad-mainnet").unwrap();
+        let testnet = NodeId::new("zebrad-testnet").unwrap();
+        assert_eq!(
+            machine
+                .volume_of(&mainnet)
+                .map(|volume| volume.label.as_str()),
+            Some("/mnt/zcash")
+        );
+        assert_eq!(machine.volume_of(&testnet), None);
         let back: MachineResources = serde_json::from_value(json).unwrap();
         assert_eq!(back, machine);
     }
@@ -296,6 +343,10 @@ mod tests {
         assert_eq!(machine.cpu_busy_cores, None);
         assert_eq!(machine.memory_available_bytes, None);
         assert_eq!(machine.pressure, None);
+        assert!(
+            machine.volumes.is_empty(),
+            "a sample from before the volumes"
+        );
     }
 
     #[test]

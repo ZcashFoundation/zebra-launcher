@@ -95,7 +95,28 @@ every node command and event carries a node's id, and the mock's zebrad below is
   tile "—" with "the system does not report them". `?readerpanic` makes the resource reader
   panic 30 s into the first run, as the backend's can: the samples stop while zebrad keeps
   running, and the card says it is not measured until zebrad's next run, which Restart
-  starts;
+  starts. The card's three charts (CPU, memory and disk I/O, beside the computer's CPU and
+  memory in use) follow the range control; `?backfill` starts zebrad's run 45 minutes before
+  the page loaded and hands the page its resource samples and the computer's of the 40
+  minutes before the load at once, so the charts have history from the start. The
+  computer's samples list the volumes of the nodes' data folders: `/` with the launcher's
+  data folder has 212.4 GB free, which the Disk tile and the card's last line show. Three
+  flags put the dashboard's verdict into its resource rules: `?lowdisk` leaves 1.4 GB free on
+  the main node's volume ("Disk almost full", with the Disk tile in the warning tone), and
+  `?lowdisk=low` 12 GB ("Disk space low" after a minute, at once with `&backfill`);
+  `?lowmem` leaves other programs 4 % of the memory available (critical pressure with
+  `&os=macos`; with `&os=windows` the commit charge is at 96 % of its limit too, but the
+  available memory gives the reason) and brings `?backfill` along, so "Memory nearly
+  exhausted" shows at once, with the Memory tile in the warning tone. `?lowmem=low` leaves
+  8 % ("Memory low"; warning pressure with `&os=macos`), `?lowmem=commit` shows Windows'
+  commit charge at 96 % with the memory available as usual ("Windows has committed 23 of 24
+  GiB (96 %)"; it brings `?os=windows` along), and `?lowmem=restart` runs on an 8 GiB
+  computer whose syncing zebrad holds most of it, so the verdict offers Restart.
+  `?nofit` leaves 40 GB free beside the 248.3 GB of state while zebrad syncs Mainnet ("The
+  chain may not fit" after a minute, at once with `&backfill`). With `?crashloop`, a crash
+  then says what ran short: with `?lowdisk` the free space, and with `?lowmem` (or
+  `=restart`) the memory, as the system kills zebrad with signal 9 instead of a panic (on
+  Windows, and with `?lowmem=commit`, the commit charge);
 - several nodes: `?herd` adds five nodes beside the mock's Stable zebrad: on Mainnet, Zakura
   catching up from a snapshot, Zaino reading the Mainnet Zebra, and the zcashd compatibility
   build, stopped; on Testnet, a **Nightly Zebra** and a pruned Zakura at the tip. This makes

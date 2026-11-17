@@ -109,12 +109,15 @@ impl LinuxReader {
             }
             Err(err) => return Err(err),
         };
-        // Allowed only for the same user's dumpable processes.
+        // Allowed only for the same user's dumpable processes. A process that is exiting, or a
+        // zombie, has no memory map left, and the kernel then gives its `io` and `fd` to root:
+        // that is no refusal of the field. It holds no files, and its last I/O counts stay in
+        // the fold.
         let io = match read_into(&dir.join("io"), buf) {
             Ok(()) => Some(procfs::parse_io(buf).ok_or_else(|| malformed(&dir, "io"))?),
             Err(err) if gone(&err) => return Ok(None),
             Err(err) if refused(&err) => {
-                denied.io = true;
+                denied.io |= !exiting(&dir, buf);
                 None
             }
             Err(err) => return Err(err),
@@ -123,8 +126,12 @@ impl LinuxReader {
             Ok(entries) => Some(u32::try_from(entries.count()).unwrap_or(u32::MAX)),
             Err(err) if gone(&err) => return Ok(None),
             Err(err) if refused(&err) => {
-                denied.descriptors = true;
-                None
+                if exiting(&dir, buf) {
+                    Some(0)
+                } else {
+                    denied.descriptors = true;
+                    None
+                }
             }
             Err(err) => return Err(err),
         };
@@ -162,6 +169,15 @@ fn gone(err: &io::Error) -> bool {
 /// EACCES or EPERM: the field is not ours to read.
 fn refused(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::PermissionDenied
+}
+
+/// Whether the process in `dir` has lost its memory map: it is exiting, or a zombie. Its
+/// `status` then has no memory lines, and its `io` and `fd` belong to root.
+fn exiting(dir: &Path, buf: &mut Vec<u8>) -> bool {
+    match read_into(&dir.join("status"), buf) {
+        Ok(()) => procfs::parse_status(buf).rss.is_none(),
+        Err(err) => gone(&err),
+    }
 }
 
 fn malformed(dir: &Path, file: &str) -> io::Error {
@@ -312,6 +328,66 @@ mod tests {
             .duration_since(member.started_at)
             .expect("started in the past");
         assert!(age < Duration::from_secs(24 * 3600), "{age:?}");
+    }
+
+    /// Whether this process may read files whatever their mode: root, or any process with
+    /// `CAP_DAC_OVERRIDE` or `CAP_DAC_READ_SEARCH` in its effective set.
+    fn overrides_file_modes() -> bool {
+        let status = fs::read_to_string("/proc/self/status").expect("our own status");
+        let effective = status
+            .lines()
+            .find_map(|line| line.strip_prefix("CapEff:"))
+            .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+            .expect("a CapEff line");
+        // CAP_DAC_OVERRIDE is bit 1, CAP_DAC_READ_SEARCH bit 2.
+        effective & 0b110 != 0
+    }
+
+    #[test]
+    fn a_zombie_child_is_no_refused_read() {
+        // The kernel gives a zombie's `io` and `fd` to root. Another test's child that has
+        // exited and is not reaped yet is a zombie under this process, so `reads_this_process`
+        // failed when it counted that as the OS refusing the fields. A process that may
+        // override file modes (root, as in a container or under sudo) reads the zombie's
+        // `io`, and its `fd` directory is empty.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("true starts");
+        let pid = child.id();
+        let stat = PathBuf::from(format!("/proc/{pid}/stat"));
+        let mut buf = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(read_into(&stat, &mut buf).is_ok()
+            && procfs::parse_stat(&buf).is_some_and(|stat| stat.state == b'Z'))
+        {
+            assert!(Instant::now() < deadline, "true did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let me = me();
+        let probe = TreeProbe {
+            run: 1,
+            pid: me.pid,
+            spawned_at: SystemTime::now(),
+            spawned: Instant::now(),
+        };
+        let reading = LinuxReader::new().tree(&probe, &[me]);
+        child.wait().expect("true is reaped");
+        let reading = reading.expect("a reading");
+        let zombie = reading
+            .members
+            .iter()
+            .find(|member| member.id.pid == pid)
+            .expect("the zombie is a member, by its parent link");
+        assert_eq!(zombie.memory, Some(0), "{zombie:?}");
+        if !overrides_file_modes() {
+            assert_eq!(zombie.read, None, "{zombie:?}");
+        }
+        assert_eq!(zombie.descriptors, Some(0), "{zombie:?}");
+        assert!(
+            !reading.denied.io && !reading.denied.descriptors,
+            "{:?}",
+            reading.denied
+        );
     }
 
     #[test]

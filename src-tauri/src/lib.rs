@@ -321,8 +321,8 @@ async fn start(app: &AppHandle) -> Result<(AppState, bool), StartupError> {
         logging::forward_notes(notes, registry.clone());
     }
     // Each node's runtime samples its own process tree; the computer is the
-    // app's.
-    let machine = MachineSampler::spawn();
+    // app's, with the volumes of the nodes' data folders.
+    let machine = MachineSampler::spawn(registry.watch_data_dirs());
     // Each network's herd compares its nodes' chains through their own RPC.
     let herd = launcher_core::herd::spawn(&registry, HerdConfig::default());
     let state = AppState::new(paths, registry, settings, sizes, machine, herd);

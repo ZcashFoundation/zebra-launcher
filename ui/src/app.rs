@@ -23,10 +23,12 @@ use crate::{
         updates::{HealthFailureBanner, UpdateBanner},
     },
     explorer::Explorer,
+    health::{machine_history, memory_carrier},
     insights::{
         RunEvent,
         events::{config_outcome_event, config_replaced_event, update_events},
     },
+    machine_history::MachineHistory,
     node_state::{self, NodeState},
     pages::{
         configure::Configure,
@@ -249,6 +251,12 @@ pub struct AppState {
     /// The computer's CPU and memory, read every 5 s; `None` until the first reading, and on
     /// platforms the backend cannot read.
     pub machine: RwSignal<Option<MachineResources>>,
+    /// The computer's samples since the launcher opened.
+    pub machine_history: RwSignal<MachineHistory>,
+    /// The node that carries the memory verdict, of either network ([`memory_carrier`]): one
+    /// for the app, so every page agrees, and its previous value keeps the verdict on one of
+    /// two nodes that use about as much memory.
+    pub memory_carrier: Memo<Option<NodeId>>,
     /// Opens the add-node dialog: the sidebar, the overview and Settings → Nodes.
     pub add_node: Callback<()>,
     /// Each network's herd, as its latest `herd` event or the snapshot gave it.
@@ -325,6 +333,14 @@ impl AppState {
     pub fn herd_of(&self, network: Network) -> Option<HerdView> {
         self.herds
             .with(|views| views.iter().find(|view| view.network == network).cloned())
+    }
+
+    /// Publishes a sample of the computer and keeps it in the history.
+    fn record_machine(&self, machine: Option<MachineResources>) {
+        if let Some(machine) = &machine {
+            self.machine_history.update(|history| history.push(machine));
+        }
+        self.machine.set(machine);
     }
 
     /// Keeps a network's newest herd.
@@ -642,10 +658,23 @@ pub fn App() -> impl IntoView {
         return_focus.set_value(active);
         adding.set(true);
     });
+    let nodes = RwSignal::new(vec![node]);
+    let memory_carrier = Memo::new(move |previous: Option<&Option<NodeId>>| {
+        let memory: Vec<_> = nodes.with(|nodes| {
+            nodes
+                .iter()
+                .map(|node| {
+                    let id = node.info.with(|info| info.id.clone());
+                    (id, node.memory_figure())
+                })
+                .collect()
+        });
+        memory_carrier(&memory, previous.and_then(Option::as_ref))
+    });
     let state = AppState {
         tab: RwSignal::new(Tab::Dashboard),
         docs_section: RwSignal::new(DocsSection::Book),
-        nodes: RwSignal::new(vec![node]),
+        nodes,
         nodes_loaded: RwSignal::new(false),
         default_data_dir: RwSignal::new(None),
         selected: RwSignal::new(node),
@@ -659,6 +688,8 @@ pub fn App() -> impl IntoView {
         update_health: RwSignal::new(None),
         log_filter_request: RwSignal::new(None),
         machine: RwSignal::new(None),
+        machine_history: RwSignal::new(machine_history()),
+        memory_carrier,
         add_node: open_add,
         herds: RwSignal::new(Vec::new()),
     };
@@ -763,7 +794,7 @@ pub fn App() -> impl IntoView {
             let result = api::on_machine_resources(
                 move |machine| {
                     seen.mark();
-                    state.machine.set(machine);
+                    state.record_machine(machine);
                 },
                 state.payload_error(),
             )
@@ -772,7 +803,7 @@ pub fn App() -> impl IntoView {
         },
         api::get_machine_resources,
         "Reading the computer's resources",
-        move |machine| state.machine.set(machine),
+        move |machine| state.record_machine(machine),
     ));
     // `update_info` carries the state too, and the backend sends it right after each
     // `update_state`, so the info event and the snapshot are enough. An `update_state` only

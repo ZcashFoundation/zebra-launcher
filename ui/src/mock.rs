@@ -32,6 +32,14 @@
 //! | `?children` | zebrad runs a `block_notify_command` in cycles of three resource samples: an `sh` with `notify-block` under it, then also 40 `curl`s, more than a sample lists ("and 11 more"), then `notify-block` alone, orphaned ([`resources::block_notify`]). |
 //! | `?unreadable` | The resource samples report CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk tile "the system does not report them". |
 //! | `?readerpanic` | The resource reader panics 30 s into the first run: the samples stop while zebrad keeps running, so the Resources card says it is not measured until zebrad's next run, which Restart starts ([`resources::reader_panicked`]). |
+//! | `?backfill` | zebrad's run started 45 minutes before the page loaded, and its resource samples and the computer's of the 40 minutes before the load reach the page at once, so the Resources card's charts have history from the start ([`resources::backfill`]). |
+//! | `?lowdisk` | The volume with the main node's data has 1.4 GB free: "Disk almost full", and the Disk tile's warning tone ([`resources::volumes`]). With `?crashloop` each crash says so. |
+//! | `?lowdisk=low` | That volume has 12 GB free: "Disk space low" after a minute, at once with `?backfill`. |
+//! | `?lowmem` | Other programs leave 4 % of the memory available (critical pressure on macOS, the commit charge at 96 % of its limit on Windows), with `?backfill`'s history: "Memory nearly exhausted", and the Memory tile's warning tone ([`resources::short_of_memory`]). On Windows the available memory gives the reason. With `?crashloop`, zebrad is killed by signal 9 instead of panicking (on Windows it still crashes), and each exit says the memory was almost out. |
+//! | `?lowmem=low` | 8 % available (warning pressure on macOS), with `?backfill`'s history: "Memory low". |
+//! | `?lowmem=commit` | Windows (it brings `?os=windows` along): the memory available as usual and the commit charge at 96 % of its limit, with `?backfill`'s history: "Memory nearly exhausted" for the commit charge ("Windows has committed 23 of 24 GiB (96 %)"). With `?crashloop` each crash says Windows was almost out of memory to commit. |
+//! | `?lowmem=restart` | As `?lowmem`, on an 8 GiB computer whose syncing zebrad holds most of it, as in zebra#9699: the verdict offers Restart. |
+//! | `?nofit` | The volume with the main node's data has 40 GB free beside its 248.3 GB of state while it syncs Mainnet: "The chain may not fit" after a minute, at once with `?backfill`. |
 //! | `?leftover` | Removing a node with its chain state deleted takes it off the list but leaves its folder behind, as when the backend cannot delete a file: the error banner names the folder. |
 //! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). Each node's process tree has samples of its own, and the computer has 16 CPUs and 32 GiB ([`resources`]). |
 //! | `?beta=unavailable` | Beta is disabled in the add-node picker and mock `add_node` rejects a Beta draft, even when its pin is newer than Stable. Without this mock-only override, channel availability follows the actual pins. |
@@ -67,7 +75,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use launcher_types::{
@@ -81,9 +89,9 @@ use leptos::prelude::*;
 use crate::{clock, format};
 
 use config::SAMPLE_CONFIG;
-use log_lines::sample_line;
+use log_lines::{sample_line, startup_left};
 use metrics::MetricsInput;
-use resources::{MockTree, OsFlag};
+use resources::{LowDisk, LowMemory, MockTree, OsFlag};
 pub use resources::{get_machine_resources, on_machine_resources};
 use updates::{MOCK_RELEASES_URL, MOCK_VERSION, UpdateFlag, health_failure};
 pub use updates::{
@@ -199,6 +207,14 @@ struct Flags {
     unreadable: bool,
     /// `?readerpanic`.
     reader_panic: bool,
+    /// `?backfill`, or `?lowmem`, which brings it along.
+    backfill: bool,
+    /// `?lowdisk` or `?lowdisk=low`.
+    low_disk: Option<LowDisk>,
+    /// `?lowmem`, `?lowmem=low`, `commit` or `restart`.
+    low_memory: Option<LowMemory>,
+    /// `?nofit`.
+    no_fit: bool,
     /// `?leftover`.
     leftover: bool,
     /// `?herd`.
@@ -228,6 +244,7 @@ impl Flags {
                 .iter()
                 .find_map(|(key, value)| (key == name).then_some(value.as_str()))
         };
+        let low_memory = flag("lowmem").then(|| LowMemory::parse(value("lowmem")));
         Flags {
             first_run: flag("firstrun"),
             stored_dir: flag("storeddir"),
@@ -241,10 +258,18 @@ impl Flags {
             stalled: flag("stalled"),
             no_peers: flag("nopeers"),
             crash_loop: flag("crashloop"),
-            os: OsFlag::parse(value("os")),
+            // `?lowmem=commit` is about Windows' commit charge.
+            os: match value("os") {
+                None if low_memory == Some(LowMemory::Commit) => OsFlag::Windows,
+                os => OsFlag::parse(os),
+            },
             children: flag("children"),
             unreadable: flag("unreadable"),
             reader_panic: flag("readerpanic"),
+            backfill: flag("backfill") || flag("lowmem"),
+            low_disk: flag("lowdisk").then(|| LowDisk::parse(value("lowdisk"))),
+            low_memory,
+            no_fit: flag("nofit"),
             leftover: flag("leftover"),
             herd: flag("herd") || flag("agree"),
             agree: value("agree").map(agreement::Agree::parse),
@@ -486,7 +511,11 @@ impl Mock {
                 })
             });
         } else if !first_run || flags.running {
-            mock.start();
+            if flags.backfill {
+                mock.backfill();
+            } else {
+                mock.start();
+            }
         }
         let ticker = mock.clone();
         set_interval(move || ticker.tick_stats(), Duration::from_secs(1));
@@ -558,11 +587,23 @@ impl Mock {
         target: Option<&str>,
         message: String,
     ) {
+        self.push_line_at(stream, level, target, message, clock::now());
+    }
+
+    /// [`Mock::push_line`], stamped `at` rather than now.
+    fn push_line_at(
+        &self,
+        stream: LogStream,
+        level: Option<LogLevel>,
+        target: Option<&str>,
+        message: String,
+        at: SystemTime,
+    ) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let line = LogLine {
             seq,
             stream,
-            timestamp: level.is_some().then(clock::now_iso),
+            timestamp: level.is_some().then(|| clock::iso(at)),
             level,
             spans: None,
             target: target.map(Into::into),
@@ -575,11 +616,17 @@ impl Mock {
     /// Adds a launcher note to the log stream, as the supervisor's `note` does: stamped now,
     /// at INFO, from the supervisor's target.
     fn note(&self, text: impl Into<String>) {
-        self.push_line(
+        self.note_at(clock::now(), text);
+    }
+
+    /// [`Mock::note`], stamped `at`.
+    fn note_at(&self, at: SystemTime, text: impl Into<String>) {
+        self.push_line_at(
             LogStream::Launcher,
             Some(LogLevel::Info),
             Some("launcher_core::supervisor"),
             text.into(),
+            at,
         );
     }
 
@@ -594,16 +641,22 @@ impl Mock {
     }
 
     fn start(&self) {
+        self.start_at(clock::now());
+    }
+
+    /// Starts a run as if zebrad had been spawned at `started_at`: now, or for `?backfill`
+    /// before the page loaded, so the status, the launcher's note and the run agree.
+    fn start_at(&self, started_at: SystemTime) {
         self.generation.fetch_add(1, Ordering::Relaxed);
         let pid = self.next_pid.fetch_add(1, Ordering::Relaxed);
         self.status.update(|status| {
             status.phase = Phase::Starting;
             status.pid = Some(pid);
-            status.started_at = Some(clock::now());
+            status.started_at = Some(started_at);
             status.rpc_addr = None;
             status.metrics_addr = None;
         });
-        self.note(format!("zebrad started (pid {pid})"));
+        self.note_at(started_at, format!("zebrad started (pid {pid})"));
         // The run's own lines start after the note, from the startup sequence.
         self.run_first_seq
             .store(self.next_seq.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -686,14 +739,22 @@ impl Mock {
     }
 
     /// `?crashloop`: zebrad panics, the launcher notes the exit and schedules a restart with a
-    /// backoff that doubles with every crash.
+    /// backoff that doubles with every crash. With `?lowmem` (or `=restart`) on Linux and macOS
+    /// the system kills it with signal 9 instead, as the OOM killer and jetsam do, and it says
+    /// nothing.
     fn crash(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
         let crashes = self.crashes.fetch_add(1, Ordering::Relaxed) + 1;
         let delay = (FIRST_BACKOFF * 2u32.pow(crashes - 1)).min(MAX_BACKOFF);
-        self.push_line(LogStream::Stderr, None, None, PANIC_LINE.to_owned());
-        self.push_line(LogStream::Stderr, None, None, PANIC_DETAIL.to_owned());
-        self.note("zebrad exited (exit code 101, Crash)");
+        let killed =
+            self.flags.low_memory.is_some_and(LowMemory::kills) && self.flags.os != OsFlag::Windows;
+        if killed {
+            self.note("zebrad exited (no exit code, Crash)");
+        } else {
+            self.push_line(LogStream::Stderr, None, None, PANIC_LINE.to_owned());
+            self.push_line(LogStream::Stderr, None, None, PANIC_DETAIL.to_owned());
+            self.note("zebrad exited (exit code 101, Crash)");
+        }
         self.note(format!("restarting zebrad in {delay:?}"));
         self.status.update(|status| {
             status.phase = Phase::Backoff {
@@ -704,12 +765,22 @@ impl Mock {
             status.started_at = None;
             status.rpc_addr = None;
             status.metrics_addr = None;
-            status.last_exit = Some(ExitInfo {
-                code: Some(101),
-                class: ExitClass::Crash,
-                detail: Some(format!("{PANIC_LINE} {PANIC_DETAIL}")),
-                at: clock::now(),
-                requested: false,
+            status.last_exit = Some(if killed {
+                ExitInfo {
+                    code: None,
+                    class: ExitClass::Crash,
+                    detail: Some("killed by signal 9".into()),
+                    at: clock::now(),
+                    requested: false,
+                }
+            } else {
+                ExitInfo {
+                    code: Some(101),
+                    class: ExitClass::Crash,
+                    detail: Some(format!("{PANIC_LINE} {PANIC_DETAIL}")),
+                    at: clock::now(),
+                    requested: false,
+                }
             });
         });
         self.clear_run();
@@ -836,6 +907,21 @@ impl Mock {
         )
     }
 
+    /// When line `seq_in_run` of the run happened, if that was before the page saw it: a line
+    /// of the startup sequence of a run that began well before its lines flow (`?backfill`'s,
+    /// started before the page loaded) is stamped from the run's start, a line every 200 ms
+    /// as the live mock writes them, so the run begins in the log when its status and the
+    /// launcher's note say. `None` for every other line, which is stamped now.
+    fn backfilled_at(&self, seq_in_run: u64) -> Option<SystemTime> {
+        if startup_left(seq_in_run) == 0 {
+            return None;
+        }
+        let started_at = self.status.with_untracked(|status| status.started_at)?;
+        let at = started_at + Duration::from_millis(200 * seq_in_run);
+        (clock::now().duration_since(at).unwrap_or_default() > Duration::from_secs(60))
+            .then_some(at)
+    }
+
     fn line(&self, seq: u64) -> LogLine {
         let seq_in_run = seq.saturating_sub(self.run_first_seq.load(Ordering::Relaxed));
         // The log tells of the same height the RPC does; before the first poll, the run's start.
@@ -849,7 +935,8 @@ impl Mock {
         LogLine {
             seq,
             stream,
-            timestamp: has_prefix.then(clock::now_iso),
+            timestamp: has_prefix
+                .then(|| clock::iso(self.backfilled_at(seq_in_run).unwrap_or_else(clock::now))),
             level,
             spans: spans.map(Into::into),
             target: target.map(Into::into),
@@ -945,7 +1032,14 @@ fn subscribe_logs(on_batch: impl Fn(Vec<LogLine>) + 'static) {
                 let first_dropped = mock.next_seq.fetch_add(DROPPED, Ordering::Relaxed);
                 batch.push(LogLine::gap_marker(DROPPED, first_dropped + DROPPED - 1));
             }
-            let count = 1 + (js_sys::Math::random() * 3.0) as u64;
+            // A backfilled run's startup happened before the page loaded: it goes in one batch.
+            let next = mock.next_seq.load(Ordering::Relaxed);
+            let seq_in_run = next.saturating_sub(mock.run_first_seq.load(Ordering::Relaxed));
+            let count = if mock.backfilled_at(seq_in_run).is_some() {
+                startup_left(seq_in_run)
+            } else {
+                1 + (js_sys::Math::random() * 3.0) as u64
+            };
             let first = mock.next_seq.fetch_add(count, Ordering::Relaxed);
             batch.extend((first..first + count).map(|seq| mock.line(seq)));
             on_batch(batch);
@@ -1156,7 +1250,7 @@ mod tests {
         // Every flag in the module doc's table, combined.
         assert_eq!(
             Flags::parse(
-                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&os=windows&children&unreadable&readerpanic&leftover&herd&agree=fork&beta=unavailable"
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&os=windows&children&unreadable&readerpanic&backfill&lowdisk&lowmem&nofit&leftover&herd&agree=fork&beta=unavailable"
             ),
             Flags {
                 first_run: true,
@@ -1178,6 +1272,10 @@ mod tests {
                 children: true,
                 unreadable: true,
                 reader_panic: true,
+                backfill: true,
+                low_disk: Some(LowDisk::Full),
+                low_memory: Some(LowMemory::Exhausted),
+                no_fit: true,
                 leftover: true,
                 herd: true,
                 agree: Some(agreement::Agree::Fork),
@@ -1205,6 +1303,23 @@ mod tests {
         assert_eq!(Flags::parse("?crashloop").scenario(), Scenario::Normal);
         assert_eq!(Flags::parse("?eos=soon").eos, EosFlag::Soon);
         assert_eq!(Flags::parse("?os=macos").os, OsFlag::Macos);
+        // The values of `?lowdisk` and `?lowmem`; `?lowmem` brings `?backfill` along.
+        assert_eq!(Flags::parse("?lowdisk=low").low_disk, Some(LowDisk::Low));
+        assert_eq!(Flags::parse("?lowdisk=lots").low_disk, Some(LowDisk::Full));
+        for (value, low) in [
+            ("", LowMemory::Exhausted),
+            ("=low", LowMemory::Low),
+            ("=commit", LowMemory::Commit),
+            ("=restart", LowMemory::Restart),
+        ] {
+            let flags = Flags::parse(&format!("?lowmem{value}"));
+            assert_eq!(flags.low_memory, Some(low), "{value}");
+            assert!(flags.backfill, "{value}");
+        }
+        // `?lowmem=commit` is about Windows, unless the query names another OS.
+        assert_eq!(Flags::parse("?lowmem=commit").os, OsFlag::Windows);
+        assert_eq!(Flags::parse("?lowmem").os, OsFlag::Linux);
+        assert_eq!(Flags::parse("?lowmem=commit&os=macos").os, OsFlag::Macos);
         // Unknown values and flags are ignored.
         assert_eq!(
             Flags::parse("?eos=never&update=bogus&os=plan9&beta=available&other"),
