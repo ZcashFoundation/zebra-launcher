@@ -122,24 +122,20 @@ pub fn plan(spec: &PublicServiceSpec, facts: &Facts) -> Vec<Step> {
     steps
 }
 
-/// The checks that decide a step's state. zingod's tip and wallet checks wait for its index,
-/// as the test on this computer and Open do, so the setup goes on while the index builds.
+/// The checks that decide a step's state. zingod's tip and wallet checks count once they fail:
+/// until then they wait for its index and their first results, as the test on this computer
+/// and Open do, so the setup goes on while the index builds, and doesn't step back to the
+/// Service step when zingod starts to serve. Open still wants them passed ([`open_gates`]).
 fn counted(id: StepId, spec: &PublicServiceSpec, checks: &[CheckResult]) -> Vec<CheckResult> {
-    let index_ready = checks
-        .iter()
-        .any(|check| check.id == CheckId::IndexReady && check.outcome == CheckOutcome::Pass);
-    let waits_for_index = |check: &CheckResult| {
-        matches!(check.id, CheckId::TipMatches | CheckId::WalletCheck)
-            && matches!(check.outcome, CheckOutcome::NotRun)
+    let pending = |check: &CheckResult| {
+        id == StepId::Service
+            && spec.backend == LightBackend::Zingod
+            && matches!(check.id, CheckId::TipMatches | CheckId::WalletCheck)
+            && matches!(check.outcome, CheckOutcome::NotRun | CheckOutcome::Running)
     };
     checks
         .iter()
-        .filter(|check| {
-            id != StepId::Service
-                || spec.backend != LightBackend::Zingod
-                || index_ready
-                || !waits_for_index(check)
-        })
+        .filter(|check| !pending(check))
         .cloned()
         .collect()
 }

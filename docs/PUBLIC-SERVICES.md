@@ -1513,8 +1513,10 @@ screens with the 26 `zingod…` mock flags. Where it differs from the sections a
   less than 8 GB of memory.
 - **The setup goes on while the index builds.** `IndexReady` warns with the build's progress,
   and `TipMatches` and `WalletCheck` wait for the index without holding the Service step: the
-  test on this computer and Open wait for `IndexReady` instead (`wait_for_index`). Once zingod
-  serves they count again; a pending cross-check holds Open for up to a minute.
+  test on this computer and Open wait for `IndexReady` instead (`wait_for_index`). They count
+  only once they fail, so the setup doesn't step back to the Service step, closing the front
+  door, while zingod's first results are under way; a pending cross-check holds Open for up to
+  a minute.
 - **Other zingod problems in the setup** are `Finding::IndexerProblem { why }`, with the status
   panel's reason, so both say the same; a zingod problem that clears by itself makes its step
   run rather than fail.

@@ -1849,7 +1849,7 @@ mod service_tests {
     };
 
     use super::*;
-    use crate::public::{gateway_mode, open_gates, pause, plan, state};
+    use crate::public::{current_step, gateway_mode, open_gates, pause, plan, state};
 
     const NOW: u64 = 30_000_000;
     const HEIGHT: u64 = 4_612_019;
@@ -2237,6 +2237,52 @@ mod service_tests {
             outcome(&spec, &facts, CheckId::LocalTest),
             CheckOutcome::Running
         );
+    }
+
+    /// zingod's first tip cross-check and wallet check, under way once it serves, leave the
+    /// setup where it is: the Service step stays done, so the front door keeps the later step's
+    /// mode, and Open waits for them. A failed check still counts.
+    #[test]
+    fn the_first_checks_once_zingod_serves_dont_hold_the_service_step() {
+        let (mut spec, mut facts) = serving();
+        spec.opened = false;
+        zingod(&mut facts).tip = None;
+        facts.wallet = None;
+        assert!(ready(&spec, &facts));
+        assert_eq!(
+            outcome(&spec, &facts, CheckId::TipMatches),
+            CheckOutcome::Running
+        );
+        assert_eq!(
+            outcome(&spec, &facts, CheckId::WalletCheck),
+            CheckOutcome::Running
+        );
+        let steps = plan(&spec, &facts);
+        let service = steps
+            .iter()
+            .find(|step| step.id == StepId::Service)
+            .unwrap();
+        assert_eq!(service.state, StepState::Done, "{service:#?}");
+        assert_ne!(current_step(&steps), Some(StepId::Service));
+        assert_eq!(
+            open_gates(&spec, &facts).unwrap_err().check,
+            Some(CheckId::TipMatches),
+            "Open waits for the cross-check"
+        );
+
+        let mut failed = facts.clone();
+        failed.wallet = Some(Checked {
+            at: at(NOW),
+            result: Err(launcher_types::public::WalletProblem::NoAnswer {
+                detail: "reset".into(),
+            }),
+        });
+        let steps = plan(&spec, &failed);
+        let service = steps
+            .iter()
+            .find(|step| step.id == StepId::Service)
+            .unwrap();
+        assert_eq!(service.state, StepState::Failed, "{service:#?}");
     }
 
     /// Every zingod row of the failure table, on an open service: its reason, and the front
