@@ -346,6 +346,7 @@ impl ZingodRunner {
             internal,
             zingod: None,
             started: None,
+            stale_for: None,
             starting: false,
             port: None,
             moved: false,
@@ -425,6 +426,10 @@ struct Runner {
     zingod: Option<Zingod>,
     /// The plan's key the last start was for.
     started: Option<(ZebradRun, u64)>,
+    /// The plan's key whose start a stale zingod failed (one Zeal couldn't end): no start
+    /// again until the key changes, so a process that outlives `SIGKILL` can't make the runner
+    /// spin.
+    stale_for: Option<(ZebradRun, u64)>,
     /// A start is under way.
     starting: bool,
     /// The port zingod gets, after a move.
@@ -586,7 +591,7 @@ impl Runner {
             }
             return;
         }
-        if !self.disk_read || !facts.disk_allows {
+        if !self.disk_read || !facts.disk_allows || self.stale_for == Some(plan.key()) {
             return;
         }
         match phase {
@@ -741,6 +746,7 @@ impl Runner {
         self.read_size();
         // A rebuilt index starts from a clean history.
         self.started = None;
+        self.stale_for = None;
         removed
     }
 
@@ -748,6 +754,9 @@ impl Runner {
         match event {
             Internal::Started(result) => {
                 self.starting = false;
+                if let Err(SupervisorError::StaleProcess(_)) = &result {
+                    self.stale_for = self.started;
+                }
                 if let Err(err) = result {
                     tracing::debug!(%err, "zingod's start ended");
                 }
@@ -855,9 +864,12 @@ impl Runner {
             }
         }
         self.facts.send_if_modified(|facts| {
-            let changed = facts.phase != status.phase || facts.last_exit != status.last_exit;
+            let changed = facts.phase != status.phase
+                || facts.last_exit != status.last_exit
+                || facts.stale != status.stale;
             facts.phase = status.phase.clone();
             facts.last_exit = status.last_exit.clone();
+            facts.stale = status.stale.clone();
             changed
         });
     }

@@ -933,7 +933,9 @@ listed in PUBLIC-SERVICES.md ("PS1 as built").
   run or attempt, starts a failed one again only for a new attempt, moves once per attempt to
   the next free port after `PortInUse`, starts zingod only once the index's disk has been
   read, stops it below 10 GB free and starts it again above 20 GB, and after `DiskFull`
-  restarts it only on evidence that covers the failure. It reads `/status` every 5 s (hyper,
+  restarts it only on evidence that covers the failure. A start that a stale zingod failed
+  (one the supervisor couldn't end) isn't tried again until zebrad's run or the attempt
+  changes, and `ZingodFacts.stale` names it. It reads `/status` every 5 s (hyper,
   HTTP/1.1, a new connection, 2 s),
   the disk every minute, the index's size every 10 minutes (50,000 entries at most, in
   `spawn_blocking`) and the process tree, and publishes them as a `watch<ZingodFacts>`.

@@ -467,6 +467,55 @@ async fn a_low_disk_stops_zingod_until_there_is_room() {
     setup.finish().await;
 }
 
+/// A stale zingod Zeal can't end (here a zombie, which no signal removes) fails the start once;
+/// the runner doesn't start zingod again until the attempt changes, even once it is gone.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_zingod_that_cant_be_ended_waits_for_a_new_attempt() {
+    let setup = setup("ok", "serving", |options| {
+        options.stop_grace = Duration::from_millis(500);
+    })
+    .await;
+    // A child that has exited and that the test doesn't reap yet: its pid stays alive.
+    let mut zombie = std::process::Command::new("true").spawn().unwrap();
+    let pid = zombie.id();
+    timeout(LIMIT, async {
+        while !std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| stat.contains(") Z "))
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the child exits");
+    let pidfile = setup.dir.path().join("data/public/zingod-testnet.pid");
+    std::fs::write(
+        &pidfile,
+        format!("{pid}\n{}\n", launcher_core_bin("fake-zingod").display()),
+    )
+    .unwrap();
+
+    setup.give_plan(0);
+    // Its SIGTERM, 5 s, its SIGKILL and 5 s more: within the 20 s limit.
+    let facts = setup
+        .facts_until("the stale zingod", |f| f.stale.is_some())
+        .await;
+    assert_eq!(facts.stale.unwrap().pid, pid);
+    zombie.wait().unwrap();
+    setup
+        .facts_stay(
+            "no start again for the same attempt",
+            Duration::from_millis(800),
+            |f| f.phase == Phase::Stopped,
+        )
+        .await;
+
+    setup.give_plan(1);
+    let facts = setup.facts_until("zingod running", running).await;
+    assert_eq!(facts.stale, None);
+    setup.finish().await;
+}
+
 /// zingod doesn't start before its index's disk is read: a disk below the low mark keeps it
 /// from ever starting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

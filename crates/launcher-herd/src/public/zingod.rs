@@ -13,7 +13,7 @@ use std::{
 };
 
 use launcher_types::{
-    ExitClass, ExitInfo, Network, Phase, Status,
+    ExitClass, ExitInfo, Network, Phase, StaleProcessInfo, Status,
     zingod::{IndexerState, IndexerStatus},
 };
 
@@ -179,6 +179,9 @@ pub struct ZingodFacts {
     pub port: Option<u16>,
     /// The ports tried under the plan's attempt, after `PortInUse`.
     pub ports_tried: Vec<u16>,
+    /// A zingod an earlier Zeal left that Zeal couldn't end: zingod doesn't start again until
+    /// zebrad's run or the attempt changes.
+    pub stale: Option<StaleProcessInfo>,
 }
 
 /// Why zingod doesn't run now.

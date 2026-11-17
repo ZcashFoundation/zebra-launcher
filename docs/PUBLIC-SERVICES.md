@@ -1394,7 +1394,9 @@ command line and the reader) and `Launch` in the supervisor and the spawner; `Di
   needs no privilege, where lowering one (Zeal at nice 15, say) fails the spawn.
 - **A stale zingod**: `kill_stale` sends a `zeal-zingod` an earlier Zeal left `SIGTERM`, and one
   still there once the 30 s stop grace has passed is killed with its process group, as a stop
-  escalates; zebrad's stale path doesn't change.
+  escalates; zebrad's stale path doesn't change. One still there after that (a process stuck in
+  the kernel) fails the start with `StaleProcess`: `ZingodFacts.stale` names it, and the runner
+  doesn't start zingod again until zebrad's run or the attempt changes.
 - **Notes**: every note of the supervisor names its program ("zingod exited", "restarting
   zingod in 1s"), not only the start; zebrad's read as before.
 - **`ZINGOD_KNOWS`** for 1.1.0 lists the 11 upgrades of launcher-herd's `BRANCH_IDS`, NU6.2
