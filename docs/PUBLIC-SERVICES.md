@@ -1543,8 +1543,16 @@ screens with the 26 `zingod…` mock flags. Where it differs from the sections a
   `stop_indexer` then stops it, beside the registry's shutdown, under the larger cap.
 - **The front door before zingod stops.** The actor puts the front door in `Unavailable` before
   every stop it decides: a plan that goes, Rebuild, Delete, a new attempt, a mismatch, a new
-  backend. The runner's own stop below 10 GB free (Z2) comes without it: the actor sees the
-  stop at its next look, within the runner's facts' change.
+  backend. For a restart of a running zingod, `IndexerFacts.restarting` holds from the request
+  until zingod no longer runs, and the rules read it as zingod starting, so the next look
+  doesn't open the front door again. The runner's own stop below 10 GB free (Z2) comes without
+  it: the actor sees the stop at its next look, within the runner's facts' change.
+- **Try again** (`run_public_checks(Service)`) starts a new attempt only for a zingod that
+  waits for the user, one an earlier Zeal left, or one that is stuck, so "Check again" on a
+  zingod that serves leaves it running.
+- **Diagnostics** carry zingod's supervisor phase and its last `/status`, the paths of its
+  binary, configuration, log, index folder and zebrad's cookie, its port, and its last 200
+  lines, which the reader redacted before the ring.
 - **Tests.** The service actor runs against fake-zebrad and fake-zingod in real time, as the
   runner's tests do: the supervisor's deadlines use the monotonic clock and the actor's rules
   the wall clock, so a paused tokio clock drives neither, and the cross-check's span is
