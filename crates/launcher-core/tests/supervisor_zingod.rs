@@ -16,7 +16,7 @@ use launcher_core::{
     pidfile,
     process::Launch,
     supervisor::{self, Listener, StartOptions, SupervisorConfig, SupervisorError},
-    zingod::{ZingodCommand, ZingodConfig, ZingodNetwork},
+    zingod::{ZingodCommand, ZingodConfig, ZingodNetwork, logs::SIGTERM_RACE},
 };
 use launcher_types::{ExitClass, LogLine, Phase, PortRole};
 use tokio::sync::watch;
@@ -194,6 +194,41 @@ async fn zingods_failures_have_their_classes() {
         }
     );
     assert!(status.restarts >= 2, "{status:?}");
+    within(handle.shutdown()).await.unwrap();
+}
+
+/// A stop Zeal asked for is a stop however zingod ends it: zingod 1.1.0 can abort on `SIGTERM`
+/// (`logs::SIGTERM_RACE`). The exit is kept with its panic, in the status and the log, and
+/// counts toward no crash loop: more such stops than the loop allows, and zingod still starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_requested_stop_that_aborts_is_a_stop_not_a_crash() {
+    let fx = fixture("abort-on-sigterm");
+    let handle = supervisor::spawn(fx.config.clone()).unwrap();
+    for round in 0..=fx.config.restart.max_crashes {
+        within(handle.start())
+            .await
+            .unwrap_or_else(|err| panic!("start {round}: {err}"));
+        within(handle.stop()).await.unwrap();
+        let status = handle.status();
+        assert_eq!(status.phase, Phase::Stopped, "round {round}");
+        assert_eq!(status.restarts, 0, "round {round}");
+        let exit = status.last_exit.expect("an exit");
+        assert_eq!(
+            (exit.code, exit.class, exit.requested),
+            (None, ExitClass::Crash, true),
+            "round {round}: {exit:?}"
+        );
+        assert_eq!(exit.detail.as_deref(), Some(SIGTERM_RACE), "round {round}");
+    }
+    let lines = history(&handle).await;
+    assert!(contains(
+        &lines,
+        "panicked at packages/zingod-sync/src/follower.rs:143:17"
+    ));
+    assert!(contains(
+        &lines,
+        "zingod exited (no exit code, Crash, stop requested)"
+    ));
     within(handle.shutdown()).await.unwrap();
 }
 

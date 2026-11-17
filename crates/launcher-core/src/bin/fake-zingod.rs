@@ -45,6 +45,7 @@
 //! | `crash` | after `FAKE_ZINGOD_FAIL_MS`, exits 1 with zingod's `task ended before shutdown` |
 //! | `abort` | after `FAKE_ZINGOD_FAIL_MS`, panics and aborts |
 //! | `ignore-sigterm` | logs a `SIGTERM` and carries on, so the supervisor must kill it |
+//! | `abort-on-sigterm` | like `serving`, but on `SIGTERM` panics with header sync's assertion and aborts, as zingod 1.1.0 can (`logs::SIGTERM_RACE`) |
 //! | `print-env` | prints `env NAME=VALUE` for each variable it got, then runs like `serving` |
 //! | `txid` | like `serving`, and logs zingod's `Transaction not accepted` with a `txid` every `FAKE_ZINGOD_HEARTBEAT_MS` (200) |
 //!
@@ -238,10 +239,13 @@ fn startup_failed(text: &str) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Rust's panic report on stderr, then an abort: zingod's panic hook.
-fn panic_and_abort(message: &str) -> ! {
+/// Where zingod 1.1.0's index commit panics.
+const COMMIT_PANIC: &str = "packages/zingod-persistence/src/error.rs:41:9";
+
+/// Rust's report of a panic at `at` on stderr, then an abort: zingod's panic hook.
+fn panic_and_abort(at: &str, message: &str) -> ! {
     eprintln!(
-        "\nthread 'tokio-rt-worker' ({}) panicked at packages/zingod-persistence/src/error.rs:41:9:",
+        "\nthread 'tokio-rt-worker' ({}) panicked at {at}:",
         std::process::id()
     );
     eprintln!("{message}");
@@ -647,15 +651,22 @@ async fn run(path: &Path, settings: Settings, mode: String) -> ExitCode {
                     shutdown = Box::pin(std::future::pending());
                     continue;
                 }
+                if mode == "abort-on-sigterm" {
+                    panic_and_abort(
+                        "packages/zingod-sync/src/follower.rs:143:17",
+                        launcher_core::zingod::logs::SIGTERM_RACE,
+                    );
+                }
                 log("info", "Shutdown complete", &[], Some("Zingod"));
                 return ExitCode::SUCCESS;
             }
             () = &mut failing => {
                 let index = config.compact_block.display().to_string();
                 match mode.as_str() {
-                    "disk-full" => panic_and_abort(&format!(
-                        "compact_block index commit failed: disk {index} full"
-                    )),
+                    "disk-full" => panic_and_abort(
+                        COMMIT_PANIC,
+                        &format!("compact_block index commit failed: disk {index} full"),
+                    ),
                     "disk-quota" => {
                         log("error", "Stopped with error", &[("error", "segment io: Disk quota exceeded (os error 122)")], Some("Zingod"));
                         eprintln!("Error: segment io: Disk quota exceeded (os error 122)");
@@ -666,7 +677,7 @@ async fn run(path: &Path, settings: Settings, mode: String) -> ExitCode {
                         eprintln!("Error: sync task ended before shutdown");
                         return ExitCode::FAILURE;
                     }
-                    "abort" => panic_and_abort("fake-zingod: a violated invariant"),
+                    "abort" => panic_and_abort(COMMIT_PANIC, "fake-zingod: a violated invariant"),
                     _ => failing.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(86_400)),
                 }
             }
