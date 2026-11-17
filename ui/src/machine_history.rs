@@ -1,5 +1,6 @@
 //! A short history of the computer's samples (docs/RESOURCES.md): its CPU busy over the last
-//! minute, for the Resources card's footer. Pure Rust, tested natively.
+//! minute, for the Resources card's footer, and its figures beside a node's in the card's
+//! charts. Pure Rust, tested natively.
 
 use std::{
     collections::VecDeque,
@@ -42,6 +43,15 @@ impl MachineHistory {
             self.samples.partition_point(|sample| sample.at < cutoff)
         });
         self.samples.range(start..)
+    }
+
+    /// The newest sample taken at or before `at`, if it is no more than `within` older: the
+    /// computer's figures beside a node's sample, whose sampler reads on its own clock.
+    pub fn at(&self, at: SystemTime, within: Duration) -> Option<&MachineResources> {
+        let after = self.samples.partition_point(|sample| sample.at <= at);
+        let sample = self.samples.get(after.checked_sub(1)?)?;
+        let age = at.duration_since(sample.at).unwrap_or_default();
+        (age <= within).then_some(sample)
     }
 
     /// The logical CPUs the computer kept busy over the last `span`: the mean of its samples'
@@ -118,5 +128,20 @@ mod tests {
         assert_eq!(history.busy_cores(minute, at(70)), Some(11.0 / 3.0));
         assert_eq!(history.busy_cores(minute, at(120)), Some(4.5));
         assert_eq!(history.busy_cores(minute, at(500)), None, "nothing recent");
+    }
+
+    #[test]
+    fn a_node_sample_finds_the_computers_newest_before_it() {
+        let mut history = MachineHistory::default();
+        assert_eq!(history.at(at(10), Duration::from_secs(15)), None);
+        for secs in [0, 5, 10, 40] {
+            history.push(&sample(secs, Some(secs as f64)));
+        }
+        let within = Duration::from_secs(15);
+        let busy = |secs| history.at(at(secs), within).and_then(|s| s.cpu_busy_cores);
+        assert_eq!(busy(7), Some(5.0));
+        assert_eq!(busy(10), Some(10.0));
+        assert_eq!(busy(26), None, "the newest before it is too old");
+        assert_eq!(busy(41), Some(40.0));
     }
 }

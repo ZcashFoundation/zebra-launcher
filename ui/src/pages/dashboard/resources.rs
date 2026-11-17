@@ -1,10 +1,10 @@
 //! The Resources card (docs/RESOURCES.md): what the node's process tree uses, from the samples
 //! the backend takes every 5 s from the spawn to the end of the run. Four tiles (CPU, Memory,
-//! Disk or I/O, Processes) with one-minute rates, the table of the tree's processes, and a line
-//! about the computer. The card stays hidden until the node's first sample; a stopped node
-//! shows its last run, never live-looking numbers, and a running node whose sampler stopped
-//! says it is not measured until the next run. No figure here takes a warning tone. The
-//! sentences are pure functions, tested natively.
+//! Disk or I/O, Processes) with one-minute rates, three charts over the dashboard's range, the
+//! table of the tree's processes, and a line about the computer. The card stays hidden until
+//! the node's first sample; a stopped node shows its last run, never live-looking numbers, and
+//! a running node whose sampler stopped says it is not measured until the next run. No figure
+//! here takes a warning tone. The sentences are pure functions, tested natively.
 
 use std::time::SystemTime;
 
@@ -13,12 +13,14 @@ use leptos::prelude::*;
 
 use crate::{
     charts::{
-        byte_rate, hhmm, tz_offset_min_at, uptime_text,
+        Range, Unit, byte_rate, hhmm,
+        line_chart::LineChart,
+        tz_offset_min_at, uptime_text,
         widgets::{StatTile, Tone},
     },
     format::{bytes, cores, cores_number, mem_bytes, mem_of, share, thousands},
     insights::SyncStage,
-    resource_history::{ProcessRate, RATE_WINDOW, RunSummary, SparkKind},
+    resource_history::{ChartKind, ProcessRate, RATE_WINDOW, RunSummary, SparkKind},
 };
 
 use super::Dash;
@@ -230,6 +232,24 @@ pub fn machine_text(machine: &MachineResources, busy: Option<f64>) -> String {
         parts.push(format!("memory pressure {}", pressure.as_str()));
     }
     format!("This computer: {}", parts.join(" · "))
+}
+
+/// What a chart's frame says with fewer than two samples: the history has slid past the
+/// range, or the samples are still coming.
+pub fn chart_empty_text(has_history: bool, window_empty: bool, range: Range) -> String {
+    if has_history && window_empty {
+        format!("No samples {}", range.phrase())
+    } else {
+        "Measuring… every 5 s".to_owned()
+    }
+}
+
+/// The subtitle of the Disk (or I/O) chart.
+pub fn io_chart_subtitle(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Linux | Platform::Macos => "Read and written per second, at the storage layer",
+        Platform::Windows => "Read and written per second: files, network and devices",
+    }
 }
 
 /// One row of the process table.
@@ -449,6 +469,27 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
     });
     let more = Memo::new(move |_| latest.with(|sample| sample.as_ref().and_then(more_text)));
 
+    // The charts: every sample in the range, with the computer's figures beside the node's.
+    let chart = move |kind: ChartKind| {
+        Memo::new(move |_| {
+            let now = state.now.get();
+            state.machine_history.with(|machine| {
+                history().with(|history| history.chart(kind, dash.span(), now, machine))
+            })
+        })
+    };
+    let (cpu_chart, memory_chart, io_chart) = (
+        chart(ChartKind::Cpu),
+        chart(ChartKind::Memory),
+        chart(ChartKind::Io),
+    );
+    let chart_empty = Signal::derive(move || {
+        // Memory is always read, so its chart is empty only without a sample in the range.
+        let has_history = latest.with(Option::is_some);
+        let window_empty = memory_chart.with(|data| data.len() == 0);
+        chart_empty_text(has_history, window_empty, dash.range.get())
+    });
+
     view! {
         <Show when=shown>
             {move || {
@@ -531,6 +572,36 @@ pub(super) fn ResourcesCard(dash: Dash) -> impl IntoView {
                                 value=processes_value
                                 detail=processes_detail
                                 tone=tone
+                            />
+                        </div>
+                        <div class="dash-resources-charts">
+                            <LineChart
+                                title="CPU"
+                                subtitle="Cores busy: this node's processes and the whole computer"
+                                data=cpu_chart
+                                empty=chart_empty
+                                unit=Unit::Cores
+                                from_zero=true
+                                area=true
+                                separate=true
+                            />
+                            <LineChart
+                                title="Memory"
+                                subtitle="This node's processes, and what is in use on the computer"
+                                data=memory_chart
+                                empty=chart_empty
+                                unit=Unit::Memory
+                                from_zero=true
+                                area=true
+                                separate=true
+                            />
+                            <LineChart
+                                title=platform.io_label()
+                                subtitle=io_chart_subtitle(platform)
+                                data=io_chart
+                                empty=chart_empty
+                                unit=Unit::BytesPerSec
+                                from_zero=true
                             />
                         </div>
                         <Show
@@ -907,6 +978,27 @@ mod tests {
             ..sample
         };
         assert_eq!(more_text(&all), None);
+    }
+
+    #[test]
+    fn chart_frames_say_why_they_are_empty() {
+        assert_eq!(
+            chart_empty_text(false, true, Range::Hour1),
+            "Measuring… every 5 s"
+        );
+        assert_eq!(
+            chart_empty_text(true, true, Range::Min15),
+            "No samples in the last 15 min"
+        );
+        assert_eq!(
+            chart_empty_text(true, false, Range::Hour1),
+            "Measuring… every 5 s",
+            "one sample in the range is still measuring"
+        );
+        assert_eq!(
+            io_chart_subtitle(Platform::Windows),
+            "Read and written per second: files, network and devices"
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ use std::{
 use launcher_types::Phase;
 
 use crate::{
-    format::{bytes, rough_duration, thousands},
+    format::{bytes, cores, cores_number, mem_bytes, rough_duration, thousands},
     stats_history::{Field, Sample},
 };
 
@@ -188,6 +188,158 @@ pub fn tick_labels(ticks: &[f64]) -> Vec<String> {
     ticks.iter().map(full).collect()
 }
 
+/// Ticks like [`nice_ticks`], a whole number apart at least.
+fn whole_ticks(lo: f64, hi: f64) -> Vec<f64> {
+    let ticks = nice_ticks(lo, hi, 3);
+    let step = match ticks.as_slice() {
+        [first, second, ..] => second - first,
+        _ => 1.0,
+    };
+    if step >= 1.0 || !lo.is_finite() || !hi.is_finite() {
+        return ticks;
+    }
+    let start = lo.min(hi).floor();
+    let end = lo.max(hi).ceil().max(start + 1.0);
+    let steps = (end - start).round() as usize;
+    (0..=steps).map(|i| start + i as f64).collect()
+}
+
+/// Tick labels in `unit` (`1e6` for MB/s), with `suffix` after every tick but zero and the
+/// fewest decimals that keep neighbours apart (a 0.5 step gets one).
+fn scaled_labels(ticks: &[f64], unit: f64, suffix: &str) -> Vec<String> {
+    let step = match ticks {
+        [first, second, ..] => (second - first) / unit,
+        _ => 1.0,
+    };
+    let decimals = if step >= 0.95 {
+        0
+    } else if step >= 0.095 {
+        1
+    } else {
+        2
+    };
+    ticks
+        .iter()
+        .map(|tick| {
+            if *tick == 0.0 {
+                "0".to_owned()
+            } else {
+                format!("{:.*}{suffix}", decimals, tick / unit)
+            }
+        })
+        .collect()
+}
+
+const KIB: f64 = 1024.0;
+const MIB: f64 = 1024.0 * KIB;
+const GIB: f64 = 1024.0 * MIB;
+
+/// The decimal unit of a transfer rate: `(1e6, " MB/s")` for 45,000,000 bytes per second.
+fn rate_unit(magnitude: f64) -> (f64, &'static str) {
+    const UNITS: [(f64, &str); 3] = [(1e9, " GB/s"), (1e6, " MB/s"), (1e3, " kB/s")];
+    UNITS
+        .into_iter()
+        .find(|(unit, _)| magnitude >= *unit)
+        .unwrap_or((1.0, " B/s"))
+}
+
+/// What a chart's values measure: how its axis, end label, tooltip, table and summary write
+/// them. A chart of counts, the default, writes them as the dashboard's first charts do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Unit {
+    /// A count: `12.3K` on the axis and the end label, `12,345` in full.
+    #[default]
+    Count,
+    /// Logical CPUs kept busy: `2.4` on the axis and the end label, `2.4 cores` in full.
+    Cores,
+    /// Bytes of memory in binary units, as the OS tools count them: ticks on whole GiB (whole
+    /// MiB below 1 GiB), so the axis reads `5 GiB`, `10 GiB`; `6.1 GiB` at the end and in full.
+    Memory,
+    /// Bytes per second in decimal units, like the other disk figures: `45 MB/s` on the axis
+    /// and the end label, `45.0 MB/s` in full.
+    BytesPerSec,
+}
+
+impl Unit {
+    /// The y axis's ticks around `lo..=hi`: at most four, the first at or below `lo` and the
+    /// last at or above `hi`.
+    pub fn ticks(self, lo: f64, hi: f64) -> Vec<f64> {
+        match self {
+            Unit::Count | Unit::Cores | Unit::BytesPerSec => nice_ticks(lo, hi, 3),
+            Unit::Memory => {
+                let unit = if lo.abs().max(hi.abs()) >= GIB {
+                    GIB
+                } else {
+                    MIB
+                };
+                whole_ticks(lo / unit, hi / unit)
+                    .into_iter()
+                    .map(|tick| tick * unit)
+                    .collect()
+            }
+        }
+    }
+
+    /// The labels of [`Unit::ticks`]. A zero tick is `0`, whatever the unit.
+    pub fn tick_labels(self, ticks: &[f64]) -> Vec<String> {
+        let max = ticks.iter().fold(0.0f64, |max, tick| max.max(tick.abs()));
+        match self {
+            Unit::Count => tick_labels(ticks),
+            Unit::Cores => scaled_labels(ticks, 1.0, ""),
+            Unit::Memory if max >= GIB => scaled_labels(ticks, GIB, " GiB"),
+            Unit::Memory => scaled_labels(ticks, MIB, " MiB"),
+            Unit::BytesPerSec => {
+                let (unit, suffix) = rate_unit(max);
+                scaled_labels(ticks, unit, suffix)
+            }
+        }
+    }
+
+    /// A value as the direct label at a line's end: `12.3K`, `2.4`, `6.1 GiB`, `45 MB/s`.
+    pub fn short(self, value: f64) -> String {
+        let value = if value.is_finite() {
+            value.max(0.0)
+        } else {
+            0.0
+        };
+        match self {
+            Unit::Count => compact(value.round() as u64),
+            Unit::Cores => cores_number(value),
+            Unit::Memory => mem_bytes(value.round() as u64),
+            Unit::BytesPerSec => {
+                let (unit, suffix) = rate_unit(value);
+                let scaled = value / unit;
+                if scaled < 9.95 && unit > 1.0 {
+                    format!("{scaled:.1}{suffix}")
+                } else {
+                    format!("{scaled:.0}{suffix}")
+                }
+            }
+        }
+    }
+
+    /// A value in full, for the tooltip, the table and the summary: `12,345`, `2.4 cores`,
+    /// `6.1 GiB`, `45.0 MB/s`. A non-finite value is a cell without a reading (a metric before
+    /// its first snapshot, a gap in the line): `—`.
+    pub fn full(self, value: f64) -> String {
+        if !value.is_finite() {
+            return "—".to_owned();
+        }
+        let value = value.max(0.0);
+        match self {
+            Unit::Count => thousands(value.round() as u64),
+            Unit::Cores => cores(value),
+            Unit::Memory => mem_bytes(value.round() as u64),
+            Unit::BytesPerSec => byte_rate(value),
+        }
+    }
+}
+
+/// The index of the last finite value: a line's end, before any gap at its end.
+pub fn last_finite(values: &[f64]) -> Option<usize> {
+    values.iter().rposition(|value| value.is_finite())
+}
+
 /// A linear map from a data domain to a drawing range.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Scale {
@@ -210,29 +362,49 @@ impl Scale {
     }
 }
 
-/// An SVG path through the points, one decimal per coordinate: `M64.0,190.0 L80.5,120.2`.
+/// Whether a point can be drawn: a non-finite coordinate is a gap in the line.
+fn drawable((x, y): &(f64, f64)) -> bool {
+    x.is_finite() && y.is_finite()
+}
+
+/// An SVG path through the points, one decimal per coordinate: `M64.0,190.0 L80.5,120.2`. A
+/// point that cannot be drawn is a gap: the path starts a new subpath after it.
 pub fn line_path(points: &[(f64, f64)]) -> String {
     let mut d = String::with_capacity(points.len() * 14);
-    for (index, (x, y)) in points.iter().enumerate() {
-        if index > 0 {
+    let mut drawing = false;
+    for point in points {
+        if !drawable(point) {
+            drawing = false;
+            continue;
+        }
+        if !d.is_empty() {
             d.push(' ');
         }
-        let _ = write!(d, "{}{x:.1},{y:.1}", if index == 0 { 'M' } else { 'L' });
+        let (x, y) = point;
+        let _ = write!(d, "{}{x:.1},{y:.1}", if drawing { 'L' } else { 'M' });
+        drawing = true;
     }
     d
 }
 
-/// The line closed down to `baseline`, for an area wash.
+/// The line closed down to `baseline`, for an area wash: each run between gaps closed on its
+/// own.
 pub fn area_path(points: &[(f64, f64)], baseline: f64) -> String {
-    let (Some(first), Some(last)) = (points.first(), points.last()) else {
-        return String::new();
-    };
-    let mut d = line_path(points);
-    let _ = write!(
-        d,
-        " L{:.1},{baseline:.1} L{:.1},{baseline:.1} Z",
-        last.0, first.0
-    );
+    let mut d = String::new();
+    for run in points.split(|point| !drawable(point)) {
+        let (Some(first), Some(last)) = (run.first(), run.last()) else {
+            continue;
+        };
+        if !d.is_empty() {
+            d.push(' ');
+        }
+        d.push_str(&line_path(run));
+        let _ = write!(
+            d,
+            " L{:.1},{baseline:.1} L{:.1},{baseline:.1} Z",
+            last.0, first.0
+        );
+    }
     d
 }
 
@@ -590,6 +762,9 @@ pub struct Geometry {
     pub y_ticks: Vec<(f64, String)>,
     /// `(x, label)` per x-axis label.
     pub x_ticks: Vec<(f64, String)>,
+    /// Where each series ends: its last finite value, `None` for a series with none. A gap at
+    /// the end of a line ends it before the last sample.
+    pub ends: Vec<Option<usize>>,
     /// The series the direct end label belongs to: the one that ends highest (the first of
     /// equals), so two lines get one label and it sits on the upper one.
     pub end_label_series: usize,
@@ -597,13 +772,15 @@ pub struct Geometry {
     pub end_label: String,
 }
 
-/// Lays out `data` for a plot `width` units wide; `None` with fewer than two samples. The y
-/// domain has nice bounds around the values, from zero when `from_zero`. `tz_at` is the zone
-/// offset (minutes behind UTC) at an instant, so each time label reads in its own instant's
-/// zone across a daylight-saving switch.
+/// Lays out `data` for a plot `width` units wide; `None` with fewer than two samples, or
+/// without a finite value. The y domain has `unit`'s ticks around the values, from zero when
+/// `from_zero`; a non-finite value is a gap. `tz_at` is the zone offset (minutes behind UTC)
+/// at an instant, so each time label reads in its own instant's zone across a daylight-saving
+/// switch.
 pub fn geometry(
     data: &ChartData,
     from_zero: bool,
+    unit: Unit,
     tz_at: impl Fn(SystemTime) -> i32,
     width: f64,
 ) -> Option<Geometry> {
@@ -638,12 +815,12 @@ pub fn geometry(
     if !lo.is_finite() || !hi.is_finite() {
         return None;
     }
-    let ticks = nice_ticks(lo, hi, 3);
+    let ticks = unit.ticks(lo, hi);
     let baseline = VIEW_H - PAD_B;
     let y = scale((ticks[0], ticks[ticks.len() - 1]), (baseline, PAD_T));
     let y_ticks = ticks
         .iter()
-        .zip(tick_labels(&ticks))
+        .zip(unit.tick_labels(&ticks))
         .map(|(tick, label)| (y.apply(*tick), label))
         .collect();
     // Ticks align to the clock of the newest sample's zone; each label then reads in its own.
@@ -671,20 +848,24 @@ pub fn geometry(
     };
     let lines = ys.iter().map(|series| line_path(&points(series))).collect();
     let area = area_path(&points(&ys[0]), baseline);
-    let end_label_series = data
+    let ends: Vec<Option<usize>> = data
         .series
         .iter()
+        .map(|s| last_finite(&s.values[..s.values.len().min(n)]))
+        .collect();
+    let (end_label_series, end_value) = data
+        .series
+        .iter()
+        .zip(&ends)
         .enumerate()
-        .filter_map(|(index, s)| Some((index, *s.values.get(n - 1)?)))
+        .filter_map(|(index, (s, end))| Some((index, s.values[(*end)?])))
         .fold(
             None,
             |best: Option<(usize, f64)>, (index, value)| match best {
                 Some((_, top)) if top >= value => best,
                 _ => Some((index, value)),
             },
-        )
-        .map_or(0, |(index, _)| index);
-    let end_label = compact(data.series[end_label_series].values[n - 1].round().max(0.0) as u64);
+        )?;
     Some(Geometry {
         width,
         xs,
@@ -693,13 +874,20 @@ pub fn geometry(
         area,
         y_ticks,
         x_ticks,
+        ends,
         end_label_series,
-        end_label,
+        end_label: unit.short(end_value),
     })
 }
 
-/// The chart in one sentence, for its `aria-label`. `tz_at` is as for [`geometry`].
-pub fn summary(title: &str, data: &ChartData, tz_at: impl Fn(SystemTime) -> i32) -> String {
+/// The chart in one sentence, for its `aria-label`: each series' latest value is its last
+/// finite one, in `unit`. `tz_at` is as for [`geometry`].
+pub fn summary(
+    title: &str,
+    data: &ChartData,
+    unit: Unit,
+    tz_at: impl Fn(SystemTime) -> i32,
+) -> String {
     let n = data.len();
     let (Some(first), Some(last)) = (data.times.first(), data.times.last()) else {
         return format!("{title}: no samples yet");
@@ -708,9 +896,8 @@ pub fn summary(title: &str, data: &ChartData, tz_at: impl Fn(SystemTime) -> i32)
         .series
         .iter()
         .filter_map(|s| {
-            s.values
-                .last()
-                .map(|v| format!("{} {}", s.name, thousands(v.round().max(0.0) as u64)))
+            let end = last_finite(&s.values)?;
+            Some(format!("{} {}", s.name, unit.full(s.values[end])))
         })
         .collect();
     format!(
@@ -1031,7 +1218,7 @@ mod tests {
         assert_eq!(data.len(), 4);
         assert_eq!(data.series[1].values, vec![3_120_000.0; 4]);
 
-        let g = geometry(&data, false, |_| 0, VIEW_W).unwrap();
+        let g = geometry(&data, false, Unit::Count, |_| 0, VIEW_W).unwrap();
         assert_eq!(g.width, VIEW_W);
         assert_eq!(g.xs.len(), 4);
         assert_eq!(g.xs[0], PAD_L);
@@ -1053,7 +1240,7 @@ mod tests {
 
         // From zero for a count.
         let peers = ChartData::from_samples(&samples, &[("Peers", "chart-series-1", Field::Peers)]);
-        let g = geometry(&peers, true, |_| 0, 1000.0).unwrap();
+        let g = geometry(&peers, true, Unit::Count, |_| 0, 1000.0).unwrap();
         assert_eq!(g.y_ticks[0].1, "0");
         assert_eq!(g.y_ticks[0].0, VIEW_H - PAD_B);
         assert_eq!((g.width, g.xs[3]), (1000.0, 1000.0 - PAD_R));
@@ -1067,7 +1254,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            geometry(&twin, true, |_| 0, VIEW_W)
+            geometry(&twin, true, Unit::Count, |_| 0, VIEW_W)
                 .unwrap()
                 .end_label_series,
             0
@@ -1076,7 +1263,7 @@ mod tests {
         // wash is empty and no two gridlines read the same.
         let idle: Vec<Sample> = (0..4).map(|i| sample(i * 5, 2_950_000, 0)).collect();
         let idle = ChartData::from_samples(&idle, &[("Peers", "chart-series-1", Field::Peers)]);
-        let g = geometry(&idle, true, |_| 0, VIEW_W).unwrap();
+        let g = geometry(&idle, true, Unit::Count, |_| 0, VIEW_W).unwrap();
         let labels: Vec<_> = g.y_ticks.iter().map(|(_, label)| label.as_str()).collect();
         assert_eq!(labels, vec!["0", "1", "2"]);
         assert_eq!(g.y_ticks[0].0, VIEW_H - PAD_B);
@@ -1089,12 +1276,19 @@ mod tests {
         // A count in the thousands from zero: the zero tick is plain.
         let behind =
             ChartData::from_samples(&samples, &[("Behind", "chart-series-1", Field::Behind)]);
-        let g = geometry(&behind, true, |_| 0, VIEW_W).unwrap();
+        let g = geometry(&behind, true, Unit::Count, |_| 0, VIEW_W).unwrap();
         assert_eq!(g.y_ticks[0].1, "0");
         // A useless width falls back to the default.
-        assert_eq!(geometry(&peers, true, |_| 0, 0.0).unwrap().width, VIEW_W);
         assert_eq!(
-            geometry(&peers, true, |_| 0, f64::NAN).unwrap().width,
+            geometry(&peers, true, Unit::Count, |_| 0, 0.0)
+                .unwrap()
+                .width,
+            VIEW_W
+        );
+        assert_eq!(
+            geometry(&peers, true, Unit::Count, |_| 0, f64::NAN)
+                .unwrap()
+                .width,
             VIEW_W
         );
 
@@ -1103,19 +1297,23 @@ mod tests {
             geometry(
                 &ChartData::from_samples(&samples[..1], &fields),
                 false,
+                Unit::Count,
                 |_| 0,
                 VIEW_W
             ),
             None
         );
-        assert_eq!(geometry(&ChartData::default(), false, |_| 0, VIEW_W), None);
+        assert_eq!(
+            geometry(&ChartData::default(), false, Unit::Count, |_| 0, VIEW_W),
+            None
+        );
 
         assert_eq!(
-            summary("Block height", &data, |_| 0),
+            summary("Block height", &data, Unit::Count, |_| 0),
             "Block height: 4 samples from 00:00:00 to 00:00:15. Latest: Height 2,950,300, Estimated height 3,120,000."
         );
         assert_eq!(
-            summary("Peers", &ChartData::default(), |_| 0),
+            summary("Peers", &ChartData::default(), Unit::Count, |_| 0),
             "Peers: no samples yet"
         );
     }
@@ -1155,7 +1353,7 @@ mod tests {
                 .collect()
         };
 
-        let g = geometry(&behind, true, |_| 0, VIEW_W).unwrap();
+        let g = geometry(&behind, true, Unit::Count, |_| 0, VIEW_W).unwrap();
         assert_eq!(
             g.lines,
             vec!["M64.0,40.4 L194.0,40.5 L324.0,40.6 L454.0,40.7 L584.0,40.8"]
@@ -1171,11 +1369,11 @@ mod tests {
         assert_eq!(g.x_ticks, owned(&[(64.0, "00:00:00"), (454.0, "00:00:15")]));
         assert_eq!((g.end_label_series, g.end_label.as_str()), (0, "170K"));
         assert_eq!(
-            summary("Blocks behind the tip", &behind, |_| 0),
+            summary("Blocks behind the tip", &behind, Unit::Count, |_| 0),
             "Blocks behind the tip: 5 samples from 00:00:00 to 00:00:20. Latest: Behind 169,520."
         );
 
-        let g = geometry(&peers, true, |_| 0, 470.0).unwrap();
+        let g = geometry(&peers, true, Unit::Count, |_| 0, 470.0).unwrap();
         assert_eq!(
             g.lines,
             vec![
@@ -1195,9 +1393,124 @@ mod tests {
         assert_eq!((g.end_label_series, g.end_label.as_str()), (0, "8"));
         assert_eq!(g.ys[1][4], 119.6);
         assert_eq!(
-            summary("Peers", &peers, |_| 0),
+            summary("Peers", &peers, Unit::Count, |_| 0),
             "Peers: 5 samples from 00:00:00 to 00:00:20. Latest: Outbound 8, Inbound 4."
         );
+    }
+
+    #[test]
+    fn units_write_their_values() {
+        let gib = |value: f64| value * GIB;
+        assert_eq!(Unit::Memory.full(gib(6.1)), "6.1 GiB");
+        assert_eq!(Unit::Memory.short(gib(6.1)), "6.1 GiB");
+        assert_eq!(Unit::Memory.full(650.0 * MIB), "650 MiB");
+        assert_eq!(Unit::Cores.full(2.4), "2.4 cores");
+        assert_eq!(Unit::Cores.full(0.05), "0.05 cores");
+        assert_eq!(Unit::Cores.short(5.62), "5.6");
+        assert_eq!(Unit::BytesPerSec.short(45_000_000.0), "45 MB/s");
+        assert_eq!(Unit::BytesPerSec.short(1_234_000.0), "1.2 MB/s");
+        assert_eq!(Unit::BytesPerSec.short(400.0), "400 B/s");
+        assert_eq!(Unit::BytesPerSec.full(45_000_000.0), "45.0 MB/s");
+        assert_eq!(Unit::Count.short(12_345.0), "12.3K");
+        assert_eq!(Unit::Count.full(12_345.0), "12,345");
+        for unit in [Unit::Count, Unit::Cores, Unit::Memory, Unit::BytesPerSec] {
+            assert_eq!(unit.full(f64::NAN), "—", "{unit:?}");
+        }
+        assert_eq!(Unit::default(), Unit::Count);
+    }
+
+    #[test]
+    fn unit_ticks_are_round_in_their_unit() {
+        let gib = |value: f64| value * GIB;
+        // Whole GiB, never 0.5 GiB steps.
+        let ticks = Unit::Memory.ticks(0.0, gib(1.2));
+        assert_eq!(ticks, vec![0.0, gib(1.0), gib(2.0)]);
+        assert_eq!(
+            Unit::Memory.tick_labels(&ticks),
+            vec!["0", "1 GiB", "2 GiB"]
+        );
+        let ticks = Unit::Memory.ticks(0.0, gib(11.6));
+        assert_eq!(
+            Unit::Memory.tick_labels(&ticks),
+            vec!["0", "5 GiB", "10 GiB", "15 GiB"]
+        );
+        // Under 1 GiB: whole MiB.
+        let ticks = Unit::Memory.ticks(0.0, 650.0 * MIB);
+        assert_eq!(
+            Unit::Memory.tick_labels(&ticks),
+            vec!["0", "500 MiB", "1000 MiB"]
+        );
+        let ticks = Unit::BytesPerSec.ticks(0.0, 105_000_000.0);
+        assert_eq!(
+            Unit::BytesPerSec.tick_labels(&ticks),
+            vec!["0", "50 MB/s", "100 MB/s", "150 MB/s"]
+        );
+        let ticks = Unit::Cores.ticks(0.0, 0.3);
+        assert_eq!(
+            Unit::Cores.tick_labels(&ticks),
+            vec!["0", "0.1", "0.2", "0.3"]
+        );
+        let ticks = Unit::Cores.ticks(0.0, 6.4);
+        assert_eq!(Unit::Cores.tick_labels(&ticks), vec!["0", "5", "10"]);
+        // Counts keep the dashboard's labels.
+        let ticks = Unit::Count.ticks(0.0, 200_000.0);
+        assert_eq!(Unit::Count.tick_labels(&ticks), tick_labels(&ticks));
+    }
+
+    #[test]
+    fn a_gap_breaks_the_line() {
+        let points = [
+            (64.0, 100.0),
+            (80.0, f64::NAN),
+            (96.0, 50.0),
+            (112.0, 40.0),
+            (128.0, f64::NAN),
+        ];
+        assert_eq!(line_path(&points), "M64.0,100.0 M96.0,50.0 L112.0,40.0");
+        assert_eq!(
+            area_path(&points, 190.0),
+            "M64.0,100.0 L64.0,190.0 L64.0,190.0 Z M96.0,50.0 L112.0,40.0 L112.0,190.0 L96.0,190.0 Z"
+        );
+        assert_eq!(area_path(&[(64.0, f64::NAN)], 190.0), "");
+        assert_eq!(last_finite(&[1.0, 2.0, f64::NAN]), Some(1));
+        assert_eq!(last_finite(&[f64::NAN]), None);
+
+        // A line that ends in a gap: its dot and the end label sit on its last value, and the
+        // summary reads it.
+        let data = ChartData {
+            times: (0..4).map(|i| at(i * 5)).collect(),
+            series: vec![
+                Series {
+                    name: "This node",
+                    class: "chart-series-1",
+                    values: vec![2.0, f64::NAN, 3.0, f64::NAN],
+                },
+                Series {
+                    name: "Whole computer",
+                    class: "chart-series-muted",
+                    values: vec![1.0, 1.5, 2.5, 2.0],
+                },
+            ],
+        };
+        let g = geometry(&data, true, Unit::Cores, |_| 0, VIEW_W).unwrap();
+        assert_eq!(g.ends, vec![Some(2), Some(3)]);
+        assert_eq!((g.end_label_series, g.end_label.as_str()), (0, "3.0"));
+        assert!(!g.lines[0].contains("NaN"), "{}", g.lines[0]);
+        assert_eq!(g.lines[0].matches('M').count(), 2, "{}", g.lines[0]);
+        assert_eq!(
+            summary("CPU", &data, Unit::Cores, |_| 0),
+            "CPU: 4 samples from 00:00:00 to 00:00:15. Latest: This node 3.0 cores, Whole computer 2.0 cores."
+        );
+        // Nothing to draw at all.
+        let blank = ChartData {
+            times: data.times.clone(),
+            series: vec![Series {
+                name: "This node",
+                class: "chart-series-1",
+                values: vec![f64::NAN; 4],
+            }],
+        };
+        assert_eq!(geometry(&blank, true, Unit::Cores, |_| 0, VIEW_W), None);
     }
 
     #[test]
@@ -1210,13 +1523,13 @@ mod tests {
             .map(|i| sample(1_000_000_800 - 1800 + i * 300, 2_950_000 + i, 8))
             .collect();
         let data = ChartData::from_samples(&samples, &[("Peers", "chart-series-1", Field::Peers)]);
-        let g = geometry(&data, true, tz_at, VIEW_W).unwrap();
+        let g = geometry(&data, true, Unit::Count, tz_at, VIEW_W).unwrap();
         let labels: Vec<_> = g.x_ticks.iter().map(|(_, label)| label.as_str()).collect();
         // The wall clock read 03:30, then 03:00 at the switch, then 03:30 again. One offset
         // for every tick would have read 03:30, 04:00, 04:30.
         assert_eq!(labels, vec!["03:30", "03:00", "03:30"]);
         assert_eq!(
-            summary("Peers", &data, tz_at),
+            summary("Peers", &data, Unit::Count, tz_at),
             "Peers: 13 samples from 03:30:00 to 03:30:00. Latest: Peers 8."
         );
     }

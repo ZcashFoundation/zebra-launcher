@@ -1,30 +1,18 @@
 //! A chart card: one or two lines over time, with a hover crosshair, keyboard navigation and
-//! a table view. The geometry comes from [`crate::charts::geometry`].
+//! a table view. The geometry comes from [`crate::charts::geometry`]; a non-finite value is a
+//! gap in its line, and a dash in the tooltip and the table.
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::{
-    charts::{
-        ChartData, Geometry, MAX_POINTS, PAD_B, PAD_L, PAD_R, PAD_T, VIEW_H, VIEW_W,
-        downsample_indices, geometry, hhmmss, nearest_index, summary, tz_offset_min_at,
-    },
-    format::thousands,
+use crate::charts::{
+    ChartData, Geometry, MAX_POINTS, PAD_B, PAD_L, PAD_R, PAD_T, Unit, VIEW_H, VIEW_W,
+    downsample_indices, geometry, hhmmss, nearest_index, summary, tz_offset_min_at,
 };
 
 /// A coordinate in `viewBox` units, as an attribute value.
 fn px(value: f64) -> String {
     format!("{value:.1}")
-}
-
-/// A sample value in the tooltip and the table; a non-finite value is a cell without a
-/// reading (a metric before its first snapshot).
-fn whole(value: f64) -> String {
-    if value.is_finite() {
-        thousands(value.round().max(0.0) as u64)
-    } else {
-        "—".to_owned()
-    }
 }
 
 /// A chart card. `data` is the range's samples; `empty` is what the frame says while there are
@@ -50,6 +38,13 @@ pub fn LineChart(
     /// range`); the table stays available.
     #[prop(into, optional)]
     note: Option<Signal<Option<String>>>,
+    /// What the values measure: counts unless said otherwise.
+    #[prop(optional)]
+    unit: Unit,
+    /// The lines are of different quantities (a node and the whole computer), so the tooltip
+    /// gives no total of them.
+    #[prop(optional)]
+    separate: bool,
 ) -> impl IntoView {
     let table = RwSignal::new(false);
     let table_data = table_data.unwrap_or(data);
@@ -60,9 +55,10 @@ pub fn LineChart(
     let width = RwSignal::new(VIEW_W);
     // Times read in the browser's zone at each instant (see `tz_offset_min_at`), so the labels
     // stay right across a daylight-saving switch while the launcher runs.
-    let layout =
-        Memo::new(move |_| data.with(|d| geometry(d, from_zero, tz_offset_min_at, width.get())));
-    let label = Memo::new(move |_| data.with(|d| summary(title, d, tz_offset_min_at)));
+    let layout = Memo::new(move |_| {
+        data.with(|d| geometry(d, from_zero, unit, tz_offset_min_at, width.get()))
+    });
+    let label = Memo::new(move |_| data.with(|d| summary(title, d, unit, tz_offset_min_at)));
     let legend = move || data.with(|d| d.series.len() >= 2);
 
     view! {
@@ -119,12 +115,12 @@ pub fn LineChart(
                                     }
                                 }
                             >
-                                <Plot layout data label hover width area />
+                                <Plot layout data label hover width area unit separate />
                             </Show>
                         }
                     }
                 >
-                    <DataTable title data=table_data />
+                    <DataTable title data=table_data unit />
                 </Show>
             </Show>
         </div>
@@ -140,6 +136,8 @@ fn Plot(
     hover: RwSignal<Option<usize>>,
     width: RwSignal<f64>,
     area: bool,
+    unit: Unit,
+    separate: bool,
 ) -> impl IntoView {
     let plot_ref = NodeRef::<leptos::html::Div>::new();
     let count = move || layout.with(|l| l.as_ref().map_or(0, |g| g.xs.len()));
@@ -221,8 +219,8 @@ fn Plot(
             let classes = classes();
             let first_class = classes.first().copied().unwrap_or("chart-series-1");
             let wash = area && classes.len() == 1;
-            let n = g.xs.len();
             let right = g.width - PAD_R;
+            let label_end = g.ends[g.end_label_series].unwrap_or(g.xs.len() - 1);
             Some(view! {
                 <g class="chart-axes">
                     <line
@@ -271,17 +269,19 @@ fn Plot(
                 {g
                     .ys
                     .iter()
+                    .zip(&g.ends)
                     .zip(classes.iter())
-                    .map(|(ys, class)| {
-                        view! {
-                            <circle class=format!("chart-dot {class}") cx=px(g.xs[n - 1]) cy=px(ys[n - 1]) r="4.5" />
-                        }
+                    .filter_map(|((ys, end), class)| {
+                        let end = (*end)?;
+                        Some(view! {
+                            <circle class=format!("chart-dot {class}") cx=px(g.xs[end]) cy=px(ys[end]) r="4.5" />
+                        })
                     })
                     .collect_view()}
                 <text
                     class="chart-direct-label"
-                    x=px(g.xs[n - 1] + 10.0)
-                    y=px(g.ys[g.end_label_series][n - 1] + 4.0)
+                    x=px(g.xs[label_end] + 10.0)
+                    y=px(g.ys[g.end_label_series][label_end] + 4.0)
                 >
                     {g.end_label.clone()}
                 </text>
@@ -300,6 +300,7 @@ fn Plot(
                         .ys
                         .iter()
                         .zip(classes())
+                        .filter(|(ys, _)| ys[index].is_finite())
                         .map(|(ys, class)| {
                             view! { <circle class=format!("chart-dot {class}") cx=px(x) cy=px(ys[index]) r="4.5" /> }
                         })
@@ -321,19 +322,19 @@ fn Plot(
                         s.name,
                         s.values
                             .get(index)
-                            .map_or_else(|| "—".to_owned(), |v| whole(*v)),
+                            .map_or_else(|| "—".to_owned(), |v| unit.full(*v)),
                     )
                 })
                 .collect();
             // Two lines of one quantity (peers by direction): their sum too.
-            if d.series.len() >= 2 {
+            if d.series.len() >= 2 && !separate {
                 let total: f64 = d
                     .series
                     .iter()
                     .filter_map(|s| s.values.get(index))
                     .filter(|value| value.is_finite())
                     .sum();
-                rows.push(("chart-series-muted", "Total", whole(total)));
+                rows.push(("chart-series-muted", "Total", unit.full(total)));
             }
             (d.times.get(index).copied(), rows)
         });
@@ -394,7 +395,7 @@ fn Plot(
 
 /// The chart's values as a table: at most [`MAX_POINTS`] rows, picked evenly.
 #[component]
-fn DataTable(title: &'static str, data: Signal<ChartData>) -> impl IntoView {
+fn DataTable(title: &'static str, data: Signal<ChartData>, unit: Unit) -> impl IntoView {
     view! {
         <div class="chart-table-wrap">
             <table class="chart-table" aria-label=format!("{title} samples")>
@@ -423,7 +424,7 @@ fn DataTable(title: &'static str, data: Signal<ChartData>) -> impl IntoView {
                                             {d
                                                 .series
                                                 .iter()
-                                                .map(|s| view! { <td>{whole(s.values[index])}</td> })
+                                                .map(|s| view! { <td>{unit.full(s.values[index])}</td> })
                                                 .collect_view()}
                                         </tr>
                                     }
