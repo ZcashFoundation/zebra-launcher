@@ -84,6 +84,8 @@ fn exit_class_named(name: &str) -> Option<ExitClass> {
         "DbLocked" => ExitClass::DbLocked,
         "PortInUse" => ExitClass::PortInUse,
         "SpawnFailed" => ExitClass::SpawnFailed,
+        "DiskFull" => ExitClass::DiskFull,
+        "IndexBroken" => ExitClass::IndexBroken,
         "Crash" => ExitClass::Crash,
         _ => return None,
     })
@@ -98,6 +100,8 @@ pub fn exit_words(class: ExitClass) -> &'static str {
         ExitClass::DbLocked => "state database locked",
         ExitClass::PortInUse => "port in use",
         ExitClass::SpawnFailed => "could not start",
+        ExitClass::DiskFull => "disk full",
+        ExitClass::IndexBroken => "index damaged",
         ExitClass::Crash => "crash",
     }
 }
@@ -637,6 +641,8 @@ mod tests {
             ExitClass::DbLocked,
             ExitClass::PortInUse,
             ExitClass::SpawnFailed,
+            ExitClass::DiskFull,
+            ExitClass::IndexBroken,
             ExitClass::Crash,
         ] {
             assert_eq!(exit_class_named(&format!("{class:?}")), Some(class));

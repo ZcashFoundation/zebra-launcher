@@ -43,6 +43,8 @@ pub fn exit_class_text(class: ExitClass) -> &'static str {
         ExitClass::DbLocked => "another zebrad is using the state database",
         ExitClass::PortInUse => "a port zebrad needs is already in use",
         ExitClass::SpawnFailed => "zebrad could not be started",
+        ExitClass::DiskFull => "the disk is full",
+        ExitClass::IndexBroken => "the index is damaged",
         ExitClass::Crash => "zebrad crashed",
     }
 }
