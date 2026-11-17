@@ -43,39 +43,70 @@ impl Episode {
         sustain: Duration,
         max_gap: Duration,
     ) -> Option<Episode> {
-        let mut run: Option<SystemTime> = None;
-        let mut on = false;
-        let mut newest = None;
-        let mut previous: Option<SystemTime> = None;
+        let mut fold = EpisodeFold::default();
         for (at, value) in readings {
-            newest = Some(at);
-            let Some(value) = value else {
-                continue;
-            };
-            let gap = previous
-                .is_some_and(|previous| at.duration_since(previous).unwrap_or_default() > max_gap);
-            previous = Some(at);
-            if on {
-                if leaves(value) {
-                    on = false;
-                    run = None;
-                } else if gap {
-                    // It held before the gap and after it; "for N" leaves the gap out.
-                    run = Some(at);
-                }
-            } else if enters(value) {
-                if gap {
-                    run = None;
-                }
-                let since = *run.get_or_insert(at);
-                on = at.duration_since(since).unwrap_or_default() >= sustain;
-            } else {
-                run = None;
-            }
+            fold.step(at, value, &enters, &leaves, sustain, max_gap);
         }
+        fold.episode()
+    }
+}
+
+/// What [`Episode::current`] knows after some readings, to go on from with newer ones.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EpisodeFold {
+    /// The first reading of the run going on.
+    run: Option<SystemTime>,
+    /// The run has begun an episode, and no reading has left it since.
+    on: bool,
+    /// The newest reading with a value.
+    previous: Option<SystemTime>,
+    /// The newest reading.
+    newest: Option<SystemTime>,
+}
+
+impl EpisodeFold {
+    /// Goes on with the reading `value` at `at`, by the rules of [`Episode::current`].
+    pub fn step(
+        &mut self,
+        at: SystemTime,
+        value: Option<f64>,
+        enters: impl Fn(f64) -> bool,
+        leaves: impl Fn(f64) -> bool,
+        sustain: Duration,
+        max_gap: Duration,
+    ) {
+        self.newest = Some(at);
+        let Some(value) = value else {
+            return;
+        };
+        let gap = self
+            .previous
+            .is_some_and(|previous| at.duration_since(previous).unwrap_or_default() > max_gap);
+        self.previous = Some(at);
+        if self.on {
+            if leaves(value) {
+                self.on = false;
+                self.run = None;
+            } else if gap {
+                // It held before the gap and after it; "for N" leaves the gap out.
+                self.run = Some(at);
+            }
+        } else if enters(value) {
+            if gap {
+                self.run = None;
+            }
+            let since = *self.run.get_or_insert(at);
+            self.on = at.duration_since(since).unwrap_or_default() >= sustain;
+        } else {
+            self.run = None;
+        }
+    }
+
+    /// The episode going on after the readings so far.
+    pub fn episode(&self) -> Option<Episode> {
         Some(Episode {
-            since: run.filter(|_| on)?,
-            until: newest?,
+            since: self.run.filter(|_| self.on)?,
+            until: self.newest?,
         })
     }
 }
