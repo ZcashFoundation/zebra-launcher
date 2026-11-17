@@ -152,7 +152,7 @@ pub(super) fn snapshot() -> Vec<(NodeInfo, Status, Option<NodeStats>)> {
 }
 
 /// The nodes, the main one first while it is there.
-fn list() -> Vec<NodeInfo> {
+pub(super) fn list() -> Vec<NodeInfo> {
     let main = (!main_removed()).then(|| mock().info.get_untracked());
     main.into_iter().chain(herd::infos()).collect()
 }

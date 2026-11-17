@@ -40,6 +40,14 @@
 //!
 //! With `?herd` the computer has 16 logical CPUs and 32 GiB, so the herd fits without a memory
 //! warning; its figures count every node's newest sample.
+//!
+//! The computer's samples list the volumes that hold the nodes' data folders ([`volumes`]),
+//! read every 30 s: `/` with the launcher's data folder (212.4 GB free of 1,000.2 GB),
+//! `/mnt/storage` with the folder picker's (1,834.5 GB of 4,000.8 GB), `/mnt/zcash` with the
+//! herd's (3,412.7 GB of 8,001.6 GB), and for any other folder its first two parts (120 GB of
+//! 500.1 GB). `?lowdisk` leaves 1.4 GB on the main node's volume and `?nofit` 40 GB;
+//! `?lowmem` leaves 4 % of the memory available, with critical pressure on macOS and the
+//! commit charge at 96 % of its limit on Windows ([`short_of_memory`]).
 
 use std::{
     cell::RefCell,
@@ -51,12 +59,15 @@ use std::{
 };
 
 use launcher_types::{
-    MAX_MEMBERS, MachineResources, MemoryPressure, Network, NodeKind, NodeResources, Phase,
-    Platform, ProcessUsage, Status,
+    MAX_MEMBERS, MachineResources, MemoryPressure, Network, NodeId, NodeKind, NodeResources, Phase,
+    Platform, ProcessUsage, Status, VolumeUsage,
 };
 use leptos::prelude::*;
 
-use super::{Flags, Scenario, mock, sleep};
+use super::{
+    DEFAULT_DATA_DIR, FREE_AT_DEFAULT, FREE_AT_PICKED, FREE_ELSEWHERE, Flags, PICKED_DATA_DIR,
+    Scenario, mock, nodes, sleep,
+};
 use crate::clock;
 
 /// `?os=`: the OS whose figures the mock reports.
@@ -652,6 +663,105 @@ impl NodeSamples {
     }
 }
 
+/// The volume a mock data folder is on: its label, size and free space.
+fn volume_of_dir(dir: &str) -> (String, u64, u64) {
+    let path = std::path::Path::new(dir);
+    if path.starts_with(DEFAULT_DATA_DIR) {
+        ("/".to_owned(), 1_000_200_000_000, FREE_AT_DEFAULT)
+    } else if path.starts_with(PICKED_DATA_DIR) {
+        ("/mnt/storage".to_owned(), 4_000_800_000_000, FREE_AT_PICKED)
+    } else if path.starts_with("/mnt/zcash") {
+        (
+            "/mnt/zcash".to_owned(),
+            8_001_600_000_000,
+            3_412_700_000_000,
+        )
+    } else {
+        let label: std::path::PathBuf = path.components().take(3).collect();
+        (label.display().to_string(), 500_100_000_000, FREE_ELSEWHERE)
+    }
+}
+
+/// `?lowdisk`: what the main node's volume has free.
+pub(super) const LOW_DISK_FREE: u64 = 1_400_000_000;
+/// `?nofit`: what the main node's volume has free while zebrad syncs Mainnet beside its
+/// 248.3 GB of state.
+const NO_FIT_FREE: u64 = 40_000_000_000;
+
+/// The volumes that hold `dirs` (each node and its data folder, in the list's order), read at
+/// the newest 30 s mark at or before `at`; the one that holds `main_dir` has what `?lowdisk`
+/// and `?nofit` leave.
+pub(super) fn volumes(
+    dirs: &[(NodeId, String)],
+    main_dir: &str,
+    flags: Flags,
+    at: SystemTime,
+) -> Vec<VolumeUsage> {
+    let since_epoch = at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let measured_at = at - Duration::from_secs(since_epoch % 30);
+    let main_label = volume_of_dir(main_dir).0;
+    let mut volumes: Vec<VolumeUsage> = Vec::new();
+    for (node, dir) in dirs {
+        let (label, total, free) = volume_of_dir(dir);
+        if let Some(volume) = volumes.iter_mut().find(|volume| volume.label == label) {
+            volume.nodes.push(node.clone());
+            continue;
+        }
+        let free = if label != main_label {
+            free
+        } else if flags.low_disk {
+            LOW_DISK_FREE
+        } else if flags.no_fit {
+            NO_FIT_FREE
+        } else {
+            free
+        };
+        volumes.push(VolumeUsage {
+            label,
+            total_bytes: total,
+            free_bytes: free,
+            nodes: vec![node.clone()],
+            measured_at,
+        });
+    }
+    volumes
+}
+
+/// `?lowmem`: other programs leave 4 % of the memory available; macOS reports critical
+/// pressure and Windows a commit charge at 96 % of its limit.
+pub(super) fn short_of_memory(machine: MachineResources) -> MachineResources {
+    let available = machine.memory_total_bytes / 25;
+    MachineResources {
+        memory_available_bytes: Some(available),
+        pressure: machine.pressure.map(|_| MemoryPressure::Critical),
+        commit_bytes: machine.commit_limit_bytes.map(|limit| limit / 100 * 96),
+        ..machine
+    }
+}
+
+/// The computer as the page gets it: with `?lowmem` short of memory, and with the volumes of
+/// the nodes' data folders now.
+fn as_published(machine: MachineResources) -> MachineResources {
+    let mock = mock();
+    let machine = if mock.flags.low_memory {
+        short_of_memory(machine)
+    } else {
+        machine
+    };
+    let dirs: Vec<(NodeId, String)> = nodes::list()
+        .into_iter()
+        .map(|info| (info.id, info.data_dir))
+        .collect();
+    let main_dir = mock.info.with_untracked(|info| info.data_dir.clone());
+    MachineResources {
+        volumes: volumes(&dirs, &main_dir, mock.flags, machine.at),
+        ..machine
+    }
+}
+
 /// The herd's nodes' newest samples, of those that have a run.
 fn herd_samples() -> Vec<NodeResources> {
     HERD_SAMPLES.with_borrow(|all| all.iter().filter_map(ArcRwSignal::get_untracked).collect())
@@ -821,14 +931,14 @@ pub async fn get_node_resources() -> Option<NodeResources> {
 pub fn on_machine_resources(handler: impl Fn(Option<MachineResources>) + 'static) {
     let machine = mock().machine;
     for sample in BACKFILLED.with_borrow(|(_, machines)| machines.clone()) {
-        handler(Some(sample));
+        handler(Some(as_published(sample)));
     }
-    Effect::new(move |_| handler(machine.get()));
+    Effect::new(move |_| handler(machine.get().map(as_published)));
 }
 
 pub async fn get_machine_resources() -> Option<MachineResources> {
     sleep(50).await;
-    mock().machine.get_untracked()
+    mock().machine.get_untracked().map(as_published)
 }
 
 #[cfg(test)]
@@ -1243,6 +1353,82 @@ mod tests {
         assert_eq!(machines[10].at, nodes[10].at);
         // The live sampler goes on with the same run.
         assert_eq!((tree.run, tree.pid, tree.count), (1, 4242, 540));
+    }
+
+    #[test]
+    fn the_volumes_hold_the_nodes_folders() {
+        let at = UNIX_EPOCH + Duration::from_secs(1_800_000_017);
+        let id = |text: &str| NodeId::new(text).unwrap();
+        let dirs = vec![
+            (id("zebrad-mainnet"), DEFAULT_DATA_DIR.to_owned()),
+            (id("zebrad-testnet"), "/mnt/zcash/zebrad-testnet".to_owned()),
+            (id("zakura-mainnet"), "/mnt/zcash/zakura-mainnet".to_owned()),
+            (
+                id("zebrad-mainnet-2"),
+                format!("{DEFAULT_DATA_DIR}/nodes/zebrad-mainnet-2"),
+            ),
+            (id("zebrad-testnet-2"), "/media/small-disk/zebra".to_owned()),
+        ];
+        let read = volumes(&dirs, DEFAULT_DATA_DIR, Flags::default(), at);
+        let listed: Vec<(&str, usize, u64)> = read
+            .iter()
+            .map(|v| (v.label.as_str(), v.nodes.len(), v.free_bytes))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("/", 2, FREE_AT_DEFAULT),
+                ("/mnt/zcash", 2, 3_412_700_000_000),
+                ("/media/small-disk", 1, FREE_ELSEWHERE)
+            ]
+        );
+        assert_eq!(
+            read[0].measured_at,
+            UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+            "read at the 30 s mark"
+        );
+        // `?lowdisk` and `?nofit` are about the main node's volume only.
+        let low = volumes(
+            &dirs,
+            DEFAULT_DATA_DIR,
+            Flags {
+                low_disk: true,
+                ..Flags::default()
+            },
+            at,
+        );
+        assert_eq!(low[0].free_bytes, LOW_DISK_FREE);
+        assert!(
+            low[0].free_bytes < crate::health::resources::DISK_FULL_BYTES,
+            "the verdict's problem"
+        );
+        assert_eq!(low[1].free_bytes, 3_412_700_000_000);
+        let tight = volumes(
+            &dirs,
+            "/mnt/zcash/zebrad-testnet",
+            Flags {
+                no_fit: true,
+                ..Flags::default()
+            },
+            at,
+        );
+        assert_eq!(tight[1].free_bytes, NO_FIT_FREE);
+        assert_eq!(tight[0].free_bytes, FREE_AT_DEFAULT);
+    }
+
+    #[test]
+    fn short_of_memory_leaves_four_percent() {
+        let at = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let linux = short_of_memory(machine(at, 3, OsFlag::Linux, ONE_NODE, &[]));
+        let share = linux.memory_available_bytes.unwrap() as f64 / linux.memory_total_bytes as f64;
+        assert!((0.039..0.041).contains(&share), "{share}");
+        assert_eq!(linux.pressure, None);
+        let mac = short_of_memory(machine(at, 3, OsFlag::Macos, ONE_NODE, &[]));
+        assert_eq!(mac.pressure, Some(MemoryPressure::Critical));
+        let windows = short_of_memory(machine(at, 3, OsFlag::Windows, ONE_NODE, &[]));
+        let commit =
+            windows.commit_bytes.unwrap() as f64 / windows.commit_limit_bytes.unwrap() as f64;
+        assert!(commit > 0.95, "{commit}");
     }
 
     #[test]

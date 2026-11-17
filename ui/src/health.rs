@@ -6,7 +6,7 @@
 //! sync, so the operator reads the reason, not the consequence. The same facts feed the hero
 //! line and the tiles, so they never disagree with the verdict.
 
-mod resources;
+pub(crate) mod resources;
 
 use std::time::{Duration, SystemTime};
 

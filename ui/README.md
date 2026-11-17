@@ -98,7 +98,19 @@ every node command and event carries a node's id, and the mock's zebrad below is
   starts. The card's three charts (CPU, memory and disk I/O, beside the computer's CPU and
   memory in use) follow the range control; `?backfill` starts zebrad's run 45 minutes before
   the page loaded and hands the page its resource samples and the computer's of the 40
-  minutes before the load at once, so the charts have history from the start;
+  minutes before the load at once, so the charts have history from the start. The
+  computer's samples list the volumes of the nodes' data folders: `/` with the launcher's
+  data folder has 212.4 GB free, which the Disk tile and the card's last line show. Three
+  flags put the dashboard's verdict into its resource rules: `?lowdisk` leaves 1.4 GB free on
+  the main node's volume ("Disk almost full", with the Disk tile in the warning tone);
+  `?lowmem` leaves other programs 4 % of the memory available (critical pressure with
+  `&os=macos`, the commit charge at 96 % of its limit with `&os=windows`) and brings
+  `?backfill` along, so "Memory nearly exhausted" shows at once, with the Memory tile in the
+  warning tone; `?nofit` leaves 40 GB free beside the 248.3 GB of state while zebrad syncs
+  Mainnet ("The chain may not fit" after a minute, at once with `&backfill`). With
+  `?crashloop`, a crash then says what ran short: with `?lowdisk` the free space, and with
+  `?lowmem` the memory, as the system kills zebrad with signal 9 instead of a panic (on
+  Windows the commit charge);
 - several nodes: `?herd` adds five nodes beside the mock's Stable zebrad: on Mainnet, Zakura
   catching up from a snapshot, Zaino reading the Mainnet Zebra, and the zcashd compatibility
   build, stopped; on Testnet, a **Nightly Zebra** and a pruned Zakura at the tip. This makes

@@ -33,6 +33,9 @@
 //! | `?unreadable` | The resource samples report CPU and I/O as refused by the OS: the CPU tile reads "not available" and the Disk tile "the system does not report them". |
 //! | `?readerpanic` | The resource reader panics 30 s into the first run: the samples stop while zebrad keeps running, so the Resources card says it is not measured until zebrad's next run, which Restart starts ([`resources::reader_panicked`]). |
 //! | `?backfill` | zebrad's run started 45 minutes before the page loaded, and its resource samples and the computer's of the 40 minutes before the load reach the page at once, so the Resources card's charts have history from the start ([`resources::backfill`]). |
+//! | `?lowdisk` | The volume with the main node's data has 1.4 GB free: "Disk almost full", and the Disk tile's warning tone ([`resources::volumes`]). With `?crashloop` each crash says so. |
+//! | `?lowmem` | Other programs leave 4 % of the memory available (critical pressure on macOS, the commit charge at 96 % of its limit on Windows), with `?backfill`'s history: "Memory nearly exhausted", and the Memory tile's warning tone ([`resources::short_of_memory`]). With `?crashloop`, zebrad is killed by signal 9 instead of panicking (on Windows it still crashes), and each exit says the memory was almost out. |
+//! | `?nofit` | The volume with the main node's data has 40 GB free beside its 248.3 GB of state while it syncs Mainnet: "The chain may not fit" after a minute, at once with `?backfill`. |
 //! | `?leftover` | Removing a node with its chain state deleted takes it off the list but leaves its folder behind, as when the backend cannot delete a file: the error banner names the folder. |
 //! | `?herd` | Five more nodes run beside zebrad (Zebra and a pruned Zakura on Testnet, Zakura, Zaino and the zcashd compatibility build on Mainnet), so the shell shows the sidebar, the overview and node pages of several nodes, and the add-node dialog adds more ([`herd`], docs/MULTI-NODE.md). Each node's process tree has samples of its own, and the computer has 16 CPUs and 32 GiB ([`resources`]). |
 //! | `?beta=unavailable` | Beta is disabled in the add-node picker and mock `add_node` rejects a Beta draft, even when its pin is newer than Stable. Without this mock-only override, channel availability follows the actual pins. |
@@ -200,8 +203,14 @@ struct Flags {
     unreadable: bool,
     /// `?readerpanic`.
     reader_panic: bool,
-    /// `?backfill`.
+    /// `?backfill`, or `?lowmem`, which brings it along.
     backfill: bool,
+    /// `?lowdisk`.
+    low_disk: bool,
+    /// `?lowmem`.
+    low_memory: bool,
+    /// `?nofit`.
+    no_fit: bool,
     /// `?leftover`.
     leftover: bool,
     /// `?herd`.
@@ -248,7 +257,10 @@ impl Flags {
             children: flag("children"),
             unreadable: flag("unreadable"),
             reader_panic: flag("readerpanic"),
-            backfill: flag("backfill"),
+            backfill: flag("backfill") || flag("lowmem"),
+            low_disk: flag("lowdisk"),
+            low_memory: flag("lowmem"),
+            no_fit: flag("nofit"),
             leftover: flag("leftover"),
             herd: flag("herd") || flag("agree"),
             agree: value("agree").map(agreement::Agree::parse),
@@ -693,14 +705,20 @@ impl Mock {
     }
 
     /// `?crashloop`: zebrad panics, the launcher notes the exit and schedules a restart with a
-    /// backoff that doubles with every crash.
+    /// backoff that doubles with every crash. With `?lowmem` on Linux and macOS the system kills
+    /// it with signal 9 instead, as the OOM killer and jetsam do, and it says nothing.
     fn crash(&self) {
         self.generation.fetch_add(1, Ordering::Relaxed);
         let crashes = self.crashes.fetch_add(1, Ordering::Relaxed) + 1;
         let delay = (FIRST_BACKOFF * 2u32.pow(crashes - 1)).min(MAX_BACKOFF);
-        self.push_line(LogStream::Stderr, None, None, PANIC_LINE.to_owned());
-        self.push_line(LogStream::Stderr, None, None, PANIC_DETAIL.to_owned());
-        self.note("zebrad exited (exit code 101, Crash)");
+        let killed = self.flags.low_memory && self.flags.os != OsFlag::Windows;
+        if killed {
+            self.note("zebrad exited (no exit code, Crash)");
+        } else {
+            self.push_line(LogStream::Stderr, None, None, PANIC_LINE.to_owned());
+            self.push_line(LogStream::Stderr, None, None, PANIC_DETAIL.to_owned());
+            self.note("zebrad exited (exit code 101, Crash)");
+        }
         self.note(format!("restarting zebrad in {delay:?}"));
         self.status.update(|status| {
             status.phase = Phase::Backoff {
@@ -711,12 +729,22 @@ impl Mock {
             status.started_at = None;
             status.rpc_addr = None;
             status.metrics_addr = None;
-            status.last_exit = Some(ExitInfo {
-                code: Some(101),
-                class: ExitClass::Crash,
-                detail: Some(format!("{PANIC_LINE} {PANIC_DETAIL}")),
-                at: clock::now(),
-                requested: false,
+            status.last_exit = Some(if killed {
+                ExitInfo {
+                    code: None,
+                    class: ExitClass::Crash,
+                    detail: Some("killed by signal 9".into()),
+                    at: clock::now(),
+                    requested: false,
+                }
+            } else {
+                ExitInfo {
+                    code: Some(101),
+                    class: ExitClass::Crash,
+                    detail: Some(format!("{PANIC_LINE} {PANIC_DETAIL}")),
+                    at: clock::now(),
+                    requested: false,
+                }
             });
         });
         self.clear_run();
@@ -1163,7 +1191,7 @@ mod tests {
         // Every flag in the module doc's table, combined.
         assert_eq!(
             Flags::parse(
-                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&os=windows&children&unreadable&readerpanic&backfill&leftover&herd&agree=fork&beta=unavailable"
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&os=windows&children&unreadable&readerpanic&backfill&lowdisk&lowmem&nofit&leftover&herd&agree=fork&beta=unavailable"
             ),
             Flags {
                 first_run: true,
@@ -1186,6 +1214,9 @@ mod tests {
                 unreadable: true,
                 reader_panic: true,
                 backfill: true,
+                low_disk: true,
+                low_memory: true,
+                no_fit: true,
                 leftover: true,
                 herd: true,
                 agree: Some(agreement::Agree::Fork),
