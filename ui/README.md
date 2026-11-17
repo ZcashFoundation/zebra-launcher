@@ -207,6 +207,8 @@ every node command and event carries a node's id, and the mock's zebrad below is
   view, their fees after them. Every synthetic transaction pays at least zebrad's
   conventional fee but the first transparent payment of every hundredth block (heights
   ending in 00), whose Transaction page shows "Paid less than zebrad's conventional fee".
+  With `?attip&explorer=big`, a transaction of block 3,550,670 spends from 17 earlier ones:
+  its page reads 16 and offers "Read them all".
   The mock reads as the backend does (a small block whole, a
   transaction's earlier ones, a coinbase's block) and remembers what it read as the backend's
   cache would, so Show RPC lists the same reads, made-up times included, and "from memory"

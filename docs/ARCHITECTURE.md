@@ -927,11 +927,13 @@ differs.
   page from explorer-model's views, and `source.rs` names every RPC method in a closed
   `ReadCall`, so nothing from IPC picks a method.
 - **Transaction detail.** The outputs a transaction's inputs spend come from its block at
-  verbosity 3, cached whole by hash, or from the earlier transactions (16 at once, all on
-  request). A block of up to 256 transactions and 512 KB is read whole for its table, which
-  brings every fee; a bigger one row by row, its rows' fees in a second ask. A request with
-  `trace` has a channel of its own on which each read it takes reports its method,
-  parameters, time, size and whether the cache answered; the cookie is never part of it.
+  verbosity 3, cached whole by hash, or from the earlier transactions (16 at once, the rest
+  on request, also when a read failed). A block of up to 256 transactions and 512 KB is read
+  whole for its table, which brings every fee; a bigger one, or one whose size zebrad does
+  not report, row by row, its rows' fees in a second ask whose reads wait on the prefetch
+  lane. A request with `trace` has a channel of its own on which each read it takes reports
+  its method, parameters as sent, time, size, whether the cache answered and how it ended
+  (answered, not found, an error, no answer); the cookie is never part of it.
 - **Reads only when asked.** Nothing is read until a page asks, and the pages ask only
   once the tab has been opened. The UI sends `Interest` when the tab or the document is
   shown or hidden; while shown and at the tip, the actor polls `getbestblockheightandhash`
@@ -946,7 +948,7 @@ differs.
   line with Show RPC, one banner and the hover card) and `ui/src/explorer/` holds the pages
   (Chain, Block, Transaction, Search), their parts, text and per-node state: the Block page's
   transactions on a virtual list (`virtual_list.rs`, slots reused as it scrolls, rows read
-  as they come into view), a transaction's flow (V6) drawn as SVG from explorer-model's
+  as they come into view, one Tab stop with an active row), a transaction's flow (V6) drawn as SVG from explorer-model's
   `flow` layout (`flow_diagram.rs`), and hover cards (`cards.rs`); `ui/styles/explorer.css`
   uses the `--pool-*` colour tokens. The tab is offered for nodes that keep the chain
   (`NodeKind::has_explorer`), and amounts are in ZEC, or TAZ on Testnet, or in zatoshis, with
@@ -957,8 +959,10 @@ differs.
   call (`mock/explorer/reads.rs`), for the first node only as the backend does (`?herd`'s
   other nodes get its answer), and the dashboard's details read the same chain. Every
   transparent input of the synthetic chain spends an output it has, so fees worked out from
-  spent outputs are the ones paid; `?explorer=big` adds 4,600 transactions to every tenth
-  block. The mock's zebrad reports
+  spent outputs are the ones paid, and every transaction pays ZIP 317's fee for its logical
+  actions but one in every hundredth block; `?explorer=big` adds 4,600 transactions to every
+  tenth block, and `?rowsfail` fails the first read of some pages of its rows. The mock's
+  zebrad reports
   its node's network as it was at its start, so a network change shows `OtherNetwork` until
   a restart, which gives a new chain on the new network.
 
