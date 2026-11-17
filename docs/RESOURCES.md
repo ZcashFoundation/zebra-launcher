@@ -1657,11 +1657,13 @@ Each phase is one pull request that ships on its own, with screenshots from the 
    - `HealthInput` gains `resources: ResourceInput` in this phase, with the node's sample and
      history and the computer's sample and history, for the Copy summary lines. The node's
      line adds the commit charge on Windows and names the I/O as the card does (`Disk 35.0
-     MB/s read, 95.0 MB/s written`); a stopped node's is the card's last-run line. The
-     computer's line is the card's footer line, so it has the busy share, swap, commit and
-     pressure; its free space comes with phase 5. The lines come from the card's helpers (the
-     dashboard's `resources` module is crate-visible for that), so the summary cannot
-     disagree with the card.
+     MB/s read, 95.0 MB/s written`). Without a live sample it is the card's line under the
+     tiles (`idle_line`, with the node's pid and `root_name`): the last run's line once the
+     node stopped, and "Not measured until zebrad's next run" while it runs on after a
+     reader panic. The computer's line is the card's footer line, so it has the busy share,
+     swap, commit and pressure; its free space comes with phase 5. The lines come from the
+     card's helpers (the dashboard's `resources` module is crate-visible for that), so the
+     summary cannot disagree with the card.
    - `?backfill` also puts the mock's zebrad in Running at once, with the run started 45
      minutes before the load; its statistics start at the load. The 40 minutes of samples
      reach each new listener before the live ones. With `?herd` the backfilled computer

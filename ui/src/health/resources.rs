@@ -21,7 +21,7 @@ use crate::{
         Episode, MachineHistory, VOLUME_GAP, available_share, commit_share, volume_fresh,
     },
     metrics_history::names,
-    pages::dashboard::resources::{last_run_text, machine_text},
+    pages::dashboard::resources::{idle_line, machine_text, root_name},
     resource_history::{RATE_WINDOW, ResourceHistory},
 };
 
@@ -120,17 +120,22 @@ pub struct ResourceInput<'a> {
 
 impl ResourceInput<'_> {
     /// The copied summary's lines, after the state on disk: the node's processes over the last
-    /// minute (its last run once it stopped), and the computer as the card's footer has it.
+    /// minute, or without a live sample the card's line ([`idle_line`]: the last run once it
+    /// stopped, and not measured while the node `pid` runs on after a reader panic); and the
+    /// computer as the card's footer has it.
     ///
     /// `Resources: 5.6 cores (70 % of 8) · 6.1 GiB, peak 6.4 GiB · 1 process · Disk 35.0 MB/s
     /// read, 95.0 MB/s written`
-    pub fn summary_lines(&self, now: SystemTime) -> Vec<String> {
+    pub fn summary_lines(&self, now: SystemTime, pid: Option<u32>) -> Vec<String> {
         let mut lines = Vec::with_capacity(2);
         match self.node {
             Some(sample) => lines.push(format!("Resources: {}", self.node_text(sample, now))),
             None => {
-                if let Some(summary) = self.history.last_run() {
-                    lines.push(format!("Resources: {}", last_run_text(&summary)));
+                let latest = self.history.latest();
+                let root = root_name(self.info, latest);
+                if let Some(line) = idle_line(pid, latest, self.history.last_run().as_ref(), &root)
+                {
+                    lines.push(format!("Resources: {line}"));
                 }
             }
         }

@@ -1173,7 +1173,7 @@ pub fn summary_text(input: &HealthInput<'_>, verdict: &Verdict) -> String {
     if let Some(disk) = facts.metric_count(names::DISK_BYTES) {
         lines.push(format!("State on disk: {}", bytes(disk)));
     }
-    lines.extend(input.resources.summary_lines(now));
+    lines.extend(input.resources.summary_lines(now, status.pid));
 
     let mut ports = Vec::new();
     if let Some(addr) = status.rpc_addr {
@@ -3077,6 +3077,7 @@ mod tests {
         );
         // Stopped: the last run, and the computer as it is.
         scene.status.phase = Phase::Stopped;
+        scene.status.pid = None;
         scene.resources = None;
         let summary = scene.summary();
         assert!(
@@ -3085,6 +3086,18 @@ mod tests {
             ),
             "{summary}"
         );
+        // Running on after the resource reader panicked: not measured, as the card says, and
+        // not a last run.
+        let mut scene = Scene::syncing(1200);
+        scene.sampled(1100, 1200, 5_046_586_573);
+        scene.resources = None;
+        assert_eq!(scene.status.pid, Some(4242));
+        let summary = scene.summary();
+        assert!(
+            summary.contains("Resources: Not measured until zebrad's next run\n"),
+            "{summary}"
+        );
+        assert!(!summary.contains("last run"), "{summary}");
         // Nothing measured: no lines.
         let summary = Scene::syncing(1200).summary();
         assert!(!summary.contains("Resources:"), "{summary}");
