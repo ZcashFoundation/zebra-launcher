@@ -3,13 +3,14 @@
 
 use std::{future::Future, net::SocketAddr, path::PathBuf, sync::Arc};
 
-use explorer_model::shapes::{BestBlock, BlockV1, Header, Subsidy, Tx};
+use explorer_model::shapes::{BestBlock, BlockV1, BlockV3, Header, Subsidy, Tx};
 use launcher_types::explorer::{BlockHash, BlockId, TxId};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 
-use crate::rpc::{OwnedSession, REQUEST_TIMEOUT, RpcClient, RpcError};
+use super::sched::HEAVY;
+use crate::rpc::{HEAVY_REQUEST_TIMEOUT, OwnedSession, REQUEST_TIMEOUT, RpcClient, RpcError};
 
 /// One read of the chain. Every call the explorer makes is one of these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -18,6 +19,9 @@ pub(crate) enum ReadCall {
     Best,
     /// `getblock <id> 1`.
     Block(BlockId),
+    /// `getblock <hash> 3`: every transaction, with the outputs its inputs spend. Heavy: zebrad
+    /// reads every distinct parent.
+    BlockV3(BlockHash),
     /// `getblockhash <height>`.
     BlockHash(u32),
     /// `getblockheader <id> true`.
@@ -33,7 +37,7 @@ impl ReadCall {
     pub(crate) fn method(self) -> &'static str {
         match self {
             ReadCall::Best => "getbestblockheightandhash",
-            ReadCall::Block(_) => "getblock",
+            ReadCall::Block(_) | ReadCall::BlockV3(_) => "getblock",
             ReadCall::BlockHash(_) => "getblockhash",
             ReadCall::Header(_) => "getblockheader",
             ReadCall::Tx(_) => "getrawtransaction",
@@ -47,10 +51,28 @@ impl ReadCall {
         match self {
             ReadCall::Best => json!([]),
             ReadCall::Block(id) => json!([id.to_string(), 1]),
+            ReadCall::BlockV3(hash) => json!([hash.to_hex(), 3]),
             ReadCall::BlockHash(height) => json!([height]),
             ReadCall::Header(id) => json!([id.to_string(), true]),
             ReadCall::Tx(txid) => json!([txid.to_hex(), 1]),
             ReadCall::Subsidy(height) => json!([height]),
+        }
+    }
+
+    /// What the call weighs against the explorer's limits: a heavy read, [`HEAVY`]; any other,
+    /// one.
+    pub(crate) fn weight(self) -> u32 {
+        match self {
+            ReadCall::BlockV3(_) => HEAVY,
+            _ => 1,
+        }
+    }
+
+    /// How long the node may take.
+    fn timeout(self) -> std::time::Duration {
+        match self {
+            ReadCall::BlockV3(_) => HEAVY_REQUEST_TIMEOUT,
+            _ => REQUEST_TIMEOUT,
         }
     }
 }
@@ -60,6 +82,7 @@ impl ReadCall {
 pub(crate) enum ReadResult {
     Best(BestBlock),
     Block(Arc<BlockV1>),
+    BlockV3(Arc<BlockV3>),
     BlockHash(BlockHash),
     Header(Header),
     Tx(Arc<Tx>),
@@ -103,9 +126,16 @@ impl SourceError {
     }
 }
 
+/// A read's answer, and its size in bytes when the source knows it.
+#[derive(Clone, Debug)]
+pub(crate) struct Answer {
+    pub(crate) result: ReadResult,
+    pub(crate) bytes: Option<u32>,
+}
+
 /// Reads the chain. The explorer's actor holds one per node run; tests use a synthetic one.
 pub(crate) trait ChainSource: Clone + Send + Sync + 'static {
-    fn read(&self, call: ReadCall) -> impl Future<Output = Result<ReadResult, SourceError>> + Send;
+    fn read(&self, call: ReadCall) -> impl Future<Output = Result<Answer, SourceError>> + Send;
 }
 
 /// A [`ChainSource`] over zebrad's cookie-authenticated RPC. The cookie is read on the first
@@ -124,29 +154,38 @@ impl RpcSource {
         })
     }
 
-    async fn call<T: DeserializeOwned>(&self, call: ReadCall) -> Result<T, SourceError> {
+    async fn call<T: DeserializeOwned>(
+        &self,
+        call: ReadCall,
+        wrap: impl FnOnce(T) -> ReadResult,
+    ) -> Result<Answer, SourceError> {
         let session = self
             .session
             .get_or_try_init(|| self.client.owned_session())
             .await
             .map_err(SourceError::from_rpc)?;
-        session
-            .call_timeout(call.method(), call.params(), REQUEST_TIMEOUT)
+        let (value, bytes) = session
+            .call_sized(call.method(), call.params(), call.timeout())
             .await
-            .map_err(SourceError::from_rpc)
+            .map_err(SourceError::from_rpc)?;
+        Ok(Answer {
+            result: wrap(value),
+            bytes: u32::try_from(bytes).ok(),
+        })
     }
 }
 
 impl ChainSource for RpcSource {
-    async fn read(&self, call: ReadCall) -> Result<ReadResult, SourceError> {
-        Ok(match call {
-            ReadCall::Best => ReadResult::Best(self.call(call).await?),
-            ReadCall::Block(_) => ReadResult::Block(Arc::new(self.call(call).await?)),
-            ReadCall::BlockHash(_) => ReadResult::BlockHash(self.call(call).await?),
-            ReadCall::Header(_) => ReadResult::Header(self.call(call).await?),
-            ReadCall::Tx(_) => ReadResult::Tx(Arc::new(self.call(call).await?)),
-            ReadCall::Subsidy(_) => ReadResult::Subsidy(Arc::new(self.call(call).await?)),
-        })
+    async fn read(&self, call: ReadCall) -> Result<Answer, SourceError> {
+        match call {
+            ReadCall::Best => self.call(call, ReadResult::Best).await,
+            ReadCall::Block(_) => self.call(call, |b| ReadResult::Block(Arc::new(b))).await,
+            ReadCall::BlockV3(_) => self.call(call, |b| ReadResult::BlockV3(Arc::new(b))).await,
+            ReadCall::BlockHash(_) => self.call(call, ReadResult::BlockHash).await,
+            ReadCall::Header(_) => self.call(call, ReadResult::Header).await,
+            ReadCall::Tx(_) => self.call(call, |tx| ReadResult::Tx(Arc::new(tx))).await,
+            ReadCall::Subsidy(_) => self.call(call, |s| ReadResult::Subsidy(Arc::new(s))).await,
+        }
     }
 }
 
@@ -171,6 +210,11 @@ mod tests {
                 "getblock",
                 json!([hash.to_hex(), 1]),
             ),
+            (
+                ReadCall::BlockV3(hash),
+                "getblock",
+                json!([hash.to_hex(), 3]),
+            ),
             (ReadCall::BlockHash(7), "getblockhash", json!([7])),
             (
                 ReadCall::Header(BlockId::Height(5)),
@@ -187,6 +231,16 @@ mod tests {
         for (call, method, params) in cases {
             assert_eq!(call.method(), method);
             assert_eq!(call.params(), params);
+            let heavy = matches!(call, ReadCall::BlockV3(_));
+            assert_eq!(call.weight(), if heavy { HEAVY } else { 1 });
+            assert_eq!(
+                call.timeout(),
+                if heavy {
+                    HEAVY_REQUEST_TIMEOUT
+                } else {
+                    REQUEST_TIMEOUT
+                }
+            );
         }
     }
 

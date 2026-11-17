@@ -609,7 +609,7 @@ pub struct TxPage {
     pub fee: Option<Shown>,
     pub actions: LogicalActions,
     /// Inputs whose spent outputs were not read: a transaction spending from many earlier
-    /// ones has the rest read on request.
+    /// ones has the rest read on request ([`ExplorerRequest::Tx`]'s `resolve`).
     pub unresolved: u32,
     /// Whether asking with `resolve` would read more of them.
     pub resolvable: bool,
@@ -693,6 +693,8 @@ pub struct SourceCall {
     pub bytes: Option<u32>,
     /// The explorer answered from memory.
     pub cached: bool,
+    /// The node answered; `false` when it reported an error or did not answer.
+    pub ok: bool,
 }
 
 /// Where a query leads.
@@ -880,22 +882,48 @@ pub enum ExplorerRequest {
     Chain { with_fees: bool },
     /// The Block page; a height above the tip answers [`ExplorerResponse::Future`].
     Block { id: BlockId },
-    /// A page of a block's transaction ids.
+    /// A page of a block's transaction rows, at most 200. A small block is read whole at
+    /// once; a big one row by row, and without `with_fees` the page answers before the outputs
+    /// the rows spend are read ([`TxRowPage::fees_pending`]).
     BlockTxs {
         hash: BlockHash,
         offset: u32,
         limit: u16,
+        #[serde(default)]
+        with_fees: bool,
     },
-    /// The Transaction page.
-    Tx { txid: TxId },
+    /// The Transaction page, with the outputs its inputs spend: up to 16 earlier transactions,
+    /// or with `resolve` all of them (up to 1,000; 200 for a waiting one).
+    Tx {
+        txid: TxId,
+        #[serde(default)]
+        resolve: bool,
+    },
     /// Where a search query leads.
     Resolve { query: String },
+    /// A hover card's facts, read after the page's own reads.
+    Card { target: CardTarget },
+    /// Reads ahead what a page may soon show, after the page's own reads. Answers at once.
+    Prefetch { targets: Vec<PrefetchTarget> },
 }
 
 /// A call of the `explorer` command.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExplorerCall {
     pub request: ExplorerRequest,
+    /// List the reads the answer took ([`ExplorerReply::sources`]), for Show RPC.
+    #[serde(default)]
+    pub trace: bool,
+}
+
+impl ExplorerCall {
+    /// `request`, without the reads listed.
+    pub fn new(request: ExplorerRequest) -> Self {
+        Self {
+            request,
+            trace: false,
+        }
+    }
 }
 
 /// The answer to an [`ExplorerCall`].
@@ -904,6 +932,9 @@ pub struct ExplorerReply {
     /// The chain the answer was read against.
     pub chain: Option<ChainView>,
     pub response: ExplorerResponse,
+    /// With `trace`, the reads the answer took, in the order they ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<Vec<SourceCall>>,
 }
 
 /// One answer per request.
@@ -916,9 +947,10 @@ pub enum ExplorerResponse {
     Chain(ChainPage),
     Block(Box<BlockPage>),
     Future(FutureBlock),
-    BlockTxs(TxidPage),
+    BlockTxs(TxRowPage),
     Tx(Box<TxPage>),
     Resolve(Resolution),
+    Card(Card),
 }
 
 /// Why an explorer call failed.
@@ -1131,6 +1163,57 @@ mod tests {
             })
             .unwrap(),
             json!({"state": "other_network", "network": "testnet"})
+        );
+    }
+
+    #[test]
+    fn calls_and_replies_without_a_trace_keep_their_shape() {
+        // A call from an older UI has no `trace`, and a reply without one no `sources`.
+        let call: ExplorerCall =
+            serde_json::from_value(json!({"request": {"q": "status"}})).unwrap();
+        assert_eq!(call, ExplorerCall::new(ExplorerRequest::Status));
+        let reply = ExplorerReply {
+            chain: None,
+            response: ExplorerResponse::Done,
+            sources: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&reply).unwrap(),
+            json!({"chain": null, "response": {"r": "done"}})
+        );
+        // `resolve` and `with_fees` default to false.
+        let hash = Hash32::parse(HASH).unwrap();
+        let tx: ExplorerRequest = serde_json::from_value(json!({"q": "tx", "txid": HASH})).unwrap();
+        assert_eq!(
+            tx,
+            ExplorerRequest::Tx {
+                txid: hash,
+                resolve: false
+            }
+        );
+        let rows: ExplorerRequest = serde_json::from_value(
+            json!({"q": "block_txs", "hash": HASH, "offset": 0, "limit": 25}),
+        )
+        .unwrap();
+        assert_eq!(
+            rows,
+            ExplorerRequest::BlockTxs {
+                hash,
+                offset: 0,
+                limit: 25,
+                with_fees: false
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(CardTarget::Tx { txid: hash }).unwrap(),
+            json!({"card": "tx", "txid": HASH})
+        );
+        assert_eq!(
+            serde_json::to_value(PrefetchTarget::Block {
+                id: BlockId::Height(3)
+            })
+            .unwrap(),
+            json!({"what": "block", "id": {"by": "height", "value": 3}})
         );
     }
 

@@ -440,6 +440,7 @@ fn Txids(
                 hash,
                 offset,
                 limit: 200,
+                with_fees: false,
             },
             0,
         ))
@@ -450,7 +451,11 @@ fn Txids(
         }
         match answer.value.get() {
             Loaded::Ready(reply) => match reply.response {
-                ExplorerResponse::BlockTxs(page) => Some(page),
+                ExplorerResponse::BlockTxs(page) => Some(TxidPage {
+                    offset: page.offset,
+                    total: page.total,
+                    txids: page.rows.iter().map(|row| row.txid).collect(),
+                }),
                 _ => None,
             },
             _ => None,

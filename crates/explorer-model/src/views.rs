@@ -17,6 +17,56 @@ use crate::{
 /// The most transaction ids one page holds.
 pub const TXIDS_PER_PAGE: u16 = 200;
 
+/// A block is read whole, at verbosity 3, up to this many transactions...
+pub const WHOLE_BLOCK_TXS: usize = 256;
+/// ... and this many bytes; a bigger one row by row.
+pub const WHOLE_BLOCK_BYTES: i64 = 512 * 1024;
+/// The earlier transactions a Transaction page reads for its inputs without being asked to
+/// resolve them all.
+pub const PARENTS_AT_ONCE: usize = 16;
+/// With `resolve`, up to this many for a mined transaction...
+pub const RESOLVED_PARENTS: usize = 1_000;
+/// ... and this many for a waiting one.
+pub const RESOLVED_WAITING_PARENTS: usize = 200;
+
+/// Whether `block` is read whole at verbosity 3 rather than row by row: a small one.
+pub fn read_whole(block: &BlockV1) -> bool {
+    block.tx.len() <= WHOLE_BLOCK_TXS && block.size.is_none_or(|size| size <= WHOLE_BLOCK_BYTES)
+}
+
+/// The earlier transactions `tx` spends from whose outputs are not in `spent` yet, each once,
+/// in the order its inputs name them.
+pub fn missing_parents(
+    tx: &Tx,
+    spent: &[Option<SpentOutput>],
+) -> Vec<launcher_types::explorer::TxId> {
+    let mut seen = std::collections::HashSet::new();
+    tx.vin
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| spent.get(*index).is_none_or(Option::is_none))
+        .filter_map(|(_, input)| input.txid)
+        .filter(|txid| seen.insert(*txid))
+        .collect()
+}
+
+/// The outputs `tx`'s inputs spend, from the earlier transactions in `parents`, keeping those
+/// in `spent` already.
+pub fn fill_spent(
+    tx: &Tx,
+    spent: &mut [Option<SpentOutput>],
+    parent: impl Fn(&launcher_types::explorer::TxId) -> Option<std::sync::Arc<Tx>>,
+) {
+    for (slot, input) in spent.iter_mut().zip(&tx.vin) {
+        if slot.is_none()
+            && let (Some(txid), Some(vout)) = (input.txid, input.vout)
+            && let Some(parent) = parent(&txid)
+        {
+            *slot = spent_from_parent(&parent, vout);
+        }
+    }
+}
+
 /// A block in a list, from the block, its parent and its coinbase.
 pub fn block_summary(
     block: &BlockV1,
@@ -831,6 +881,59 @@ mod tests {
             ..parent
         };
         assert_eq!(spent_from_parent(&waiting, 0).unwrap().height, None);
+    }
+
+    #[test]
+    fn parents_are_named_once_and_small_blocks_are_read_whole() {
+        let other = TxIn {
+            txid: Some(Hash32([4; 32])),
+            ..input()
+        };
+        let tx = Tx {
+            vin: vec![input(), other.clone(), input(), other],
+            ..tx()
+        };
+        assert_eq!(
+            missing_parents(&tx, &[]),
+            vec![Hash32([3; 32]), Hash32([4; 32])]
+        );
+        let known = [Some(spent(1)), None, Some(spent(1)), None];
+        assert_eq!(missing_parents(&tx, &known), vec![Hash32([4; 32])]);
+        let mut slots = known.clone();
+        let parent = Tx {
+            vout: vec![output(9)],
+            ..tx.clone()
+        };
+        fill_spent(&tx, &mut slots, |txid| {
+            (*txid == Hash32([4; 32])).then(|| std::sync::Arc::new(parent.clone()))
+        });
+        assert_eq!(slots[1].as_ref().map(|spent| spent.zat), Some(9));
+        assert_eq!(slots[0], Some(spent(1)), "kept");
+        let block = |txs: u32, size: Option<i64>| BlockV1 {
+            hash: Hash32([0; 32]),
+            confirmations: 1,
+            size,
+            height: Some(1),
+            version: None,
+            merkle_root: None,
+            block_commitments: None,
+            final_sapling_root: None,
+            final_orchard_root: None,
+            tx: (0..txs).map(|i| Hash32([i as u8; 32])).collect(),
+            time: None,
+            nonce: None,
+            bits: None,
+            difficulty: None,
+            chain_supply: None,
+            value_pools: None,
+            trees: Default::default(),
+            previous: None,
+            next: None,
+        };
+        assert!(read_whole(&block(256, Some(512 * 1024))));
+        assert!(read_whole(&block(10, None)), "a size zebrad does not know");
+        assert!(!read_whole(&block(257, Some(1_000))));
+        assert!(!read_whole(&block(10, Some(600_000))));
     }
 
     #[test]

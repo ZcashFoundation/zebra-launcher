@@ -43,7 +43,10 @@ pub fn TxPage(
         let (epoch, height) = tip();
         let height = if waiting.get() { height } else { 0 };
         Some((
-            ExplorerRequest::Tx { txid },
+            ExplorerRequest::Tx {
+                txid,
+                resolve: false,
+            },
             (epoch << 32) | u64::from(height),
         ))
     });

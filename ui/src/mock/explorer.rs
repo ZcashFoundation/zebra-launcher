@@ -28,7 +28,7 @@ use launcher_types::{
     explorer::{
         BlockHash, BlockId, ChainPage, ChainView, ExplorerCall, ExplorerError, ExplorerErrorKind,
         ExplorerLive, ExplorerLiveEvent, ExplorerReply, ExplorerRequest, ExplorerResponse,
-        ExplorerRoute, LiveState, NotFoundHint, ReorgNotice, Resolution,
+        ExplorerRoute, LiveState, NotFoundHint, ReorgNotice, Resolution, RowsRead, TxRowPage,
     },
 };
 use leptos::prelude::*;
@@ -402,11 +402,13 @@ pub async fn handle(node: &NodeId, call: ExplorerCall) -> Result<ExplorerReply, 
             Ok(ExplorerReply {
                 chain: live.tip,
                 response: ExplorerResponse::Status(live),
+                sources: None,
             })
         }
         ExplorerRequest::Interest { .. } => Ok(ExplorerReply {
             chain: None,
             response: ExplorerResponse::Done,
+            sources: None,
         }),
         request => {
             if !view.running {
@@ -427,7 +429,11 @@ pub async fn handle(node: &NodeId, call: ExplorerCall) -> Result<ExplorerReply, 
                     )),
                     request => answer(&explorer.chain, &view, request),
                 };
-                response.map(|response| ExplorerReply { chain, response })
+                response.map(|response| ExplorerReply {
+                    chain,
+                    response,
+                    sources: None,
+                })
             })?
         }
     }
@@ -473,11 +479,31 @@ fn answer(
             hash,
             offset,
             limit,
+            ..
         } => chain
             .block(BlockId::Hash(hash))
-            .map(|block| ExplorerResponse::BlockTxs(views::txid_page(&block, offset, limit)))
+            .map(|block| {
+                let height = block.height.unwrap_or(0);
+                let page = views::txid_page(&block, offset, limit);
+                let rows = page
+                    .txids
+                    .iter()
+                    .zip(page.offset..)
+                    .filter_map(|(txid, index)| {
+                        let tx = chain.tx(txid)?;
+                        Some(views::tx_row(&tx, index, &[], height, heights))
+                    })
+                    .collect();
+                ExplorerResponse::BlockTxs(TxRowPage {
+                    offset: page.offset,
+                    total: page.total,
+                    rows,
+                    read: RowsRead::OneByOne,
+                    fees_pending: false,
+                })
+            })
             .ok_or_else(|| not_found("Not in your node's best chain")),
-        ExplorerRequest::Tx { txid } => {
+        ExplorerRequest::Tx { txid, .. } => {
             let tx = chain.tx(&txid).ok_or_else(|| {
                 not_found(
                     "Not in your node's chain or mempool; it only knows transactions it has \
@@ -500,7 +526,13 @@ fn answer(
             view.network,
             &query,
         ))),
-        ExplorerRequest::Status | ExplorerRequest::Interest { .. } => Ok(ExplorerResponse::Done),
+        ExplorerRequest::Card { .. } => Err(ExplorerError::new(
+            ExplorerErrorKind::Internal,
+            "the mock has no hover cards yet",
+        )),
+        ExplorerRequest::Status
+        | ExplorerRequest::Interest { .. }
+        | ExplorerRequest::Prefetch { .. } => Ok(ExplorerResponse::Done),
     }
 }
 

@@ -714,7 +714,7 @@ pub async fn explorer(
     node: &NodeId,
     request: ExplorerRequest,
 ) -> Result<ExplorerReply, ExplorerError> {
-    let call = ExplorerCall { request };
+    let call = ExplorerCall::new(request);
     if !is_tauri() {
         return match mock::explorer::handle(node, call).await {
             Ok(reply) => wire(reply).map_err(explorer_error),
