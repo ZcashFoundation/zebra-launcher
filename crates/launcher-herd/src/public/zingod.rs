@@ -865,6 +865,20 @@ pub fn problem(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReason
     };
     let runner = &zingod.runner;
     let start = start_facts(spec, facts);
+    // Zeal's own start failed before zingod ran, under this plan: the supervisor's phase is
+    // still the last run's, a crash loop's for a Try again after one, and zingod's log has
+    // nothing about it.
+    if plan_run(&start).is_ok()
+        && let Some((path, error)) = &runner.start_error
+    {
+        return Some(DegradedReason::IndexerFailed {
+            class: ExitClass::SpawnFailed,
+            detail: FailDetail::Folder {
+                path: path.clone(),
+                error: error.clone(),
+            },
+        });
+    }
     match want(&start, runner) {
         Want::Stop(blocked) => match blocked {
             Blocked::Untested => Some(DegradedReason::IndexerUntested {
@@ -924,16 +938,6 @@ pub fn problem(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReason
                     class: ExitClass::DbLocked,
                     detail: FailDetail::Dir {
                         path: zingod.dir.clone(),
-                    },
-                });
-            }
-            // zingod never ran: its log has nothing about it.
-            if let Some((path, error)) = &runner.start_error {
-                return Some(DegradedReason::IndexerFailed {
-                    class: ExitClass::SpawnFailed,
-                    detail: FailDetail::Folder {
-                        path: path.clone(),
-                        error: error.clone(),
                     },
                 });
             }
@@ -2738,6 +2742,28 @@ mod service_tests {
                     detail: FailDetail::Folder {
                         path: dir().join("home"),
                         error: "Permission denied (os error 13)".into(),
+                    },
+                },
+            ),
+            (
+                "a folder Zeal can't create, at a Try again after a crash loop",
+                |f| {
+                    let runner = &mut zingod(f).runner;
+                    runner.phase = Phase::Failed {
+                        class: ExitClass::Crash,
+                    };
+                    runner.status = None;
+                    runner.listening = None;
+                    runner.start_error = Some((
+                        dir().join("home"),
+                        "Read-only file system (os error 30)".into(),
+                    ));
+                },
+                DegradedReason::IndexerFailed {
+                    class: ExitClass::SpawnFailed,
+                    detail: FailDetail::Folder {
+                        path: dir().join("home"),
+                        error: "Read-only file system (os error 30)".into(),
                     },
                 },
             ),
