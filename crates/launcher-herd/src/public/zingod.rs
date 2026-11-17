@@ -529,6 +529,21 @@ impl CrossCheck {
     }
 }
 
+/// The cross-check to keep after `check` at `now`: a skipped height (zingod a block ahead of
+/// zebrad's last reading, common just after a block) keeps the last match or mismatch with the
+/// new time, so it doesn't undo a pass until the next check.
+pub fn keep_tip(
+    last: Option<&Checked<TipCheck>>,
+    check: TipCheck,
+    now: SystemTime,
+) -> Checked<TipCheck> {
+    let result = match (check, last) {
+        (TipCheck::Skipped, Some(last)) => last.result,
+        _ => check,
+    };
+    Checked { at: now, result }
+}
+
 /// `/status` reads in a row without an answer that make zingod not answering.
 pub const NO_ANSWER_MISSES: u32 = 3;
 
@@ -1635,6 +1650,26 @@ mod tests {
         assert!(!skipped.observe(Mismatch, at(120)));
         assert!(!skipped.observe(Skipped, at(150)));
         assert!(skipped.observe(Mismatch, at(200)));
+    }
+
+    #[test]
+    fn a_skipped_height_keeps_the_last_result() {
+        use TipCheck::*;
+        let first = keep_tip(None, Skipped, at(0));
+        assert_eq!(first.result, Skipped, "nothing to keep");
+        let matched = keep_tip(Some(&first), Match, at(60));
+        assert_eq!(matched.result, Match);
+        let kept = keep_tip(Some(&matched), Skipped, at(120));
+        assert_eq!(
+            kept,
+            Checked {
+                at: at(120),
+                result: Match
+            }
+        );
+        let mismatch = keep_tip(Some(&kept), Mismatch, at(180));
+        assert_eq!(mismatch.result, Mismatch);
+        assert_eq!(keep_tip(Some(&mismatch), Skipped, at(240)).result, Mismatch);
     }
 
     fn status(state: IndexerState, answering: Option<u32>) -> IndexerStatus {

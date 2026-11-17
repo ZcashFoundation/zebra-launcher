@@ -900,7 +900,8 @@ answers 503 through a whole first sync, so Zeal doesn't read it.
   order, so reversed) with zebrad's `getblockhash` at that height, asked through launcher-core's
   RPC client with zebrad's cookie. Three different answers in a
   row, spanning at least 3 minutes, are `ChainMismatch`: zingod stops and Rebuild is offered. A
-  reorg clears sooner, and a height zebrad doesn't have yet is skipped. `/status` `chain.tip`
+  reorg clears sooner, and a height zebrad doesn't have yet is skipped, keeping the last match
+  or mismatch, so a check just after a block doesn't undo a pass. `/status` `chain.tip`
   can't do this job: it is the tip the validator vouches for, so it always equals zebrad's. The
   same-spec rule prevents the known cause, and zingod's own `Diverged` exit catches an index that
   no longer extends the chain; the cross-check is the cheap backstop.

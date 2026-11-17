@@ -1176,10 +1176,8 @@ impl Actor {
                     return;
                 };
                 let now = SystemTime::now();
-                self.zingod.tip = Some(Checked {
-                    at: now,
-                    result: check,
-                });
+                self.zingod.tip =
+                    Some(zingod_rules::keep_tip(self.zingod.tip.as_ref(), check, now));
                 if self.zingod.cross.observe(check, now) && self.zingod.mismatch.is_none() {
                     tracing::warn!(target: "zeal::public", height, "zingod's chain doesn't match zebrad's; stopping zingod");
                     self.door_unavailable();
