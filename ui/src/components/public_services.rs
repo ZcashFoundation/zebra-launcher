@@ -263,6 +263,14 @@ fn LightServer(
         act(busy, note, agree_with(current, backend));
     });
     let cancel = Callback::new(move |()| choosing.set(false));
+    // The buttons beside a zingod problem, keyed on what they are: the status changes every
+    // second, and rebuilding them would close a Rebuild… confirmation and clear their note.
+    let degraded_actions = Memo::new(move |_| {
+        status.with(|s| match s.as_ref().map(|s| &s.state) {
+            Some(PublicState::Degraded { why }) => indexer_actions(why),
+            _ => &[],
+        })
+    });
     let network =
         Memo::new(move |_| status.with(|s| s.as_ref().map_or(Network::Mainnet, |s| s.network)));
     let in_scope = move || state.network.get() == network.get();
@@ -289,10 +297,8 @@ fn LightServer(
                     })
             }}
             {move || {
-                status.get().and_then(|status| match status.state {
-                    PublicState::Degraded { why } => Some(view! { <IndexerActions why /> }),
-                    _ => None,
-                })
+                let actions = degraded_actions.get();
+                (!actions.is_empty()).then(|| view! { <IndexerActions actions /> })
             }}
             {move || note.get().map(|note| view! { <p class="error">{note}</p> })}
             <Show
@@ -459,7 +465,8 @@ fn StepBody(step: StepId, status: Memo<Option<PublicStatus>>) -> impl IntoView {
         let current = status.with_untracked(|s| s.as_ref().map(|s| s.backend));
         act(busy, note, agree_with(current, backend));
     });
-    // The zingod problem the Service step shows, for its buttons.
+    // The zingod problem the Service step shows, for its buttons, which are keyed on what they
+    // are, as the panel's.
     let problem = move || {
         status.with(|s| {
             s.as_ref()
@@ -477,10 +484,14 @@ fn StepBody(step: StepId, status: Memo<Option<PublicStatus>>) -> impl IntoView {
                 })
         })
     };
+    let problem_actions = Memo::new(move |_| problem().as_ref().map_or(&[][..], indexer_actions));
     let body = match step {
         StepId::Consent => view! { <ConsentScreen status busy on_agree=agree /> }.into_any(),
         StepId::Service => view! {
-            {move || problem().map(|why| view! { <IndexerActions why /> })}
+            {move || {
+                let actions = problem_actions.get();
+                (!actions.is_empty()).then(|| view! { <IndexerActions actions /> })
+            }}
             <div class="buttons">
                 <button type="button" disabled=busy on:click=recheck>"Check again"</button>
             </div>
@@ -666,8 +677,7 @@ fn ConsentScreen(
 
 /// The buttons beside a zingod problem's line: the log, Try again, Rebuild or the diagnostics.
 #[component]
-fn IndexerActions(why: DegradedReason) -> impl IntoView {
-    let actions = indexer_actions(&why);
+fn IndexerActions(actions: &'static [IndexerAction]) -> impl IntoView {
     let busy = RwSignal::new(false);
     let note = RwSignal::new(None::<String>);
     let rebuilding = RwSignal::new(false);
