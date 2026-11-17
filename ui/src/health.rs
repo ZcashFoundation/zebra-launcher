@@ -15,7 +15,7 @@ use launcher_types::{
     StaleProcessInfo, Status, UpdateInfo, UpdateState, eos_within,
 };
 pub use launcher_types::{Level, NO_PEERS_FOR, STALE_AFTER};
-pub use resources::{ResourceInput, largest_consumer};
+pub use resources::{ResourceInput, memory_carrier};
 
 use crate::{
     charts::{eta_text, percent_1},
@@ -1259,7 +1259,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::{machine_history::MachineHistory, resource_history::ResourceHistory};
+    use crate::{
+        machine_history::MachineHistory,
+        resource_history::{RATE_WINDOW, ResourceHistory},
+    };
     use launcher_types::{MemoryPressure, NodeId};
 
     /// 2026-10-23 19:00:00 UTC: the run started.
@@ -1417,7 +1420,7 @@ mod tests {
         insights: Insights,
         update: Option<UpdateInfo>,
         info: NodeInfo,
-        largest_consumer: bool,
+        carries_memory: bool,
         resources: Option<NodeResources>,
         resource_history: ResourceHistory,
         machine: Option<MachineResources>,
@@ -1441,7 +1444,7 @@ mod tests {
                 insights: insights(&[tracing_started(0, 1)]),
                 update: Some(update(UpdateState::Idle)),
                 info: crate::node_state::placeholder(),
-                largest_consumer: true,
+                carries_memory: true,
                 resources: None,
                 resource_history: ResourceHistory::default(),
                 machine: None,
@@ -1485,7 +1488,7 @@ mod tests {
                 update: self.update.as_ref(),
                 resources: ResourceInput {
                     info: &self.info,
-                    largest_consumer: self.largest_consumer,
+                    carries_memory: self.carries_memory,
                     node: self.resources.as_ref(),
                     history: &self.resource_history,
                     machine: self.machine.as_ref(),
@@ -2584,10 +2587,10 @@ mod tests {
         // A node that uses half the memory or more is offered a restart (zebra#9699).
         scene.resources.as_mut().unwrap().memory_bytes = 9 << 30;
         assert_eq!(scene.verdict().actions, vec![Action::Restart]);
-        // Only the node that uses the most memory carries it.
-        scene.largest_consumer = false;
+        // Only the node that carries the memory verdict shows it.
+        scene.carries_memory = false;
         assert_eq!(scene.verdict().rule, 17);
-        scene.largest_consumer = true;
+        scene.carries_memory = true;
         // A computer sample older than 30 s says nothing.
         scene.now = t(1231);
         assert_ne!(scene.verdict().rule, 20);
@@ -2655,14 +2658,88 @@ mod tests {
             (id("zcashd-mainnet"), None),
             (id("zebrad-testnet"), Some(9 << 30)),
         ];
-        assert!(largest_consumer(&id("zakura-mainnet"), &memory));
+        let zakura = Some(id("zakura-mainnet"));
+        assert_eq!(memory_carrier(&memory, None), zakura, "the first of equals");
+        assert_eq!(memory_carrier(&[], None), None);
+        // The carrier keeps it within the margin, also as the second of equals.
+        let testnet = id("zebrad-testnet");
+        assert_eq!(memory_carrier(&memory, Some(&testnet)), Some(testnet));
+        let zebrad = id("zebrad-mainnet");
+        assert_eq!(memory_carrier(&memory, Some(&zebrad)), zakura, "overtaken");
+        // A carrier without a run passes it on.
+        let zcashd = id("zcashd-mainnet");
+        assert_eq!(memory_carrier(&memory, Some(&zcashd)), zakura);
+        // The margin: 5 % of the carrier's, and at least 256 MiB.
+        let pair = |carrier: u64, other: u64| {
+            memory_carrier(
+                &[
+                    (zebrad.clone(), Some(carrier)),
+                    (id("zakura-mainnet"), Some(other)),
+                ],
+                Some(&zebrad),
+            )
+        };
+        assert_eq!(pair(8 << 30, (8 << 30) + (409 << 20)), Some(zebrad.clone()));
+        assert_eq!(pair(8 << 30, (8 << 30) + (410 << 20)), zakura);
+        assert_eq!(pair(1 << 30, (1 << 30) + (256 << 20)), Some(zebrad.clone()));
+        assert_eq!(pair(1 << 30, (1 << 30) + (257 << 20)), zakura);
+    }
+
+    #[test]
+    fn two_nodes_that_use_about_as_much_do_not_pass_the_memory_verdict_around() {
+        // A's samples alternate between 6.0 and 6.2 GiB, B's stay at 6.1 GiB, on clocks 2 s
+        // apart: their newest samples take turns being the largest, and the carrier stays.
+        let id = |text: &str| NodeId::new(text).unwrap();
+        let (a, b) = (id("zebrad-mainnet"), id("zakura-mainnet"));
+        let gib = |tenths: u64| (tenths << 30) / 10;
+        let sample = |secs: u64, memory: u64| NodeResources {
+            memory_bytes: memory,
+            ..node_sample(secs)
+        };
+        let (mut history_a, mut history_b) =
+            (ResourceHistory::default(), ResourceHistory::default());
+        let mut carrier = None;
+        let mut carriers = Vec::new();
+        let mut newest_largest = Vec::new();
+        for step in 0..60u64 {
+            let secs = 5 * step;
+            let memory_a = if step % 2 == 0 { gib(60) } else { gib(62) };
+            history_a.push(&sample(secs, memory_a));
+            history_b.push(&sample(secs + 2, gib(61)));
+            newest_largest.push(memory_a > gib(61));
+            let memory = [
+                (a.clone(), history_a.memory_mean(RATE_WINDOW)),
+                (b.clone(), history_b.memory_mean(RATE_WINDOW)),
+            ];
+            carrier = memory_carrier(&memory, carrier.as_ref());
+            carriers.push(carrier.clone());
+        }
+        assert!(newest_largest.contains(&true) && newest_largest.contains(&false));
+        // B's first sample was the larger, and B keeps it.
         assert!(
-            !largest_consumer(&id("zebrad-testnet"), &memory),
-            "the first of equals"
+            carriers.iter().all(|carrier| *carrier == Some(b.clone())),
+            "{carriers:?}"
         );
-        assert!(!largest_consumer(&id("zebrad-mainnet"), &memory));
-        assert!(!largest_consumer(&id("zcashd-mainnet"), &memory));
-        assert!(!largest_consumer(&id("zebrad-mainnet"), &[]));
+        // With the memory low, the verdict stays on that node's page throughout.
+        let mut scene = Scene::syncing(1200);
+        scene.sampled(1000, 1200, 644_245_094);
+        for carrier in &carriers {
+            scene.carries_memory = carrier.as_ref() == Some(&scene.info.id);
+            let rule = scene.verdict().rule;
+            assert_eq!(rule == 20, carriers[0].as_ref() == Some(&scene.info.id));
+        }
+        // A overtakes clearly: it takes the verdict.
+        for step in 60..80u64 {
+            let secs = 5 * step;
+            history_a.push(&sample(secs, gib(70)));
+            history_b.push(&sample(secs + 2, gib(61)));
+            let memory = [
+                (a.clone(), history_a.memory_mean(RATE_WINDOW)),
+                (b.clone(), history_b.memory_mean(RATE_WINDOW)),
+            ];
+            carrier = memory_carrier(&memory, carrier.as_ref());
+        }
+        assert_eq!(carrier, Some(a));
     }
 
     #[test]

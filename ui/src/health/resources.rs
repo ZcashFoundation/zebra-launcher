@@ -63,21 +63,42 @@ pub const BEFORE_EXIT: Duration = Duration::from_secs(60);
 /// A reading for [`Episode::current`]: its time and its value, if it has one.
 type Reading = (SystemTime, Option<f64>);
 
-/// Whether `node` uses the most memory among the nodes with a run (`memory`, the newest
-/// sample of each, `None` without a run; the first of equals). The memory verdict goes only
-/// on that node, of either network.
-pub fn largest_consumer(node: &NodeId, memory: &[(NodeId, Option<u64>)]) -> bool {
-    memory
-        .iter()
-        .filter_map(|(id, bytes)| Some((id, (*bytes)?)))
-        .fold(
+/// How much more memory than the node that carries the memory verdict another node must use to
+/// take it: this share of the carrier's, and at least [`CARRIER_MARGIN_BYTES`].
+pub const CARRIER_MARGIN_SHARE: f64 = 0.05;
+pub const CARRIER_MARGIN_BYTES: u64 = 256 << 20;
+
+/// The node that carries the memory verdict, of either network: the one that uses the most
+/// memory (the first of equals). `memory` lists each node in the node list's order with its
+/// mean over the last minute ([`ResourceHistory::memory_mean`]), `None` without a run.
+/// `previous`, the carrier so far, keeps it while it has a run unless another node uses
+/// [`CARRIER_MARGIN_SHARE`] more (at least [`CARRIER_MARGIN_BYTES`]), so two nodes that use
+/// about as much do not pass the verdict back and forth.
+pub fn memory_carrier(
+    memory: &[(NodeId, Option<u64>)],
+    previous: Option<&NodeId>,
+) -> Option<NodeId> {
+    let running = || {
+        memory
+            .iter()
+            .filter_map(|(id, bytes)| Some((id, (*bytes)?)))
+    };
+    let (largest, most) =
+        running().fold(
             None,
             |best: Option<(&NodeId, u64)>, (id, bytes)| match best {
                 Some((_, top)) if top >= bytes => best,
                 _ => Some((id, bytes)),
             },
-        )
-        .is_some_and(|(id, _)| id == node)
+        )?;
+    let held = previous.and_then(|previous| running().find(|(id, _)| *id == previous));
+    if let Some((id, bytes)) = held {
+        let margin = ((bytes as f64 * CARRIER_MARGIN_SHARE) as u64).max(CARRIER_MARGIN_BYTES);
+        if most <= bytes.saturating_add(margin) {
+            return Some(id.clone());
+        }
+    }
+    Some(largest.clone())
 }
 
 /// The resource facts the verdict and the summary read, borrowed.
@@ -85,8 +106,8 @@ pub fn largest_consumer(node: &NodeId, memory: &[(NodeId, Option<u64>)]) -> bool
 pub struct ResourceInput<'a> {
     /// The node: its id names its volume, its name the reasons'.
     pub info: &'a NodeInfo,
-    /// It uses the most memory of the nodes with a run ([`largest_consumer`]).
-    pub largest_consumer: bool,
+    /// It carries the memory verdict ([`memory_carrier`]).
+    pub carries_memory: bool,
     /// The node's newest sample, `None` while it has no run.
     pub node: Option<&'a NodeResources>,
     /// The node's samples since the launcher opened.
@@ -260,7 +281,7 @@ impl Facts<'_> {
     /// Rule 20 at `level`, the problem or the warning, on the node that carries it.
     fn memory(&self, level: Level) -> Option<Verdict> {
         let resources = self.resources();
-        if !resources.largest_consumer {
+        if !resources.carries_memory {
             return None;
         }
         let history = resources.machine_history;

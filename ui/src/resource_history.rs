@@ -438,6 +438,25 @@ impl ResourceHistory {
         ChartData { times, series }
     }
 
+    /// The tree's mean memory over the `span` up to its newest sample, within the newest run:
+    /// steadier than one sample, for choosing the node that carries the memory verdict. `None`
+    /// without a sample.
+    pub fn memory_mean(&self, span: Duration) -> Option<u64> {
+        let newest = self.points.last()?;
+        let cutoff = newest.at.checked_sub(span);
+        let (sum, count) = self
+            .points
+            .iter()
+            .rev()
+            .take_while(|point| {
+                point.run == newest.run && cutoff.is_none_or(|cutoff| point.at >= cutoff)
+            })
+            .fold((0u128, 0u128), |(sum, count), point| {
+                (sum + u128::from(point.memory), count + 1)
+            });
+        u64::try_from(sum / count.max(1)).ok()
+    }
+
     /// The newest run as its last sample left it.
     pub fn last_run(&self) -> Option<RunSummary> {
         let point = self.points.last()?;
@@ -817,6 +836,23 @@ mod tests {
                 .series
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn memory_is_averaged_over_the_newest_runs_minute() {
+        assert_eq!(ResourceHistory::default().memory_mean(RATE_WINDOW), None);
+        let mut history = ResourceHistory::default();
+        // Run 1's memory is 1000 + its seconds: 1005 to 1100.
+        for secs in (5..=100).step_by(5) {
+            history.push(&sample(1, secs, 0.0, 0));
+        }
+        // The samples from 40 s to 100 s: 1040 to 1100.
+        assert_eq!(history.memory_mean(RATE_WINDOW), Some(1070));
+        // A new run's first sample stands alone.
+        let mut first = sample(2, 5, 0.0, 0);
+        first.at = at(1200);
+        history.push(&first);
+        assert_eq!(history.memory_mean(RATE_WINDOW), Some(1005));
     }
 
     #[test]

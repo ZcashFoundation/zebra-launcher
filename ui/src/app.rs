@@ -23,6 +23,7 @@ use crate::{
         updates::{HealthFailureBanner, UpdateBanner},
     },
     explorer::Explorer,
+    health::memory_carrier,
     insights::{
         RunEvent,
         events::{config_outcome_event, config_replaced_event, update_events},
@@ -252,6 +253,10 @@ pub struct AppState {
     pub machine: RwSignal<Option<MachineResources>>,
     /// The computer's samples since the launcher opened.
     pub machine_history: RwSignal<MachineHistory>,
+    /// The node that carries the memory verdict, of either network ([`memory_carrier`]): one
+    /// for the app, so every page agrees, and its previous value keeps the verdict on one of
+    /// two nodes that use about as much memory.
+    pub memory_carrier: Memo<Option<NodeId>>,
     /// Opens the add-node dialog: the sidebar, the overview and Settings → Nodes.
     pub add_node: Callback<()>,
     /// Each network's herd, as its latest `herd` event or the snapshot gave it.
@@ -653,10 +658,23 @@ pub fn App() -> impl IntoView {
         return_focus.set_value(active);
         adding.set(true);
     });
+    let nodes = RwSignal::new(vec![node]);
+    let memory_carrier = Memo::new(move |previous: Option<&Option<NodeId>>| {
+        let memory: Vec<_> = nodes.with(|nodes| {
+            nodes
+                .iter()
+                .map(|node| {
+                    let id = node.info.with(|info| info.id.clone());
+                    (id, node.memory_figure())
+                })
+                .collect()
+        });
+        memory_carrier(&memory, previous.and_then(Option::as_ref))
+    });
     let state = AppState {
         tab: RwSignal::new(Tab::Dashboard),
         docs_section: RwSignal::new(DocsSection::Book),
-        nodes: RwSignal::new(vec![node]),
+        nodes,
         nodes_loaded: RwSignal::new(false),
         default_data_dir: RwSignal::new(None),
         selected: RwSignal::new(node),
@@ -671,6 +689,7 @@ pub fn App() -> impl IntoView {
         log_filter_request: RwSignal::new(None),
         machine: RwSignal::new(None),
         machine_history: RwSignal::new(MachineHistory::default()),
+        memory_carrier,
         add_node: open_add,
         herds: RwSignal::new(Vec::new()),
     };

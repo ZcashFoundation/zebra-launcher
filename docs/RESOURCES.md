@@ -1146,7 +1146,9 @@ question 3.
   - A stuck syncer is already caught by rule 9 (stall) and rule 8 (no peers).
 - **Machine-wide facts show once.**
   - The memory verdict goes only on the largest memory consumer among the running nodes
-    of both networks; the overview strip carries it for the rest, on either tab.
+    of both networks, which keeps it until another uses clearly more, so it never moves
+    back and forth between two nodes that use about as much; the overview strip carries it
+    for the rest, on either tab.
   - Disk verdicts go only on the nodes whose data is on that volume.
 - **No desktop notifications** in this design.
 
@@ -1700,8 +1702,16 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      and reads no volumes. `MachineResources::volume_of(node)` finds a node's volume, and Copy
      diagnostics has a line per volume under the computer.
    - `ResourceInput` also has the node's `info` (its id finds its volume, its name is in the
-     reasons) and `largest_consumer`, which `with_health_input` works out from every node's
-     newest sample, of both networks; a node without a run is never the largest.
+     reasons) and `carries_memory`: whether the node is `AppState::memory_carrier`, one
+     `Memo` for the app, so every page agrees. The memo calls
+     `memory_carrier(memory, previous)` with every node of both networks and its mean memory
+     over the last minute (`ResourceHistory::memory_mean`, `None` without a run). The
+     largest carries the verdict, and the carrier so far keeps it while it has a run unless
+     another node uses 5 % more, at least 256 MiB (`CARRIER_MARGIN_SHARE`,
+     `CARRIER_MARGIN_BYTES`). Choosing on each node's newest sample let two nodes on their
+     own 5 s clocks, whose memory moves between samples, pass the verdict and the Memory
+     tile's tone back and forth from one sample to the next; the memo's previous value is
+     the hysteresis, with no new state elsewhere.
    - `Episode` has `since` (the first reading of the run that began it) and `until` (the
      newest reading), and `Episode::current(readings, enters, leaves, sustain, max_gap)` runs
      the rule over readings oldest first. Readings more than `max_gap` apart (the computer
@@ -1734,7 +1744,7 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      locked database, a failed spawn, the end of support) have causes of their own. The sentences are parts of the reason, as its other parts are, so they start in
      lower case: "the computer was almost out of memory just before; the system may have
      stopped it", "only 1.2 GB was free on its disk".
-   - The memory verdict goes only on the largest consumer. Until the overview's
+   - The memory verdict goes only on its carrier. Until the overview's
      `MachineStrip` (phase 6), the other nodes show nothing about it, on either tab.
    - The Disk tile takes the warning tone from `DISK_RULES` while the node runs, and adds the
      free space also while it waits for zebrad's metrics. The card's footer, and with it Copy
