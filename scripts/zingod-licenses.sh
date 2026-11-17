@@ -13,10 +13,11 @@
 #
 # build-zingod.sh checks the committed folder against OUT/committed and ships
 # OUT/copied with the binary; bump-zingod.sh refreshes the folder from
-# OUT/committed. No file in the checkout or its sources holds the Apache-2.0
-# text, so Apache-2.0.txt is the committed copy of
+# OUT/committed. zingod's checkout has only the licence's notice, so
+# Apache-2.0.txt is the committed copy of
 # https://www.apache.org/licenses/LICENSE-2.0.txt, checked against that file's
-# sha256. See docs/SIDECARS.md, "Licences of zingod".
+# sha256 rather than against a copy some dependency happens to ship. See
+# docs/SIDECARS.md, "Licences of zingod".
 #
 # Requires: bash, git, cargo (with the checkout's dependencies fetched: this
 # runs `cargo metadata --offline`), grep, sed, sha256sum or shasum.

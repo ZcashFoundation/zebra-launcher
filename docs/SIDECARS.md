@@ -460,8 +460,10 @@ What was built follows PUBLIC-SERVICES.md's Z1, with these differences:
   `scripts/zingod-licenses.sh`, which `build-zingod.sh` and `bump-zingod.sh`
   both call. It also writes `README.txt` from the checkout and its
   `Cargo.lock`, so a bump refreshes it and the build checks it.
-- No file in the checkout or its sources holds the full Apache-2.0 text, so
-  `Apache-2.0.txt` is checked against the sha256 of apache.org's file instead.
+- zingod's checkout holds only the Apache-2.0 notice, so `Apache-2.0.txt` is
+  apache.org's text, checked against that file's sha256. Some dependencies
+  ship the same text (zeroize 1.9.0's `LICENSE-APACHE`, for one), but a check
+  tied to one of them would break whenever it changes.
 - `build-zingod.sh` builds only for the host's own Linux triple, since its
   checks run the binary, and takes the host from `uname`. It checks the
   licence folder before the build rather than after.
@@ -765,7 +767,7 @@ each comes from is in one place:
 | File | From |
 | --- | --- |
 | `zingod-LICENSE` | zingod's `LICENSE`, the notice |
-| `Apache-2.0.txt` | the licence's full text, <https://www.apache.org/licenses/LICENSE-2.0.txt>, checked against that file's sha256: neither the checkout nor its sources hold it |
+| `Apache-2.0.txt` | the licence's full text, <https://www.apache.org/licenses/LICENSE-2.0.txt>, checked against that file's sha256: zingod's checkout has only the notice |
 | `lightwallet-protocol-LICENSE` | `packages/zingod-proto/lightwallet-protocol/LICENSE` |
 | `zebra-LICENSE-MIT` | `LICENSE-MIT` of the `elicbarbieri/zebra` revision the build pins (`ebabeee5`), for `zebra_indexer.proto` and the zebra-chain and zebra-network crates linked in |
 | `zstd-LICENSE` | zstd-sys's `zstd/LICENSE` |
