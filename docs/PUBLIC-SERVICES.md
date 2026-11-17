@@ -1282,8 +1282,9 @@ over.
     permission at open `Crash`, never `IndexBroken`;
   - the txid redaction, read back from both the ring and the log file's contents;
   - zebrad's lines reaching the file unchanged.
-- **The runner against fakes** (launcher-public, under `tokio::time::pause`). `fake-zingod`, a
-  launcher-core bin beside `fake-zebrad`:
+- **The runner against fakes** (launcher-public). As built they run in real time with short
+  intervals: the supervisor's deadlines use the monotonic clock, which a paused tokio clock
+  can't drive. `fake-zingod`, a launcher-core bin beside `fake-zebrad`:
   - reads its `-c` file and refuses an unknown key with zingod's `unknown field` message;
   - binds `grpc_listen_address`, prints zingod's lines, answers `/status` and `/readyz` over
     HTTP/1.1 from captured JSON and `GetLightdInfo` and `GetLatestBlock` over h2c, and stops on
