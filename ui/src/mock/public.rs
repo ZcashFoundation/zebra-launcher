@@ -34,6 +34,7 @@
 //! | `zingod-unreachable` | no validator has answered zingod for 40 s |
 //! | `zingod-down` | zingod says `down`, with its message |
 //! | `zingod-behind` | zingod serves 12 blocks behind zebrad |
+//! | `zingod-wallet` | zingod gives a wrong answer to the wallet check |
 //! | `zingod-stuck` | zingod stays at a block after its restart |
 //! | `zingod-backoff` | zingod crashed, and Zeal starts it again after the backoff |
 //! | `zingod-crashloop` | zingod crashed 5 times in 10 minutes |
@@ -72,7 +73,7 @@ use launcher_types::{
         AcmeProblem, CONSENT_VERSION, CertStatus, ConnectionReport, Consent, DnsProvider,
         DnsStatus, Evidence, EvidenceSource, FirewallTool, GatewayStats, LightBackend, LightdInfo,
         NetFacts, OpenError, PublicServiceSpec, PublicStatus, StepAnswer, StepId, StillPublic,
-        WanKind, ZingodChoice, ZingodSpec,
+        WalletProblem, WanKind, ZingodChoice, ZingodSpec,
     },
     zingod::{IndexerState, IndexerStatus, SyncProgress, ZingodStatus},
 };
@@ -116,6 +117,7 @@ pub(crate) enum ZingodFlag {
     Unreachable,
     Down,
     Behind,
+    Wallet,
     Stuck,
     Backoff,
     Crashloop,
@@ -135,7 +137,7 @@ pub(crate) enum ZingodFlag {
 }
 
 impl ZingodFlag {
-    const ALL: [(&'static str, ZingodFlag); 28] = [
+    const ALL: [(&'static str, ZingodFlag); 29] = [
         ("zingod-choose", ZingodFlag::Choose),
         ("zingod", ZingodFlag::Serving),
         ("zingod-building", ZingodFlag::Building),
@@ -148,6 +150,7 @@ impl ZingodFlag {
         ("zingod-unreachable", ZingodFlag::Unreachable),
         ("zingod-down", ZingodFlag::Down),
         ("zingod-behind", ZingodFlag::Behind),
+        ("zingod-wallet", ZingodFlag::Wallet),
         ("zingod-stuck", ZingodFlag::Stuck),
         ("zingod-backoff", ZingodFlag::Backoff),
         ("zingod-crashloop", ZingodFlag::Crashloop),
@@ -362,6 +365,8 @@ struct World {
     month_bytes_up: u64,
     /// The keychain refuses to delete the token.
     keychain_locked: bool,
+    /// zingod answers the wallet check with another network's name.
+    wallet_wrong: bool,
     /// The zebrad the light client server reads.
     zebrad_version: String,
     phase: Phase,
@@ -387,6 +392,7 @@ impl World {
             gateway: GatewayStats::default(),
             month_bytes_up: 0,
             keychain_locked: false,
+            wallet_wrong: false,
             zebrad_version: "7.0.0".into(),
             phase: Phase::Running,
             upgrades: vec![NetworkUpgrade {
@@ -634,6 +640,7 @@ impl World {
             ZingodFlag::Behind => {
                 zingod(&mut world).runner.status = Some(captured(SERVING, Some(tip - 12)));
             }
+            ZingodFlag::Wallet => world.wallet_wrong = true,
             ZingodFlag::Stuck => {
                 let zingod = zingod(&mut world);
                 zingod.runner.status = Some(captured(SERVING, Some(tip - 17)));
@@ -818,7 +825,14 @@ impl World {
         {
             facts.wallet = Some(Checked {
                 at: now,
-                result: Ok(zingod_info(network, height)),
+                result: if self.wallet_wrong {
+                    Err(WalletProblem::WrongChain {
+                        got: "main".into(),
+                        want: "test".into(),
+                    })
+                } else {
+                    Ok(zingod_info(network, height))
+                },
             });
         }
         facts.net = self.net(now);

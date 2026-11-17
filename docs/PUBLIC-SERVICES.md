@@ -546,7 +546,8 @@ flag (`?public=<flag>`).
 | a set-up zingod meets an untested pair: the node's channel or zebrad's pin changed | `TESTED_ZINGOD` | `IndexerUntested`; doesn't start zingod | "zingod 1.1.0 isn't tested with Zebra 7.1.0-alpha.0 on Testnet yet. Wallets that use your server are told to try again until Zeal updates zingod, or Zebra · Testnet runs a tested version." | a Zeal update, or a tested zebrad | `zingod-untested` |
 | no `zeal-zingod` on this system | `Options.zingod_binary` is `None` | the choice is disabled | "zingod runs on Linux only for now" | — | `zingod-absent` |
 
-A failed wallet check stays PS1's `WalletCheckFailed`. Two lines close the front door: PS1's
+A failed wallet check stays PS1's `WalletCheckFailed`, which names zingod when it is the
+backend (`zingod-wallet`). Two lines close the front door: PS1's
 `BackingStopped` and the pause for an upgrade zingod doesn't know (`gateway_mode` closes it for
 every `Paused`). Every other zingod problem is `Degraded`, so the front door stays up in
 `Unavailable` and TLS-ALPN-01 renewals go on through a long build, stall or rebuild.
@@ -1515,7 +1516,7 @@ backend, the Service step's checks and findings, zingod's degraded reasons, `Fai
 `BuildTooOld`, `IndexerStats`); launcher-herd's Service step, `problem()` for every row of the
 failure table, `choice()` and `DEFAULT_BACKEND`; the service actor's wiring of the runner and
 the tip cross-check; the app's sidecar key, commands, exit flow and diagnostics; and the
-screens with the 28 `zingod…` mock flags. Where it differs from the sections above:
+screens with the 29 `zingod…` mock flags. Where it differs from the sections above:
 
 - **The room for a first build is a start condition.** Until zingod has served from the
   recorded folder's index once (`ZingodSpec.built`, which Rebuild and Delete clear), the actor

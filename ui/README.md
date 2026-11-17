@@ -257,8 +257,9 @@ every node command and event carries a node's id, and the mock's zebrad below is
     `zingod-building-early` (no target yet), `zingod-catchup` (syncing at the tip while
     zebrad's mempool is off), `zingod-restarting`, `zingod-waiting` (for zebrad's tip),
     `zingod-booting`, `zingod-nozebra` (paused), `zingod-unreachable`, `zingod-down`,
-    `zingod-behind`, `zingod-stuck` (Open the log), `zingod-backoff`, `zingod-crashloop`
-    (Open the log, Try again), `zingod-config` (Copy diagnostics), `zingod-cookie`,
+    `zingod-behind`, `zingod-wallet` (a wrong answer to the wallet check), `zingod-stuck`
+    (Open the log), `zingod-backoff`, `zingod-crashloop` (Open the log, Try again),
+    `zingod-config` (Copy diagnostics), `zingod-cookie`,
     `zingod-port`, `zingod-locked` and `zingod-folder` (Try again), `zingod-disk`,
     `zingod-room` (switched to zingod without the room for its first build), `zingod-broken`
     and `zingod-mismatch` (Rebuild…), `zingod-tooold` (paused), `zingod-untested`;

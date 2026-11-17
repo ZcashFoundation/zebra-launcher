@@ -309,7 +309,7 @@ pub fn indexer_text(why: &DegradedReason, status: Option<&PublicStatus>) -> Stri
         }
         DegradedReason::BackingBehind { .. }
         | DegradedReason::WalletCheckFailed
-        | DegradedReason::CertificateExpired => backing_text(why),
+        | DegradedReason::CertificateExpired => backing_text(why, status),
     }
 }
 
@@ -365,11 +365,12 @@ pub fn degraded_text(why: &DegradedReason, status: &PublicStatus) -> String {
     if is_indexer_reason(why, status.backend) {
         return indexer_text(why, Some(status));
     }
-    backing_text(why)
+    backing_text(why, Some(status))
 }
 
-/// zebrad's and the front door's reasons, the same for either backend.
-fn backing_text(why: &DegradedReason) -> String {
+/// zebrad's and the front door's reasons, the same for either backend but the wallet check,
+/// which names the server that answered it, when the status is at hand.
+fn backing_text(why: &DegradedReason, status: Option<&PublicStatus>) -> String {
     match why {
         DegradedReason::BackingRestarting => {
             "Zebra is restarting. Wallets are told to try again.".into()
@@ -378,6 +379,11 @@ fn backing_text(why: &DegradedReason) -> String {
             "Zebra is catching up, {} blocks behind. Wallets are told to try again.",
             thousands(*blocks)
         ),
+        DegradedReason::WalletCheckFailed
+            if status.is_some_and(|status| status.backend == LightBackend::Zingod) =>
+        {
+            "zingod gave a wrong answer to the wallet check. Wallets are told to try again.".into()
+        }
         DegradedReason::WalletCheckFailed => {
             "Zebra's light wallet endpoint gave a wrong answer to the wallet check. Wallets are \
              told to try again."
@@ -1682,6 +1688,15 @@ mod tests {
             "Paused · zingod 1.1.0 doesn't know NU8, which is active. Wallets that use your \
              server see an error until Zeal updates zingod."
         );
+        // The wallet check names the server that failed it.
+        status.state = PublicState::Degraded {
+            why: DegradedReason::WalletCheckFailed,
+        };
+        assert_eq!(
+            state_line(&status, at(NOW)).1,
+            "Serving with a problem · zingod gave a wrong answer to the wallet check. Wallets \
+             are told to try again."
+        );
         // zebrad's own reasons read as before with zingod.
         status.state = PublicState::Degraded {
             why: DegradedReason::BackingBehind { blocks: 3 },
@@ -1698,6 +1713,14 @@ mod tests {
         assert_eq!(
             state_line(&status, at(NOW)).1,
             "Serving with a problem · Zebra is restarting. Wallets are told to try again."
+        );
+        status.state = PublicState::Degraded {
+            why: DegradedReason::WalletCheckFailed,
+        };
+        assert!(
+            state_line(&status, at(NOW))
+                .1
+                .contains("Zebra's light wallet endpoint gave a wrong answer"),
         );
     }
 

@@ -955,7 +955,7 @@ on the node's pages: the consent screen's choice of server (`RadioChoice`), zing
 step with each check, the Server card, "Server software…" and Forget's box for the index;
 the zebrad strip says "zingod reads this node". Every sentence comes from
 `ui/src/public_text.rs`, and the mock's `?public=setup`, `serving`, `unconfirmed`, `cgnat`,
-`expiring`, `keychain`, `consent` and the 28 `zingod…` flags run launcher-herd's rules over
+`expiring`, `keychain`, `consent` and the 29 `zingod…` flags run launcher-herd's rules over
 fake facts, zingod's from its captured `/status` answers. What PS1 and Z3 left for later is
 listed in PUBLIC-SERVICES.md ("PS1 as built", "Z3 as built").
 
