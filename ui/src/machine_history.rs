@@ -229,6 +229,22 @@ impl MachineHistory {
         readings
     }
 
+    /// The readings of the volume that holds `node`'s data folder now, oldest first: the
+    /// newest run of [`MachineHistory::volume_readings`] with the newest's label, so the
+    /// readings of a volume its data folder was moved from are left out.
+    pub fn current_volume_readings(&self, node: &NodeId) -> Vec<&VolumeUsage> {
+        let mut readings = self.volume_readings(node);
+        let start = readings
+            .last()
+            .and_then(|newest| {
+                readings
+                    .iter()
+                    .rposition(|volume| volume.label != newest.label)
+            })
+            .map_or(0, |before| before + 1);
+        readings.split_off(start)
+    }
+
     /// Whether a sample taken from `from` to `to` passes `test`.
     pub fn any_between(
         &self,
@@ -520,7 +536,32 @@ mod tests {
         assert!(volume_fresh(readings[1], at(120)));
         assert!(!volume_fresh(readings[1], at(121)));
         assert!(history.volume_readings(&other).is_empty());
+        assert_eq!(history.current_volume_readings(&node), readings);
+        assert!(history.current_volume_readings(&other).is_empty());
         assert!(history.any_between(at(10), at(20), |m| m.at == at(15)));
+
+        // The data folder moved to another volume and back: only the newest run is the
+        // volume it is on now.
+        for (secs, label) in [(60, "/b"), (90, "/b"), (120, "/"), (150, "/")] {
+            history.push(&MachineResources {
+                volumes: vec![VolumeUsage {
+                    label: label.into(),
+                    ..volume(secs, secs)
+                }],
+                ..sample(secs, None)
+            });
+        }
+        let labels = |readings: Vec<&VolumeUsage>| -> Vec<(String, u64)> {
+            readings
+                .iter()
+                .map(|volume| (volume.label.clone(), volume.free_bytes))
+                .collect()
+        };
+        assert_eq!(labels(history.volume_readings(&node)).len(), 6);
+        assert_eq!(
+            labels(history.current_volume_readings(&node)),
+            vec![("/".to_owned(), 120), ("/".to_owned(), 150)]
+        );
         assert!(!history.any_between(at(10), at(20), |m| m.at == at(25)));
     }
 

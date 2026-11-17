@@ -2568,6 +2568,29 @@ mod tests {
         scene.machine_with(1295, 1295, stale);
         scene.until(1295);
         assert_eq!(scene.verdict().rule, 17);
+
+        // The data folder moved from a nearly full disk to one with 2.5 GB free: the first
+        // disk's readings do not keep its problem going on the second, which is low.
+        let mut scene = Scene::syncing(1200);
+        scene.disk(1170, 1200, |_| 1_400_000_000);
+        assert_eq!(scene.verdict().level, Level::Problem);
+        scene.machine_with(1205, 1290, |secs, machine| {
+            // Read at once after the move, at 1215 s, and every 30 s from then.
+            if secs >= 1215 {
+                let measured = 1215 + (secs - 1215) / 30 * 30;
+                machine.volumes = vec![launcher_types::VolumeUsage {
+                    label: "/mnt/b".into(),
+                    ..volume(measured, 2_500_000_000)
+                }];
+            }
+        });
+        scene.until(1290);
+        let verdict = scene.verdict();
+        assert_eq!((verdict.rule, verdict.level), (19, Level::Attention));
+        assert_eq!(
+            verdict.reason,
+            "2.5 GB free of 1,000.0 GB on the disk with this node's data (/mnt/b) for 1 min. zebrad stops when a write fails."
+        );
     }
 
     #[test]

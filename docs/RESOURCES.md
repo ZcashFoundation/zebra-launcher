@@ -1098,6 +1098,11 @@ gains their rows.
     and before rule 16.
 - **Staleness.** Rule 20 needs a computer sample younger than `STALE_AFTER` (30 s), and
   rules 19 and 21 a volume reading younger than three of its 30 s intervals.
+- **A moved data folder.** Rules 19 and 21 read only the volume the node's data is on now:
+  the newest run of its readings with the newest one's label. After the data folder moves
+  to another volume, their episodes start afresh there; the old volume's readings would
+  have kept its problem going on the new one, which never crossed the threshold. The exit's
+  disk sentence reads every reading, as the crash may have come before the move.
 - **Reasons** name the facts:
   - "1.4 GB free on the disk with this node's data (/mnt/zcash). zebrad stops when a write
     fails; free some space or move the data folder."
@@ -1742,7 +1747,8 @@ Each phase is one pull request that ships on its own, with screenshots from the 
      `VOLUME_GAP` (90 s, three of the volume sampler's 30 s intervals), as `VOLUME_INTERVAL`
      is in launcher-core.
      `MachineHistory` also gains `latest`, `volume_readings(node)` (one per reading, though
-     the samples carry each for 30 s) and `any_between` for the exit sentences.
+     the samples carry each for 30 s), `current_volume_readings(node)` (the newest run of
+     them with one label, for rules 19 and 21) and `any_between` for the exit sentences.
    - Rule 20 checks the computer sample's age, as designed. Rules 19 and 21, the Disk tile,
      the card's footer (and Copy summary's computer line) and the exit's disk sentence leave
      out a volume reading more than `VOLUME_GAP` (90 s) old (`volume_fresh`), since a folder

@@ -194,13 +194,15 @@ impl Facts<'_> {
         &self.input.resources
     }
 
-    /// The readings of the node's volume, oldest first, while the newest still says how the
-    /// volume is ([`volume_fresh`]); none once its folder's read hangs.
+    /// The readings of the volume the node's data is on now, oldest first, while the newest
+    /// still says how the volume is ([`volume_fresh`]); none once its folder's read hangs. A
+    /// data folder moved to another volume starts afresh: the old volume's readings would
+    /// keep an episode of its going on the new one.
     fn volume_readings(&self) -> Vec<&VolumeUsage> {
         let resources = self.resources();
         let readings = resources
             .machine_history
-            .volume_readings(&resources.info.id);
+            .current_volume_readings(&resources.info.id);
         match readings.last() {
             Some(newest) if volume_fresh(newest, self.now()) => readings,
             _ => Vec::new(),
