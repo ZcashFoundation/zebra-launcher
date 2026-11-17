@@ -710,7 +710,9 @@ the archive.
   launcher-public, or the front door. Its `real-zingod` job runs
   `real_zingod.rs` on `ubuntu-24.04` and `ubuntu-24.04-arm` with this call's
   `zingod-<triple>`, installed with `install_zingod`, and the release zebrad
-  that `fetch-zebrad-linux.sh --target` verifies on the host.
+  that `fetch-zebrad-linux.sh --target` verifies on the host. It downloads
+  that artifact with `run-id`, through the API, so it grants `actions: read`
+  beside `contents: read`, as `bundle.yml`'s build job does.
 - The workflow has an `attest` input, true by default, that both attestation
   steps follow. `ci.yml` passes false: a fork's pull request gets no OIDC
   token, and a binary built from an unmerged branch never carries an
