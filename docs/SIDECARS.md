@@ -795,17 +795,22 @@ review stand in for it.
 
 On a Linux host `scripts/dev-sidecar.sh` installs `fake-zingod` as
 `zeal-zingod-<host>`, beside the three fake zebrads; on macOS and Windows it
-installs nothing for zingod. For the real one, run `scripts/build-zingod.sh
---target x86_64-unknown-linux-gnu --out
-src-tauri/binaries/zeal-zingod-x86_64-unknown-linux-gnu` inside `ubuntu:22.04`,
-or download a CI build with `gh run download <run id> -n
-zingod-x86_64-unknown-linux-gnu`. On a newer host `build-zingod.sh` builds
-but installs nothing, since the binary fails the glibc floor. To try zingod
-out there, or to run `real_zingod.rs`, build the checkout with plain cargo
-(`cargo build --locked --release -p zingod --bin zingod`, with `protoc`
-installed) and set `ZINGOD_BIN` to the result; only `build-zingod.sh`'s output
-is ever installed as `zeal-zingod`. Treat the checkout as downloaded code:
-build it only through cargo, with `CARGO_TARGET_DIR` outside the checkout.
+installs nothing for zingod. For the real one, run `scripts/build-zingod.sh`
+inside `ubuntu:22.04` (its default `--out` is
+`src-tauri/binaries/zeal-zingod-<host>`, with `licenses/` and
+`zingod-build-info.txt` beside it there; copy `licenses/*` into
+`src-tauri/resources/licenses/zingod/` for a bundle that has them all), or
+download a CI build with `gh run download <run id> -n
+zingod-x86_64-unknown-linux-gnu` and install it as the workflows do:
+`. scripts/lib.sh && install_zingod <folder> <triple> .`, after defining
+`die`. On a newer host `build-zingod.sh` builds but installs nothing, since the
+binary fails the glibc floor (on Ubuntu 24.04 it needs `GLIBC_2.39`). To try
+zingod out there, or, from Z2, to run `real_zingod.rs`, build the checkout with
+plain cargo (`cargo build --locked --release -p zingod --bin zingod`, with
+`protoc` installed) and set `ZINGOD_BIN` to the result; only
+`build-zingod.sh`'s output is ever installed as `zeal-zingod`. Treat the
+checkout as downloaded code: build it only through cargo, with
+`CARGO_TARGET_DIR` outside the checkout.
 
 ### Bumping ZINGOD_VERSION
 
