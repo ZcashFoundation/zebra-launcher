@@ -644,13 +644,15 @@ one ("resource path `binaries/zeal-zingod-<triple>` doesn't exist"):
 `bundle.yml`'s Linux `bundle` legs, and both of `release.yml`'s Linux jobs,
 the unprivileged `build` (`cargo tauri build --no-bundle`) and `bundle_sign`.
 Each adds `sidecars-zingod` to its `needs`, downloads the artifact on Linux
-only, and runs `install_zingod` from `scripts/lib.sh`. That installs the
-binary as `src-tauri/binaries/zeal-zingod-<target triple>` with `chmod +x`
-(artifacts lose the executable bit), checks `--version` against
-`ZINGOD_VERSION` and the build information's commit, target and binary sha256
-against the pins and the file, and installs each licence file the build
-copied into `src-tauri/resources/licenses/zingod/`, checked against the sha256
-`zingod-build-info.txt` records. The binary then joins each job's glibc check.
+only, and runs `install_zingod` from `scripts/lib.sh`. That checks the build
+information's commit and target against the pins, and the binary and each
+licence file the build copied against the sha256 `zingod-build-info.txt`
+records, before it installs anything. It then installs the binary as
+`src-tauri/binaries/zeal-zingod-<target triple>` with `chmod +x` (artifacts
+lose the executable bit), checks `--version` against `ZINGOD_VERSION`
+(deleting the binary if it fails), and copies the licence files into
+`src-tauri/resources/licenses/zingod/`, so a failed run leaves no unchecked
+file behind. The binary then joins each job's glibc check.
 The macOS and Windows jobs don't download it.
 
 `bundle.yml` compiles and bundles in one job, so its runs on `main` never
