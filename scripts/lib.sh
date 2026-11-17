@@ -1,8 +1,9 @@
 # shellcheck shell=bash
-# Helpers shared by the sidecar and version scripts (fetch-zebrad-linux.sh,
-# build-zebrad.sh, dev-sidecar.sh, check-versions.sh, bump-zebrad.sh) and by
-# the `run:` steps of zebrad-sidecars.yml and zebrad-watch.yml. Source it after
-# defining `die MESSAGE...`, which must print the message and exit non-zero.
+# Helpers shared by the sidecar, licence and version scripts
+# (fetch-zebrad-linux.sh, build-zebrad.sh, zingod-licenses.sh, dev-sidecar.sh,
+# check-versions.sh, bump-zebrad.sh) and by the `run:` steps of
+# zebrad-sidecars.yml and zebrad-watch.yml. Source it after defining
+# `die MESSAGE...`, which must print the message and exit non-zero.
 #
 # The functions that print a value are meant for `x="$(fn ...)"` under
 # `set -e`: when they call die inside the command substitution, the assignment
@@ -172,6 +173,17 @@ check_git_ref() {
 # is_full_sha STRING: succeeds when STRING is a full 40-hex lowercase SHA.
 is_full_sha() {
     printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{40}$'
+}
+
+# sha256_of FILE: prints FILE's sha256 in lowercase hex.
+sha256_of() {
+    local sum
+    if command -v sha256sum >/dev/null 2>&1; then
+        sum="$(sha256sum <"$1")"
+    else
+        sum="$(shasum -a 256 <"$1")"
+    fi
+    printf '%s\n' "${sum%% *}"
 }
 
 # host_triple: prints rustc's host target triple.

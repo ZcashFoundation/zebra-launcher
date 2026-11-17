@@ -681,27 +681,32 @@ Four C libraries are linked statically:
 | zstd 1.5.7 | zstd-sys 2.1.0 | BSD-3-Clause (zstd is BSD-3-Clause OR GPL-2.0; Zeal ships the BSD text) | `zstd/LICENSE`, committed |
 | libsecp256k1 | secp256k1-sys 0.14.1 | MIT. The crate's own `LICENSE` is CC0-1.0 and covers only its Rust wrapper | `depend/secp256k1/COPYING`, committed |
 
-`src-tauri/resources/licenses/zingod/` is committed and refreshed by
-`bump-zingod.sh`. It holds:
+[`src-tauri/resources/licenses/zingod/`](../src-tauri/resources/licenses/zingod/)
+is committed and refreshed by `bump-zingod.sh`.
+[`scripts/zingod-licenses.sh`](../scripts/zingod-licenses.sh) gathers it from a
+checkout and the sources cargo fetched for it, so the list of files and where
+each comes from is in one place:
 
-- zingod's notice, with the full Apache-2.0 text;
-- lightwallet-protocol's `LICENSE`;
-- Zebra's `LICENSE-MIT`, from the `elicbarbieri/zebra` revision the build pins
-  (`ebabeee5`), for `zebra_indexer.proto` and the zebra crates linked in;
-- zstd's `LICENSE` and libsecp256k1's `COPYING`;
-- a `README.txt` that Zeal writes: zingod's name, version and copyright line,
-  the source URL and commit, where the release's source archive is, and where
-  each `.proto` file comes from.
+| File | From |
+| --- | --- |
+| `zingod-LICENSE` | zingod's `LICENSE`, the notice |
+| `Apache-2.0.txt` | the licence's full text, <https://www.apache.org/licenses/LICENSE-2.0.txt>, checked against that file's sha256: neither the checkout nor its sources hold it |
+| `lightwallet-protocol-LICENSE` | `packages/zingod-proto/lightwallet-protocol/LICENSE` |
+| `zebra-LICENSE-MIT` | `LICENSE-MIT` of the `elicbarbieri/zebra` revision the build pins (`ebabeee5`), for `zebra_indexer.proto` and the zebra-chain and zebra-network crates linked in |
+| `zstd-LICENSE` | zstd-sys's `zstd/LICENSE` |
+| `secp256k1-COPYING` | secp256k1-sys's `depend/secp256k1/COPYING` |
+| `README.txt` | written by `zingod-licenses.sh`: zingod's version and copyright line, the source URL and commit, the release's source archive, where each `.proto` file comes from, and which file covers each C library, at the versions in zingod's `Cargo.lock` |
+| `jemalloc-COPYING`, `aws-lc-LICENSE` | tikv-jemalloc-sys's `jemalloc/COPYING` and aws-lc-sys's `aws-lc/LICENSE`, copied at build time (below) |
 
 jemalloc's `COPYING` and AWS-LC's `LICENSE` aren't committed: their copyright
 lines carry personal contact addresses, which Zeal keeps out of its
 repository. `build-zingod.sh` copies both from the build's own sources into its
 output, and every Linux job that compiles Zeal installs them into the folder,
-where `.gitignore` names them, and checks their sha256. `smoke-linux.sh` checks
-that an installed bundle holds every file. A local build has only the committed
-files, which is fine for a build that is never shipped. `bump-zingod.sh` refuses
-to commit a licence file that holds an email address, and names it, so a file
-that gains one moves to the copied list.
+where `src-tauri/.gitignore` names them, and checks their sha256.
+`smoke-linux.sh` checks that an installed bundle holds every file. A local
+build has only the committed files, which is fine for a build that is never
+shipped. `bump-zingod.sh` refuses to commit a licence file that holds an email
+address, and names it, so a file that gains one moves to the copied list.
 
 Zeal's bundles carry no third-party licences for zebrad today, nor a list of
 the Rust crates linked into either binary; that is a Zeal-wide follow-up
