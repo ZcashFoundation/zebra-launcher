@@ -1389,10 +1389,11 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
 - **Outpoints.** `tx/<txid>?out=n` marks the output, brings it into view and lights its node
   in V6 on hover; its spent status and "Find the spending transaction" come with P4.
 - **Hover cards** are on every link to a block or a transaction and on the table's rows, not
-  on the strip's tiles. As WCAG 1.4.13 asks, the pointer can move onto a card, which stays
-  until 300 ms after it leaves both, and Escape, wherever focus is, or any scroll hides it. The
-  UI keeps the cards it read while the chain they were read on
-  holds: another network or a reorganisation (a new epoch) drops them all, and a new tip the
+  on the strip's tiles. As WCAG 1.4.13 asks, a card stays while the pointer is on its link or
+  on the card, or focus is on its link (in the table, while its row is the active one), each
+  kept apart, and goes 300 ms after none is; the pointer or focus resting on a link to
+  something else takes it. Escape, wherever focus is, or any scroll hides it. The UI keeps
+  the cards it read while the chain they were read on holds: another network or a reorganisation (a new epoch) drops them all, and a new tip the
   cards of transactions not in a best-chain block. A card answered once any of these has
   happened may be of the old chain: it is not kept, and is asked for again while its hover
   lasts. A card whose read failed says why ("Block

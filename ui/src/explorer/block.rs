@@ -22,7 +22,7 @@ use launcher_types::{
 use leptos::{prelude::*, task::spawn_local};
 
 use super::{
-    cards::{CARD_ID, HoverCards, hover_handlers},
+    cards::{CARD_ID, HoverCards, Rest, hover_handlers},
     parts::{Failure, HashText, Loading, PoolChip, RouteLink, RpcCalls},
     prefs::Prefs,
     state::{Loaded, NodeExplorer, load},
@@ -684,10 +684,10 @@ fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> imp
             Some((index, row)) => {
                 let link = row.query_selector(".ex-link").ok().flatten().unwrap_or(row);
                 if let Some(txid) = txid_at(index) {
-                    cards.enter(CardTarget::Tx { txid }, link);
+                    cards.enter(Rest::Focus, CardTarget::Tx { txid }, link);
                 }
             }
-            None => cards.leave_soon(),
+            None => cards.leave_soon(Rest::Focus),
         }
     });
     let on_open = Callback::new(move |index: u32| {

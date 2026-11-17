@@ -2,8 +2,9 @@
 //! focus rests on it. The facts are asked for after 120 ms, from one cheap read on the
 //! explorer's prefetch lane, which also fills its cache for the page the link opens; the card
 //! shows at 300 ms. One card at a time, drawn by the shell under the link. It stays while the
-//! pointer moves onto it, and goes 300 ms after the pointer or focus leaves both the link and
-//! the card, at once on Escape wherever focus is, and when anything scrolls. The facts are kept while the chain they were read on holds:
+//! pointer is on the link or on the card, or focus is on the link, and goes 300 ms after none
+//! is; a link to something else takes it, and it goes at once on Escape wherever focus is, and
+//! when anything scrolls. The facts are kept while the chain they were read on holds:
 //! another network or a reorganisation drops them all, and a new tip those of transactions
 //! not in a block yet. A read answered once the chain has changed may be of the old one: it is
 //! not kept, and is asked for again while its hover lasts.
@@ -56,8 +57,62 @@ pub struct HoverCards {
     /// The chain the cards are for, counted: one more at each new network, epoch or tip, so a
     /// read answered across one is not kept.
     revision: StoredValue<u64>,
-    /// The pointer is on the card.
-    on_card: StoredValue<bool>,
+    /// What holds the card.
+    presence: StoredValue<Presence>,
+}
+
+/// What rests on a link with a card, or on the card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rest {
+    /// The pointer, on the link.
+    Pointer,
+    /// Focus, on the link, or on the table with the link's row active.
+    Focus,
+    /// The pointer, on the card.
+    Card,
+}
+
+/// What holds the card about `target`: the pointer on a link to it or on the card, focus on a
+/// link to it. Each is kept apart, so the pointer leaving a link that has focus, or focus
+/// leaving one under the pointer, keeps the card.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Presence {
+    target: Option<CardTarget>,
+    pointer: bool,
+    focus: bool,
+    card: bool,
+}
+
+impl Presence {
+    /// `by` rests on a link to `target`. A link to something else takes the card: what held
+    /// it holds it no more.
+    fn rest(&mut self, by: Rest, target: &CardTarget) {
+        if self.target.as_ref() != Some(target) {
+            *self = Presence {
+                target: Some(target.clone()),
+                ..Presence::default()
+            };
+        }
+        self.set(by, true);
+    }
+
+    /// `by` left: whether anything still holds the card.
+    fn left(&mut self, by: Rest) -> bool {
+        self.set(by, false);
+        self.held()
+    }
+
+    fn held(&self) -> bool {
+        self.pointer || self.focus || self.card
+    }
+
+    fn set(&mut self, by: Rest, on: bool) {
+        match by {
+            Rest::Pointer => self.pointer = on,
+            Rest::Focus => self.focus = on,
+            Rest::Card => self.card = on,
+        }
+    }
 }
 
 impl HoverCards {
@@ -72,7 +127,7 @@ impl HoverCards {
             node,
             tip,
             failed: RwSignal::new(None),
-            on_card: StoredValue::new(false),
+            presence: StoredValue::new(Presence::default()),
             shown: RwSignal::new(None),
             cards: RwSignal::new(HashMap::new()),
             generation: StoredValue::new(0),
@@ -106,8 +161,10 @@ impl HoverCards {
         use_context()
     }
 
-    /// The pointer or focus rests on `element`, a link to `target`.
-    pub fn enter(self, target: CardTarget, element: web_sys::Element) {
+    /// The pointer or focus (`by`) rests on `element`, a link to `target`.
+    pub fn enter(self, by: Rest, target: CardTarget, element: web_sys::Element) {
+        self.presence
+            .update_value(|presence| presence.rest(by, &target));
         let mine = self.generation.get_value() + 1;
         self.generation.set_value(mine);
         let node = self.node.get_untracked();
@@ -189,16 +246,20 @@ impl HoverCards {
     /// The card was dismissed, or what it was under has moved: it goes now.
     pub fn leave(self) {
         self.generation.set_value(self.generation.get_value() + 1);
-        self.on_card.set_value(false);
+        self.presence.set_value(Presence::default());
         if self.shown.with_untracked(Option::is_some) {
             self.shown.set(None);
         }
     }
 
-    /// The pointer or focus left the link, or the pointer left the card: a card not shown yet
-    /// is not shown, and one shown goes in a moment, unless the pointer is on it by then or has
-    /// rested on another link.
-    pub fn leave_soon(self) {
+    /// The pointer or focus (`by`) left the link, or the pointer left the card. While the other
+    /// still holds the card, nothing changes. Otherwise a card not shown yet is not shown, and
+    /// one shown goes in a moment, unless by then something holds it again or another link
+    /// has been rested on.
+    pub fn leave_soon(self, by: Rest) {
+        if self.presence.try_update_value(|presence| presence.left(by)) == Some(true) {
+            return;
+        }
         if self.shown.with_untracked(Option::is_none) {
             self.leave();
             return;
@@ -207,7 +268,7 @@ impl HoverCards {
         set_timeout(
             move || {
                 if self.generation.try_get_value() == Some(mine)
-                    && self.on_card.try_get_value() == Some(false)
+                    && self.presence.try_with_value(Presence::held) == Some(false)
                 {
                     self.leave();
                 }
@@ -226,8 +287,9 @@ fn holds_at_a_new_tip(card: &Card) -> bool {
     }
 }
 
-/// The handlers a link with a hover card takes: rest and leave. `target` names what the link
-/// leads to when it is entered (a table row's link changes as the table scrolls).
+/// The handlers a link with a hover card takes: rest and leave, for the pointer (`mouseenter`,
+/// `mouseleave`) and focus (`focus`, `blur`) alike, told apart by the event. `target` names
+/// what the link leads to when it is entered (a table row's link changes as the table scrolls).
 pub fn hover_handlers(
     target: impl Fn() -> Option<CardTarget> + Copy + 'static,
 ) -> (
@@ -235,6 +297,10 @@ pub fn hover_handlers(
     impl Fn(web_sys::Event) + Copy + 'static,
 ) {
     let cards = HoverCards::get();
+    let by = |event: &web_sys::Event| match event.type_().as_str() {
+        "focus" | "blur" | "focusin" | "focusout" => Rest::Focus,
+        _ => Rest::Pointer,
+    };
     let enter = move |event: web_sys::Event| {
         if let (Some(cards), Some(target), Some(element)) = (
             cards,
@@ -243,12 +309,12 @@ pub fn hover_handlers(
                 .current_target()
                 .and_then(|target| target.dyn_into::<web_sys::Element>().ok()),
         ) {
-            cards.enter(target, element);
+            cards.enter(by(&event), target, element);
         }
     };
-    let leave = move |_: web_sys::Event| {
+    let leave = move |event: web_sys::Event| {
         if let Some(cards) = cards {
-            cards.leave_soon();
+            cards.leave_soon(by(&event));
         }
     };
     (enter, leave)
@@ -346,11 +412,8 @@ pub fn HoverCard() -> impl IntoView {
                     id=CARD_ID
                     style:left=format!("{left:.0}px")
                     style:top=format!("{top:.0}px")
-                    on:mouseenter=move |_| cards.on_card.set_value(true)
-                    on:mouseleave=move |_| {
-                        cards.on_card.set_value(false);
-                        cards.leave_soon();
-                    }
+                    on:mouseenter=move |_| cards.presence.update_value(|presence| presence.card = true)
+                    on:mouseleave=move |_| cards.leave_soon(Rest::Card)
                 >
                     {lines
                         .into_iter()
@@ -399,7 +462,7 @@ mod tests {
             failed: RwSignal::new(None),
             generation: StoredValue::new(1),
             revision: StoredValue::new(0),
-            on_card: StoredValue::new(false),
+            presence: StoredValue::new(Presence::default()),
         }
     }
 
@@ -490,6 +553,44 @@ mod tests {
         let cards = hover_cards();
         read(cards, async |_| reply(&mined));
         assert_eq!(card(cards), Some(mined));
+    }
+
+    #[test]
+    fn the_pointer_and_focus_each_hold_the_card() {
+        let link = |byte| CardTarget::Tx {
+            txid: Hash32([byte; 32]),
+        };
+        // Focus on a link, the pointer across it: focus still holds the card.
+        let mut presence = Presence::default();
+        presence.rest(Rest::Focus, &link(1));
+        presence.rest(Rest::Pointer, &link(1));
+        assert!(presence.left(Rest::Pointer));
+        assert!(!presence.left(Rest::Focus));
+        // The pointer on a link with focus, focus gone on: the pointer still holds it.
+        let mut presence = Presence::default();
+        presence.rest(Rest::Pointer, &link(1));
+        presence.rest(Rest::Focus, &link(1));
+        assert!(presence.left(Rest::Focus));
+        assert!(!presence.left(Rest::Pointer));
+        // From the link onto the card, and off it.
+        let mut presence = Presence::default();
+        presence.rest(Rest::Pointer, &link(1));
+        assert!(!presence.left(Rest::Pointer));
+        presence.card = true;
+        assert!(presence.held());
+        assert!(!presence.left(Rest::Card));
+        // A link to something else takes the card: the focus left behind does not hold it.
+        let mut presence = Presence::default();
+        presence.rest(Rest::Focus, &link(1));
+        presence.rest(Rest::Pointer, &link(2));
+        assert!(!presence.left(Rest::Pointer));
+        // The table: the pointer on one row's link, the keys make another row active; the
+        // pointer leaving its link leaves the active row's card.
+        let mut presence = Presence::default();
+        presence.rest(Rest::Pointer, &link(1));
+        presence.rest(Rest::Focus, &link(2));
+        assert!(presence.left(Rest::Pointer));
+        assert_eq!(presence.target, Some(link(2)));
     }
 
     #[test]
