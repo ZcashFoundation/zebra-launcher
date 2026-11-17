@@ -760,6 +760,7 @@ impl Runner {
         self.facts.send_modify(|facts| {
             facts.port = Some(config.listen.port());
             facts.running_for = Some(plan.zebrad);
+            facts.started_attempt = Some(plan.attempt);
         });
         let handle = zingod.handle.clone();
         // Sent from the actor, so a stop it sends next is handled after this start.

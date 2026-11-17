@@ -423,6 +423,31 @@ async fn crashes_back_off_then_wait_for_a_new_attempt() {
     setup.finish().await;
 }
 
+/// A new attempt restarts a running zingod, and the facts name the attempt it runs for, so the
+/// service actor sees the restart through phases it may miss between two looks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_attempt_restarts_a_running_zingod_and_the_facts_say_for_which() {
+    let setup = setup("ok", "serving", |_| {}).await;
+    setup.give_plan(0);
+    let facts = setup.facts_until("zingod running", running).await;
+    assert_eq!(facts.started_attempt, Some(0));
+    assert!(!facts.restarting(0));
+    assert!(
+        facts.restarting(1),
+        "until the runner starts the new attempt"
+    );
+    setup.give_plan(1);
+    let facts = setup
+        .facts_until("zingod running for the new attempt", |f| {
+            running(f) && f.started_attempt == Some(1)
+        })
+        .await;
+    assert!(!facts.restarting(1));
+    let restarted = facts.last_exit.expect("the first zingod stopped");
+    assert!(restarted.requested, "{restarted:?}");
+    setup.finish().await;
+}
+
 /// zingod that ignores `SIGTERM` is killed after the grace.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_zingod_that_ignores_sigterm_is_killed_after_the_grace() {

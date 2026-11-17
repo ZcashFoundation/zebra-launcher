@@ -501,9 +501,6 @@ struct Zingod {
     tip: Option<Checked<zingod_rules::TipCheck>>,
     tip_due: Option<tokio::time::Instant>,
     tip_running: bool,
-    /// A restart was asked of a running zingod, which hasn't stopped yet: the rules see it as
-    /// starting, so the front door stays `Unavailable` through the restart.
-    restarting: bool,
     /// The actor's own reading of the index folder.
     disk: Option<(std::path::PathBuf, IndexDisk)>,
     disk_due: Option<tokio::time::Instant>,
@@ -527,7 +524,6 @@ impl Zingod {
             tip: None,
             tip_due: None,
             tip_running: false,
-            restarting: false,
             disk: None,
             disk_due: None,
             disk_running: false,
@@ -871,6 +867,9 @@ impl Actor {
             .zingod
             .tip_run
             .is_some_and(|(tip_run, at_tip)| Some(tip_run) == run && at_tip);
+        // The rules see zingod as starting through a restart asked for, so the front door
+        // stays `Unavailable` until it serves again.
+        let restarting = runner.restarting(self.zingod.attempt);
         Some(IndexerFacts {
             bundled,
             version: launcher_types::zingod::version().to_owned(),
@@ -890,7 +889,7 @@ impl Actor {
             stuck: self.zingod.stuck,
             mismatch: self.zingod.mismatch,
             tip: self.zingod.tip.clone(),
-            restarting: self.zingod.restarting,
+            restarting,
             dir,
         })
     }
@@ -961,7 +960,8 @@ impl Actor {
 
     /// Follows zingod between looks: zebrad at the tip in its run, zingod behind, the stall
     /// rule, the restart when no validator answers, a moved port into the spec. Returns whether
-    /// the facts changed.
+    /// the facts changed, a restart's new attempt included, so the look doesn't open the front
+    /// door again for a zingod it is restarting.
     async fn track_zingod(
         &mut self,
         spec: &PublicServiceSpec,
@@ -986,11 +986,6 @@ impl Actor {
             return changed;
         }
         let runner = &zingod.runner;
-        // A restart asked of a running zingod has begun once it no longer runs.
-        if self.zingod.restarting && runner.phase != Phase::Running {
-            self.zingod.restarting = false;
-            changed = true;
-        }
         let status = runner
             .status
             .as_ref()
@@ -1020,6 +1015,7 @@ impl Actor {
             StallVerdict::Restart => {
                 tracing::warn!(target: "zeal::public", "zingod is stalled; restarting it once");
                 self.restart_zingod();
+                changed = true;
                 None
             }
             StallVerdict::Stuck { at, zebrad_at } => Some((at, zebrad_at)),
@@ -1034,6 +1030,7 @@ impl Actor {
             tracing::warn!(target: "zeal::public", "zingod can't reach zebrad; restarting it once");
             self.zingod.no_validator_restart = run;
             self.restart_zingod();
+            changed = true;
         }
         // The runner's one move after `PortInUse` goes into the spec.
         if let (Some(port), Some(recorded)) = (runner.port, &spec.zingod)
@@ -1052,11 +1049,10 @@ impl Actor {
     }
 
     /// A new attempt for zingod: the runner restarts it, or starts it again after a failure
-    /// that waited for the user. The front door goes `Unavailable` first, and stays so until
-    /// the restart has begun.
+    /// that waited for the user. The front door goes `Unavailable` first, and stays so while
+    /// zingod runs for an earlier attempt (`IndexerFacts.restarting`).
     fn restart_zingod(&mut self) {
         self.door_unavailable();
-        self.zingod.restarting = self.zingod.facts().phase == Phase::Running;
         self.zingod.attempt += 1;
     }
 

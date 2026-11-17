@@ -176,6 +176,8 @@ pub struct ZingodFacts {
     pub last_exit: Option<ExitInfo>,
     /// The zebrad run zingod's last start was for.
     pub running_for: Option<ZebradRun>,
+    /// The plan's attempt zingod's last start was for.
+    pub started_attempt: Option<u64>,
     /// The last `/status` answer of this run.
     pub status: Option<IndexerStatus>,
     /// `/status` reads in a row without an answer.
@@ -200,6 +202,16 @@ pub struct ZingodFacts {
     pub stale: Option<StaleProcessInfo>,
     /// The address zingod's `Listening` line named in this run.
     pub listening: Option<SocketAddr>,
+}
+
+impl ZingodFacts {
+    /// Whether zingod still runs for an earlier attempt than `attempt`, the actor's: a restart
+    /// the actor asked for is under way, and zingod serves no more. From the restart's stop on
+    /// the phase says so itself, and the runner's next start is for `attempt`, however briefly
+    /// the phase between them showed.
+    pub fn restarting(&self, attempt: u64) -> bool {
+        self.phase.is_active() && self.started_attempt != Some(attempt)
+    }
 }
 
 /// Why zingod doesn't run now.
@@ -681,8 +693,8 @@ pub struct IndexerFacts {
     pub mismatch: Option<u64>,
     /// The last tip cross-check.
     pub tip: Option<Checked<TipCheck>>,
-    /// The actor asked the runner to restart a running zingod, which hasn't stopped yet: it
-    /// serves no more.
+    /// zingod still runs for an earlier attempt than the actor's ([`ZingodFacts::restarting`]):
+    /// it serves no more.
     pub restarting: bool,
 }
 
@@ -1457,6 +1469,44 @@ mod tests {
         };
         assert_eq!(ZebradRun::of(&status), Some(next));
         assert_eq!(ZebradRun::of(&Status::default()), None);
+    }
+
+    /// A restart the actor asks for holds from the new attempt until zingod runs for it, from
+    /// the attempt the runner started for rather than a phase it may not see.
+    #[test]
+    fn a_restart_holds_until_zingod_runs_for_the_new_attempt() {
+        let running = |phase: Phase, started_attempt| ZingodFacts {
+            phase,
+            started_attempt,
+            ..ZingodFacts::default()
+        };
+        assert!(!running(Phase::Running, Some(3)).restarting(3));
+        assert!(running(Phase::Running, Some(3)).restarting(4), "asked");
+        assert!(running(Phase::Starting, Some(3)).restarting(4));
+        assert!(
+            !running(Phase::Stopping, Some(3)).restarting(4),
+            "stopping: problem() sees zingod as starting from here"
+        );
+        assert!(!running(Phase::Stopped, Some(3)).restarting(4));
+        assert!(
+            !running(Phase::Starting, Some(4)).restarting(4),
+            "started again"
+        );
+        assert!(
+            !running(Phase::Running, Some(4)).restarting(4),
+            "running again, with no stopped phase seen between"
+        );
+        assert!(
+            !running(
+                Phase::Failed {
+                    class: ExitClass::Crash
+                },
+                Some(3)
+            )
+            .restarting(4),
+            "Try again after a failure starts zingod, nothing to restart"
+        );
+        assert!(!running(Phase::Stopped, None).restarting(0));
     }
 
     #[test]
