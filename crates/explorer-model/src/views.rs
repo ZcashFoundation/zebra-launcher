@@ -215,9 +215,8 @@ pub fn tx_kind(tx: &Tx, rules_height: u32, heights: &UpgradeHeights) -> TxKind {
     TxKind::Mixed
 }
 
-/// The Transaction page, without the values of the outputs its inputs spend. `rules_height`
-/// is as for [`tx_kind`].
-pub fn tx_page(tx: &Tx, rules_height: u32, heights: &UpgradeHeights) -> TxPage {
+/// The shielded pools `tx` touches: counts and the net value that left each.
+pub fn shielded_parts(tx: &Tx) -> Vec<PoolPart> {
     let net = tx.net_out();
     let touches = tx.touches();
     let mut shielded = Vec::new();
@@ -245,6 +244,14 @@ pub fn tx_page(tx: &Tx, rules_height: u32, heights: &UpgradeHeights) -> TxPage {
         }
         shielded.push(part);
     }
+    shielded
+}
+
+/// The Transaction page, without the values of the outputs its inputs spend. `rules_height`
+/// is as for [`tx_kind`].
+pub fn tx_page(tx: &Tx, rules_height: u32, heights: &UpgradeHeights) -> TxPage {
+    let net = tx.net_out();
+    let shielded = shielded_parts(tx);
     let coinbase = tx.is_coinbase();
     let fee = if coinbase {
         None
