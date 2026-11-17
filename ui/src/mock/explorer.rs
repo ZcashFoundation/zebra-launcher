@@ -618,7 +618,6 @@ fn tx_page(reads: &mut Reads, tx: &Tx, resolve: bool) -> TxPage {
         .block_hash
         .filter(|_| tx.height.is_some_and(|height| height >= 0));
     let mut spent: Vec<Option<SpentOutput>> = vec![None; tx.vin.len()];
-    let mut resolvable = false;
     let mut claim = None;
     if tx.is_coinbase() {
         claim = Some(coinbase_claim(reads, tx, mined_in));
@@ -652,7 +651,6 @@ fn tx_page(reads: &mut Reads, tx: &Tx, resolve: bool) -> TxPage {
                 (true, Some(_)) => views::RESOLVED_PARENTS,
                 (true, None) => views::RESOLVED_WAITING_PARENTS,
             };
-            resolvable = !resolve && parents.len() > cap;
             let found: Vec<(TxId, Option<Tx>)> = parents
                 .into_iter()
                 .take(cap)
@@ -667,7 +665,7 @@ fn tx_page(reads: &mut Reads, tx: &Tx, resolve: bool) -> TxPage {
         }
     }
     let mut page = views::tx_page(tx, &spent, rules_height, &heights);
-    page.resolvable = resolvable && page.unresolved > 0;
+    page.resolvable = !resolve && page.unresolved > 0;
     page.coinbase = claim;
     page
 }

@@ -1383,8 +1383,11 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
   sizes, and remembers them as the backend's cache would, for Show RPC.
 - **Call budgets** pinned by the actor's tests: a small block's rows are one heavy read with
   every fee, after which a transaction of the block is one read; a transaction with inputs is
-  one read and one per earlier transaction, then nothing; a coinbase's page makes the Block
-  page's reads; a big block's 25 rows are 25 reads and one per earlier transaction, never the
+  one read and one per earlier transaction, then nothing; one spending from more than 16 is,
+  in a small block, one heavy read and none of them, and in a big block 16 and the rest on
+  request, past the 16th on the prefetch lane, at most 1,000 (200 while it waits); inputs left
+  unread for any reason, a failed heavy read included, can be read on request; a coinbase's
+  page makes the Block page's reads; a big block's 25 rows are 25 reads and one per earlier transaction, never the
   whole block; a heavy read leaves room for three cheap ones; prefetches and cards fill the
   cache the pages then read.
 

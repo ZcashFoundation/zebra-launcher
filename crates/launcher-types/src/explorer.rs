@@ -609,7 +609,8 @@ pub struct TxPage {
     pub fee: Option<Shown>,
     pub actions: LogicalActions,
     /// Inputs whose spent outputs were not read: a transaction spending from many earlier
-    /// ones has the rest read on request ([`ExplorerRequest::Tx`]'s `resolve`).
+    /// ones, or whose block or earlier transactions could not be read, has the rest read on
+    /// request ([`ExplorerRequest::Tx`]'s `resolve`).
     pub unresolved: u32,
     /// Whether asking with `resolve` would read more of them.
     pub resolvable: bool,

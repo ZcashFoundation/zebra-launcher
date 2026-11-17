@@ -454,7 +454,9 @@ async fn spent_by(
 /// when the cache has it; else from up to 16 earlier transactions, or the block read whole
 /// when it spends from more and the block is small; else, with `resolve`, from them all (up to
 /// 1,000, or 200 for a waiting transaction), the first 16 on the page's lane and the rest on
-/// the prefetch lane. A coinbase gets what it claimed, from its block.
+/// the prefetch lane. Inputs left unread, however that came about, can be resolved: a block
+/// that could not be read whole, or lacked the transaction, leaves them to be read one by one.
+/// A coinbase gets what it claimed, from its block.
 async fn tx(
     context: &Context,
     txid: TxId,
@@ -476,7 +478,6 @@ async fn tx(
         .block_hash
         .filter(|_| tx.height.is_some_and(|height| height >= 0));
     let mut spent: Vec<Option<SpentOutput>> = vec![None; tx.vin.len()];
-    let mut resolvable = false;
     let mut claim = None;
     if tx.is_coinbase() {
         claim = Some(coinbase_claim(context, &tx, mined_in).await);
@@ -512,7 +513,6 @@ async fn tx(
                     (true, Some(_)) => views::RESOLVED_PARENTS,
                     (true, None) => views::RESOLVED_WAITING_PARENTS,
                 };
-                resolvable = !resolve && parents.len() > cap;
                 let later = fetch.in_lane(Lane::Prefetch);
                 let reads: Vec<_> = parents
                     .iter()
@@ -538,7 +538,7 @@ async fn tx(
         }
     }
     let mut page = views::tx_page(&tx, &spent, rules_height, &context.heights);
-    page.resolvable = resolvable && page.unresolved > 0;
+    page.resolvable = !resolve && page.unresolved > 0;
     page.coinbase = claim;
     Ok(ExplorerResponse::Tx(Box::new(page)))
 }
