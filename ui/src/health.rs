@@ -6,6 +6,8 @@
 //! sync, so the operator reads the reason, not the consequence. The same facts feed the hero
 //! line and the tiles, so they never disagree with the verdict.
 
+mod resources;
+
 use std::time::{Duration, SystemTime};
 
 use launcher_types::{
@@ -13,6 +15,7 @@ use launcher_types::{
     StaleProcessInfo, Status, UpdateInfo, UpdateState, eos_within,
 };
 pub use launcher_types::{Level, NO_PEERS_FOR, STALE_AFTER};
+pub use resources::ResourceInput;
 
 use crate::{
     charts::{eta_text, percent_1},
@@ -169,6 +172,8 @@ pub struct HealthInput<'a> {
     pub metrics_history: &'a MetricsHistory,
     pub insights: &'a Insights,
     pub update: Option<&'a UpdateInfo>,
+    /// What the node's processes and the computer use.
+    pub resources: ResourceInput<'a>,
     pub now: SystemTime,
     /// When the current phase (or the current rule) began, for "for N min".
     pub phase_since: SystemTime,
@@ -1148,6 +1153,7 @@ pub fn summary_text(input: &HealthInput<'_>, verdict: &Verdict) -> String {
     if let Some(disk) = facts.metric_count(names::DISK_BYTES) {
         lines.push(format!("State on disk: {}", bytes(disk)));
     }
+    lines.extend(input.resources.summary_lines(now));
 
     let mut ports = Vec::new();
     if let Some(addr) = status.rpc_addr {
@@ -1227,11 +1233,13 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     use launcher_types::{
-        EosInfo, ExitInfo, LogLevel, LogLine, LogStream, MetricFamily, MetricKind, MetricSample,
-        UpdateHealthFailure, UpdateMode,
+        EosInfo, ExitInfo, LogLevel, LogLine, LogStream, MachineResources, MetricFamily,
+        MetricKind, MetricSample, NodeResources, Platform, ProcessUsage, UpdateHealthFailure,
+        UpdateMode,
     };
 
     use super::*;
+    use crate::{machine_history::MachineHistory, resource_history::ResourceHistory};
 
     /// 2026-10-23 19:00:00 UTC: the run started.
     const START: u64 = 1_792_782_000;
@@ -1387,6 +1395,10 @@ mod tests {
         metrics_history: MetricsHistory,
         insights: Insights,
         update: Option<UpdateInfo>,
+        resources: Option<NodeResources>,
+        resource_history: ResourceHistory,
+        machine: Option<MachineResources>,
+        machine_history: MachineHistory,
         now: SystemTime,
         phase_since: SystemTime,
     }
@@ -1405,6 +1417,10 @@ mod tests {
                 metrics_history: MetricsHistory::default(),
                 insights: insights(&[tracing_started(0, 1)]),
                 update: Some(update(UpdateState::Idle)),
+                resources: None,
+                resource_history: ResourceHistory::default(),
+                machine: None,
+                machine_history: MachineHistory::default(),
                 now: t(now),
                 phase_since: t(0),
             }
@@ -1442,6 +1458,12 @@ mod tests {
                 metrics_history: &self.metrics_history,
                 insights: &self.insights,
                 update: self.update.as_ref(),
+                resources: ResourceInput {
+                    node: self.resources.as_ref(),
+                    history: &self.resource_history,
+                    machine: self.machine.as_ref(),
+                    machine_history: &self.machine_history,
+                },
                 now: self.now,
                 phase_since: self.phase_since,
             }
@@ -1489,6 +1511,72 @@ mod tests {
             if let (Some(stats), Some(frozen)) = (&mut self.stats, frozen) {
                 stats.height = frozen;
                 stats.verification_progress = frozen as f64 / 3_120_000.0;
+            }
+        }
+    }
+
+    const GIB: u64 = 1 << 30;
+
+    /// zebrad's tree `secs` after the start: 5.6 cores, 6.1 GiB (peak 6.4), 35 MB/s read and
+    /// 95 MB/s written since the spawn.
+    fn node_sample(secs: u64) -> NodeResources {
+        NodeResources {
+            run: 1,
+            at: t(secs),
+            run_secs: secs as f64,
+            platform: Platform::Linux,
+            cpu_secs: 5.6 * secs as f64,
+            cpu_cores: Some(5.6),
+            memory_bytes: 6_549_000_000,
+            peak_memory_bytes: 6_871_947_673,
+            committed_bytes: None,
+            read_bytes: Some(35_000_000 * secs),
+            written_bytes: Some(95_000_000 * secs),
+            processes: 1,
+            threads: Some(68),
+            descriptors: Some(412),
+            members: vec![ProcessUsage {
+                pid: 4242,
+                parent: None,
+                name: "zebrad".into(),
+                started_at: t(0),
+                cpu_secs: 5.6 * secs as f64,
+                memory_bytes: Some(6_549_000_000),
+                read_bytes: None,
+                written_bytes: None,
+                threads: Some(68),
+            }],
+        }
+    }
+
+    /// The computer `secs` after the start: 8 CPUs, 6.5 of them busy, 16 GiB with `available`
+    /// bytes available, 0.3 of 2 GiB swap.
+    fn computer(secs: u64, available: u64) -> MachineResources {
+        MachineResources {
+            at: t(secs),
+            logical_cpus: 8,
+            cpu_busy_cores: Some(6.5),
+            memory_total_bytes: 16 * GIB,
+            memory_available_bytes: Some(available),
+            swap_total_bytes: Some(2 * GIB),
+            swap_used_bytes: Some(322_122_547),
+            commit_bytes: None,
+            commit_limit_bytes: None,
+            pressure: None,
+        }
+    }
+
+    impl Scene {
+        /// zebrad's samples and the computer's every 5 s from `from` to `to` seconds after the
+        /// start, the computer with `available` bytes available.
+        fn sampled(&mut self, from: u64, to: u64, available: u64) {
+            for secs in (from..=to).step_by(5) {
+                let sample = node_sample(secs);
+                self.resource_history.push(&sample);
+                self.resources = Some(sample);
+                let machine = computer(secs, available);
+                self.machine_history.push(&machine);
+                self.machine = Some(machine);
             }
         }
     }
@@ -2403,6 +2491,41 @@ mod tests {
         assert_eq!(Level::Neutral.word(), None);
         assert_eq!(Level::Attention.word(), Some("Attention"));
         assert_eq!(Action::StartKillingStale.label(), "Stop it and start");
+    }
+
+    #[test]
+    fn summary_has_the_resource_lines() {
+        let mut scene = Scene::syncing(1200);
+        scene.sampled(1100, 1200, 5_046_586_573);
+        let summary = scene.summary();
+        let lines: Vec<&str> = summary.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.starts_with("Resources: "))
+            .expect("a resources line");
+        assert_eq!(
+            &lines[at - 1..=at + 2],
+            [
+                "Mempool: 24 transactions",
+                "Resources: 5.6 cores (70 % of 8) · 6.1 GiB, peak 6.4 GiB · 1 process · Disk 35.0 MB/s read, 95.0 MB/s written",
+                "This computer: 8 CPUs, 81 % busy · 16 GiB, 4.7 GiB available · swap 0.3 of 2 GiB",
+                "Ports: RPC 127.0.0.1:8232 · metrics 127.0.0.1:9999",
+            ]
+        );
+        // Stopped: the last run, and the computer as it is.
+        scene.status.phase = Phase::Stopped;
+        scene.resources = None;
+        let summary = scene.summary();
+        assert!(
+            summary.contains(
+                "Resources: last run: average 5.6 cores · peak 6.4 GiB · read 42.0 GB, wrote 114.0 GB · 20 min\n"
+            ),
+            "{summary}"
+        );
+        // Nothing measured: no lines.
+        let summary = Scene::syncing(1200).summary();
+        assert!(!summary.contains("Resources:"), "{summary}");
+        assert!(!summary.contains("This computer:"), "{summary}");
     }
 
     #[test]
