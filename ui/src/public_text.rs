@@ -118,8 +118,9 @@ fn failed_text(class: ExitClass, detail: &FailDetail, status: Option<&PublicStat
             path.display()
         ),
         (ExitClass::ConfigError, FailDetail::OpenFiles { needed, limit }) => format!(
-            "zingod needs {} open files, and this computer allows Zeal {}. Raise the open-file \
-             limit (LimitNOFILE in a systemd unit, or ulimit -n), then try again.",
+            "zingod needs {} open files, and this computer allows Zeal {}. Raise the hard \
+             open-file limit (LimitNOFILE in a systemd unit, or nofile in \
+             /etc/security/limits.conf), restart Zeal, then try again.",
             thousands(*needed),
             thousands(*limit)
         ),
