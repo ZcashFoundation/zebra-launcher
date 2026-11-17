@@ -23,6 +23,7 @@
 //! | `hang-on-signal` | ignores shutdown requests, so the supervisor must kill it |
 //! | `stderr-flood` | writes 20 000 lines to stderr after start-up, then behaves like `ok` |
 //! | `non-utf8` | writes a line of invalid UTF-8 to stdout, then behaves like `ok` |
+//! | `close-on-wrong-cookie` | like `ok`, but closes an RPC connection with a wrong or missing cookie without an answer, as zebrad 7.0.0 does, where `ok` answers `401` |
 //!
 //! `FAKE_ZEBRAD_STARTUP_DELAY_MS` delays the lines after `Starting zebrad`, and
 //! `FAKE_ZEBRAD_HEARTBEAT_MS` sets the heartbeat interval (default 500 ms).
@@ -57,6 +58,8 @@
 //! `getinfo`, `getmempoolinfo`, `getpeerinfo` and `getdeprecationinfo` with
 //! canned values in zebrad's shapes (see [`canned`]: supply and value pools,
 //! network upgrades, eight peers with user agents and ping times),
+//! `getblockhash` with a hash derived from the height up to its tip
+//! (`fake/chain.rs`, which fake-zingod shares) and zebrad's `-8` above it,
 //! `fakegetcallcounts` with the number of calls per method so far, and
 //! `-32601` to anything else.
 //! `FAKE_ZEBRAD_DEPRECATION_FAILURES=N` makes the first `N` `getdeprecationinfo`
@@ -96,6 +99,9 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::oneshot,
 };
+
+#[path = "fake/chain.rs"]
+mod chain;
 
 const RPC_ADDR: &str = "127.0.0.1:8232";
 const METRICS_ADDR: &str = "127.0.0.1:9999";
@@ -340,7 +346,7 @@ async fn run(
         "Opened Zcash protocol endpoint at 127.0.0.1:18233",
     );
     let (rpc_addr, cookie_written) = match config.as_deref().and_then(rpc_config) {
-        Some(rpc) => match start_rpc_server(rpc).await {
+        Some(rpc) => match start_rpc_server(rpc, mode == "close-on-wrong-cookie").await {
             Ok(started) => started,
             Err(err) => panic_and_abort(
                 "zebra-rpc/src/server.rs:1:1",
@@ -753,7 +759,12 @@ async fn serve_metrics(stream: TcpStream) -> std::io::Result<()> {
 
 /// Binds the RPC listener, writes the cookie, and serves requests in the
 /// background. Returns the bound address and whether a cookie was written.
-async fn start_rpc_server(config: RpcConfig) -> std::io::Result<(String, bool)> {
+/// With `close_on_wrong_cookie` a request without the cookie gets its
+/// connection closed instead of a `401`.
+async fn start_rpc_server(
+    config: RpcConfig,
+    close_on_wrong_cookie: bool,
+) -> std::io::Result<(String, bool)> {
     let listener = TcpListener::bind(config.listen_addr).await?;
     let addr = listener.local_addr()?;
     let expected_auth = match &config.cookie_dir {
@@ -773,7 +784,7 @@ async fn start_rpc_server(config: RpcConfig) -> std::io::Result<(String, bool)> 
                     tokio::spawn(async move {
                         let _ = tokio::time::timeout(
                             Duration::from_secs(10),
-                            serve_connection(stream, expected_auth),
+                            serve_connection(stream, expected_auth, close_on_wrong_cookie),
                         )
                         .await;
                     });
@@ -804,7 +815,11 @@ fn random_cookie() -> String {
 }
 
 /// Serves one HTTP/1.1 request, then closes the connection.
-async fn serve_connection(stream: TcpStream, expected_auth: Option<String>) -> std::io::Result<()> {
+async fn serve_connection(
+    stream: TcpStream,
+    expected_auth: Option<String>,
+    close_on_wrong_cookie: bool,
+) -> std::io::Result<()> {
     const MAX_HEADER_LINES: usize = 100;
     const MAX_BODY: usize = 1024 * 1024;
 
@@ -835,9 +850,14 @@ async fn serve_connection(stream: TcpStream, expected_auth: Option<String>) -> s
         }
     }
 
+    let wrong_cookie = expected_auth.is_some() && authorization != expected_auth;
+    if wrong_cookie && close_on_wrong_cookie {
+        // zebrad 7.0.0 drops the connection without an HTTP answer.
+        return Ok(());
+    }
     let (status, body) = if content_length > MAX_BODY {
         ("413 Payload Too Large", String::new())
-    } else if expected_auth.is_some() && authorization != expected_auth {
+    } else if wrong_cookie {
         ("401 Unauthorized", String::new())
     } else {
         let mut body = vec![0; content_length];
@@ -853,16 +873,17 @@ async fn serve_connection(stream: TcpStream, expected_auth: Option<String>) -> s
 }
 
 /// The methods the fake answers, in the order of [`CALL_COUNTS`].
-const METHODS: [&str; 5] = [
+const METHODS: [&str; 6] = [
     "getblockchaininfo",
     "getinfo",
     "getmempoolinfo",
     "getpeerinfo",
     "getdeprecationinfo",
+    "getblockhash",
 ];
 
 /// How often each of [`METHODS`] was called.
-static CALL_COUNTS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+static CALL_COUNTS: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 
 /// Answers one JSON-RPC request body.
 fn handle_rpc(body: &[u8]) -> Value {
@@ -895,6 +916,9 @@ fn handle_rpc(body: &[u8]) -> Value {
                     "error": { "code": code, "message": "simulated failure" },
                 });
             }
+            if method == "getblockhash" {
+                return block_hash_answer(id, request.get("params"));
+            }
             json!({ "jsonrpc": "2.0", "id": id, "result": canned(method) })
         }
         None => json!({
@@ -905,12 +929,30 @@ fn handle_rpc(body: &[u8]) -> Value {
     }
 }
 
+/// `getblockhash [height]`: the hash of a block up to the tip, and zebrad's
+/// error above it or for a height that isn't one.
+fn block_hash_answer(id: Value, params: Option<&Value>) -> Value {
+    let height = params
+        .and_then(|params| params.get(0))
+        .and_then(Value::as_i64);
+    match height.and_then(|height| u64::try_from(height).ok()) {
+        Some(height) if height <= chain::TIP => {
+            json!({ "jsonrpc": "2.0", "id": id, "result": chain::block_hash(height) })
+        }
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -8, "message": "Provided index is greater than the current tip" },
+        }),
+    }
+}
+
 /// zebrad-shaped responses, trimmed to a plausible subset of fields.
 fn canned(method: &str) -> Value {
     match method {
         "getblockchaininfo" => json!({
             "chain": "main",
-            "blocks": 2_500_000,
+            "blocks": chain::TIP,
             "headers": 2_500_001,
             "difficulty": 123_456_789.5,
             "verificationprogress": 0.8333,
