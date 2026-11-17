@@ -34,7 +34,7 @@ use launcher_core::{
     process::ZebradCommand,
     rpc::{RpcClient, RpcError},
     supervisor::{self, SupervisorConfig, SupervisorHandle},
-    zingod::{ZingodCommand, ZingodConfig, ZingodNetwork},
+    zingod::{ZingodCommand, ZingodConfig, ZingodNetwork, logs::SIGTERM_RACE},
 };
 use launcher_gateway::{Config, Event, Inputs, Limits, Mode, Outputs, Stats, Timers};
 use launcher_herd::public::zingod::{ZebradRun, ZingodFacts};
@@ -309,6 +309,17 @@ impl Zingod {
         .await
     }
 
+    /// The `panicked at` line zingod printed last, from the runner's log.
+    async fn panic_line(&self) -> Option<String> {
+        let lines = timeout(LIMIT, self.runner.subscribe()).await.ok()??;
+        lines
+            .history
+            .iter()
+            .rev()
+            .find(|line| line.message.contains(" panicked at "))
+            .map(|line| line.message.trim().to_string())
+    }
+
     async fn stop(self) {
         timeout(LIMIT, self.runner.shutdown()).await.unwrap();
     }
@@ -439,8 +450,30 @@ impl Cases {
             let took = asked.elapsed();
             let exit = facts.last_exit.unwrap();
             eprintln!("stopped in {took:?} with a connection open: {open}: {exit:?}");
-            assert_eq!((exit.code, exit.class), (Some(0), ExitClass::Clean));
             assert!(took < zingod.options.stop_grace, "{took:?}");
+            assert!(exit.requested, "{exit:?}");
+            match (exit.code, exit.class) {
+                (Some(0), ExitClass::Clean) => {}
+                // zingod 1.1.0's race, which Zeal takes as the stop it asked for.
+                (None, ExitClass::Crash) if exit.detail.as_deref() == Some(SIGTERM_RACE) => {
+                    eprintln!(
+                        "note: zingod {} aborted on SIGTERM instead of exiting 0: the race of \
+                         zingod v1.1.0's assert! at packages/zingod-sync/src/follower.rs:143 \
+                         (the same one is at packages/zingod-nfs/src/nfs.rs:118), where header \
+                         sync's chain watch closes before the follower sees the cancel. Zeal \
+                         takes it as the stop it asked for (docs/PUBLIC-SERVICES.md, \"Stop\"). \
+                         zingod said: {}",
+                        launcher_types::zingod::version(),
+                        zingod
+                            .panic_line()
+                            .await
+                            .unwrap_or_else(|| "no panic line in its log".into())
+                    );
+                }
+                _ => {
+                    panic!("zingod's SIGTERM stop neither exited 0 nor hit 1.1.0's race: {exit:?}")
+                }
+            }
             drop(held);
             zingod.stop().await;
         }
