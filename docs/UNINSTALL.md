@@ -65,8 +65,8 @@ Kept data stays where it is; delete it by hand if you no longer want it.
   `/usr/bin/zeal-zebrad` and `/usr/bin/zeal-zingod`).
 - **zingod:** Settings → Public services → "Turn off and forget…" with "Delete zingod's
   index" ticked removes the index and zingod's state from the recorded folder, and nothing
-  else; after switching back to Zebra's built-in server, "Delete…" beside the kept index does
-  the same. Otherwise remove `<first node's data dir>/zingod` by hand, with Zeal stopped. In
+  else, and lists what it couldn't remove; after switching back to Zebra's built-in server,
+  "Delete…" beside the kept index does the same. Otherwise remove `<first node's data dir>/zingod` by hand, with Zeal stopped. In
   an AppImage, the launcher also keeps a copy of zingod in
   `~/.local/share/org.zfnd.zeal/sidecar/zingod/<launcher version>/zeal-zingod`.
 

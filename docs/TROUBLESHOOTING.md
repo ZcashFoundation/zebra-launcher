@@ -188,8 +188,12 @@ still renews. zingod's own log is `zingod-<network>.log` in the logs folder ("Op
 - **"zingod's index is damaged"** or **"zingod's chain doesn't match Zebra's"**: press
   Rebuild…. It deletes the index in the folder shown and builds it again from Zebra's chain,
   which takes hours.
-- **"zingod is stuck at block …"**: Zeal restarted zingod once already. Open the log; it goes
-  on by itself once zingod moves.
+- **"zingod is stuck at block …"**: Zeal restarted zingod once already, during a build or a
+  catch-up too. Open the log; it goes on by itself once zingod moves.
+- **"Zeal could not set up zingod's folder <path>: <error>"**: Zeal couldn't create zingod's
+  index folder or write its files before starting it, so zingod's log has nothing about it.
+  The folder's parent isn't yours to write (`ls -ld <path>`), its disk was remounted
+  read-only, or its mount point isn't mounted. Fix that, then press Try again.
 
 ### zingod can't read Zebra's cookie
 
@@ -210,7 +214,9 @@ When zingod itself ran out of room, Zeal starts it again by itself only when fre
 low then and is back above 20 GB. If the disk shows free space but zingod still ran out, a quota
 or the filesystem's inodes are the cause (`quota -s`, `df -i`): free some, then press Try
 again. A setup on zingod waits before the first build until the disk has 50 GB free on Testnet,
-counting the part of the index already built.
+counting the part of the index already built, and so does a service switched to zingod or
+rebuilt, until zingod has served from the index: "Waiting for room: zingod needs 45.0 GB free
+in … to build its index".
 
 ## Observability stack (Prometheus and Grafana)
 
