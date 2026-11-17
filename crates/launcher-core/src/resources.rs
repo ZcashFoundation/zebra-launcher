@@ -1171,8 +1171,15 @@ mod tests {
                 })
                 .collect()
         };
+        // Each folder's read is published as it ends, so wait for all three.
+        let read = |volumes: &[VolumeUsage]| {
+            volumes
+                .iter()
+                .map(|volume| volume.nodes.len())
+                .sum::<usize>()
+        };
         assert_eq!(
-            volumes_until(&mut rx, |volumes| !volumes.is_empty()).await,
+            volumes_until(&mut rx, |volumes| read(volumes) == 3).await,
             owned(&[
                 ("/a", &["zebrad-mainnet", "zakura-mainnet"]),
                 ("/b", &["zebrad-testnet"])
