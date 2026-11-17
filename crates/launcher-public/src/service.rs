@@ -2219,11 +2219,17 @@ impl Actor {
             return Err("zingod serves the light client server: switch back to Zebra's built-in server first".into());
         }
         self.door_unavailable();
-        self.delete_index_in(&recorded.dir).await?;
+        let removed = self.delete_index_in(&recorded.dir).await;
         self.zingod.forget_history();
         self.zingod.disk_due = None;
+        // The runner holds zingod stopped after its removal until the plan changes: a rebuild's
+        // new attempt is that change, whether or not the removal went through, so a half
+        // removed index shows as zingod's own failure rather than a start that never comes.
         if restart {
             self.zingod.attempt += 1;
+        }
+        removed?;
+        if restart {
             tracing::info!(target: "zeal::public", "zingod's index is rebuilt");
         } else {
             tracing::info!(target: "zeal::public", "zingod's index is deleted");

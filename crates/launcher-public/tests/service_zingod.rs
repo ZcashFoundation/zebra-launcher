@@ -553,3 +553,36 @@ async fn switching_back_keeps_the_index_until_delete() {
     assert!(!index.join("state").exists());
     s.finish().await;
 }
+
+/// A Rebuild whose removal fails still starts zingod again: the runner holds zingod stopped
+/// after its removal until the plan changes, and the rebuild's new attempt is that change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rebuild_that_cant_remove_the_index_still_starts_zingod() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = setup("serving").await;
+    s.choose_zingod().await;
+    s.wait_for("zingod serving", index_ready).await;
+    let pid = s.zingod_pid().expect("zingod's pid file");
+    // `indexes/` can't leave a folder that can't change.
+    let index = s.index_dir();
+    let mode = |mode| std::fs::set_permissions(&index, std::fs::Permissions::from_mode(mode));
+    mode(0o555).unwrap();
+    if std::fs::write(index.join("probe"), b"").is_ok() {
+        // Root writes there anyway: nothing to see.
+        mode(0o755).unwrap();
+        s.finish().await;
+        return;
+    }
+    let rebuilt = s.services.rebuild_index().await;
+    mode(0o755).unwrap();
+    assert!(rebuilt.is_err(), "{rebuilt:?}");
+    s.wait_for("zingod started again", |status| {
+        status
+            .indexer
+            .as_ref()
+            .is_some_and(|indexer| indexer.phase.is_active())
+            && s.zingod_pid().is_some_and(|new| new != pid)
+    })
+    .await;
+    s.finish().await;
+}
