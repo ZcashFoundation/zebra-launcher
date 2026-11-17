@@ -675,8 +675,13 @@ pub fn fee_figures(fee: Option<Shown>, actions: &LogicalActions) -> Option<FeeFi
     }
 }
 
-/// A multiple of the conventional fee: `1×`, `2.5×`, `250×`.
+/// A multiple of the conventional fee: `1×`, `2.5×`, `250×`. Below one it is cut, never
+/// rounded up, to two places, so a fee short of the conventional one never reads `1×`:
+/// `0.97×`.
 pub fn multiple_text(multiple: f64) -> String {
+    if multiple < 1.0 {
+        return format!("{:.2}×", (multiple * 100.0).floor() / 100.0);
+    }
     if multiple >= 100.0 || (multiple - multiple.round()).abs() < 0.05 {
         format!("{}×", thousands(multiple.round() as u64))
     } else {
@@ -1209,6 +1214,18 @@ mod tests {
         );
         assert_eq!(multiple_text(1.0), "1×");
         assert_eq!(multiple_text(250.0), "250×");
+        // Just short of the conventional fee: never "1×", which reads as paid in full.
+        let just_short = LogicalActions {
+            in_bytes: 148,
+            out_bytes: 34,
+            sapling_outputs: 19,
+            ..LogicalActions::default()
+        };
+        let figures = FeeFigures::new(19_500, &just_short);
+        assert_eq!((figures.logical, figures.unpaid), (20, 1));
+        assert_eq!(multiple_text(figures.multiple), "0.97×");
+        assert_eq!(multiple_text(0.999), "0.99×");
+        assert_eq!(multiple_text(0.5), "0.50×");
         assert_eq!(
             fee_figures(
                 Some(Shown::Unknown {
