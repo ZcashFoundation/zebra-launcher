@@ -1,8 +1,10 @@
 //! zebrad 7.0.0's RPC answers, reduced to the fields the explorer reads (zebra-rpc's
 //! `BlockObject`, `TransactionObject`, `GetBlockSubsidyResponse` and friends). Unknown fields
 //! are skipped, so the Equihash solution and every proof and ciphertext are never kept, and
-//! shielded arrays are only counted ([`Count`]). Optional fields default, so a zebrad that
-//! leaves one out still decodes.
+//! shielded arrays are only counted ([`Count`]); of a script only its length is kept
+//! ([`HexLen`]), which ZIP 317 counts. Amounts zebrad gives in ZEC alone (a spent output's
+//! value, a fee) are read as zatoshis ([`zec_amount`]). Optional fields default, so a zebrad
+//! that leaves one out still decodes.
 //!
 //! The shapes also serialize, in the same field names, so the synthetic chain can stand in for
 //! zebrad: fields that are `None` are left out, as zebrad leaves them out, and the genesis
@@ -56,6 +58,67 @@ impl Serialize for Count {
 
 fn is_zero(count: &Count) -> bool {
     count.0 == 0
+}
+
+/// The length in bytes of a hex string the explorer does not read, such as a script: counted
+/// as it is decoded, never kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HexLen(pub u32);
+
+impl<'de> Deserialize<'de> for HexLen {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct HexVisitor;
+        impl Visitor<'_> for HexVisitor {
+            type Value = HexLen;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a hex string")
+            }
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<HexLen, E> {
+                Ok(HexLen(u32::try_from(text.len() / 2).unwrap_or(u32::MAX)))
+            }
+        }
+        deserializer.deserialize_str(HexVisitor)
+    }
+}
+
+impl Serialize for HexLen {
+    /// As many zero bytes, in hex: what is read back is only the length.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&"00".repeat(self.0 as usize))
+    }
+}
+
+/// Amounts zebrad gives in ZEC only, as zatoshis: exact for every amount it prints
+/// ([`crate::zec_to_zat`]), and written back in ZEC.
+pub mod zec_amount {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
+        f64::deserialize(deserializer).map(crate::zec_to_zat)
+    }
+
+    pub fn serialize<S: Serializer>(zat: &i64, serializer: S) -> Result<S::Ok, S::Error> {
+        (*zat as f64 / crate::ZAT_PER_ZEC as f64).serialize(serializer)
+    }
+
+    /// The same for an optional amount.
+    pub mod option {
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<Option<i64>, D::Error> {
+            Option::<f64>::deserialize(deserializer).map(|zec| zec.map(crate::zec_to_zat))
+        }
+
+        pub fn serialize<S: Serializer>(
+            zat: &Option<i64>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            zat.map(|zat| zat as f64 / crate::ZAT_PER_ZEC as f64)
+                .serialize(serializer)
+        }
+    }
 }
 
 /// `getblock <hash or height> 1`.
@@ -173,6 +236,20 @@ impl BlockV1 {
     }
 }
 
+/// `getblock <hash> 3`: the block's transactions in full, each input with the output it
+/// spends and each transaction with its fee. Only the fields the explorer reads; the rest of
+/// the block comes from verbosity 1.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockV3 {
+    pub hash: BlockHash,
+    #[serde(default)]
+    pub confirmations: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub tx: Vec<Tx>,
+}
+
 /// One entry of `valuePools`, or `chainSupply` (whose `id` is empty).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolValue {
@@ -229,6 +306,14 @@ pub struct Tx {
     pub height: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmations: Option<i64>,
+    /// The fee in zatoshis, in `getblock` at verbosity 3 only, and only when zebrad found every
+    /// output the transaction spends. Never in a coinbase.
+    #[serde(
+        default,
+        with = "zec_amount::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fee: Option<i64>,
     #[serde(default)]
     pub vin: Vec<TxIn>,
     #[serde(default)]
@@ -330,6 +415,59 @@ pub struct TxIn {
     pub txid: Option<TxId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vout: Option<u32>,
+    /// The unlocking script, for its length.
+    #[serde(default, rename = "scriptSig", skip_serializing_if = "Option::is_none")]
+    pub script_sig: Option<ScriptSig>,
+    /// The output it spends, in `getblock` at verbosity 3 only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prevout: Option<Prevout>,
+}
+
+impl TxIn {
+    /// The input's size as ZIP 317 counts it: the outpoint (36 bytes), the script with its
+    /// length prefix, and the sequence (4 bytes). A coinbase input's script is its
+    /// `coinbase` field.
+    pub fn serialized_size(&self) -> u32 {
+        let script = match (&self.coinbase, &self.script_sig) {
+            (Some(coinbase), _) => u32::try_from(coinbase.len() / 2).unwrap_or(u32::MAX),
+            (None, Some(sig)) => sig.hex.0,
+            (None, None) => 0,
+        };
+        36 + compact_size_len(script) + script + 4
+    }
+}
+
+/// An unlocking script.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptSig {
+    #[serde(default)]
+    pub hex: HexLen,
+}
+
+/// The output an input spends, as `getblock` at verbosity 3 gives it (Bitcoin Core's
+/// `prevout`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Prevout {
+    /// Whether a coinbase made it.
+    #[serde(default)]
+    pub generated: bool,
+    /// The height of the block that made it.
+    #[serde(default)]
+    pub height: u32,
+    /// Its value in zatoshis; zebrad gives it in ZEC only.
+    #[serde(rename = "value", with = "zec_amount")]
+    pub value_zat: i64,
+    #[serde(rename = "scriptPubKey")]
+    pub script: ScriptPubKey,
+}
+
+/// The bytes of a script's length prefix (Bitcoin's compact size).
+fn compact_size_len(len: u32) -> u32 {
+    match len {
+        0..=252 => 1,
+        253..=0xffff => 3,
+        _ => 5,
+    }
 }
 
 /// A transparent output.
@@ -342,6 +480,14 @@ pub struct TxOut {
     pub script: ScriptPubKey,
 }
 
+impl TxOut {
+    /// The output's size as ZIP 317 counts it: the value (8 bytes) and the script with its
+    /// length prefix.
+    pub fn serialized_size(&self) -> u32 {
+        8 + compact_size_len(self.script.hex.0) + self.script.hex.0
+    }
+}
+
 /// The parts of `scriptPubKey` the explorer shows.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptPubKey {
@@ -350,6 +496,9 @@ pub struct ScriptPubKey {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addresses: Option<Vec<String>>,
+    /// The locking script, for its length.
+    #[serde(default)]
+    pub hex: HexLen,
 }
 
 /// A Sprout JoinSplit's public values.
@@ -538,6 +687,13 @@ mod tests {
         assert_eq!(tx.vin[0].vout, Some(1));
         assert_eq!(tx.vout[0].script.kind, "pubkeyhash");
         assert_eq!(tx.expiry_height, Some(3_120_040));
+        // Scripts are kept as their lengths: one byte of scriptSig, two of scriptPubKey.
+        assert_eq!(tx.vin[0].script_sig.map(|sig| sig.hex), Some(HexLen(1)));
+        assert_eq!(tx.vin[0].serialized_size(), 36 + 1 + 1 + 4);
+        assert_eq!(tx.vout[0].script.hex, HexLen(2));
+        assert_eq!(tx.vout[0].serialized_size(), 8 + 1 + 2);
+        assert_eq!(tx.fee, None, "getrawtransaction gives no fee");
+        assert_eq!(tx.vin[0].prevout, None);
         // A coinbase input and a mempool transaction: no height, no block.
         let coinbase: Tx = serde_json::from_str(
             r#"{"txid":"3333333333333333333333333333333333333333333333333333333333333333",
@@ -560,6 +716,60 @@ mod tests {
         assert_eq!(back, block);
         let json = serde_json::to_value(Count(2)).unwrap();
         assert_eq!(json, serde_json::json!([{}, {}]));
+    }
+
+    /// A block at verbosity 3 as zebrad 7.0.0 writes it: every transaction in full, an input
+    /// with the output it spends (`prevout`, value in ZEC only), and the fee.
+    const BLOCK_V3: &str = r#"{
+        "hash": "0000000000d8a9ac4e30b7a7ce2bd2b3b1b9c67b6ec23f5a3e7ba7ca1d4ab501",
+        "confirmations": 3, "size": 1200, "height": 3120000, "version": 4,
+        "tx": [
+            {"hex": "0500", "height": 3120000, "confirmations": 3,
+             "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+             "vin": [{"coinbase": "03807b2f00", "sequence": 0}],
+             "vout": [{"value": 1.25, "valueZat": 125000000, "n": 0,
+                       "scriptPubKey": {"asm": "", "hex": "76a914", "type": "pubkeyhash",
+                                        "addresses": ["t1abc"]}}],
+             "vShieldedSpend": [], "vShieldedOutput": [], "vjoinsplit": [],
+             "version": 5, "locktime": 0},
+            {"hex": "0500", "height": 3120000, "confirmations": 3, "fee": 0.0001,
+             "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+             "vin": [{"txid": "3333333333333333333333333333333333333333333333333333333333333333",
+                      "vout": 0, "scriptSig": {"asm": "", "hex": "0000"}, "sequence": 1,
+                      "prevout": {"generated": true, "height": 3119000, "value": 2.5,
+                                  "scriptPubKey": {"asm": "", "hex": "76a9", "type": "pubkeyhash",
+                                                   "addresses": ["t1def"]}}}],
+             "vout": [{"value": 2.4999, "valueZat": 249990000, "n": 0,
+                       "scriptPubKey": {"asm": "", "hex": "76a9", "type": "pubkeyhash"}}],
+             "vShieldedSpend": [], "vShieldedOutput": [], "vjoinsplit": [],
+             "version": 5, "locktime": 0}
+        ],
+        "time": 1761200000, "nonce": "00ff", "solution": "0123", "bits": "1c01ad18",
+        "difficulty": 1.0, "trees": {}
+    }"#;
+
+    #[test]
+    fn a_block_at_verbosity_3_decodes_with_prevouts_and_fees() {
+        let block: BlockV3 = serde_json::from_str(BLOCK_V3).expect("block v3");
+        assert_eq!(block.height, Some(3_120_000));
+        assert_eq!(block.tx.len(), 2);
+        let coinbase = &block.tx[0];
+        assert!(coinbase.is_coinbase());
+        assert_eq!(coinbase.fee, None);
+        assert_eq!(coinbase.vin[0].serialized_size(), 36 + 1 + 5 + 4);
+        let spending = &block.tx[1];
+        assert_eq!(spending.fee, Some(10_000), "0.0001 ZEC");
+        let prevout = spending.vin[0].prevout.as_ref().expect("a prevout");
+        assert!(prevout.generated);
+        assert_eq!(prevout.height, 3_119_000);
+        assert_eq!(prevout.value_zat, 250_000_000);
+        assert_eq!(
+            prevout.script.addresses.as_deref(),
+            Some(&["t1def".to_owned()][..])
+        );
+        // And back through its own JSON, as the synthetic chain writes it.
+        let back: BlockV3 = serde_json::from_value(serde_json::to_value(&block).unwrap()).unwrap();
+        assert_eq!(back, block);
     }
 
     #[test]

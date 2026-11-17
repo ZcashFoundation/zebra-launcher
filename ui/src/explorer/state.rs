@@ -6,11 +6,13 @@ use std::collections::HashMap;
 
 use launcher_types::{
     NodeId,
-    explorer::{ExplorerError, ExplorerLive, ExplorerReply, ExplorerRequest, ExplorerRoute},
+    explorer::{
+        ExplorerCall, ExplorerError, ExplorerLive, ExplorerReply, ExplorerRequest, ExplorerRoute,
+    },
 };
 use leptos::{prelude::*, task::spawn_local};
 
-use super::history::NavHistory;
+use super::{history::NavHistory, prefs::Prefs};
 use crate::api;
 
 /// One node's Explorer. `Copy`: every field is a signal.
@@ -111,10 +113,14 @@ pub struct Load {
     pub refreshing: RwSignal<bool>,
 }
 
+/// What a page last asked: whether the node was reachable, whether the reads were listed, and
+/// the request with its revision.
+type Asked = (bool, bool, Option<(ExplorerRequest, u64)>);
+
 /// Asks `node`'s explorer for `request()` now and again whenever its tracked inputs change the
 /// request or its revision (a page that follows the tip passes the tip as the revision), and
-/// when the node becomes reachable or stops being so. An answer to an older request is
-/// dropped. `None` asks nothing.
+/// when the node becomes reachable or stops being so, or Show RPC is turned on or off: with it,
+/// the answer lists its reads. An answer to an older request is dropped. `None` asks nothing.
 pub fn load(
     node: NodeId,
     nav: NodeExplorer,
@@ -125,37 +131,37 @@ pub fn load(
         refreshing: RwSignal::new(false),
     };
     let generation = StoredValue::new(0u64);
-    Effect::new(
-        move |previous: Option<(bool, Option<(ExplorerRequest, u64)>)>| {
-            let reachable = nav.reads();
-            let next = (reachable, request());
-            if previous.as_ref() == Some(&next) {
-                return next;
+    let prefs = Prefs::get();
+    Effect::new(move |previous: Option<Asked>| {
+        let reachable = nav.reads();
+        let trace = prefs.rpc.get();
+        let next = (reachable, trace, request());
+        if previous.as_ref() == Some(&next) {
+            return next;
+        }
+        let mine = generation.get_value() + 1;
+        generation.set_value(mine);
+        if let (_, _, Some((request, _))) = next.clone() {
+            if matches!(load.value.get_untracked(), Loaded::Ready(_)) {
+                load.refreshing.set(true);
+            } else {
+                load.value.set(Loaded::Loading);
             }
-            let mine = generation.get_value() + 1;
-            generation.set_value(mine);
-            if let (_, Some((request, _))) = next.clone() {
-                if matches!(load.value.get_untracked(), Loaded::Ready(_)) {
-                    load.refreshing.set(true);
-                } else {
-                    load.value.set(Loaded::Loading);
+            let node = node.clone();
+            spawn_local(async move {
+                let result = api::explorer_call(&node, ExplorerCall { request, trace }).await;
+                if generation.try_get_value() != Some(mine) {
+                    return;
                 }
-                let node = node.clone();
-                spawn_local(async move {
-                    let result = api::explorer(&node, request).await;
-                    if generation.try_get_value() != Some(mine) {
-                        return;
-                    }
-                    // The page may be gone by now: then there is nothing to set.
-                    load.refreshing.try_set(false);
-                    load.value.try_set(match result {
-                        Ok(reply) => Loaded::Ready(reply),
-                        Err(error) => Loaded::Failed(error),
-                    });
+                // The page may be gone by now: then there is nothing to set.
+                load.refreshing.try_set(false);
+                load.value.try_set(match result {
+                    Ok(reply) => Loaded::Ready(reply),
+                    Err(error) => Loaded::Failed(error),
                 });
-            }
-            next
-        },
-    );
+            });
+        }
+        next
+    });
     load
 }

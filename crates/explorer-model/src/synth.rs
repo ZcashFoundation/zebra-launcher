@@ -15,21 +15,38 @@
 //! - the lockbox is funded from NU6, and 78,750 ZEC leave it at NU6.1 (Mainnet);
 //! - from NU7 ⌊6 F / 10⌋ of a block's fees F burn, and the shielded budget stays under 330.
 //!
+//! Every transparent input spends an output the chain has, worth what the transaction's fee
+//! needs: a root, which is an output of a coinbase or of a transaction without transparent
+//! inputs, in an older block (100 blocks back, where coinbase outputs mature; near the chain's
+//! start, the block's own coinbase). Roots are found without looking further back, so a
+//! block stays cheap to build. Nothing checks that an output is spent only once.
+//!
+//! Every transaction pays for its logical actions as ZIP 317 counts them, inputs and leftover
+//! notes included: what a wallet pays an action in its era (5,000 zatoshis on Mainnet until
+//! 3,590,000 and on Testnet until NU7, 1,000 after) when the block's fees cover that, else
+//! zebrad's conventional 1,000; the transparent payments pay the rest of the block's fees. The
+//! first payment of every hundredth block pays half of zebrad's conventional fee, as a block
+//! may hold what zebrad's mempool would not, so the explorer's "paid less" shows.
+//!
+//! With [`SynthChain::with_big_blocks`], every so many blocks hold 4,600 more transparent
+//! payments, nearly 2 MB in all and under zebrad's limit of 2,000,000 bytes.
+//!
 //! Block hashes and transaction ids encode their height, branch and position, so lookups need
 //! no index. Addresses are made-up strings in the right shape: never real ones.
 
 use launcher_types::{
     Network, NetworkUpgrade, UpgradeStatus,
-    explorer::{BlockHash, BlockId, Hash32, Pool, TxId},
+    explorer::{BlockHash, BlockId, Hash32, LogicalActions, Pool, TxId},
 };
 
 use crate::{
     ledger::burned_share,
     shapes::{
-        Actions, BestBlock, BlockV1, Count, Header, JoinSplit, PoolValue, ScriptPubKey, Stream,
-        Subsidy, TreeSize, Trees, Tx, TxIn, TxOut,
+        Actions, BestBlock, BlockV1, BlockV3, Count, Header, HexLen, JoinSplit, PoolValue, Prevout,
+        ScriptPubKey, ScriptSig, Stream, Subsidy, TreeSize, Trees, Tx, TxIn, TxOut,
     },
     upgrades::{Upgrade, UpgradeHeights},
+    zip317,
 };
 
 const ZEC: i128 = 100_000_000;
@@ -42,8 +59,8 @@ const HALVING_INTERVAL: u32 = 1_680_000;
 const NU6_1_DISBURSEMENT: u64 = 7_875_000_000_000;
 
 /// The burned fees per block from NU7, on average, and their spread.
-const BURN_BASE: u64 = 90_000;
-const BURN_SPREAD: u64 = 50_000;
+const BURN_BASE: u64 = 270_000;
+const BURN_SPREAD: u64 = 100_000;
 
 const KIND_BLOCK: u64 = 1;
 const KIND_TX: u64 = 2;
@@ -51,6 +68,7 @@ const KIND_PLAN: u64 = 3;
 const KIND_TIME: u64 = 4;
 const KIND_FEES: u64 = 5;
 const KIND_BURN: u64 = 6;
+const KIND_FUNDS: u64 = 7;
 const KIND_POOL: u64 = 10;
 const KIND_TREE: u64 = 20;
 const KIND_FIELD: u64 = 30;
@@ -62,6 +80,20 @@ const TX_INDEX_KEY: u16 = 0x7f4a;
 
 /// The header and solution of a block, in bytes, before its transactions.
 const HEADER_BYTES: i64 = 1_487;
+
+/// A pay-to-public-key-hash input's unlocking script, in bytes: a signature and a public key.
+const P2PKH_SCRIPT_SIG: u32 = 107;
+/// The inputs a shielding transaction is taken to have before it is funded, when the block's
+/// fees are shared out.
+const SHIELD_INPUTS_GUESS: usize = 4;
+
+/// The transactions a big block holds beyond its plan ([`SynthChain::with_big_blocks`]): with
+/// the largest plans, about 200 KB, the block stays under 2,000,000 bytes.
+const FILLERS: u32 = 4_600;
+/// What each of them pays.
+const FILLER_FEE: i64 = 10_000;
+/// And its size: two inputs and two outputs, all pay-to-public-key-hash.
+const FILLER_BYTES: i64 = 10 + 2 * 148 + 2 * 34;
 
 /// A synthetic chain: its tip, the tip's time, and the reorganisations it went through.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +107,9 @@ pub struct SynthChain {
     forks: Vec<u32>,
     /// Every block at a height `h` with `h % n == n - 1` lacks zebrad's value-pool row.
     missing_rows: Option<u32>,
+    /// Every block at a non-zero height `h` with `h % n == 0` holds [`FILLERS`] more
+    /// transactions.
+    big_blocks: Option<u32>,
 }
 
 impl SynthChain {
@@ -88,6 +123,7 @@ impl SynthChain {
             tip_time,
             forks: Vec::new(),
             missing_rows: None,
+            big_blocks: None,
         }
     }
 
@@ -96,6 +132,18 @@ impl SynthChain {
     pub fn with_missing_rows(mut self, every: u32) -> Self {
         self.missing_rows = (every > 1).then_some(every);
         self
+    }
+
+    /// The same chain with every `every`-th block holding 4,600 more transparent payments,
+    /// nearly 2 MB in all: a block too big to read whole at once.
+    pub fn with_big_blocks(mut self, every: u32) -> Self {
+        self.big_blocks = (every > 0).then_some(every);
+        self
+    }
+
+    /// Whether the block at `height` is one of the big ones.
+    pub fn is_big(&self, height: u32) -> bool {
+        self.fillers(height) > 0
     }
 
     pub fn network(&self) -> Network {
@@ -182,24 +230,56 @@ impl SynthChain {
         if !best && branch > 0 && height < self.forks[usize::from(branch) - 1] {
             return None;
         }
-        let mut tx = self
-            .plan(height, branch)
+        let mut tx = self.built(height, branch, index)?.tx;
+        self.place(&mut tx, height, branch);
+        Some(tx)
+    }
+
+    /// `getblock <hash> 3`: a block of the best chain with its transactions in full, each
+    /// input with the output it spends and each transaction but the coinbase with its fee.
+    pub fn block_v3(&self, id: BlockId) -> Option<BlockV3> {
+        let height = self.best_height(id)?;
+        let branch = self.branch(height);
+        let mut built = self.plan(height, branch);
+        let base = built.len() as u16;
+        for index in base..base + self.fillers(height) as u16 {
+            built.push(self.filler(height, branch, index));
+        }
+        let tx = built
             .into_iter()
-            .nth(usize::from(index))?
-            .tx;
-        let block = self.block_hash(height, branch);
-        let time = self.time(height, branch);
-        if best {
+            .enumerate()
+            .map(|(index, built)| {
+                let mut tx = built.tx;
+                self.place(&mut tx, height, branch);
+                for (input, root) in tx.vin.iter_mut().zip(&built.spent) {
+                    input.prevout = Some(root.prevout());
+                }
+                tx.fee = (index > 0).then_some(built.fee);
+                tx
+            })
+            .collect();
+        Some(BlockV3 {
+            hash: self.block_hash(height, branch),
+            confirmations: i64::from(self.tip - height + 1),
+            height: Some(height),
+            tx,
+        })
+    }
+
+    /// Where a transaction of the block at `height` on `branch` is, as zebrad reports it: in
+    /// the best chain, or at height -1 in a side chain.
+    fn place(&self, tx: &mut Tx, height: u32, branch: u16) {
+        if self.branch(height) == branch {
             tx.height = Some(i64::from(height));
             tx.confirmations = Some(i64::from(self.tip - height + 1));
         } else {
             tx.height = Some(-1);
             tx.confirmations = Some(0);
         }
-        tx.block_hash = Some(block);
+        let time = self.time(height, branch);
+        tx.block_hash = Some(self.block_hash(height, branch));
         tx.block_time = Some(time);
         tx.time = Some(time);
-        Some(tx)
     }
 
     /// The fee a transaction of the best chain paid, which zebrad does not report and the
@@ -210,10 +290,7 @@ impl SynthChain {
         if index == 0 || height > self.tip || self.branch(height) != branch {
             return None;
         }
-        self.plan(height, branch)
-            .into_iter()
-            .nth(usize::from(index))
-            .map(|built| built.fee)
+        self.built(height, branch, index).map(|built| built.fee)
     }
 
     /// `getblocksubsidy <height>`.
@@ -547,7 +624,14 @@ impl SynthChain {
         if height < nu7 {
             return 0;
         }
-        BURN_BASE * u64::from(height - nu7 + 1) + self.noise(KIND_BURN, height, 0, BURN_SPREAD)
+        // A big block's payments burn their share too.
+        let big = match self.big_blocks {
+            Some(every) => u64::from(height / every - (nu7 - 1) / every),
+            None => 0,
+        };
+        BURN_BASE * u64::from(height - nu7 + 1)
+            + self.noise(KIND_BURN, height, 0, BURN_SPREAD)
+            + big * burned_share((FILLER_FEE * i64::from(FILLERS)) as u64)
     }
 
     fn burned(&self, height: u32) -> u64 {
@@ -563,8 +647,23 @@ impl SynthChain {
         } else if height == 0 {
             0
         } else {
-            60_000 + self.noise(KIND_FEES, height, branch, 300_000)
+            250_000
+                + self.noise(KIND_FEES, height, branch, 300_000)
+                + self.filler_fees(height) as u64
         }
+    }
+
+    /// The transactions the block at `height` holds beyond its plan.
+    fn fillers(&self, height: u32) -> u32 {
+        match self.big_blocks {
+            Some(every) if height > 0 && height.is_multiple_of(every) => FILLERS,
+            _ => 0,
+        }
+    }
+
+    /// What they pay.
+    fn filler_fees(&self, height: u32) -> i64 {
+        FILLER_FEE * i64::from(self.fillers(height))
     }
 
     /// Mainnet amounts as they are; Testnet's shielded pools are a tenth.
@@ -735,7 +834,10 @@ impl SynthChain {
         let parent = (height > 0).then(|| self.balances(height - 1, parent_branch));
         let parent_row = height == 0 || self.has_row(height - 1);
         let field = |which: u64| hex(self.seed(KIND_FIELD, height, branch, which));
-        let size = HEADER_BYTES + plan.iter().map(|built| built.size).sum::<i64>();
+        let fillers = self.fillers(height);
+        let size = HEADER_BYTES
+            + plan.iter().map(|built| built.size).sum::<i64>()
+            + FILLER_BYTES * i64::from(fillers);
         let value_pools = row.then(|| {
             Pool::ALL
                 .into_iter()
@@ -776,7 +878,7 @@ impl SynthChain {
                 .heights
                 .is_active(Upgrade::Nu5, height)
                 .then(|| field(4)),
-            tx: (0..plan.len())
+            tx: (0..plan.len() + fillers as usize)
                 .map(|index| self.txid(height, branch, index as u16))
                 .collect(),
             time: Some(self.time(height, branch)),
@@ -806,9 +908,8 @@ impl SynthChain {
         }
     }
 
-    /// The transactions of the block at `height` on `branch`, coinbase first, built to move
-    /// exactly the value between the block's parent's pools and its own.
-    fn plan(&self, height: u32, branch: u16) -> Vec<Built> {
+    /// The block's coinbase, and what the rest of its plan starts from.
+    fn start(&self, height: u32, branch: u16) -> Start {
         let mut rng = Rng(self.seed(KIND_PLAN, height, branch, 0));
         let parent_branch = self.parent_branch(height, branch);
         let after = self.balances(height, branch);
@@ -873,6 +974,30 @@ impl SynthChain {
         } else {
             coinbase.pay(claim, self.address(rng.below(12)), "pubkeyhash");
         }
+        Start {
+            rng,
+            notes,
+            deltas,
+            fees,
+            coinbase,
+        }
+    }
+
+    /// The transactions of the block at `height` on `branch`, coinbase first and each in its
+    /// place, built to move exactly the value between the block's parent's pools and its own.
+    /// Those without transparent inputs are final, their fees paid; the shielding and the
+    /// transparent payments are funded later ([`SynthChain::funded`]), from the fees left. So
+    /// funding a later block needs nothing of this one but its skeleton, and never looks
+    /// further back. A big block's extra payments are not among them ([`SynthChain::filler`]).
+    fn skeleton(&self, height: u32, branch: u16) -> Skeleton {
+        let Start {
+            mut rng,
+            mut notes,
+            deltas,
+            fees,
+            coinbase,
+        } = self.start(height, branch);
+        let active = |upgrade| self.heights.is_active(upgrade, height);
         let mut paid = [0i64; 6];
         paid[Pool::Transparent.index()] = coinbase.outputs.iter().map(|out| out.0).sum();
         for (pool, net_out) in Pool::SHIELDED.into_iter().zip(coinbase.net_out()) {
@@ -880,11 +1005,32 @@ impl SynthChain {
         }
 
         // What the other transactions must move into each pool; fees leave the pools they are
-        // paid from.
+        // paid from. A big block's extra payments pay their own.
         let mut need: [i64; 6] = std::array::from_fn(|index| deltas[index] - paid[index]);
         need[Pool::Lockbox.index()] = 0;
-        let mut fee_left = fees;
+        let mut fee_left = fees - self.filler_fees(height);
         let mut parts: Vec<Part> = Vec::new();
+        let mut migration = None;
+
+        // The block's transactions pay per logical action what a wallet pays in this era when
+        // the block's fees cover that for all of them, with room to spare; else zebrad's
+        // conventional fee, which none pays less than. All of them: a note each, the flows'
+        // transparent sides and a couple of payments.
+        let least = zip317::MARGINAL_FEE as i64;
+        let flows = Pool::SHIELDED
+            .into_iter()
+            .filter(|pool| need[pool.index()] != 0)
+            .count();
+        let likely = i64::from(notes.iter().sum::<u32>())
+            + (flows * (SHIELD_INPUTS_GUESS + 2)) as i64
+            + 2 * 2;
+        let wallets = self.conventional_fee(height, 2) / 2;
+        let rate = if wallets * likely * 5 / 4 <= fee_left {
+            wallets
+        } else {
+            least
+        };
+        let price = |actions: u32| rate * i64::from(actions.max(2));
 
         // Orchard to Ironwood, from NU6.3.
         let (orchard, ironwood) = (Pool::Orchard.index(), Pool::Ironwood.index());
@@ -894,12 +1040,9 @@ impl SynthChain {
             && notes[1] >= 4
             && notes[2] >= 4
         {
-            let fee = self
-                .conventional_fee(height, 4)
-                .min(fee_left)
-                .min(-need[orchard]);
+            let fee = price(4).min(fee_left).min(-need[orchard]);
             let moved = need[ironwood].min(-need[orchard] - fee);
-            if moved > 0 {
+            if moved > 0 && fee >= 4 * least {
                 let mut part = Part::default();
                 part.shielded(Pool::Orchard, 2, moved + fee);
                 part.shielded(Pool::Ironwood, 2, -moved);
@@ -908,13 +1051,14 @@ impl SynthChain {
                 fee_left -= fee;
                 notes[1] -= 2;
                 notes[2] -= 2;
+                migration = Some(parts.len());
                 parts.push(part);
             }
         }
 
         // Fully shielded transactions, two or three notes each, while notes and fees last.
         // Each needs room in its pool: a pool that only drains cannot take back its fee.
-        let flow_reserve = 4 * self.conventional_fee(height, 2);
+        let flow_reserve = 4 * price(2);
         for pool in [Pool::Sapling, Pool::Orchard, Pool::Ironwood] {
             let tree = tree_index(pool);
             while notes[tree] >= 2 + 2 && rng.chance(85) {
@@ -923,14 +1067,12 @@ impl SynthChain {
                 } else {
                     2
                 };
-                let mut fee = self
-                    .conventional_fee(height, notes_here)
-                    .min(fee_left - flow_reserve);
+                let mut fee = price(notes_here).min(fee_left - flow_reserve);
                 let drain_only = pool == Pool::Orchard && active(Upgrade::Nu6_3);
                 if drain_only {
                     fee = fee.min(-need[pool.index()]);
                 }
-                if fee <= 0 {
+                if fee < least * i64::from(notes_here) {
                     break;
                 }
                 let mut part = Part::default();
@@ -943,101 +1085,141 @@ impl SynthChain {
         }
 
         // One transaction per shielded pool for the rest of its flow, to or from transparent
-        // outputs.
+        // outputs, with up to two of the pool's notes.
+        let mut flow_notes = [0u32; 6];
         for pool in Pool::SHIELDED {
             let amount = need[pool.index()];
             if amount == 0 {
                 continue;
             }
-            let notes_here = match pool {
+            let here = match pool {
                 Pool::Sapling => notes[0].min(2),
                 Pool::Orchard => notes[1].min(2),
                 Pool::Ironwood => notes[2].min(2),
                 _ => 0,
             };
-            let fee = self.conventional_fee(height, 2).min(fee_left).max(0);
-            let mut part = Part::default();
-            if amount > 0 {
-                // Shielding, with transparent change now and then.
-                let change = if rng.chance(50) {
-                    rng.range(1_000_000, 500_000_000) as i64
-                } else {
-                    0
-                };
-                part.inputs = 1 + rng.below(2) as u32;
-                part.t_in = amount + fee + change;
-                if change > 0 {
-                    part.pay(change, self.address(rng.zipf()), "pubkeyhash");
-                }
-                part.pay_into(pool, amount, notes_here.max(1));
-            } else {
-                // Deshielding; what is left after the fee goes to transparent outputs.
-                let out = -amount;
-                let fee = fee.min(out);
-                if out - fee > 0 {
-                    let first = if out - fee > 2 && rng.chance(40) {
-                        (out - fee) / 3
-                    } else {
-                        out - fee
-                    };
-                    part.pay(first, self.address(rng.zipf()), "pubkeyhash");
-                    if first < out - fee {
-                        part.pay(out - fee - first, self.address(rng.zipf()), "pubkeyhash");
-                    }
-                }
-                part.take_out(pool, out, notes_here);
-                fee_left -= fee;
-                need[pool.index()] = 0;
-                take_notes(&mut notes, pool, notes_here);
-                parts.push(part);
+            let here = if amount > 0 { here.max(1) } else { here };
+            take_notes(&mut notes, pool, here);
+            flow_notes[pool.index()] = here;
+        }
+        // The notes left over join their pool's flow, so the fee for them comes from
+        // transparent value. With no flow, Orchard's and Ironwood's join the migration, whose
+        // fee comes from the side that still has a flow; else a transaction of their own pays it
+        // from transparent inputs.
+        for pool in [Pool::Sapling, Pool::Orchard, Pool::Ironwood] {
+            let tree = tree_index(pool);
+            let left = std::mem::take(&mut notes[tree]);
+            if left == 0 {
                 continue;
             }
-            fee_left -= fee;
+            if need[pool.index()] != 0 {
+                flow_notes[pool.index()] += left;
+                continue;
+            }
+            if let Some(index) = migration.filter(|_| pool != Pool::Sapling) {
+                let part = &mut parts[index];
+                let fee = if rate * i64::from(left) <= fee_left - flow_reserve {
+                    rate * i64::from(left)
+                } else {
+                    least * i64::from(left)
+                };
+                let moved = -part.ironwood.map_or(0, |bundle| bundle.1);
+                let side = if need[orchard] + fee < 0 {
+                    Some(Pool::Orchard)
+                } else if need[ironwood] > 0 && moved > fee {
+                    Some(Pool::Ironwood)
+                } else {
+                    None
+                };
+                if let Some(side) = side.filter(|_| fee <= fee_left) {
+                    // More leaves Orchard, or less reaches Ironwood: the pool's flow makes up
+                    // the difference.
+                    let bundle = match side {
+                        Pool::Orchard => &mut part.orchard,
+                        _ => &mut part.ironwood,
+                    };
+                    *bundle = bundle.map(|(actions, net_out)| (actions, net_out + fee));
+                    need[side.index()] += fee;
+                    fee_left -= fee;
+                    part.more_notes(pool, left);
+                    continue;
+                }
+            }
+            let mut part = Part {
+                funding: Funding::Shield { amount: 0 },
+                ..Part::default()
+            };
+            part.shielded(pool, left, 0);
+            parts.push(part);
+        }
+        let mut flows: Vec<PoolFlow> = Vec::new();
+        for pool in Pool::SHIELDED {
+            let amount = need[pool.index()];
+            if amount == 0 {
+                continue;
+            }
+            let mut part = Part::default();
+            let here = flow_notes[pool.index()];
+            if amount > 0 {
+                // Shielding, from transparent outputs found when it is funded, which pay its
+                // fee too; what they bring beyond comes back as change.
+                part.funding = Funding::Shield { amount };
+                part.pay_into(pool, amount, here);
+            } else {
+                // Deshielding, paid for below once its outputs are known.
+                part.take_out(pool, -amount, here);
+            }
             need[pool.index()] = 0;
-            take_notes(&mut notes, pool, notes_here.max(1));
+            flows.push(PoolFlow {
+                index: parts.len(),
+                out: (-amount).max(0),
+                two_outputs: rng.chance(40),
+            });
             parts.push(part);
         }
 
-        // Notes left over join a transaction that already touches their pool.
-        for pool in [Pool::Sapling, Pool::Orchard, Pool::Ironwood] {
-            let tree = tree_index(pool);
-            if notes[tree] == 0 {
-                continue;
+        // What the shielding is likely to take: a few inputs each, at the block's rate.
+        let shielding: i64 = parts
+            .iter()
+            .filter(|part| matches!(part.funding, Funding::Shield { .. }))
+            .map(|part| rate * i64::from(part.paid_actions(SHIELD_INPUTS_GUESS, 1)))
+            .sum();
+        // Deshielding pays for its actions from what it takes out: at the block's rate while that
+        // leaves the shielding and a payment theirs, else at zebrad's.
+        for flow in flows.iter().filter(|flow| flow.out > 0) {
+            let part = &mut parts[flow.index];
+            let actions = i64::from(part.paid_actions(0, if flow.two_outputs { 2 } else { 1 }));
+            let room = fee_left - shielding - 2 * rate;
+            let fee = if rate * actions <= room {
+                rate * actions
+            } else {
+                least * actions
             }
-            match parts.iter_mut().rev().find(|part| part.touches(pool)) {
-                Some(part) => part.more_notes(pool, notes[tree]),
-                None => {
-                    let mut part = Part::default();
-                    part.shielded(pool, notes[tree], 0);
-                    parts.push(part);
-                }
-            }
-            notes[tree] = 0;
+            .min(fee_left.max(0))
+            .min(flow.out);
+            let sent = flow.out - fee;
+            let first = if flow.two_outputs && sent > 2 {
+                sent / 3
+            } else {
+                sent
+            };
+            part.pay(first, self.address(rng.zipf()), "pubkeyhash");
+            part.pay(sent - first, self.address(rng.zipf()), "pubkeyhash");
+            fee_left -= fee;
         }
 
-        // Transparent transactions pay the fees that are left.
+        // Transparent payments pay the fees the shielding leaves; how many, from what it is
+        // likely to take. They are funded with the shielding.
         if fee_left > 0 {
-            let count = (1 + fee_left / (3 * self.conventional_fee(height, 2)).max(1)).min(8);
-            let mut left = fee_left;
-            for index in 0..count {
-                let fee = if index + 1 == count {
-                    left
-                } else {
-                    fee_left / count
-                };
-                left -= fee;
-                let mut part = Part::default();
-                let sent = rng.range(1_000_000, 4_000_000_000) as i64;
-                part.inputs = 1 + rng.below(2) as u32;
-                part.t_in = sent + fee;
-                if rng.chance(60) && sent > 2 {
-                    let change = sent / (2 + rng.below(5) as i64);
-                    part.pay(sent - change, self.address(rng.zipf()), "pubkeyhash");
-                    part.pay(change, self.address(rng.zipf()), "pubkeyhash");
-                } else {
-                    part.pay(sent, self.address(rng.zipf()), "pubkeyhash");
-                }
-                parts.push(part);
+            let spare = (fee_left - shielding).max(0);
+            let count = (1 + spare / (3 * price(2))).min(8);
+            for _ in 0..count {
+                parts.push(Part {
+                    funding: Funding::Pay {
+                        inputs: 1 + rng.below(2) as u32,
+                    },
+                    ..Part::default()
+                });
             }
         }
 
@@ -1046,11 +1228,275 @@ impl SynthChain {
             let other = rng.below(index as u64 + 1) as usize;
             parts.swap(index, other);
         }
-        let mut built = vec![self.build(coinbase, height, branch, 0, true)];
-        for (index, part) in parts.into_iter().enumerate() {
-            built.push(self.build(part, height, branch, index as u16 + 1, false));
+        let mut all = Vec::with_capacity(parts.len() + 1);
+        all.push(coinbase);
+        all.extend(parts);
+        Skeleton {
+            parts: all,
+            fee_left,
+            rate,
         }
-        built
+    }
+
+    /// The block's skeleton with its shielding and payments funded. The shielding pays for its
+    /// logical actions, inputs included, at the block's rate when what is left still pays each
+    /// payment zebrad's conventional fee, else at zebrad's; the payments share the rest. The
+    /// first payment of every hundredth block pays half of zebrad's conventional fee, so a
+    /// transaction that paid less shows; zebrad's mempool takes none such, but a block may
+    /// hold one.
+    fn funded(&self, skeleton: Skeleton, height: u32, branch: u16) -> Vec<Part> {
+        let Skeleton {
+            parts,
+            fee_left,
+            rate,
+        } = skeleton;
+        let least = zip317::MARGINAL_FEE as i64;
+        let pays: Vec<usize> = (0..parts.len())
+            .filter(|index| matches!(parts[*index].funding, Funding::Pay { .. }))
+            .collect();
+        let room = fee_left - 2 * least * pays.len() as i64;
+        let mut funded = parts.clone();
+        let mut shielding = self.fund_shielding(&mut funded, height, branch, rate);
+        if shielding > room {
+            funded = parts;
+            shielding = self.fund_shielding(&mut funded, height, branch, least);
+        }
+        let mut parts = funded;
+        let mut left = fee_left - shielding;
+        if left < 0 {
+            // Even zebrad's fee is more than the block's: the shielding pays less, its change
+            // taking the difference.
+            for part in parts.iter_mut().rev() {
+                if let Funding::Shield { .. } = part.funding {
+                    let back = (-left).min(part.fee());
+                    part.pay(back, self.address(u64::from(height)), "pubkeyhash");
+                    left += back;
+                }
+            }
+        }
+        let mut fees = vec![0; pays.len()];
+        if !pays.is_empty() {
+            let count = pays.len() as i64;
+            for (fee, share) in fees.iter_mut().zip(0..) {
+                *fee = if share + 1 == count {
+                    left - left / count * (count - 1)
+                } else {
+                    left / count
+                };
+            }
+            if height.is_multiple_of(100) && fees.len() >= 2 {
+                let short = least.min(fees[0]);
+                fees[1] += fees[0] - short;
+                fees[0] = short;
+            }
+        }
+        for (index, fee) in pays.into_iter().zip(fees) {
+            self.fund_payment(&mut parts[index], height, branch, index as u16, fee.max(0));
+        }
+        parts
+    }
+
+    /// Funds every shielding part of `parts` at `rate` per logical action; returns their fees.
+    fn fund_shielding(&self, parts: &mut [Part], height: u32, branch: u16, rate: i64) -> i64 {
+        let mut fees = 0;
+        for (index, part) in parts.iter_mut().enumerate() {
+            if let Funding::Shield { amount } = part.funding {
+                self.fund_shield(part, amount, height, branch, index as u16, rate);
+                fees += part.fee();
+            }
+        }
+        fees
+    }
+
+    /// The transactions of the block at `height` on `branch`, coinbase first, funded and
+    /// built; a big block's extra payments follow them ([`SynthChain::filler`]).
+    fn plan(&self, height: u32, branch: u16) -> Vec<Built> {
+        self.funded(self.skeleton(height, branch), height, branch)
+            .into_iter()
+            .enumerate()
+            .map(|(index, part)| {
+                let index = index as u16;
+                self.build(part, height, branch, index, index == 0)
+            })
+            .collect()
+    }
+
+    /// The `index`-th transaction of the block at `height` on `branch`, built on its own: one
+    /// without transparent inputs from the skeleton, the others funded with the block's rest,
+    /// whose fees they share.
+    fn built(&self, height: u32, branch: u16, index: u16) -> Option<Built> {
+        let skeleton = self.skeleton(height, branch);
+        let base = skeleton.parts.len() as u16;
+        if index >= base {
+            return (index < base + self.fillers(height) as u16)
+                .then(|| self.filler(height, branch, index));
+        }
+        let mut parts = match skeleton.parts[usize::from(index)].funding {
+            Funding::None => skeleton.parts,
+            _ => self.funded(skeleton, height, branch),
+        };
+        let part = parts.swap_remove(usize::from(index));
+        Some(self.build(part, height, branch, index, index == 0))
+    }
+
+    /// The `index`-th transaction of a big block, past its plan: a payment from two coinbase
+    /// outputs to two addresses, paying [`FILLER_FEE`].
+    fn filler(&self, height: u32, branch: u16, index: u16) -> Built {
+        let mut rng = Rng(self.seed(KIND_FUNDS, height, branch, u64::from(index)));
+        let (inputs, sum) = self.coinbase_inputs(height, branch, 2, FILLER_FEE, &mut rng);
+        let sent = sum - FILLER_FEE;
+        let change = sent / 3;
+        let mut part = Part {
+            t_in: sum,
+            inputs,
+            ..Part::default()
+        };
+        part.pay(sent - change, self.address(rng.zipf()), "pubkeyhash");
+        part.pay(change, self.address(rng.zipf()), "pubkeyhash");
+        self.build(part, height, branch, index, false)
+    }
+
+    /// The roots among the block's transactions: the outputs of its coinbase and of its
+    /// transactions without transparent inputs, which need nothing older to have a value.
+    fn roots(&self, height: u32, branch: u16) -> Vec<Root> {
+        self.skeleton(height, branch)
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(_, part)| matches!(part.funding, Funding::None))
+            .flat_map(|(index, part)| self.roots_of(part, height, branch, index as u16))
+            .collect()
+    }
+
+    /// The outputs of the block's coinbase, without the rest of its plan.
+    fn coinbase_roots(&self, height: u32, branch: u16) -> Vec<Root> {
+        self.roots_of(&self.start(height, branch).coinbase, height, branch, 0)
+    }
+
+    fn roots_of(&self, part: &Part, height: u32, branch: u16, index: u16) -> Vec<Root> {
+        part.outputs
+            .iter()
+            .enumerate()
+            .map(|(n, (zat, address, kind))| Root {
+                txid: self.txid(height, branch, index),
+                n: n as u32,
+                zat: *zat,
+                address: address.clone(),
+                kind,
+                height,
+                coinbase: index == 0,
+            })
+            .collect()
+    }
+
+    /// The heights a transaction at `height` takes outputs from: from 100 blocks back, where
+    /// coinbase outputs mature, a few blocks apart, `count` of them; near the chain's start,
+    /// younger ones; and last the block itself, whose coinbase comes first in it.
+    fn funding_heights(&self, height: u32, count: usize, rng: &mut Rng) -> Vec<u32> {
+        let mut heights = Vec::with_capacity(count + 1);
+        if height > 100 {
+            let mut at = height - 100 - rng.below(u64::from((height - 100).min(20))) as u32;
+            while heights.len() < count && at >= 1 {
+                heights.push(at);
+                at = at.saturating_sub(1 + rng.below(13) as u32);
+            }
+        } else {
+            heights.extend((1..height).rev().take(count));
+        }
+        heights.push(height);
+        heights
+    }
+
+    /// Funds a shielding of `amount` by `part`, the `index`-th transaction of the block at
+    /// `height` on `branch`: its inputs spend roots until they bring the amount and the fee, at
+    /// `rate` per logical action, its own inputs counted; the rest comes back as change.
+    fn fund_shield(
+        &self,
+        part: &mut Part,
+        amount: i64,
+        height: u32,
+        branch: u16,
+        index: u16,
+        rate: i64,
+    ) {
+        let mut rng = Rng(self.seed(KIND_FUNDS, height, branch, u64::from(index)));
+        let fee = |inputs: usize| rate * i64::from(part.paid_actions(inputs, 1));
+        let mut inputs = Vec::new();
+        let mut sum = 0;
+        'blocks: for at in self.funding_heights(height, 64, &mut rng) {
+            let roots = if at == height {
+                self.coinbase_roots(height, branch)
+            } else {
+                self.roots(at, self.branch(at))
+            };
+            for root in roots {
+                sum += root.zat;
+                inputs.push(root);
+                if sum >= amount + fee(inputs.len()) {
+                    break 'blocks;
+                }
+            }
+        }
+        let change = sum - amount - fee(inputs.len());
+        part.t_in = sum;
+        part.inputs = inputs;
+        part.pay(change, self.address(rng.zipf()), "pubkeyhash");
+    }
+
+    /// Funds a transparent payment, the `index`-th transaction of the block at `height` on
+    /// `branch`, paying `fee`: it spends coinbase outputs and sends what they bring beyond.
+    fn fund_payment(&self, part: &mut Part, height: u32, branch: u16, index: u16, fee: i64) {
+        let Funding::Pay { inputs } = part.funding else {
+            return;
+        };
+        let mut rng = Rng(self.seed(KIND_FUNDS, height, branch, u64::from(index)));
+        let (inputs, sum) = self.coinbase_inputs(height, branch, inputs, fee, &mut rng);
+        part.t_in = sum;
+        part.inputs = inputs;
+        let sent = sum - fee;
+        if rng.chance(60) && sent > 2 {
+            let change = sent / (2 + rng.below(5) as i64);
+            part.pay(sent - change, self.address(rng.zipf()), "pubkeyhash");
+            part.pay(change, self.address(rng.zipf()), "pubkeyhash");
+        } else {
+            part.pay(sent, self.address(rng.zipf()), "pubkeyhash");
+        }
+    }
+
+    /// `wanted` coinbase outputs of blocks 100 to 2,000 back, or more until they bring more
+    /// than `fee`; near the chain's start, the block's own coinbase.
+    fn coinbase_inputs(
+        &self,
+        height: u32,
+        branch: u16,
+        wanted: u32,
+        fee: i64,
+        rng: &mut Rng,
+    ) -> (Vec<Root>, i64) {
+        let mut inputs: Vec<Root> = Vec::new();
+        let mut sum = 0;
+        for _ in 0..32 {
+            if inputs.len() as u32 >= wanted && sum > fee {
+                break;
+            }
+            let at = if height > 101 {
+                height - 100 - rng.below(u64::from((height - 101).min(1_900))) as u32
+            } else {
+                height
+            };
+            let roots = if at == height {
+                self.coinbase_roots(height, branch)
+            } else {
+                self.coinbase_roots(at, self.branch(at))
+            };
+            if roots.is_empty() {
+                continue;
+            }
+            let root = roots[rng.below(roots.len() as u64) as usize].clone();
+            sum += root.zat;
+            inputs.push(root);
+        }
+        (inputs, sum)
     }
 
     fn build(&self, part: Part, height: u32, branch: u16, index: u16, coinbase: bool) -> Built {
@@ -1064,18 +1510,20 @@ impl SynthChain {
                 )),
                 txid: None,
                 vout: None,
+                script_sig: None,
+                prevout: None,
             }]
         } else {
-            (0..part.inputs)
-                .map(|_| {
-                    // A coinbase output at least 100 blocks back: always one that exists.
-                    let back = 100 + rng.below(1_900) as u32;
-                    let spent = height.saturating_sub(back);
-                    TxIn {
-                        coinbase: None,
-                        txid: Some(self.txid(spent, self.branch(spent), 0)),
-                        vout: Some(0),
-                    }
+            part.inputs
+                .iter()
+                .map(|root| TxIn {
+                    coinbase: None,
+                    txid: Some(root.txid),
+                    vout: Some(root.n),
+                    script_sig: Some(ScriptSig {
+                        hex: HexLen(P2PKH_SCRIPT_SIG),
+                    }),
+                    prevout: None,
                 })
                 .collect()
         };
@@ -1086,10 +1534,7 @@ impl SynthChain {
             .map(|(n, (zat, address, kind))| TxOut {
                 value_zat: *zat,
                 n: n as u32,
-                script: ScriptPubKey {
-                    kind: (*kind).to_owned(),
-                    addresses: Some(vec![address.clone()]),
-                },
+                script: script(kind, address),
             })
             .collect();
         let bundle = |bundle: Option<(u32, i64)>| {
@@ -1112,8 +1557,14 @@ impl SynthChain {
         };
         let actions = part.orchard.map_or(0, |b| b.0) + part.ironwood.map_or(0, |b| b.0);
         let size = 10
-            + 148 * i64::from(vin.len() as u32)
-            + 34 * vout.len() as i64
+            + vin
+                .iter()
+                .map(|input| i64::from(input.serialized_size()))
+                .sum::<i64>()
+            + vout
+                .iter()
+                .map(|output| i64::from(output.serialized_size()))
+                .sum::<i64>()
             + 384 * i64::from(part.sapling.0)
             + 948 * i64::from(part.sapling.1)
             + if part.sapling.0 + part.sapling.1 > 0 {
@@ -1132,6 +1583,7 @@ impl SynthChain {
             txid: self.txid(height, branch, index),
             height: None,
             confirmations: None,
+            fee: None,
             vin,
             vout,
             sapling_spends: Count(part.sapling.0),
@@ -1155,8 +1607,56 @@ impl SynthChain {
             block_hash: None,
             block_time: None,
         };
-        Built { tx, size, fee }
+        Built {
+            tx,
+            size,
+            fee,
+            spent: part.inputs,
+        }
     }
+}
+
+/// The locking script of an output of type `kind` paying `address`.
+fn script(kind: &str, address: &str) -> ScriptPubKey {
+    let bytes = match kind {
+        "scripthash" => 23,
+        _ => 25,
+    };
+    ScriptPubKey {
+        kind: kind.to_owned(),
+        addresses: Some(vec![address.to_owned()]),
+        hex: HexLen(bytes),
+    }
+}
+
+/// A block's transactions in their places, before the shielding and the payments are funded
+/// ([`SynthChain::skeleton`]).
+struct Skeleton {
+    parts: Vec<Part>,
+    /// The block's fees the shielding and the payments share.
+    fee_left: i64,
+    /// The fee its transactions pay per logical action.
+    rate: i64,
+}
+
+/// A transaction moving the rest of a shielded pool's change to or from transparent value.
+struct PoolFlow {
+    /// Its place among the block's transactions while they are planned.
+    index: usize,
+    /// The value it takes out of the pool; 0 when it shields.
+    out: i64,
+    /// Whether what it takes out goes to two outputs rather than one.
+    two_outputs: bool,
+}
+
+/// What a block's plan starts from: its coinbase, and the seeded draws, notes, pool changes
+/// and fees the rest of the plan uses.
+struct Start {
+    rng: Rng,
+    notes: [u32; 3],
+    deltas: [i64; 6],
+    fees: i64,
+    coinbase: Part,
 }
 
 /// How a block's subsidy splits.
@@ -1170,18 +1670,59 @@ struct Split {
 }
 
 /// A transaction of the synthetic chain, with its fee (which the explorer cannot know without
-/// the spent outputs' values).
+/// the spent outputs' values) and the outputs its inputs spend.
 #[derive(Clone, Debug)]
 struct Built {
     tx: Tx,
     size: i64,
     fee: i64,
+    spent: Vec<Root>,
+}
+
+/// An output a later transaction spends: one of a coinbase or of a transaction without
+/// transparent inputs, so its value needs nothing older.
+#[derive(Clone, Debug)]
+struct Root {
+    txid: TxId,
+    n: u32,
+    zat: i64,
+    address: String,
+    kind: &'static str,
+    height: u32,
+    coinbase: bool,
+}
+
+impl Root {
+    /// As `getblock` at verbosity 3 describes it.
+    fn prevout(&self) -> Prevout {
+        Prevout {
+            generated: self.coinbase,
+            height: self.height,
+            value_zat: self.zat,
+            script: script(self.kind, &self.address),
+        }
+    }
+}
+
+/// How a planned transaction is funded from transparent outputs.
+#[derive(Clone, Copy, Debug, Default)]
+enum Funding {
+    /// It has no transparent inputs.
+    #[default]
+    None,
+    /// It shields `amount` into its pools, and pays for its logical actions.
+    Shield { amount: i64 },
+    /// A transparent payment from at least `inputs` coinbase outputs, paying a share of what
+    /// the block's other transactions leave of its fees.
+    Pay { inputs: u32 },
 }
 
 /// A transaction being planned: what it takes in and pays out, per part.
 #[derive(Clone, Debug, Default)]
 struct Part {
-    inputs: u32,
+    funding: Funding,
+    /// The outputs its inputs spend, once funded.
+    inputs: Vec<Root>,
     /// The value of its transparent inputs.
     t_in: i64,
     /// `(zatoshis, address, script type)`.
@@ -1229,15 +1770,6 @@ impl Part {
         }
     }
 
-    fn touches(&self, pool: Pool) -> bool {
-        match pool {
-            Pool::Sapling => self.sapling.0 + self.sapling.1 > 0,
-            Pool::Orchard => self.orchard.is_some(),
-            Pool::Ironwood => self.ironwood.is_some(),
-            _ => false,
-        }
-    }
-
     fn more_notes(&mut self, pool: Pool, notes: u32) {
         match pool {
             Pool::Sapling => self.sapling.1 += notes,
@@ -1260,6 +1792,44 @@ impl Part {
     fn fee(&self) -> i64 {
         self.t_in - self.outputs.iter().map(|out| out.0).sum::<i64>()
             + self.net_out().iter().sum::<i64>()
+    }
+
+    /// The logical actions ZIP 317 makes the transaction pay for, at least two, with `inputs`
+    /// standard inputs and `more` standard outputs beside its own.
+    fn paid_actions(&self, inputs: usize, more: usize) -> u32 {
+        let input = TxIn {
+            coinbase: None,
+            txid: None,
+            vout: None,
+            script_sig: Some(ScriptSig {
+                hex: HexLen(P2PKH_SCRIPT_SIG),
+            }),
+            prevout: None,
+        }
+        .serialized_size();
+        let output = |kind: &str| {
+            TxOut {
+                value_zat: 0,
+                n: 0,
+                script: script(kind, ""),
+            }
+            .serialized_size()
+        };
+        let parts = LogicalActions {
+            in_bytes: input * inputs as u32,
+            out_bytes: self
+                .outputs
+                .iter()
+                .map(|(_, _, kind)| output(kind))
+                .sum::<u32>()
+                + output("pubkeyhash") * more as u32,
+            joinsplits: self.joinsplits.len() as u32,
+            sapling_spends: self.sapling.0,
+            sapling_outputs: self.sapling.1,
+            orchard_actions: self.orchard.map_or(0, |bundle| bundle.0),
+            ironwood_actions: self.ironwood.map_or(0, |bundle| bundle.0),
+        };
+        zip317::paid_actions(zip317::logical_actions(&parts))
     }
 }
 
@@ -1362,10 +1932,6 @@ impl Rng {
         if n == 0 { 0 } else { self.next() % n }
     }
 
-    fn range(&mut self, low: u64, high: u64) -> u64 {
-        low + self.below(high - low + 1)
-    }
-
     fn chance(&mut self, percent: u64) -> bool {
         self.below(100) < percent
     }
@@ -1458,6 +2024,151 @@ mod tests {
                 assert_eq!(notes, created, "{height}");
             }
         }
+    }
+
+    #[test]
+    fn transactions_pay_for_their_logical_actions_but_one_in_a_hundred_blocks() {
+        let chains = [
+            // Wallets pay 5,000 zatoshis an action here; 1,000 on the others.
+            SynthChain::new(Network::Mainnet, 3_551_000, NOW),
+            SynthChain::new(Network::Mainnet, 3_600_000, NOW),
+            SynthChain::new(Network::Testnet, 4_500_000, NOW),
+        ];
+        for chain in chains {
+            let (mut all, mut at_rate, mut short) = (0, 0, 0);
+            for height in chain.tip() - 300..=chain.tip() {
+                let rate = chain.conventional_fee(height, 2) / 2;
+                let mut unpaid = 0;
+                for built in chain.plan(height, chain.branch(height)).iter().skip(1) {
+                    let actions = zip317::logical_actions(&zip317::parts(&built.tx));
+                    let fee = u64::try_from(built.fee).expect("no negative fee");
+                    all += 1;
+                    at_rate += usize::from(fee >= rate as u64 * u64::from(actions.max(2)));
+                    unpaid += usize::from(zip317::unpaid_actions(actions, fee) > 0);
+                }
+                // None pays less than zebrad's conventional fee, but for one transparent
+                // payment in every hundredth block.
+                let allowed = usize::from(height.is_multiple_of(100));
+                assert!(
+                    unpaid <= allowed,
+                    "{:?} {height}: {unpaid}",
+                    chain.network()
+                );
+                short += unpaid;
+            }
+            assert!(short > 0, "the fee card's \"paid less\" is shown somewhere");
+            // Most pay what wallets pay: the blocks' fees cover it.
+            assert!(
+                4 * at_rate > 3 * all,
+                "{:?}: {at_rate} of {all}",
+                chain.network()
+            );
+        }
+    }
+
+    #[test]
+    fn every_input_spends_an_output_the_chain_has_and_the_fees_follow() {
+        for chain in chains() {
+            for height in heights_to_check(&chain) {
+                let block = chain.block(BlockId::Height(height)).expect("block");
+                let v3 = chain
+                    .block_v3(BlockId::Height(height))
+                    .expect("verbosity 3");
+                assert_eq!(v3.tx.len(), block.tx.len(), "{height}");
+                for (txid, full) in block.tx.iter().zip(&v3.tx).skip(1) {
+                    let tx = chain.tx(txid).expect("a transaction");
+                    assert_eq!(full.txid, *txid);
+                    assert_eq!(tx.fee, None, "getrawtransaction gives no fee");
+                    // Each input spends an output of a block at or below this one, worth what
+                    // verbosity 3 says.
+                    let mut spent = Vec::new();
+                    for (input, described) in tx.vin.iter().zip(&full.vin) {
+                        let parent = chain.tx(&input.txid.expect("an outpoint")).expect("parent");
+                        let at = parent.height.expect("mined");
+                        assert!(at >= 0 && at as u32 <= height, "{height}: from {at}");
+                        let output = crate::views::spent_from_parent(&parent, input.vout.unwrap())
+                            .expect("the output exists");
+                        let prevout = described.prevout.as_ref().expect("a prevout");
+                        assert_eq!(crate::views::spent_from_prevout(prevout), output);
+                        spent.push(Some(output));
+                    }
+                    // So the fee the explorer works out is what the transaction paid.
+                    let paid = chain.fee(txid).expect("a fee");
+                    assert!(paid >= 0, "{height}: {paid}");
+                    assert_eq!(
+                        crate::views::tx_fee(&tx, &spent),
+                        Some(launcher_types::explorer::Shown::Public { zat: paid }),
+                        "{:?} {height} {txid}",
+                        chain.network()
+                    );
+                    assert_eq!(full.fee, Some(paid));
+                    // Scripts are kept as their lengths, which ZIP 317 counts: standard
+                    // inputs of 148 bytes.
+                    for input in &tx.vin {
+                        assert_eq!(input.serialized_size(), 148);
+                    }
+                    assert_eq!(tx.size, full.size);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn big_blocks_hold_thousands_more_payments_under_two_megabytes() {
+        let chain = SynthChain::new(Network::Mainnet, 3_551_000, NOW).with_big_blocks(10);
+        let plain = SynthChain::new(Network::Mainnet, 3_551_000, NOW);
+        let height = 3_550_990;
+        assert!(chain.is_big(height) && !chain.is_big(height + 1));
+        let block = chain.block(BlockId::Height(height)).unwrap();
+        let small = plain.block(BlockId::Height(height)).unwrap();
+        assert_eq!(block.tx.len(), small.tx.len() + FILLERS as usize);
+        // Each stays under zebrad's 2,000,000 bytes, on either network.
+        for chain in [
+            chain.clone(),
+            SynthChain::new(Network::Testnet, 4_500_000, NOW).with_big_blocks(10),
+        ] {
+            for height in (chain.tip() - 3_000..=chain.tip()).step_by(10) {
+                let size = chain.block(BlockId::Height(height)).unwrap().size.unwrap();
+                assert!((1_700_000..2_000_000).contains(&size), "{height}: {size}");
+            }
+        }
+        // The last one is a payment from two coinbase outputs, as found by its id.
+        let last = chain
+            .tx(block.tx.last().unwrap())
+            .expect("the last payment");
+        assert_eq!((last.vin.len(), last.vout.len()), (2, 2));
+        assert_eq!(chain.fee(&last.txid), Some(FILLER_FEE));
+        assert_eq!(last.size, Some(FILLER_BYTES));
+        assert_eq!(
+            chain.tx(&chain.txid(height, 0, block.tx.len() as u16)),
+            None
+        );
+        // Their fees are the block's: it still balances, and burns their share.
+        for height in [height, height + 1, 3_551_000] {
+            let block = chain.block(BlockId::Height(height)).unwrap();
+            let parent = chain.block(BlockId::Height(height - 1)).unwrap();
+            let coinbase = chain.tx(&block.tx[0]).unwrap();
+            let ledger = block_ledger(&block, Some(&parent), Some(&coinbase), chain.heights());
+            let subsidy = zec_to_zat(chain.subsidy(height).total) as u64;
+            assert_eq!(
+                ledger_check(&ledger, height, Some(subsidy), chain.heights()),
+                LedgerCheck::Balanced,
+                "{height}"
+            );
+        }
+        let ledger = |chain: &SynthChain| {
+            let block = chain.block(BlockId::Height(height)).unwrap();
+            let parent = chain.block(BlockId::Height(height - 1)).unwrap();
+            let coinbase = chain.tx(&block.tx[0]).unwrap();
+            block_ledger(&block, Some(&parent), Some(&coinbase), chain.heights())
+        };
+        let (big, small) = (ledger(&chain), ledger(&plain));
+        assert_eq!(
+            big.fees.unwrap() - small.fees.unwrap(),
+            FILLER_FEE as u64 * u64::from(FILLERS)
+        );
+        // Pools elsewhere agree with the plain chain's, but for what the big blocks burned.
+        assert_eq!(chain.pools(3_000_000), plain.pools(3_000_000));
     }
 
     #[test]

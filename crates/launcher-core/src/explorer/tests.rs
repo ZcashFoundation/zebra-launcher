@@ -3,22 +3,28 @@
 //! their own values on Tokio's paused clock, and logs that never carry what was asked for.
 
 use std::{
+    collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime},
 };
 
-use explorer_model::{synth::SynthChain, zec_to_zat};
+use explorer_model::{
+    shapes::{Count, HexLen, Prevout, ScriptPubKey, ScriptSig, Tx, TxIn, TxOut},
+    synth::SynthChain,
+    zec_to_zat,
+};
 use launcher_types::{
     EosInfo, Network, NodeDetails, NodeId, NodeStats, Phase, Status,
     explorer::{
-        BlockId, ChainPage, ExplorerCall, ExplorerErrorKind, ExplorerLive, ExplorerReply,
-        ExplorerRequest, ExplorerResponse, ExplorerRoute, Hash32, LedgerCheck, LiveState,
-        NotFoundHint, PageKind, Resolution, SecretKind, TxStatus,
+        BlockHash, BlockId, Card, CardTarget, ChainPage, ExplorerCall, ExplorerErrorKind,
+        ExplorerLive, ExplorerReply, ExplorerRequest, ExplorerResponse, ExplorerRoute, Hash32,
+        LedgerCheck, LiveState, NotFoundHint, PageKind, PrefetchTarget, ReadOutcome, Resolution,
+        RowsRead, SecretKind, Shown, TxId, TxStatus, UnknownWhy,
     },
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -28,7 +34,7 @@ use crate::nodes::NodeSpec;
 
 use super::{
     ExplorerConfig, ExplorerHandle, ExplorerInputs,
-    source::{ChainSource, ReadCall, ReadResult, SourceError},
+    source::{Answer, ChainSource, ReadCall, ReadResult, SourceError},
     spawn_with,
 };
 
@@ -39,14 +45,17 @@ const LIMIT: Duration = Duration::from_secs(10);
 /// Calls per method, in [`slot`]'s order.
 type Counts = Arc<[AtomicU64; 6]>;
 
-fn slot(call: ReadCall) -> usize {
+/// The slot of `call` in [`Counts`]; a block at verbosity 3 is counted on its own
+/// ([`Synth::v3`]).
+fn slot(call: ReadCall) -> Option<usize> {
     match call {
-        ReadCall::Best => 0,
-        ReadCall::Block(_) => 1,
-        ReadCall::BlockHash(_) => 2,
-        ReadCall::Header(_) => 3,
-        ReadCall::Tx(_) => 4,
-        ReadCall::Subsidy(_) => 5,
+        ReadCall::Best => Some(0),
+        ReadCall::Block(_) => Some(1),
+        ReadCall::BlockHash(_) => Some(2),
+        ReadCall::Header(_) => Some(3),
+        ReadCall::Tx(_) => Some(4),
+        ReadCall::Subsidy(_) => Some(5),
+        ReadCall::BlockV3(_) => None,
     }
 }
 
@@ -62,6 +71,43 @@ struct Synth {
     /// Holds subsidy reads only.
     subsidy_gate: watch::Receiver<bool>,
     counts: Counts,
+    /// Blocks read at verbosity 3.
+    v3: Arc<AtomicU64>,
+    /// Each read as it starts, in order.
+    started: std::sync::mpsc::Sender<ReadCall>,
+    /// Transactions the chain does not have, read before its own and added to their blocks
+    /// at verbosity 3.
+    extra: watch::Receiver<HashMap<TxId, Tx>>,
+    /// Blocks at verbosity 3 are not answered.
+    fail_v3: Arc<AtomicBool>,
+}
+
+/// The transactions of `extra` mined in block `hash`.
+fn in_block(extra: &HashMap<TxId, Tx>, hash: BlockHash) -> Vec<&Tx> {
+    let mut found: Vec<&Tx> = extra
+        .values()
+        .filter(|tx| tx.block_hash == Some(hash))
+        .collect();
+    found.sort_by_key(|tx| tx.txid.to_hex());
+    found
+}
+
+/// The output `input` spends, as verbosity 3 describes it, from `extra` or the chain.
+fn spent(extra: &HashMap<TxId, Tx>, chain: &SynthChain, input: &TxIn) -> Option<Prevout> {
+    let txid = input.txid?;
+    let parent = extra.get(&txid).cloned().or_else(|| chain.tx(&txid))?;
+    let output = parent
+        .vout
+        .iter()
+        .find(|output| Some(output.n) == input.vout)?;
+    Some(Prevout {
+        generated: parent.is_coinbase(),
+        height: parent
+            .height
+            .and_then(|height| u32::try_from(height).ok())?,
+        value_zat: output.value_zat,
+        script: output.script.clone(),
+    })
 }
 
 /// `value` as zebrad writes it and the explorer reads it back.
@@ -69,9 +115,27 @@ fn through_json<T: Serialize + DeserializeOwned>(value: T) -> T {
     serde_json::from_value(serde_json::to_value(value).expect("serializes")).expect("decodes")
 }
 
+/// The size of `result` as zebrad's JSON.
+fn json_size(result: &ReadResult) -> Option<u32> {
+    let bytes = match result {
+        ReadResult::Best(best) => serde_json::to_vec(best),
+        ReadResult::Block(block) => serde_json::to_vec(&**block),
+        ReadResult::BlockV3(block) => serde_json::to_vec(&**block),
+        ReadResult::BlockHash(hash) => serde_json::to_vec(hash),
+        ReadResult::Header(header) => serde_json::to_vec(header),
+        ReadResult::Tx(tx) => serde_json::to_vec(&**tx),
+        ReadResult::Subsidy(subsidy) => serde_json::to_vec(&**subsidy),
+    };
+    bytes.ok().and_then(|bytes| u32::try_from(bytes.len()).ok())
+}
+
 impl ChainSource for Synth {
-    async fn read(&self, call: ReadCall) -> Result<ReadResult, SourceError> {
-        self.counts[slot(call)].fetch_add(1, Ordering::SeqCst);
+    async fn read(&self, call: ReadCall) -> Result<Answer, SourceError> {
+        match slot(call) {
+            Some(slot) => self.counts[slot].fetch_add(1, Ordering::SeqCst),
+            None => self.v3.fetch_add(1, Ordering::SeqCst),
+        };
+        let _ = self.started.send(call);
         let mut gate = self.gate.clone();
         let _ = gate.wait_for(|open| *open).await;
         let held = match call {
@@ -83,6 +147,19 @@ impl ChainSource for Synth {
             let _ = gate.clone().wait_for(|open| *open).await;
         }
         let chain = self.chain.borrow().clone();
+        let extra = self.extra.borrow().clone();
+        if let ReadCall::Tx(txid) = call
+            && let Some(tx) = extra.get(&txid)
+        {
+            let result = ReadResult::Tx(Arc::new(through_json(tx.clone())));
+            return Ok(Answer {
+                bytes: json_size(&result),
+                result,
+            });
+        }
+        if matches!(call, ReadCall::BlockV3(_)) && self.fail_v3.load(Ordering::SeqCst) {
+            return Err(SourceError::Timeout);
+        }
         let found = match call {
             ReadCall::Best => Some(ReadResult::Best(through_json(chain.best()))),
             ReadCall::Block(id) => chain
@@ -98,8 +175,29 @@ impl ChainSource for Synth {
             ReadCall::Subsidy(height) => Some(ReadResult::Subsidy(Arc::new(through_json(
                 chain.subsidy(height),
             )))),
+            ReadCall::BlockV3(hash) => chain.block_v3(BlockId::Hash(hash)).map(|mut block| {
+                block
+                    .tx
+                    .extend(in_block(&extra, hash).into_iter().cloned().map(|mut tx| {
+                        let mut paid = tx.transparent_out();
+                        for input in &mut tx.vin {
+                            input.prevout = spent(&extra, &chain, input);
+                            paid -= input
+                                .prevout
+                                .as_ref()
+                                .map_or(0, |prevout| prevout.value_zat);
+                        }
+                        tx.fee = Some(-paid);
+                        tx
+                    }));
+                ReadResult::BlockV3(Arc::new(through_json(block)))
+            }),
         };
-        found.ok_or(SourceError::NotFound)
+        let result = found.ok_or(SourceError::NotFound)?;
+        Ok(Answer {
+            bytes: json_size(&result),
+            result,
+        })
     }
 }
 
@@ -110,6 +208,10 @@ struct Harness {
     tx_gate: watch::Sender<bool>,
     subsidy_gate: watch::Sender<bool>,
     counts: Counts,
+    v3: Arc<AtomicU64>,
+    started: std::sync::mpsc::Receiver<ReadCall>,
+    extra: watch::Sender<HashMap<TxId, Tx>>,
+    fail_v3: Arc<AtomicBool>,
     status: watch::Sender<Status>,
     stats: watch::Sender<Option<NodeStats>>,
     details: watch::Sender<Option<NodeDetails>>,
@@ -168,6 +270,10 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
     let (tx_gate_tx, tx_gate_rx) = watch::channel(true);
     let (subsidy_gate_tx, subsidy_gate_rx) = watch::channel(true);
     let counts: Counts = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
+    let v3 = Arc::new(AtomicU64::new(0));
+    let (started_tx, started) = std::sync::mpsc::channel();
+    let (extra_tx, extra) = watch::channel(HashMap::new());
+    let fail_v3 = Arc::new(AtomicBool::new(false));
     let (status_tx, status) = watch::channel(running());
     let (stats_tx, stats) = watch::channel(Some(stats));
     let (details_tx, details) = watch::channel(Some(details));
@@ -178,6 +284,10 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
         tx_gate: tx_gate_rx,
         subsidy_gate: subsidy_gate_rx,
         counts: counts.clone(),
+        v3: v3.clone(),
+        started: started_tx,
+        extra,
+        fail_v3: fail_v3.clone(),
     };
     let mut explorer_config = ExplorerConfig::new(PathBuf::from("/nonexistent/.cookie"));
     config(&mut explorer_config);
@@ -198,6 +308,10 @@ fn harness_with(chain: SynthChain, config: impl FnOnce(&mut ExplorerConfig)) -> 
         tx_gate: tx_gate_tx,
         subsidy_gate: subsidy_gate_tx,
         counts,
+        v3,
+        started,
+        extra: extra_tx,
+        fail_v3,
         status: status_tx,
         stats: stats_tx,
         details: details_tx,
@@ -220,7 +334,7 @@ impl Harness {
     ) -> Result<ExplorerReply, launcher_types::explorer::ExplorerError> {
         tokio::time::timeout(
             LIMIT,
-            self.explorer.call(&mainnet(), ExplorerCall { request }),
+            self.explorer.call(&mainnet(), ExplorerCall::new(request)),
         )
         .await
         .expect("the explorer answers in time")
@@ -234,10 +348,33 @@ impl Harness {
     fn counts(&self) -> [u64; 6] {
         std::array::from_fn(|index| self.counts[index].load(Ordering::SeqCst))
     }
+
+    /// Blocks read at verbosity 3 so far.
+    fn v3_reads(&self) -> u64 {
+        self.v3.load(Ordering::SeqCst)
+    }
+
+    /// The reads started since the last look, in the order they started.
+    fn started(&self) -> Vec<ReadCall> {
+        self.started.try_iter().collect()
+    }
 }
 
 fn delta(after: [u64; 6], before: [u64; 6]) -> [u64; 6] {
     std::array::from_fn(|index| after[index] - before[index])
+}
+
+/// A transaction of the block at `height`, not its coinbase, with transparent inputs or
+/// without.
+fn txid_where(chain: &SynthChain, height: u32, inputs: bool) -> TxId {
+    let block = chain.block(BlockId::Height(height)).expect("the block");
+    block
+        .tx
+        .iter()
+        .skip(1)
+        .copied()
+        .find(|txid| chain.tx(txid).expect("its transaction").vin.is_empty() != inputs)
+        .expect("such a transaction")
 }
 
 /// The Chain page asked for as the UI asks: first without waiting for the coinbases, then
@@ -309,10 +446,8 @@ async fn the_chain_page_stays_within_its_budget_and_a_revisit_is_free() {
 #[tokio::test(start_paused = true)]
 async fn a_page_goes_before_the_chain_pages_coinbases() {
     let harness = harness();
-    let txid = {
-        let chain = harness.chain.borrow();
-        chain.block(BlockId::Height(TIP - 3_000)).unwrap().tx[1]
-    };
+    // A transaction without transparent inputs: its page is one read.
+    let txid = txid_where(&harness.chain.borrow(), TIP - 3_000, false);
     // The Chain page answers; its 25 coinbases wait, two of them read, the rest queued.
     harness.tx_gate.send_replace(false);
     let ExplorerResponse::Chain(first) = harness
@@ -330,9 +465,10 @@ async fn a_page_goes_before_the_chain_pages_coinbases() {
         explorer
             .call(
                 &mainnet(),
-                ExplorerCall {
-                    request: ExplorerRequest::Tx { txid },
-                },
+                ExplorerCall::new(ExplorerRequest::Tx {
+                    txid,
+                    resolve: false,
+                }),
             )
             .await
     });
@@ -445,17 +581,6 @@ async fn a_block_page_reads_two_blocks_its_coinbase_and_its_subsidy() {
         panic!("a block page");
     };
     assert_eq!(by_hash, page);
-    let ExplorerResponse::BlockTxs(txids) = harness
-        .reply(ExplorerRequest::BlockTxs {
-            hash: page.summary.hash,
-            offset: 0,
-            limit: 200,
-        })
-        .await
-    else {
-        panic!("a page of txids");
-    };
-    assert_eq!(txids.txids, page.txids.txids);
     assert_eq!(delta(harness.counts(), before), [0; 6]);
 }
 
@@ -497,13 +622,16 @@ async fn reads_of_one_block_merge() {
 }
 
 #[tokio::test]
-async fn a_transaction_page_is_one_read() {
+async fn a_transaction_without_transparent_inputs_is_one_read() {
     let harness = harness();
-    let txid = {
-        let chain = harness.chain.borrow();
-        chain.block(BlockId::Height(TIP - 10)).unwrap().tx[1]
-    };
-    let ExplorerResponse::Tx(page) = harness.reply(ExplorerRequest::Tx { txid }).await else {
+    let txid = txid_where(&harness.chain.borrow(), TIP - 10, false);
+    let ExplorerResponse::Tx(page) = harness
+        .reply(ExplorerRequest::Tx {
+            txid,
+            resolve: false,
+        })
+        .await
+    else {
         panic!("a transaction page");
     };
     assert_eq!(page.txid, txid);
@@ -512,6 +640,7 @@ async fn a_transaction_page_is_one_read() {
     let unknown = harness
         .ask(ExplorerRequest::Tx {
             txid: Hash32([7; 32]),
+            resolve: false,
         })
         .await
         .expect_err("unknown");
@@ -645,9 +774,7 @@ async fn the_first_node_answers_by_its_own_id_on_its_own_network() {
             explorer
                 .call(
                     &NodeId::new(node).unwrap(),
-                    ExplorerCall {
-                        request: ExplorerRequest::Chain { with_fees: true },
-                    },
+                    ExplorerCall::new(ExplorerRequest::Chain { with_fees: true }),
                 )
                 .await
         }
@@ -861,11 +988,9 @@ async fn an_answer_from_the_old_network_is_dropped() {
         explorer
             .call(
                 &mainnet(),
-                ExplorerCall {
-                    request: ExplorerRequest::Block {
-                        id: BlockId::Height(height),
-                    },
-                },
+                ExplorerCall::new(ExplorerRequest::Block {
+                    id: BlockId::Height(height),
+                }),
             )
             .await
     });
@@ -1139,7 +1264,13 @@ async fn without_a_known_height_below_it_a_reorganisation_is_a_lower_bound() {
         .block(BlockId::Height(TIP - 2))
         .unwrap()
         .tx[1];
-    let ExplorerResponse::Tx(before) = harness.reply(ExplorerRequest::Tx { txid }).await else {
+    let ExplorerResponse::Tx(before) = harness
+        .reply(ExplorerRequest::Tx {
+            txid,
+            resolve: false,
+        })
+        .await
+    else {
         panic!("a transaction page");
     };
     assert!(matches!(before.status, TxStatus::Mined { .. }));
@@ -1158,7 +1289,13 @@ async fn without_a_known_height_below_it_a_reorganisation_is_a_lower_bound() {
     );
     assert!((1..=3).contains(&reorg.replaced), "{reorg:?}");
     // The transaction's block was replaced: the page says so instead of the cached status.
-    let ExplorerResponse::Tx(after) = harness.reply(ExplorerRequest::Tx { txid }).await else {
+    let ExplorerResponse::Tx(after) = harness
+        .reply(ExplorerRequest::Tx {
+            txid,
+            resolve: false,
+        })
+        .await
+    else {
         panic!("a transaction page");
     };
     assert!(
@@ -1336,7 +1473,7 @@ async fn a_syncing_node_is_not_followed_and_gets_fewer_reads_at_once() {
                     id: BlockId::Height(TIP - 2_000 - 10 * back - limit),
                 };
                 tokio::spawn(
-                    async move { explorer.call(&mainnet(), ExplorerCall { request }).await },
+                    async move { explorer.call(&mainnet(), ExplorerCall::new(request)).await },
                 )
             })
             .collect();
@@ -1393,6 +1530,799 @@ async fn a_new_run_of_zebrad_keeps_the_cache() {
         delta(harness.counts(), before),
         [1, 0, 0, 0, 0, 0],
         "one tip check; the rest from the cache"
+    );
+}
+
+#[tokio::test]
+async fn a_small_blocks_rows_are_one_heavy_read_with_every_fee() {
+    let harness = harness();
+    let height = TIP - 2_000;
+    let ExplorerResponse::Block(page) = harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Height(height),
+        })
+        .await
+    else {
+        panic!("a block page");
+    };
+    let hash = page.summary.hash;
+    let before = harness.counts();
+    let ExplorerResponse::BlockTxs(rows) = harness
+        .reply(ExplorerRequest::BlockTxs {
+            hash,
+            offset: 0,
+            limit: 200,
+            with_fees: false,
+        })
+        .await
+    else {
+        panic!("a page of rows");
+    };
+    assert_eq!(rows.read, RowsRead::Block);
+    assert!(!rows.fees_pending);
+    assert_eq!(rows.total, page.summary.tx_count);
+    assert_eq!(rows.rows.len() as u32, page.summary.tx_count);
+    assert_eq!(harness.v3_reads(), 1, "the block, whole, once");
+    assert_eq!(delta(harness.counts(), before), [0; 6], "nothing else");
+    // Every fee is known, and they add up to the block's.
+    let chain = harness.chain.borrow().clone();
+    let mut fees = 0;
+    for row in &rows.rows[1..] {
+        let Some(Shown::Public { zat }) = row.fee else {
+            panic!("a fee: {row:?}");
+        };
+        assert_eq!(Some(zat), chain.fee(&row.txid));
+        fees += zat;
+    }
+    assert_eq!(Some(fees as u64), page.summary.ledger.fees);
+    assert_eq!(rows.rows[0].fee, None, "a coinbase pays none");
+    // A later page, and a spending transaction's own page, come from the block in the cache:
+    // the transaction itself is the one read.
+    let spending = txid_where(&chain, height, true);
+    let before = harness.counts();
+    harness
+        .reply(ExplorerRequest::BlockTxs {
+            hash,
+            offset: 1,
+            limit: 5,
+            with_fees: true,
+        })
+        .await;
+    let ExplorerResponse::Tx(tx) = harness
+        .reply(ExplorerRequest::Tx {
+            txid: spending,
+            resolve: false,
+        })
+        .await
+    else {
+        panic!("a transaction page");
+    };
+    assert_eq!(delta(harness.counts(), before), [0, 0, 0, 0, 1, 0]);
+    assert_eq!(harness.v3_reads(), 1);
+    assert_eq!(tx.unresolved, 0);
+    assert_eq!(
+        tx.fee,
+        chain.fee(&spending).map(|zat| Shown::Public { zat })
+    );
+}
+
+#[tokio::test]
+async fn a_transaction_page_reads_the_outputs_its_inputs_spend() {
+    let harness = harness();
+    let chain = harness.chain.borrow().clone();
+    let txid = txid_where(&chain, TIP - 10, true);
+    let tx = chain.tx(&txid).unwrap();
+    let parents: std::collections::HashSet<_> =
+        tx.vin.iter().filter_map(|input| input.txid).collect();
+    assert!(parents.len() <= 16);
+    let ExplorerResponse::Tx(page) = harness
+        .reply(ExplorerRequest::Tx {
+            txid,
+            resolve: false,
+        })
+        .await
+    else {
+        panic!("a transaction page");
+    };
+    assert_eq!(
+        harness.counts(),
+        [0, 0, 0, 0, 1 + parents.len() as u64, 0],
+        "the transaction, then each earlier one once"
+    );
+    assert_eq!(harness.v3_reads(), 0, "a few parents need no whole block");
+    assert_eq!(page.unresolved, 0);
+    assert!(!page.resolvable);
+    assert!(page.inputs.iter().all(|input| input.spent.is_some()));
+    assert_eq!(page.fee, chain.fee(&txid).map(|zat| Shown::Public { zat }));
+    // Its flow balances.
+    assert!(matches!(
+        explorer_model::flow::tx_flow(&page).balance,
+        explorer_model::flow::Balance::Balanced { .. }
+    ));
+    // Again: all from the cache.
+    let before = harness.counts();
+    harness
+        .reply(ExplorerRequest::Tx {
+            txid,
+            resolve: false,
+        })
+        .await;
+    assert_eq!(delta(harness.counts(), before), [0; 6]);
+}
+
+impl Harness {
+    /// Gives the node transactions its chain does not have.
+    fn add_txs(&self, txs: impl IntoIterator<Item = Tx>) {
+        self.extra
+            .send_modify(|extra| extra.extend(txs.into_iter().map(|tx| (tx.txid, tx))));
+    }
+}
+
+/// The `n`-th id of a set of made-up transactions, `set`, which no synthetic one has.
+fn made_up_txid(set: u8, n: u32) -> TxId {
+    let mut bytes = [0x5e; 32];
+    bytes[0] = set;
+    bytes[1..5].copy_from_slice(&n.to_be_bytes());
+    Hash32(bytes)
+}
+
+/// A made-up transaction that spends one output of each of `count` earlier ones, made up
+/// too, and pays a fee of 10,000 zatoshis: mined in the block at `height`, or waiting with
+/// `None`. Returns it with the earlier ones.
+fn spending_from(chain: &SynthChain, set: u8, count: u32, height: Option<u32>) -> (Tx, Vec<Tx>) {
+    let template = chain
+        .tx(&txid_where(chain, TIP - 3_000, true))
+        .expect("a transaction");
+    let paying = |zat| TxOut {
+        value_zat: zat,
+        n: 0,
+        script: ScriptPubKey {
+            kind: "pubkeyhash".into(),
+            addresses: Some(vec!["t1MadeUpForTheExplorerTests000000".into()]),
+            hex: HexLen(25),
+        },
+    };
+    let at = |tx: &mut Tx, height: u32| {
+        tx.height = Some(i64::from(height));
+        tx.confirmations = Some(i64::from(TIP - height + 1));
+        tx.block_hash = chain.hash(height);
+    };
+    let plain = Tx {
+        fee: None,
+        vin: Vec::new(),
+        vout: vec![paying(100_000)],
+        sapling_spends: Count(0),
+        sapling_outputs: Count(0),
+        joinsplits: Vec::new(),
+        orchard: None,
+        ironwood: None,
+        sapling_value_balance: None,
+        ..template
+    };
+    let parents: Vec<Tx> = (0..count)
+        .map(|n| {
+            let mut parent = Tx {
+                txid: made_up_txid(set, n),
+                ..plain.clone()
+            };
+            at(&mut parent, TIP - 3_000);
+            parent
+        })
+        .collect();
+    let mut tx = Tx {
+        txid: made_up_txid(set, u32::MAX),
+        vin: parents
+            .iter()
+            .map(|parent| TxIn {
+                coinbase: None,
+                txid: Some(parent.txid),
+                vout: Some(0),
+                script_sig: Some(ScriptSig { hex: HexLen(107) }),
+                prevout: None,
+            })
+            .collect(),
+        vout: vec![paying(100_000 * i64::from(count) - 10_000)],
+        ..plain
+    };
+    match height {
+        Some(height) => at(&mut tx, height),
+        None => {
+            tx.height = None;
+            tx.confirmations = None;
+            tx.block_hash = None;
+            tx.block_time = None;
+        }
+    }
+    (tx, parents)
+}
+
+#[tokio::test]
+async fn a_transaction_spending_from_many_earlier_ones_has_the_rest_read_on_request() {
+    let harness = harness_with(
+        SynthChain::new(Network::Mainnet, TIP, NOW).with_big_blocks(10),
+        |_| {},
+    );
+    let chain = harness.chain.borrow().clone();
+    let big = TIP - 2_000;
+    assert!(chain.is_big(big));
+    let (tx, parents) = spending_from(&chain, 1, 20, Some(big));
+    let txid = tx.txid;
+    harness.add_txs(parents.into_iter().chain([tx]));
+    let ask = |txid, resolve| ExplorerRequest::Tx { txid, resolve };
+    let page = |response| match response {
+        ExplorerResponse::Tx(page) => page,
+        other => panic!("a transaction page: {other:?}"),
+    };
+    // A big block is not read whole: 16 earlier transactions, and the rest on request.
+    let first = page(harness.reply(ask(txid, false)).await);
+    assert_eq!(
+        harness.counts(),
+        [0, 1, 0, 0, 1 + 16, 0],
+        "the transaction, its block to see that it is big, and 16 earlier ones"
+    );
+    assert_eq!(harness.v3_reads(), 0);
+    assert_eq!((first.unresolved, first.resolvable), (4, true));
+    assert_eq!(
+        first.fee,
+        Some(Shown::Unknown {
+            why: UnknownWhy::InputValues
+        })
+    );
+    // Read them all: the other four, past the first 16, on the prefetch lane, two at a time.
+    harness.tx_gate.send_replace(false);
+    let _ = harness.started();
+    let all = harness.ask_later(ask(txid, true));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(harness.started().len(), 2, "two prefetches at a time");
+    harness.tx_gate.send_replace(true);
+    let all = page(all.await.expect("no panic").expect("a page").response);
+    assert_eq!(
+        harness.counts(),
+        [0, 1, 0, 0, 1 + 20, 0],
+        "only the four not read before"
+    );
+    assert_eq!((all.unresolved, all.resolvable), (0, false));
+    assert_eq!(all.fee, Some(Shown::Public { zat: 10_000 }));
+
+    // With `resolve`, at most 1,000 earlier transactions for a mined one...
+    let (wide, parents) = spending_from(&chain, 2, 1_010, Some(big));
+    let wide_id = wide.txid;
+    harness.add_txs(parents.into_iter().chain([wide]));
+    let wide = wide_id;
+    let before = harness.counts();
+    let read = page(harness.reply(ask(wide, true)).await);
+    assert_eq!(delta(harness.counts(), before), [0, 0, 0, 0, 1 + 1_000, 0]);
+    assert_eq!((read.unresolved, read.resolvable), (10, false));
+    // ... and 200 for a waiting one, which has no block to read and is not kept.
+    let (waiting, parents) = spending_from(&chain, 3, 210, None);
+    let waiting_id = waiting.txid;
+    harness.add_txs(parents.into_iter().chain([waiting]));
+    let waiting = waiting_id;
+    let before = harness.counts();
+    let first = page(harness.reply(ask(waiting, false)).await);
+    assert_eq!(delta(harness.counts(), before), [0, 0, 0, 0, 1 + 16, 0]);
+    assert_eq!((first.unresolved, first.resolvable), (194, true));
+    let all = page(harness.reply(ask(waiting, true)).await);
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0, 0, 0, 0, 1 + 16 + 1 + 184, 0]
+    );
+    assert_eq!((all.unresolved, all.resolvable), (10, false));
+}
+
+#[tokio::test]
+async fn a_small_block_brings_what_a_transaction_spending_from_many_spends() {
+    let harness = harness();
+    let chain = harness.chain.borrow().clone();
+    let small = TIP - 2_000;
+    let (tx, parents) = spending_from(&chain, 4, 20, Some(small));
+    let txid = tx.txid;
+    harness.add_txs(parents.into_iter().chain([tx]));
+    let ask = |txid, resolve| ExplorerRequest::Tx { txid, resolve };
+    let page = |response| match response {
+        ExplorerResponse::Tx(page) => page,
+        other => panic!("a transaction page: {other:?}"),
+    };
+    // The block, read whole, has every output the transaction spends: no earlier one is read.
+    let whole = page(harness.reply(ask(txid, false)).await);
+    assert_eq!(harness.counts(), [0, 1, 0, 0, 1, 0]);
+    assert_eq!(harness.v3_reads(), 1);
+    assert_eq!((whole.unresolved, whole.resolvable), (0, false));
+    assert_eq!(whole.fee, Some(Shown::Public { zat: 10_000 }));
+    // When the block cannot be read whole, the inputs are left to read one by one on request.
+    harness.fail_v3.store(true, Ordering::SeqCst);
+    let (other, parents) = spending_from(&chain, 5, 20, Some(small - 1));
+    let other_id = other.txid;
+    harness.add_txs(parents.into_iter().chain([other]));
+    let other = other_id;
+    let before = harness.counts();
+    let unread = page(harness.reply(ask(other, false)).await);
+    assert_eq!(delta(harness.counts(), before), [0, 1, 0, 0, 1, 0]);
+    assert_eq!(harness.v3_reads(), 2, "the second block's attempt");
+    assert_eq!((unread.unresolved, unread.resolvable), (20, true));
+    let all = page(harness.reply(ask(other, true)).await);
+    assert_eq!(delta(harness.counts(), before), [0, 1, 0, 0, 1 + 20, 0]);
+    assert_eq!((all.unresolved, all.resolvable), (0, false));
+    assert_eq!(all.fee, Some(Shown::Public { zat: 10_000 }));
+}
+
+#[tokio::test]
+async fn a_coinbase_page_claims_from_its_block() {
+    let harness = harness();
+    let height = TIP - 30;
+    let chain = harness.chain.borrow().clone();
+    let txid = chain.block(BlockId::Height(height)).unwrap().tx[0];
+    let ExplorerResponse::Tx(page) = harness
+        .reply(ExplorerRequest::Tx {
+            txid,
+            resolve: false,
+        })
+        .await
+    else {
+        panic!("a transaction page");
+    };
+    assert_eq!(
+        harness.counts(),
+        [0, 2, 0, 0, 1, 1],
+        "the coinbase, its block and parent, and the subsidy: the Block page's reads"
+    );
+    let claim = page.coinbase.expect("a claim");
+    assert_eq!(
+        claim.subsidy,
+        u64::try_from(zec_to_zat(chain.subsidy(height).total)).ok()
+    );
+    assert!(claim.fees.is_some() && claim.burned.is_some());
+    assert_eq!(
+        explorer_model::flow::tx_flow(&page).balance,
+        explorer_model::flow::Balance::Balanced {
+            total: claim.subsidy.unwrap() + claim.fees.unwrap()
+        }
+    );
+    assert!(page.burns_fees);
+}
+
+#[tokio::test]
+async fn a_big_blocks_rows_are_read_one_by_one_and_their_fees_after() {
+    let harness = harness_with(
+        SynthChain::new(Network::Mainnet, TIP, NOW).with_big_blocks(10),
+        |_| {},
+    );
+    let height = TIP - 2_000;
+    let chain = harness.chain.borrow().clone();
+    assert!(chain.is_big(height));
+    let ExplorerResponse::Block(page) = harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Height(height),
+        })
+        .await
+    else {
+        panic!("a block page");
+    };
+    let hash = page.summary.hash;
+    let before = harness.counts();
+    let ask = |with_fees| ExplorerRequest::BlockTxs {
+        hash,
+        offset: 4_000,
+        limit: 25,
+        with_fees,
+    };
+    let ExplorerResponse::BlockTxs(first) = harness.reply(ask(false)).await else {
+        panic!("a page of rows");
+    };
+    assert_eq!(first.read, RowsRead::OneByOne);
+    assert_eq!((first.offset, first.rows.len()), (4_000, 25));
+    assert!(first.fees_pending, "the spent outputs are on their way");
+    assert_eq!(harness.v3_reads(), 0, "never the whole block");
+    let rows_read = delta(harness.counts(), before)[4];
+    assert!(rows_read >= 25, "{rows_read}");
+    // Asked again with the fees, the page waits for the outputs the rows spend.
+    let ExplorerResponse::BlockTxs(full) = harness.reply(ask(true)).await else {
+        panic!("a page of rows");
+    };
+    assert!(!full.fees_pending);
+    for row in &full.rows {
+        assert_eq!(
+            row.fee,
+            chain.fee(&row.txid).map(|zat| Shown::Public { zat }),
+            "{}",
+            row.index
+        );
+    }
+    let parents: std::collections::HashSet<_> = full
+        .rows
+        .iter()
+        .flat_map(|row| chain.tx(&row.txid).unwrap().vin)
+        .filter_map(|input| input.txid)
+        .collect();
+    assert_eq!(
+        delta(harness.counts(), before)[4],
+        25 + parents.len() as u64,
+        "each row and each earlier transaction once"
+    );
+    assert_eq!(harness.v3_reads(), 0);
+}
+
+impl Harness {
+    /// Asks for `request` on a task of its own, so the test goes on while it waits.
+    fn ask_later(
+        &self,
+        request: ExplorerRequest,
+    ) -> tokio::task::JoinHandle<Result<ExplorerReply, launcher_types::explorer::ExplorerError>>
+    {
+        let explorer = self.explorer.clone();
+        tokio::spawn(async move { explorer.call(&mainnet(), ExplorerCall::new(request)).await })
+    }
+}
+
+#[tokio::test]
+async fn a_big_blocks_fee_reads_wait_behind_its_rows_and_the_tip() {
+    let harness = harness_with(
+        SynthChain::new(Network::Mainnet, TIP, NOW).with_big_blocks(10),
+        |_| {},
+    );
+    let chain = harness.chain.borrow().clone();
+    let block = chain.block(BlockId::Height(TIP - 2_000)).unwrap();
+    let hash = block.hash;
+    // The block and the transactions of rows 4,000 to 4,024 are in the cache, but not the
+    // earlier transactions they spend from: a card reads its transaction and nothing else.
+    harness
+        .reply(ExplorerRequest::Block {
+            id: BlockId::Hash(hash),
+        })
+        .await;
+    let shown = &block.tx[4_000..4_025];
+    for txid in shown {
+        harness
+            .reply(ExplorerRequest::Card {
+                target: CardTarget::Tx { txid: *txid },
+            })
+            .await;
+    }
+    let parents: std::collections::HashSet<TxId> = shown
+        .iter()
+        .flat_map(|txid| chain.tx(txid).unwrap().vin)
+        .filter_map(|input| input.txid)
+        .collect();
+    let next_rows: std::collections::HashSet<TxId> =
+        block.tx[4_025..4_050].iter().copied().collect();
+    let rows = |offset, with_fees| ExplorerRequest::BlockTxs {
+        hash,
+        offset,
+        limit: 25,
+        with_fees,
+    };
+    let _ = harness.started();
+    // The next rows are asked for while transaction reads are held: six start, 19 wait.
+    harness.tx_gate.send_replace(false);
+    let next = harness.ask_later(rows(4_025, false));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Shown, the explorer checks the tip, which waits for a permit too.
+    harness.show(PageKind::Block).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The first rows are asked for again, with their fees: the outputs their inputs spend.
+    let fees = harness.ask_later(rows(4_000, true));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    harness.tx_gate.send_replace(true);
+    let Ok(ExplorerReply {
+        response: ExplorerResponse::BlockTxs(page),
+        ..
+    }) = fees.await.expect("no panic")
+    else {
+        panic!("a page of rows");
+    };
+    assert!(!page.fees_pending);
+    assert!(
+        page.rows
+            .iter()
+            .all(|row| matches!(row.fee, Some(Shown::Public { .. })))
+    );
+    next.await.expect("no panic").expect("the next rows");
+    // Those reads waited on the prefetch lane: the rows and the tip check went first, though
+    // they were asked for before.
+    let started = harness.started();
+    let read = |wanted: &std::collections::HashSet<TxId>| {
+        let wanted = wanted.clone();
+        move |call: &ReadCall| matches!(call, ReadCall::Tx(txid) if wanted.contains(txid))
+    };
+    let first_parent = started
+        .iter()
+        .position(read(&parents))
+        .expect("the earlier transactions were read");
+    let last_row = started
+        .iter()
+        .rposition(read(&next_rows))
+        .expect("the next rows were read");
+    let tip = started
+        .iter()
+        .position(|call| *call == ReadCall::Best)
+        .expect("the tip was checked");
+    assert!(last_row < first_parent, "{started:?}");
+    assert!(tip < first_parent, "{started:?}");
+}
+
+#[tokio::test]
+async fn a_heavy_read_takes_three_of_the_six() {
+    let harness = harness();
+    let heights = [TIP - 2_000, TIP - 2_002];
+    let mut hashes = Vec::new();
+    for height in heights {
+        let ExplorerResponse::Block(page) = harness
+            .reply(ExplorerRequest::Block {
+                id: BlockId::Height(height),
+            })
+            .await
+        else {
+            panic!("a block page");
+        };
+        hashes.push(page.summary.hash);
+    }
+    let chain = harness.chain.borrow().clone();
+    let shielded: Vec<TxId> = (TIP - 1_000..TIP - 900)
+        .filter_map(|height| {
+            let block = chain.block(BlockId::Height(height))?;
+            block
+                .tx
+                .iter()
+                .skip(1)
+                .copied()
+                .find(|txid| chain.tx(txid).is_some_and(|tx| tx.vin.is_empty()))
+        })
+        .take(5)
+        .collect();
+    assert_eq!(shielded.len(), 5);
+    harness.gate.send_replace(false);
+    let before = harness.counts();
+    let rows = |hash| {
+        let explorer = harness.explorer.clone();
+        let request = ExplorerRequest::BlockTxs {
+            hash,
+            offset: 0,
+            limit: 200,
+            with_fees: false,
+        };
+        tokio::spawn(async move { explorer.call(&mainnet(), ExplorerCall::new(request)).await })
+    };
+    let mut asks = vec![rows(hashes[0])];
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for txid in shielded {
+        let request = ExplorerRequest::Tx {
+            txid,
+            resolve: false,
+        };
+        let explorer = harness.explorer.clone();
+        asks.push(tokio::spawn(async move {
+            explorer.call(&mainnet(), ExplorerCall::new(request)).await
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // One whole block weighs three: three transactions fill the six.
+    assert_eq!(harness.v3_reads(), 1);
+    assert_eq!(delta(harness.counts(), before)[4], 3);
+    // A second whole block waits, while other interactive reads do and while there is no
+    // room.
+    asks.push(rows(hashes[1]));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(harness.v3_reads(), 1);
+    harness.gate.send_replace(true);
+    for ask in asks {
+        ask.await.expect("no panic").expect("an answer");
+    }
+    assert_eq!(harness.v3_reads(), 2);
+}
+
+#[tokio::test]
+async fn show_rpc_lists_the_reads_an_answer_took() {
+    let harness = harness();
+    let height = TIP - 2_000;
+    // By hash, so the second ask needs no check of the tip to find it in the cache.
+    let id = BlockId::Hash(harness.chain.borrow().hash(height).unwrap());
+    let traced = |request| {
+        let explorer = harness.explorer.clone();
+        async move {
+            explorer
+                .call(
+                    &mainnet(),
+                    ExplorerCall {
+                        request,
+                        trace: true,
+                    },
+                )
+                .await
+                .expect("an answer")
+        }
+    };
+    let first = traced(ExplorerRequest::Block { id }).await;
+    let sources = first.sources.expect("the reads");
+    let mut methods: Vec<&str> = sources.iter().map(|call| call.method.as_str()).collect();
+    methods.sort_unstable();
+    assert_eq!(
+        methods,
+        [
+            "getblock",
+            "getblock",
+            "getblocksubsidy",
+            "getrawtransaction"
+        ]
+    );
+    assert!(
+        sources
+            .iter()
+            .all(|call| !call.cached && call.outcome == ReadOutcome::Answered)
+    );
+    assert!(
+        sources
+            .iter()
+            .all(|call| call.bytes.is_some_and(|bytes| bytes > 0))
+    );
+    assert!(
+        sources
+            .iter()
+            .any(|call| call.params == format!(r#"["{id}",1]"#)),
+        "{sources:?}"
+    );
+    assert!(
+        sources
+            .iter()
+            .any(|call| call.params == format!("[{height}]")),
+        "{sources:?}"
+    );
+    // The same page again comes from memory, and says so.
+    let again = traced(ExplorerRequest::Block { id }).await;
+    let sources = again.sources.expect("the reads");
+    assert_eq!(sources.len(), 4);
+    assert!(
+        sources
+            .iter()
+            .all(|call| call.cached && call.ms == 0 && call.bytes.is_none())
+    );
+    // Without `trace`, no list.
+    assert_eq!(
+        harness
+            .ask(ExplorerRequest::Block { id })
+            .await
+            .unwrap()
+            .sources,
+        None
+    );
+    // An unknown hash is listed as the reads zebrad answered "not found": a block, then a
+    // transaction.
+    let missing = harness
+        .explorer
+        .call(
+            &mainnet(),
+            ExplorerCall {
+                request: ExplorerRequest::Resolve {
+                    query: "ab".repeat(32),
+                },
+                trace: true,
+            },
+        )
+        .await
+        .expect("an answer");
+    let sources = missing.sources.expect("the reads");
+    let methods: Vec<(&str, ReadOutcome)> = sources
+        .iter()
+        .map(|call| (call.method.as_str(), call.outcome))
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            ("getblock", ReadOutcome::NotFound),
+            ("getrawtransaction", ReadOutcome::NotFound)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn show_rpc_lists_a_block_asked_by_height_as_the_read_of_its_hash() {
+    let harness = harness();
+    // A check of the tip gives the index the tip's hash, without reading the tip's block.
+    harness
+        .reply(ExplorerRequest::Resolve {
+            query: "tip".into(),
+        })
+        .await;
+    assert_eq!(harness.counts(), [1, 0, 0, 0, 0, 0]);
+    let hash = harness.chain.borrow().hash(TIP).unwrap();
+    let call = ExplorerCall {
+        request: ExplorerRequest::Block {
+            id: BlockId::Height(TIP),
+        },
+        trace: true,
+    };
+    let reply = harness
+        .explorer
+        .call(&mainnet(), call.clone())
+        .await
+        .expect("an answer");
+    let sources = reply.sources.expect("the reads");
+    // zebrad was asked for the tip's block by its hash, and Show RPC says so.
+    assert!(
+        sources
+            .iter()
+            .any(|call| call.method == "getblock" && call.params == format!(r#"["{hash}",1]"#)),
+        "{sources:?}"
+    );
+    assert!(
+        !sources
+            .iter()
+            .any(|call| call.params.contains(&format!(r#""{TIP}""#))),
+        "{sources:?}"
+    );
+    // So it does when the cache answers.
+    let again = harness.explorer.call(&mainnet(), call).await.unwrap();
+    let sources = again.sources.expect("the reads");
+    assert!(
+        sources
+            .iter()
+            .any(|call| call.cached && call.params == format!(r#"["{hash}",1]"#)),
+        "{sources:?}"
+    );
+}
+
+#[tokio::test]
+async fn prefetch_and_cards_read_on_their_own_lane_and_fill_the_cache() {
+    let harness = harness();
+    let height = TIP - 2_000;
+    let txid = txid_where(&harness.chain.borrow(), height, false);
+    let id = BlockId::Hash(harness.chain.borrow().hash(height).unwrap());
+    let ExplorerResponse::Done = harness
+        .reply(ExplorerRequest::Prefetch {
+            targets: vec![PrefetchTarget::Block { id }],
+        })
+        .await
+    else {
+        panic!("answered at once");
+    };
+    // The reads go on behind the answer.
+    let started = tokio::time::Instant::now();
+    while harness.counts() != [0, 2, 0, 0, 1, 1] && started.elapsed() < LIMIT {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        harness.counts(),
+        [0, 2, 0, 0, 1, 1],
+        "the Block page's reads"
+    );
+    // Once they are in, the page is all from the cache.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let before = harness.counts();
+    harness.reply(ExplorerRequest::Block { id }).await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0; 6],
+        "now from the cache"
+    );
+    // A card is one read, which the page then finds in the cache.
+    let ExplorerResponse::Card(Card::Tx { txid: carded, .. }) = harness
+        .reply(ExplorerRequest::Card {
+            target: CardTarget::Tx { txid },
+        })
+        .await
+    else {
+        panic!("a card");
+    };
+    assert_eq!(carded, txid);
+    assert_eq!(delta(harness.counts(), before), [0, 0, 0, 0, 1, 0]);
+    let ExplorerResponse::Card(Card::Block { height: shown, .. }) = harness
+        .reply(ExplorerRequest::Card {
+            target: CardTarget::Block { id },
+        })
+        .await
+    else {
+        panic!("a card");
+    };
+    assert_eq!(shown, height);
+    harness
+        .reply(ExplorerRequest::Tx {
+            txid,
+            resolve: false,
+        })
+        .await;
+    assert_eq!(
+        delta(harness.counts(), before),
+        [0, 0, 0, 0, 1, 0],
+        "the block and the transaction were in the cache"
     );
 }
 
@@ -1619,40 +2549,129 @@ async fn the_logs_never_carry_what_was_asked_for() {
     let _second = tracing::Dispatch::new(capture::Capture::new(lines.clone()));
     let _guard = tracing::subscriber::set_default(capture::Capture::new(lines));
     tracing::callsite::rebuild_interest_cache();
-    let harness = harness();
-    let (block, txid) = {
-        let chain = harness.chain.borrow();
-        let block = chain.block(BlockId::Height(TIP - 77)).unwrap();
-        (block.hash, block.tx[0])
+    // Big blocks too, so the rows of one are read one by one with the outputs they spend.
+    let harness = harness_with(
+        SynthChain::new(Network::Mainnet, TIP, NOW).with_big_blocks(10),
+        |_| {},
+    );
+    let chain = harness.chain.borrow().clone();
+    let (height, big_height) = (TIP - 77, TIP - 70);
+    assert!(!chain.is_big(height) && chain.is_big(big_height));
+    let block = chain.block(BlockId::Height(height)).unwrap();
+    let big = chain.block(BlockId::Height(big_height)).unwrap();
+    let txid = block.tx[0];
+    // What else is asked for: a transaction with inputs, read whole and carded, one of the next
+    // block, read ahead, and a made-up one spending from more than 16, read in full.
+    let spending = txid_where(&chain, height, true);
+    let ahead = txid_where(&chain, height + 1, true);
+    let (many, made_up) = spending_from(&chain, 6, 20, Some(big_height));
+    let many_id = many.txid;
+    harness.add_txs(made_up.iter().cloned().chain([many]));
+    let traced = |request| ExplorerCall {
+        request,
+        trace: true,
     };
-    let height = TIP - 77;
-    harness
-        .reply(ExplorerRequest::Block {
-            id: BlockId::Height(height),
-        })
-        .await;
-    harness.reply(ExplorerRequest::Tx { txid }).await;
-    harness
-        .reply(ExplorerRequest::Resolve {
-            query: block.to_hex(),
-        })
-        .await;
-    let _ = harness
-        .ask(ExplorerRequest::Tx {
-            txid: Hash32([0x5a; 32]),
-        })
-        .await;
+    let node = mainnet();
+    let ask = |request| harness.explorer.call(&node, traced(request));
+    ask(ExplorerRequest::Block {
+        id: BlockId::Height(height),
+    })
+    .await
+    .expect("a block page");
+    ask(ExplorerRequest::Tx {
+        txid,
+        resolve: false,
+    })
+    .await
+    .expect("a coinbase page");
+    ask(ExplorerRequest::Resolve {
+        query: block.hash.to_hex(),
+    })
+    .await
+    .expect("a resolution");
+    let _ = ask(ExplorerRequest::Tx {
+        txid: Hash32([0x5a; 32]),
+        resolve: false,
+    })
+    .await;
+    // P2's reads: a small block's rows (verbosity 3), a big block's (one by one, then with the
+    // outputs they spend), cards, prefetches, and every earlier transaction of one page.
+    let rows = |hash, with_fees| ExplorerRequest::BlockTxs {
+        hash,
+        offset: 0,
+        limit: 25,
+        with_fees,
+    };
+    ask(rows(block.hash, false)).await.expect("small rows");
+    ask(rows(big.hash, false)).await.expect("big rows");
+    ask(rows(big.hash, true)).await.expect("big rows with fees");
+    for target in [
+        CardTarget::Block {
+            id: BlockId::Height(height - 1),
+        },
+        CardTarget::Tx { txid: spending },
+    ] {
+        ask(ExplorerRequest::Card { target }).await.expect("a card");
+    }
+    ask(ExplorerRequest::Prefetch {
+        targets: vec![
+            PrefetchTarget::Block {
+                id: BlockId::Height(height + 2),
+            },
+            PrefetchTarget::Tx { txid: ahead },
+            PrefetchTarget::BlockTxs {
+                hash: big.hash,
+                offset: 25,
+                limit: 25,
+            },
+        ],
+    })
+    .await
+    .expect("advice taken");
+    ask(ExplorerRequest::Tx {
+        txid: many_id,
+        resolve: true,
+    })
+    .await
+    .expect("a page read in full");
+    // The reads made behind the answers end too.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     drop(harness);
     let text: Vec<String> = captured.try_iter().collect();
     assert!(!text.is_empty(), "the reads are logged");
+    let rows_and_parents = big.tx[..50]
+        .iter()
+        .chain(&block.tx)
+        .flat_map(|txid| {
+            let parents: Vec<TxId> = chain
+                .tx(txid)
+                .map(|tx| tx.vin.iter().filter_map(|input| input.txid).collect())
+                .unwrap_or_default();
+            parents.into_iter().chain([*txid])
+        })
+        .map(|txid| txid.to_hex());
+    let secrets: Vec<String> = [
+        block.hash.to_hex(),
+        big.hash.to_hex(),
+        txid.to_hex(),
+        spending.to_hex(),
+        ahead.to_hex(),
+        many_id.to_hex(),
+        Hash32([0x5a; 32]).to_hex(),
+        chain.hash(height - 1).unwrap().to_hex(),
+        chain.hash(height + 2).unwrap().to_hex(),
+        height.to_string(),
+        big_height.to_string(),
+        (height - 1).to_string(),
+        (height + 2).to_string(),
+    ]
+    .into_iter()
+    .chain(made_up.iter().map(|tx| tx.txid.to_hex()))
+    .chain(rows_and_parents)
+    .collect();
     for line in &text {
-        for secret in [
-            block.to_hex(),
-            txid.to_hex(),
-            Hash32([0x5a; 32]).to_hex(),
-            height.to_string(),
-        ] {
-            assert!(!line.contains(&secret), "{line}");
+        for secret in &secrets {
+            assert!(!line.contains(secret), "{line}");
         }
     }
 }

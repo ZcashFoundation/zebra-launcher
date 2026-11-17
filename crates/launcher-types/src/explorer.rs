@@ -226,8 +226,7 @@ pub enum Shown {
 pub enum UnknownWhy {
     /// zebrad has no value-pool row for the block or its parent.
     NoBlockInfo,
-    /// It needs the values of the outputs the transaction spends, which this page does not
-    /// read yet.
+    /// It needs the values of the outputs the transaction spends, and some were not read.
     InputValues,
 }
 
@@ -381,6 +380,63 @@ pub struct TxidPage {
     pub txids: Vec<TxId>,
 }
 
+/// What ZIP 317 counts in a transaction, part by part (zebrad's `conventional_actions`,
+/// zip317.rs:140-174). explorer-model's `zip317` adds them up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogicalActions {
+    /// The transparent inputs' size in bytes; ⌈÷ 150⌉ actions.
+    pub in_bytes: u32,
+    /// The transparent outputs' size in bytes; ⌈÷ 34⌉ actions.
+    pub out_bytes: u32,
+    /// Sprout JoinSplits, two actions each.
+    pub joinsplits: u32,
+    pub sapling_spends: u32,
+    pub sapling_outputs: u32,
+    pub orchard_actions: u32,
+    pub ironwood_actions: u32,
+}
+
+/// One row of a block's transaction table.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TxRow {
+    /// The position in the block; the coinbase is 0.
+    pub index: u32,
+    pub txid: TxId,
+    pub kind: TxKind,
+    pub version: u32,
+    pub size: Option<u32>,
+    /// Transparent inputs and outputs.
+    pub inputs: u32,
+    pub outputs: u32,
+    /// One entry per shielded pool the transaction touches.
+    pub shielded: Vec<PoolPart>,
+    pub actions: LogicalActions,
+    /// The fee; `None` for a coinbase.
+    pub fee: Option<Shown>,
+}
+
+/// How a page of transaction rows was read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RowsRead {
+    /// The whole block at once (`getblock` at verbosity 3), spent outputs and fees included.
+    Block,
+    /// A big block: the rows' transactions one by one, and the outputs they spend after them.
+    OneByOne,
+}
+
+/// A page of a block's transaction rows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TxRowPage {
+    pub offset: u32,
+    pub total: u32,
+    pub rows: Vec<TxRow>,
+    pub read: RowsRead,
+    /// Some rows' fees wait for the outputs they spend, which are being read: asked again
+    /// `with_fees`, the page has them.
+    pub fees_pending: bool,
+}
+
 /// The Block page.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlockPage {
@@ -481,11 +537,28 @@ pub struct OutPoint {
     pub vout: u32,
 }
 
-/// A transparent input. Its value is the spent output's, which this page does not read yet.
+/// A transparent input. Its value is the spent output's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxInput {
     /// The output it spends; `None` for a coinbase input.
     pub prevout: Option<OutPoint>,
+    /// That output, once read.
+    pub spent: Option<SpentOutput>,
+}
+
+/// The output an input spends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpentOutput {
+    pub zat: u64,
+    /// The address it paid, when the script has one.
+    pub address: Option<String>,
+    /// zebrad's script type.
+    pub script: String,
+    /// The height of the block that made it; `None` while that transaction waits in the
+    /// mempool.
+    pub height: Option<u32>,
+    /// Made by a coinbase.
+    pub coinbase: bool,
 }
 
 /// A transparent output.
@@ -531,9 +604,122 @@ pub struct TxPage {
     pub outputs: Vec<TxOutput>,
     /// One entry per shielded pool the transaction touches.
     pub shielded: Vec<PoolPart>,
-    /// The fee, public but unknown while transparent inputs' values are not read; not
+    /// The fee, public but unknown while some transparent inputs' values are not read; not
     /// applicable to a coinbase.
     pub fee: Option<Shown>,
+    pub actions: LogicalActions,
+    /// Inputs whose spent outputs were not read: a transaction spending from many earlier
+    /// ones, or whose block or earlier transactions could not be read, has the rest read on
+    /// request ([`ExplorerRequest::Tx`]'s `resolve`).
+    pub unresolved: u32,
+    /// Whether asking with `resolve` would read more of them.
+    pub resolvable: bool,
+    /// Whether the rules the transaction follows burn part of its block's fees (NU7).
+    pub burns_fees: bool,
+    /// For a coinbase: what it claimed, from its block.
+    pub coinbase: Option<CoinbaseClaim>,
+}
+
+/// What a coinbase claimed, from its block's ledger and subsidy: the subsidy and the block's
+/// fees go in; its outputs, the lockbox's share and the burned fees go out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoinbaseClaim {
+    /// The block subsidy; `None` when zebrad did not answer `getblocksubsidy`.
+    pub subsidy: Option<u64>,
+    /// The block's fees; `None` without zebrad's value-pool rows.
+    pub fees: Option<u64>,
+    /// The burned share of the fees, from NU7.
+    pub burned: Option<u64>,
+    /// The lockbox's change in the block: its share of the subsidy, less what it paid out
+    /// (NU6.1).
+    pub lockbox: Option<i64>,
+}
+
+/// What a hover card is about.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "card", rename_all = "snake_case")]
+pub enum CardTarget {
+    Block { id: BlockId },
+    Tx { txid: TxId },
+}
+
+/// A hover card: a few facts, from one cheap read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "card", rename_all = "snake_case")]
+pub enum Card {
+    Block {
+        height: u32,
+        hash: BlockHash,
+        time: u64,
+        tx_count: u32,
+        size: Option<u32>,
+    },
+    Tx {
+        txid: TxId,
+        kind: TxKind,
+        status: TxStatus,
+        inputs: u32,
+        outputs: u32,
+        pools: Vec<Pool>,
+        size: Option<u32>,
+    },
+}
+
+/// Something a page may soon show, read ahead into the explorer's cache.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "what", rename_all = "snake_case")]
+pub enum PrefetchTarget {
+    /// The Block page's reads.
+    Block { id: BlockId },
+    /// The Transaction page's first read.
+    Tx { txid: TxId },
+    /// A page of a big block's rows: their transactions.
+    BlockTxs {
+        hash: BlockHash,
+        offset: u32,
+        limit: u16,
+    },
+}
+
+/// One read an answer took, as Show RPC lists it: the method and its parameters as the
+/// request carried them, how long the node took, and how much it sent. Never the cookie.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceCall {
+    pub method: String,
+    /// The parameters as JSON text: `["3120000",1]`.
+    pub params: String,
+    /// Milliseconds from asking to the answer; 0 when the cache answered.
+    pub ms: u32,
+    /// The answer's size in bytes, when the node sent one.
+    pub bytes: Option<u32>,
+    /// The explorer answered from memory.
+    pub cached: bool,
+    pub outcome: ReadOutcome,
+}
+
+/// How a read Show RPC lists ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadOutcome {
+    /// The node answered, or the explorer from memory.
+    Answered,
+    /// The node answered that it has no such block or transaction.
+    NotFound,
+    /// The node answered with another error, or with something the explorer could not read.
+    Error,
+    /// The node did not answer: it took too long, or it does not run.
+    NoAnswer,
+}
+
+impl ReadOutcome {
+    /// How a read that failed with `kind` ended.
+    pub fn of_error(kind: &ExplorerErrorKind) -> Self {
+        match kind {
+            ExplorerErrorKind::NotFound => ReadOutcome::NotFound,
+            ExplorerErrorKind::Timeout | ExplorerErrorKind::NodeNotRunning => ReadOutcome::NoAnswer,
+            _ => ReadOutcome::Error,
+        }
+    }
 }
 
 /// Where a query leads.
@@ -721,22 +907,48 @@ pub enum ExplorerRequest {
     Chain { with_fees: bool },
     /// The Block page; a height above the tip answers [`ExplorerResponse::Future`].
     Block { id: BlockId },
-    /// A page of a block's transaction ids.
+    /// A page of a block's transaction rows, at most 200. A small block is read whole at
+    /// once; a big one row by row, and without `with_fees` the page answers before the outputs
+    /// the rows spend are read ([`TxRowPage::fees_pending`]).
     BlockTxs {
         hash: BlockHash,
         offset: u32,
         limit: u16,
+        #[serde(default)]
+        with_fees: bool,
     },
-    /// The Transaction page.
-    Tx { txid: TxId },
+    /// The Transaction page, with the outputs its inputs spend: up to 16 earlier transactions,
+    /// or with `resolve` all of them (up to 1,000; 200 for a waiting one).
+    Tx {
+        txid: TxId,
+        #[serde(default)]
+        resolve: bool,
+    },
     /// Where a search query leads.
     Resolve { query: String },
+    /// A hover card's facts, read after the page's own reads.
+    Card { target: CardTarget },
+    /// Reads ahead what a page may soon show, after the page's own reads. Answers at once.
+    Prefetch { targets: Vec<PrefetchTarget> },
 }
 
 /// A call of the `explorer` command.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExplorerCall {
     pub request: ExplorerRequest,
+    /// List the reads the answer took ([`ExplorerReply::sources`]), for Show RPC.
+    #[serde(default)]
+    pub trace: bool,
+}
+
+impl ExplorerCall {
+    /// `request`, without the reads listed.
+    pub fn new(request: ExplorerRequest) -> Self {
+        Self {
+            request,
+            trace: false,
+        }
+    }
 }
 
 /// The answer to an [`ExplorerCall`].
@@ -745,6 +957,9 @@ pub struct ExplorerReply {
     /// The chain the answer was read against.
     pub chain: Option<ChainView>,
     pub response: ExplorerResponse,
+    /// With `trace`, the reads the answer took, in the order the answer used them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<Vec<SourceCall>>,
 }
 
 /// One answer per request.
@@ -757,9 +972,10 @@ pub enum ExplorerResponse {
     Chain(ChainPage),
     Block(Box<BlockPage>),
     Future(FutureBlock),
-    BlockTxs(TxidPage),
+    BlockTxs(TxRowPage),
     Tx(Box<TxPage>),
     Resolve(Resolution),
+    Card(Card),
 }
 
 /// Why an explorer call failed.
@@ -972,6 +1188,57 @@ mod tests {
             })
             .unwrap(),
             json!({"state": "other_network", "network": "testnet"})
+        );
+    }
+
+    #[test]
+    fn calls_and_replies_without_a_trace_keep_their_shape() {
+        // A call from an older UI has no `trace`, and a reply without one no `sources`.
+        let call: ExplorerCall =
+            serde_json::from_value(json!({"request": {"q": "status"}})).unwrap();
+        assert_eq!(call, ExplorerCall::new(ExplorerRequest::Status));
+        let reply = ExplorerReply {
+            chain: None,
+            response: ExplorerResponse::Done,
+            sources: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&reply).unwrap(),
+            json!({"chain": null, "response": {"r": "done"}})
+        );
+        // `resolve` and `with_fees` default to false.
+        let hash = Hash32::parse(HASH).unwrap();
+        let tx: ExplorerRequest = serde_json::from_value(json!({"q": "tx", "txid": HASH})).unwrap();
+        assert_eq!(
+            tx,
+            ExplorerRequest::Tx {
+                txid: hash,
+                resolve: false
+            }
+        );
+        let rows: ExplorerRequest = serde_json::from_value(
+            json!({"q": "block_txs", "hash": HASH, "offset": 0, "limit": 25}),
+        )
+        .unwrap();
+        assert_eq!(
+            rows,
+            ExplorerRequest::BlockTxs {
+                hash,
+                offset: 0,
+                limit: 25,
+                with_fees: false
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(CardTarget::Tx { txid: hash }).unwrap(),
+            json!({"card": "tx", "txid": HASH})
+        );
+        assert_eq!(
+            serde_json::to_value(PrefetchTarget::Block {
+                id: BlockId::Height(3)
+            })
+            .unwrap(),
+            json!({"what": "block", "id": {"by": "height", "value": 3}})
         );
     }
 

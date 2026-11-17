@@ -47,8 +47,10 @@
 //! | `?tip=<h>` | Like `?attip`, at height `h`, a block per the era's target spacing. |
 //! | `?explorer=slow` | Every Explorer answer takes 300 to 800 ms ([`explorer`]). |
 //! | `?explorer=empty` | A chain of ten blocks: zebrad at height 9, at the tip. |
-//! | `?explorer=nobi` | Every seventh block lacks zebrad's value-pool row, so its successor shows the zero-diff case. |
+//! | `?explorer=nobi` | Every seventh block lacks zebrad's value-pool row, so its successor shows the zero-diff case, and it has no size, so its rows are read one by one. |
+//! | `?explorer=big` | Every tenth block holds 4,600 more transactions (nearly 2 MB): the Block page reads its rows one by one as they scroll into view, and their fees after them. |
 //! | `?reorg` | About every 90 s at the tip, the main node's top two blocks are replaced. |
+//! | `?rowsfail` | The second of every five pages of a Block table's rows (rows 25 to 49, 150 to 174, ...) fails its first read, as when zebrad does not answer in time: the table shows the failure until the page, asked again as the table scrolls back to it, reads. With `?explorer=big`. |
 //! | `?herd&agree` | The herd's agreement ([`agreement`], docs/HERD.md): Zebra · Mainnet 2 joins, zebrad and Zakura · Mainnet are at the tip, and the three agree. Implies `?herd` and `?attip`. |
 //! | `&agree=behind`, `stall`, `fork`, `race`, `split`, `impl`, `channels`, `restart`, `deepfork`, `silent`, `herdstall`, `replaced`, `pair`, `otherchain` | A scenario: a node lagging, stuck, on a chain of its own, racing; a split without a majority; Zakura on its own chain (implementations disagree); Zebra · Mainnet 3 on Beta on its own chain (channels disagree); a node restarting; a fork past the rollback window; a node that does not answer probes; no new block on any node (the herd stalls); a node stuck on a block the others replaced; zebrad and Zakura alone, each on a chain of its own; Zakura catching up on another chain ([`agreement`]). |
 //!
@@ -199,6 +201,8 @@ struct Flags {
     explorer: ExplorerFlag,
     /// `?reorg`.
     reorg: bool,
+    /// `?rowsfail`.
+    rows_fail: bool,
     /// `?os=…`.
     os: OsFlag,
     /// `?children`.
@@ -279,6 +283,7 @@ impl Flags {
                 .or_else(|| (flag("attip") || flag("agree")).then_some(AT_TIP_HEIGHT)),
             explorer: ExplorerFlag::parse(value("explorer")),
             reorg: flag("reorg"),
+            rows_fail: flag("rowsfail"),
         }
     }
 
@@ -328,6 +333,8 @@ enum ExplorerFlag {
     Empty,
     /// `nobi`: blocks without zebrad's value-pool row.
     NoBlockInfo,
+    /// `big`: every tenth block holds 4,600 more transactions.
+    Big,
 }
 
 impl ExplorerFlag {
@@ -336,6 +343,7 @@ impl ExplorerFlag {
             Some("slow") => ExplorerFlag::Slow,
             Some("empty") => ExplorerFlag::Empty,
             Some("nobi") => ExplorerFlag::NoBlockInfo,
+            Some("big") => ExplorerFlag::Big,
             _ => ExplorerFlag::Normal,
         }
     }
@@ -1250,7 +1258,7 @@ mod tests {
         // Every flag in the module doc's table, combined.
         assert_eq!(
             Flags::parse(
-                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&os=windows&children&unreadable&readerpanic&backfill&lowdisk&lowmem&nofit&leftover&herd&agree=fork&beta=unavailable"
+                "?firstrun&storeddir&running&stale&configfail&eos=halt&update=countdown&deb&stalecheck&stalled&nopeers&crashloop&attip&explorer=nobi&reorg&rowsfail&os=windows&children&unreadable&readerpanic&backfill&lowdisk&lowmem&nofit&leftover&herd&agree=fork&beta=unavailable"
             ),
             Flags {
                 first_run: true,
@@ -1268,6 +1276,7 @@ mod tests {
                 tip: Some(AT_TIP_HEIGHT),
                 explorer: ExplorerFlag::NoBlockInfo,
                 reorg: true,
+                rows_fail: true,
                 os: OsFlag::Windows,
                 children: true,
                 unreadable: true,
@@ -1291,6 +1300,7 @@ mod tests {
         assert_eq!(Flags::parse("?tip=3100000&attip").at_tip(), Some(3_100_000));
         assert_eq!(Flags::parse("?explorer=empty&attip").at_tip(), Some(9));
         assert_eq!(Flags::parse("?explorer=slow").explorer, ExplorerFlag::Slow);
+        assert_eq!(Flags::parse("?explorer=big").explorer, ExplorerFlag::Big);
         assert_eq!(Flags::parse("?tip=lots").at_tip(), None);
         assert_eq!(target_spacing(Network::Mainnet, 3_543_405), 25);
         assert_eq!(target_spacing(Network::Mainnet, 3_100_000), 75);

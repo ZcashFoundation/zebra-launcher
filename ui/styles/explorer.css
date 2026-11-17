@@ -663,6 +663,283 @@ button.link.ex-link {
   overflow-wrap: anywhere;
 }
 
+/* A block's transactions on a virtual list: a scroller of fixed height whose rows are slots
+   moved into place, so only the rows in view are in the page. Header and rows share one grid of
+   columns; a narrow page scrolls it sideways. */
+
+.ex-vlist {
+  position: relative;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  contain: strict;
+  font-variant-numeric: tabular-nums;
+}
+
+.ex-vlist:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The row the grid's keys made active, while the grid has focus. */
+.ex-vrow-active {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* The columns' widths, the gaps and the padding add up to the rows' least width. The Net
+   column holds two pools' amounts in coins. */
+.ex-vrow {
+  display: grid;
+  grid-template-columns: 56px 150px 170px 64px 190px minmax(280px, 1fr) 104px 92px 56px 64px 76px;
+  align-items: center;
+  column-gap: 10px;
+  min-width: 1422px;
+  height: 32px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.ex-vrow > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ex-vhead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ex-vbody {
+  position: relative;
+  min-width: 1422px;
+}
+
+.ex-vbody .ex-vrow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+.ex-vrow .ex-num {
+  text-align: right;
+}
+
+.ex-vrow .ex-kind {
+  font-size: 12px;
+}
+
+.ex-glyph {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.ex-pools-cell {
+  display: flex;
+  gap: 8px;
+}
+
+.ex-net-cell {
+  font-size: 13px;
+}
+
+/* A hover card: a few facts under the link the pointer or focus rests on. */
+
+.ex-hovercard {
+  position: fixed;
+  z-index: 20;
+  width: 280px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 4px 16px var(--shadow);
+  font-size: 13px;
+}
+
+.ex-hovercard p {
+  margin: 2px 0;
+  color: var(--text-secondary);
+}
+
+.ex-hovercard .ex-hovercard-title {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* The transaction's flow (V6): strands meet in the middle; pools are outlined boxes, values
+   not known dashed. Strands are lighter than their nodes, and the lit one is darker. */
+
+/* Drawn at about its own size: its text keeps the page's. */
+.ex-flow-wrap {
+  max-width: 900px;
+  overflow-x: auto;
+}
+
+.ex-flow-svg {
+  display: block;
+  width: 100%;
+  min-width: 680px;
+  height: auto;
+}
+
+.ex-strand {
+  opacity: 0.4;
+}
+
+.ex-strand.ex-lit {
+  opacity: 0.75;
+}
+
+.ex-flow-svg .ex-dim {
+  opacity: 0.18;
+}
+
+.ex-flow-node {
+  outline: none;
+}
+
+.ex-flow-node:focus-visible .ex-flow-box {
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.ex-flow-link {
+  cursor: pointer;
+}
+
+.ex-flow-box.ex-flow-pool {
+  fill-opacity: 0.25;
+  stroke-width: 2;
+}
+
+.ex-flow-box.ex-flow-unknown {
+  fill: none;
+  stroke: var(--text-secondary);
+  stroke-dasharray: 3 2;
+}
+
+.ex-flow-middle {
+  fill: var(--text-secondary);
+}
+
+.ex-flow-label {
+  fill: var(--text);
+  font-size: 12px;
+}
+
+.ex-flow-amount {
+  fill: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ex-c-transparent { fill: var(--pool-transparent); stroke: var(--pool-transparent); }
+.ex-c-sprout { fill: var(--pool-sprout); stroke: var(--pool-sprout); }
+.ex-c-sapling { fill: var(--pool-sapling); stroke: var(--pool-sapling); }
+.ex-c-orchard { fill: var(--pool-orchard); stroke: var(--pool-orchard); }
+.ex-c-ironwood { fill: var(--pool-ironwood); stroke: var(--pool-ironwood); }
+.ex-c-lockbox { fill: var(--pool-lockbox); stroke: var(--pool-lockbox); }
+.ex-c-fees { fill: var(--reward-miner); stroke: var(--reward-miner); }
+.ex-c-subsidy { fill: var(--reward-stream); stroke: var(--reward-stream); }
+.ex-c-none { fill: none; stroke: var(--text-secondary); }
+
+.ex-conservation {
+  margin: 8px 0 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.ex-unresolved {
+  margin: 8px 0 0;
+  color: var(--warn);
+}
+
+.ex-unresolved button {
+  margin-left: 6px;
+}
+
+/* A table row whose node in the flow is lit, and the other way round. */
+.ex-row-lit {
+  background: var(--hover);
+}
+
+.ex-fee-rows dd {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Show RPC: the toggle in the source line, and each page's list of its reads. */
+
+.ex-rpc-toggle {
+  min-height: 28px;
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+.ex-rpc-toggle[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.ex-rpc {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.ex-rpc h3 {
+  margin: 0 0 6px;
+}
+
+.ex-rpc summary {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.ex-rpc summary h3 {
+  display: inline;
+  margin: 0;
+}
+
+.ex-rpc[open] summary {
+  margin-bottom: 6px;
+}
+
+.ex-rpc-calls {
+  margin: 0;
+  padding-left: 28px;
+  font-size: 12px;
+}
+
+.ex-rpc-calls li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 1px 0;
+}
+
+.ex-rpc-calls code {
+  overflow-wrap: anywhere;
+}
+
+.ex-rpc-cached code {
+  color: var(--text-secondary);
+}
+
+.ex-rpc-failed .muted {
+  color: var(--warn);
+}
+
 /* Forced colours drop backgrounds, so every mark drawn by one keeps its colour and gains an
    outline: the strip's interval bars too, the only mark of a block's interval. */
 @media (forced-colors: active) {
@@ -674,5 +951,11 @@ button.link.ex-link {
   .ex-meter-fill {
     forced-color-adjust: none;
     border: 1px solid CanvasText;
+  }
+
+  .ex-strand,
+  .ex-flow-box {
+    forced-color-adjust: none;
+    stroke: CanvasText;
   }
 }

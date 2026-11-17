@@ -189,16 +189,33 @@ every node command and event carries a node's id, and the mock's zebrad below is
 - the Explorer (Ctrl/Cmd+3, or Ctrl+K, Cmd+K on macOS, for its search): as in the backend it
   serves the first node, the mock's own zebrad, over a synthetic chain from explorer-model,
   answered with the backend's own page builders, and the dashboard's best block, pools,
-  supply, difficulty and upgrades read the same chain.
-  Amounts are in ZEC, or TAZ on Testnet; the source line's toggles switch amounts to zatoshis
-  and times to UTC or Unix seconds, and the browser's localStorage keeps the choice
-  (`explorer.unit`, `explorer.time`). The default mock syncs, so the Explorer shows what the
+  supply, difficulty and upgrades read the same chain. A Block page lists its transactions as
+  rows on a virtual list, with their kinds, pools and fees; a Transaction page shows where its
+  value went (V6) with its conservation line, the outputs its inputs spend, and a fee card;
+  links to blocks and transactions have hover cards. Amounts are in ZEC, or TAZ on Testnet;
+  the source line's toggles switch amounts to zatoshis and times to UTC or Unix seconds, and
+  Show RPC lists under each page the reads it took; the browser's localStorage keeps the
+  choices (`explorer.unit`, `explorer.time`, `explorer.rpc`). The default mock syncs, so the Explorer shows what the
   node has and does not follow the tip. `?attip` puts zebrad at the tip near block 3,551,000
   (past NU7, a block every 25 s), so Ironwood, the burn and the shielded budget show;
   `?tip=<h>` does the same at height `h`. `?explorer=slow` makes every answer take 300 to
-  800 ms, `?explorer=empty` gives a chain of ten blocks, and `?explorer=nobi` takes zebrad's
+  800 ms, `?explorer=empty` gives a chain of ten blocks, `?explorer=nobi` takes zebrad's
   value-pool row from every seventh block, so that block and the next show their fees as
-  unknown. `?reorg` replaces the main node's top two blocks about every 90 s at the tip (with
+  unknown and that block, of a size zebrad does not report, reads its rows one by one, and
+  `?explorer=big` gives every tenth block (heights ending in 0) 4,600 more
+  transactions, nearly 2 MB, whose rows the Block page reads one by one as they scroll into
+  view, their fees after them. Every synthetic transaction pays at least zebrad's
+  conventional fee but the first transparent payment of every hundredth block (heights
+  ending in 00), whose Transaction page shows "Paid less than zebrad's conventional fee".
+  With `?attip&explorer=big`, a transaction of block 3,550,670 spends from 17 earlier ones:
+  its page reads 16 and offers "Read them all".
+  The mock reads as the backend does (a small block whole, a
+  transaction's earlier ones, a coinbase's block) and remembers what it read as the backend's
+  cache would, so Show RPC lists the same reads, made-up times included, and "from memory"
+  the second time. `?rowsfail` (with `?explorer=big`) fails the first read of rows 25 to 49
+  of a big block, and of every fifth page after them, as when zebrad does not answer in time:
+  the table shows the failure until it scrolls back and the page reads. `?reorg` replaces the
+  main node's top two blocks about every 90 s at the tip (with
   `?attip`), and the Explorer shows the banner. With `?herd` the other nodes' Explorer tabs
   say that the Explorer reads only the node that was first when Zeal started: each node gets
   its own in P6. The mock's zebrad runs on its node's network as it was when it started, as
@@ -301,7 +318,7 @@ to the CSP when it serves the bundled assets.
 | `src/tauri.rs` | `#[wasm_bindgen]` externs to `window.__TAURI__`, JSON-compatible (de)serialization |
 | `src/api.rs` | One typed function per backend command or event, Tauri or mock; the node commands and events carry the node's id |
 | `src/mock.rs`, `src/mock/` | The fake backend for `trunk serve`; its values go through the same JSON round trip as Tauri payloads. `nodes.rs` is the node-scoped API and the node list's rules, `herd.rs` the light simulation of every node but the first, and `resources.rs` the resource samples, pure and tested natively |
-| `src/mock/explorer.rs` | The mock's block explorers: one synthetic chain per zebrad or Zakura node, answered with explorer-model's views, and the chain facts the mock's dashboard details read |
+| `src/mock/explorer.rs`, `src/mock/explorer/` | The mock's block explorers: one synthetic chain per zebrad or Zakura node, answered with explorer-model's views, and the chain facts the mock's dashboard details read; `reads.rs` names each read as the backend's RPC call and remembers it as its cache would |
 | `src/app.rs` | Shared state (`AppState`: the node list from `list_nodes` and the `nodes` event, matched by id, the selected node and `open_docs(DocsSection)`), backend subscriptions, the shell with `Tab::Docs`: header, the tab bar for one node or the sidebar for several, and the first-run wizard |
 | `src/node_state.rs` | One node's state: what the backend reports about it and the histories and log analysis the UI keeps for it |
 | `src/node_summary.rs` | A node's state in a few words, for the sidebar and the overview. Pure, tested natively |
@@ -325,7 +342,7 @@ to the CSP when it serves the bundled assets.
 | `src/config_view.rs` | Helpers for the Configure page's file pane: changed lines, where a key is written, how far to scroll. Pure, tested natively |
 | `src/components/` | `nav.rs` (header and tabs), `sidebar.rs` and `herd_header.rs` (the shell for several nodes), `add_node.rs` (the add-node dialog), `status_strip.rs` (phase, progress, Start/Stop/Restart), `stale_banner.rs`, `updates.rs` (update banner, buttons, "Check for updates", recovery panel), `update_mode_choice.rs` (radio buttons shared by the wizard and Settings), `config_form.rs` (the two-view configuration editor), `log_insights.rs` (analysis cards), `reset_config.rs`, `tooltip.rs` |
 | `src/pages/` | The pages (`overview.rs` with several nodes, `dashboard.rs`, `logs.rs`, `docs.rs` with the Book/Config/Changes sections and sandboxed themed iframe, `grafana.rs`, `configure.rs`, `node_settings.rs` with several nodes, `settings.rs`) and the first-run wizard (`first_run.rs`) |
-| `src/explorer.rs`, `src/explorer/` | The Explorer tab: the shell (back and forward, the search box, the source line, the banner) and the Chain, Block, Transaction and Search pages, with their shared parts, text (pure, tested natively), navigation history, per-node state and the unit and time choices (`prefs.rs`, kept in localStorage) |
+| `src/explorer.rs`, `src/explorer/` | The Explorer tab: the shell (back and forward, the search box, the source line, the banner, the hover card) and the Chain, Block, Transaction and Search pages, with their shared parts, text (pure, tested natively), navigation history, per-node state, the unit, time and Show RPC choices (`prefs.rs`, kept in localStorage), the virtual list of a block's transactions (`virtual_list.rs`), a transaction's flow, V6 (`flow_diagram.rs`) and hover cards (`cards.rs`) |
 | `styles/explorer.css` | The Explorer's styles, with the `--pool-*` colour tokens from `styles.css` |
 
 The crate also compiles natively so `cargo clippy --workspace --all-targets` and

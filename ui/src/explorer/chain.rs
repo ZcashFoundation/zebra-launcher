@@ -17,7 +17,7 @@ use leptos::{ev, html, prelude::*};
 use wasm_bindgen::JsCast;
 
 use super::{
-    parts::{Failure, Loading, RouteLink},
+    parts::{Failure, Loading, RouteLink, RpcCalls},
     prefs::Prefs,
     state::{Loaded, NodeExplorer, load},
     text::{self, Unit},
@@ -59,6 +59,10 @@ pub fn ChainPage(node: NodeId, nav: NodeExplorer, network: Network) -> impl Into
             with_fees.set(true);
         }
     });
+    let sources = Signal::derive(move || match answer.value.get() {
+        Loaded::Ready(reply) => reply.sources,
+        _ => None,
+    });
     view! {
         // Filling in the fees is no refetch: the page is not dimmed for it.
         <div class="ex-chain" class:ex-refreshing=move || answer.refreshing.get() && !fees_pending()>
@@ -74,6 +78,7 @@ pub fn ChainPage(node: NodeId, nav: NodeExplorer, network: Network) -> impl Into
                     _ => view! { <Loading /> }.into_any(),
                 },
             }}
+            <RpcCalls sources title="What this page asked your node" folded=true />
         </div>
     }
 }

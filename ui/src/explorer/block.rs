@@ -1,30 +1,46 @@
 //! The Block page: height, hash, time, confirmations and finality; the block in a sentence;
 //! the turnstile of value between the pools (V2), the reward split (V3), the shielded budget
-//! (V4); the transaction ids, 200 a page; the header's details. A height above the tip counts
-//! down instead, and becomes the block once the node has it.
+//! (V4); the transactions as a table on a virtual list, read from the node as their rows come
+//! into view (a small block whole, a big one row by row); the header's details. A height above
+//! the tip counts down instead, and becomes the block once the node has it. The blocks either
+//! side are read ahead, so ◀ and ▶ open at once.
 
-use std::time::{Duration, UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    time::{Duration, UNIX_EPOCH},
+};
 
 use launcher_types::{
     Network, NodeId,
     explorer::{
-        BlockId, BlockLedger, BlockPage as Page, Budget, ExplorerErrorKind, ExplorerRequest,
-        ExplorerResponse, ExplorerRoute, FutureBlock, LiveState, PerPool, Pool, RewardSplit,
-        TxidPage,
+        BlockHash, BlockId, BlockLedger, BlockPage as Page, Budget, CardTarget, ExplorerCall,
+        ExplorerError, ExplorerErrorKind, ExplorerReply, ExplorerRequest, ExplorerResponse,
+        ExplorerRoute, FutureBlock, LiveState, PerPool, Pool, PrefetchTarget, RewardSplit,
+        RowsRead, Shown, SourceCall, TxRow,
     },
 };
-use leptos::prelude::*;
+use leptos::{prelude::*, task::spawn_local};
 
 use super::{
-    parts::{Failure, HashText, Loading, PoolChip, RouteLink},
+    cards::{CARD_ID, HoverCards, Rest, hover_handlers},
+    parts::{Failure, HashText, Loading, PoolChip, RouteLink, RpcCalls},
     prefs::Prefs,
     state::{Loaded, NodeExplorer, load},
     text::{self, Unit},
+    virtual_list::{VirtualList, Window},
 };
 use crate::{
+    api,
     app::{AppState, Tab},
     format::{bytes, relative, short_hash, thousands},
 };
+
+/// The rows asked for at once.
+const CHUNK: u32 = 25;
+/// The rows in view at once.
+const ROWS_SHOWN: u32 = 14;
+/// The reads Show RPC keeps for the table: the latest.
+const TABLE_SOURCES: usize = 100;
 
 #[component]
 pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId) -> impl IntoView {
@@ -68,6 +84,35 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
         };
         Some((ExplorerRequest::Block { id }, revision))
     });
+    // Once the block is in, the blocks either side are read ahead.
+    let ahead = node.clone();
+    Effect::new(move |_| {
+        if let Loaded::Ready(reply) = answer.value.get()
+            && let ExplorerResponse::Block(page) = &reply.response
+        {
+            let height = page.summary.height;
+            let mut targets = Vec::new();
+            if let Some(previous) = height.checked_sub(1) {
+                targets.push(PrefetchTarget::Block {
+                    id: BlockId::Height(previous),
+                });
+            }
+            if page.next.is_some() {
+                targets.push(PrefetchTarget::Block {
+                    id: BlockId::Height(height + 1),
+                });
+            }
+            let node = ahead.clone();
+            spawn_local(async move {
+                // Advice: a failure is not worth a banner.
+                let _ = api::explorer(&node, ExplorerRequest::Prefetch { targets }).await;
+            });
+        }
+    });
+    let sources = Signal::derive(move || match answer.value.get() {
+        Loaded::Ready(reply) => reply.sources,
+        _ => None,
+    });
     Effect::new(move |_| match answer.value.get() {
         Loaded::Ready(reply) => future.set(matches!(reply.response, ExplorerResponse::Future(_))),
         Loaded::Failed(error) => {
@@ -78,6 +123,26 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
         }
         Loaded::Loading => future.set(false),
     });
+    // The table is drawn once per block: an answer for the same block again (Show RPC turned on
+    // or off, the node reachable again) keeps its rows, its reads and its place.
+    let block_page = move |value: &Loaded<ExplorerReply>| match value {
+        Loaded::Ready(reply) => match &reply.response {
+            ExplorerResponse::Block(page) => Some(page.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let shown = Memo::new(move |_| {
+        answer
+            .value
+            .with(|value| block_page(value).map(|page| page.summary.hash))
+    });
+    let table_node = node.clone();
+    let table = move || {
+        shown.get()?;
+        let page = *answer.value.with_untracked(block_page)?;
+        Some(view! { <TxTable page nav node=table_node.clone() network /> })
+    };
     view! {
         <div class="ex-block" class:ex-refreshing=move || answer.refreshing.get()>
             {move || match answer.value.get() {
@@ -102,20 +167,35 @@ pub fn BlockPage(node: NodeId, nav: NodeExplorer, network: Network, id: BlockId)
                 },
                 Loaded::Ready(reply) => match reply.response {
                     ExplorerResponse::Block(page) => {
-                        // A new unit draws the same answer again; nothing is read for it.
-                        let unit = prefs.unit(network);
-                        view! { <Block page=*page nav unit node=node.clone() /> }.into_any()
+                        let page = *page;
+                        // A new unit draws the same answer again; nothing is read for it. The
+                        // table reads the unit itself.
+                        (move || {
+                            let unit = prefs.unit(network);
+                            view! { <Block page=page.clone() nav unit /> }
+                        })
+                        .into_any()
                     }
                     ExplorerResponse::Future(future) => view! { <Future future nav /> }.into_any(),
                     _ => view! { <Loading /> }.into_any(),
                 },
             }}
+            {table}
+            {move || answer.value.with(block_page).map(|page| view! {
+                <section class="ex-section">
+                    <details class="ex-details">
+                        <summary>"Header details"</summary>
+                        <Details page=*page nav />
+                    </details>
+                </section>
+            })}
+            <RpcCalls sources title="What this page asked your node" />
         </div>
     }
 }
 
 #[component]
-fn Block(page: Page, nav: NodeExplorer, unit: Unit, node: NodeId) -> impl IntoView {
+fn Block(page: Page, nav: NodeExplorer, unit: Unit) -> impl IntoView {
     let app = AppState::get();
     let prefs = Prefs::get();
     let summary = page.summary.clone();
@@ -189,18 +269,6 @@ fn Block(page: Page, nav: NodeExplorer, unit: Unit, node: NodeId) -> impl IntoVi
         <section class="ex-section" aria-labelledby="ex-budget-title">
             <h2 id="ex-budget-title">"How full"</h2>
             <BudgetMeter ledger=summary.ledger.clone() />
-        </section>
-        <section class="ex-section" aria-labelledby="ex-txs-title">
-            <h2 id="ex-txs-title">
-                {format!("Transactions ({})", thousands(u64::from(summary.tx_count)))}
-            </h2>
-            <Txids first=page.txids.clone() hash=summary.hash nav node />
-        </section>
-        <section class="ex-section">
-            <details class="ex-details">
-                <summary>"Header details"</summary>
-                <Details page nav />
-            </details>
         </section>
     }
 }
@@ -422,95 +490,368 @@ fn BudgetMeter(ledger: BlockLedger) -> impl IntoView {
     }
 }
 
-/// The block's transaction ids, 200 a page.
-#[component]
-fn Txids(
-    first: TxidPage,
-    hash: launcher_types::explorer::BlockHash,
-    nav: NodeExplorer,
-    node: NodeId,
-) -> impl IntoView {
-    let offset = RwSignal::new(0u32);
-    let total = first.total;
-    let first_page = first.clone();
-    let answer = load(node, nav, move || {
-        let offset = offset.get();
-        (offset > 0).then_some((
-            ExplorerRequest::BlockTxs {
-                hash,
-                offset,
-                limit: 200,
-            },
-            0,
-        ))
-    });
-    let page = move || {
-        if offset.get() == 0 {
-            return Some(first_page.clone());
+/// What the table has read: its rows, the chunks whose fees are on their way, how the block
+/// is read, Show RPC's reads, and the chunks whose last read failed. `Copy`.
+#[derive(Clone, Copy)]
+struct Rows {
+    rows: RwSignal<HashMap<u32, TxRow>>,
+    pending: RwSignal<HashSet<u32>>,
+    read: RwSignal<Option<RowsRead>>,
+    sources: RwSignal<Option<Vec<SourceCall>>>,
+    failed: RwSignal<BTreeMap<u32, ExplorerError>>,
+}
+
+/// Reads chunk `chunk` of block `hash`'s rows with `call` (the node's explorer), then again
+/// with their fees when the first answer came without them. A chunk that failed is forgotten
+/// from `asked`, so scrolling asks again, and its fees are no longer on their way; its failure
+/// shows until it is read. An answer that comes once the table has gone (its page was left
+/// meanwhile) is dropped, and its fees are not asked for.
+async fn read_rows(
+    call: impl AsyncFn(ExplorerCall) -> Result<ExplorerReply, ExplorerError>,
+    hash: BlockHash,
+    chunk: u32,
+    trace: bool,
+    store: Rows,
+    asked: StoredValue<HashSet<u32>>,
+) {
+    for with_fees in [false, true] {
+        let request = ExplorerRequest::BlockTxs {
+            hash,
+            offset: chunk * CHUNK,
+            limit: CHUNK as u16,
+            with_fees,
+        };
+        match call(ExplorerCall { request, trace }).await {
+            Ok(reply) => {
+                let ExplorerResponse::BlockTxs(page) = reply.response else {
+                    return;
+                };
+                let kept = store.rows.try_update(|rows| {
+                    for row in page.rows {
+                        rows.insert(row.index, row);
+                    }
+                });
+                if kept.is_none() {
+                    return;
+                }
+                store.read.try_set(Some(page.read));
+                if let Some(calls) = reply.sources {
+                    store.sources.try_update(|all| {
+                        let all = all.get_or_insert_with(Vec::new);
+                        all.extend(calls);
+                        let over = all.len().saturating_sub(TABLE_SOURCES);
+                        all.drain(..over);
+                    });
+                }
+                store.pending.try_update(|pending| {
+                    if page.fees_pending {
+                        pending.insert(chunk);
+                    } else {
+                        pending.remove(&chunk);
+                    }
+                });
+                if store
+                    .failed
+                    .try_with_untracked(|failed| failed.contains_key(&chunk))
+                    == Some(true)
+                {
+                    store.failed.try_update(|failed| {
+                        failed.remove(&chunk);
+                    });
+                }
+                if !page.fees_pending {
+                    return;
+                }
+            }
+            Err(error) => {
+                store.failed.try_update(|failed| {
+                    failed.insert(chunk, error);
+                });
+                store.pending.try_update(|pending| {
+                    pending.remove(&chunk);
+                });
+                asked.try_update_value(|asked| {
+                    asked.remove(&chunk);
+                });
+                return;
+            }
         }
-        match answer.value.get() {
-            Loaded::Ready(reply) => match reply.response {
-                ExplorerResponse::BlockTxs(page) => Some(page),
-                _ => None,
-            },
+    }
+}
+
+/// The block's transactions on a virtual list: the rows in view are read as they come into
+/// view, a chunk at a time. A small block comes whole in the first answer; a big one row by
+/// row, with the fees after the rows and the next rows read ahead. Until a row is read, its id
+/// (for the first 200, from the block) holds its place.
+#[component]
+fn TxTable(page: Page, nav: NodeExplorer, node: NodeId, network: Network) -> impl IntoView {
+    let prefs = Prefs::get();
+    let hash = page.summary.hash;
+    let total = page.summary.tx_count;
+    let first = StoredValue::new(page.txids.txids.clone());
+    let store = Rows {
+        rows: RwSignal::new(HashMap::new()),
+        pending: RwSignal::new(HashSet::new()),
+        read: RwSignal::new(None),
+        sources: RwSignal::new(None),
+        failed: RwSignal::new(BTreeMap::new()),
+    };
+    let asked = StoredValue::new(HashSet::<u32>::new());
+    let read_ahead = StoredValue::new(HashSet::<u32>::new());
+    let last_window = StoredValue::new(None::<Window>);
+    let reader = node.clone();
+    let on_window = Callback::new(move |window: Window| {
+        last_window.set_value(Some(window));
+        let (start, end) = window.rows;
+        if end <= start {
+            return;
+        }
+        let trace = prefs.rpc.get_untracked();
+        let chunks = |(start, end): (u32, u32)| start / CHUNK..=(end.max(start + 1) - 1) / CHUNK;
+        let seen = chunks(window.seen);
+        // A block read whole answers every chunk from the explorer's cache. A big one's rows
+        // in view are asked for, and the overscan and the next chunk read ahead, so the
+        // explorer reads the rows in view first.
+        let whole = store.read.get_untracked() == Some(RowsRead::Block);
+        let (mut asking, mut ahead) = (Vec::new(), Vec::new());
+        for chunk in chunks(window.rows) {
+            if asked.with_value(|asked| asked.contains(&chunk)) {
+                continue;
+            }
+            if whole || seen.contains(&chunk) {
+                asking.push(chunk);
+            } else {
+                ahead.push(chunk);
+            }
+        }
+        // The explorer reads the newest request first: the chunk with the first row in view
+        // is asked for last.
+        for chunk in asking.into_iter().rev() {
+            asked.update_value(|asked| {
+                asked.insert(chunk);
+            });
+            let node = reader.clone();
+            let call = async move |call| api::explorer_call(&node, call).await;
+            spawn_local(read_rows(call, hash, chunk, trace, store, asked));
+        }
+        let next = (end - 1) / CHUNK + 1;
+        if next * CHUNK < total && !asked.with_value(|asked| asked.contains(&next)) {
+            ahead.push(next);
+        }
+        ahead.retain(|chunk| read_ahead.try_update_value(|read| read.insert(*chunk)) == Some(true));
+        if !whole && !ahead.is_empty() {
+            let node = reader.clone();
+            spawn_local(async move {
+                let targets = ahead
+                    .into_iter()
+                    .map(|chunk| PrefetchTarget::BlockTxs {
+                        hash,
+                        offset: chunk * CHUNK,
+                        limit: CHUNK as u16,
+                    })
+                    .collect();
+                let _ = api::explorer(&node, ExplorerRequest::Prefetch { targets }).await;
+            });
+        }
+    });
+    // The table outlives Show RPC turned on, and the rows read before were not traced: the
+    // chunks in view are asked again, traced, so its list starts then. The explorer's cache
+    // answers them.
+    Effect::new(move |was_on: Option<bool>| {
+        let on = prefs.rpc.get();
+        if on && was_on == Some(false) {
+            store.sources.set(None);
+            asked.update_value(HashSet::clear);
+            if let Some(window) = last_window.get_value() {
+                on_window.run(window);
+            }
+        }
+        on
+    });
+    // The row the grid's keys made active: its hover card under its link, and Enter opens it.
+    let txid_at = move |index: u32| {
+        store
+            .rows
+            .with_untracked(|rows| rows.get(&index).map(|row| row.txid))
+            .or_else(|| first.with_value(|first| first.get(index as usize).copied()))
+    };
+    let cards = HoverCards::get();
+    let on_active = Callback::new(move |active: Option<(u32, web_sys::Element)>| {
+        let Some(cards) = cards else {
+            return;
+        };
+        match active {
+            Some((index, row)) => {
+                let link = row.query_selector(".ex-link").ok().flatten().unwrap_or(row);
+                if let Some(txid) = txid_at(index) {
+                    cards.enter(Rest::Focus, CardTarget::Tx { txid }, link);
+                }
+            }
+            None => cards.leave_soon(Rest::Focus),
+        }
+    });
+    let on_open = Callback::new(move |index: u32| {
+        if let Some(txid) = txid_at(index) {
+            nav.go(ExplorerRoute::Tx { txid, out: None });
+        }
+    });
+    let unit = move || prefs.unit(network);
+    // The header is built once, and the table outlives a change of unit: the two labels that
+    // name it follow it, as the cells do.
+    let header = move || {
+        view! {
+            <span role="columnheader" class="ex-num">"#"</span>
+            <span role="columnheader">"Transaction"</span>
+            <span role="columnheader">"Kind"</span>
+            <span role="columnheader" title="Where value came from and went: t transparent, z shielded, cb a coinbase's new coins">"Flow"</span>
+            <span role="columnheader">"Pools"</span>
+            <span role="columnheader" title="What entered (+) or left (−) each shielded pool">{move || format!("Net ({})", unit())}</span>
+            <span role="columnheader" class="ex-num">{move || format!("Fee ({})", unit())}</span>
+            <span role="columnheader" class="ex-num" title="Zatoshis per logical action due">"Per action"</span>
+            <span role="columnheader" class="ex-num" title="The fee over zebrad's conventional fee">"×"</span>
+            <span role="columnheader" class="ex-num" title="ZIP 317's logical actions">"Actions"</span>
+            <span role="columnheader" class="ex-num">"Size"</span>
+        }
+    };
+    let row = move |index: Memo<u32>| {
+        let row = Memo::new(move |_| store.rows.with(|rows| rows.get(&index.get()).cloned()));
+        let txid = move || {
+            row.with(|row| row.as_ref().map(|row| row.txid))
+                .or_else(|| first.with_value(|first| first.get(index.get() as usize).copied()))
+        };
+        let pending = move || {
+            store
+                .pending
+                .with(|pending| pending.contains(&(index.get() / CHUNK)))
+        };
+        let (enter, leave) = hover_handlers(move || txid().map(|txid| CardTarget::Tx { txid }));
+        let fee = move || {
+            let unit = unit();
+            row.with(|row| match row.as_ref().map(|row| row.fee) {
+                None => String::new(),
+                Some(None) => "—".to_owned(),
+                Some(Some(Shown::Public { zat })) => unit.number(zat),
+                Some(Some(_)) if pending() => "…".to_owned(),
+                Some(Some(_)) => "unknown".to_owned(),
+            })
+        };
+        let figures = move || {
+            row.with(|row| {
+                row.as_ref()
+                    .and_then(|row| text::fee_figures(row.fee, &row.actions))
+            })
+        };
+        let net = move || {
+            let unit = unit();
+            row.with(|row| {
+                row.as_ref()
+                    .map(|row| text::net_text(&row.shielded, unit))
+                    .unwrap_or_default()
+            })
+        };
+        view! {
+            <span role="gridcell" class="ex-num muted">{move || index.get()}</span>
+            <span role="gridcell">
+                // No Tab stop of its own: the grid is one, and its keys open the active row.
+                <button
+                    type="button"
+                    class="link ex-link"
+                    tabindex="-1"
+                    aria-describedby=CARD_ID
+                    on:click=move |_| {
+                        if let Some(txid) = txid() {
+                            nav.go(ExplorerRoute::Tx { txid, out: None });
+                        }
+                    }
+                    on:mouseenter=move |event| enter(event.into())
+                    on:mouseleave=move |event| leave(event.into())
+                >
+                    <code>{move || txid().map_or_else(|| "…".to_owned(), |txid| short_hash(&txid.to_hex()))}</code>
+                </button>
+            </span>
+            <span role="gridcell">
+                {move || row.with(|row| row.as_ref().map(|row| {
+                    let shielded = !matches!(row.kind, launcher_types::explorer::TxKind::Transparent | launcher_types::explorer::TxKind::Coinbase { .. });
+                    view! { <span class="ex-kind" class:ex-kind-shielded=shielded>{text::kind_label(&row.kind)}</span> }
+                }))}
+            </span>
+            <span role="gridcell" class="ex-glyph">{move || row.with(|row| row.as_ref().map(text::flow_glyph))}</span>
+            <span role="gridcell" class="ex-pools-cell">
+                {move || row.with(|row| row.as_ref().map(|row| {
+                    row.shielded
+                        .iter()
+                        .map(|part| view! { <PoolChip pool=part.pool /> })
+                        .collect_view()
+                }))}
+            </span>
+            // In full on hover too, should it not fit.
+            <span role="gridcell" class="ex-net-cell" title=net>{net}</span>
+            <span role="gridcell" class="ex-num">{fee}</span>
+            <span role="gridcell" class="ex-num">
+                {move || figures().map(|figures| format!("{} zat", thousands(figures.per_action)))}
+            </span>
+            <span role="gridcell" class="ex-num">{move || figures().map(|figures| text::multiple_text(figures.multiple))}</span>
+            <span role="gridcell" class="ex-num">
+                {move || row.with(|row| row.as_ref().map(|row| explorer_model::zip317::logical_actions(&row.actions)))}
+            </span>
+            <span role="gridcell" class="ex-num">
+                {move || row.with(|row| row.as_ref().and_then(|row| row.size).map(|size| bytes(u64::from(size))))}
+            </span>
+        }
+    };
+    // zebrad does not report the size of a block it has no value-pool row for, and such a
+    // block is read row by row in case it is a big one.
+    let sized = page.summary.size.is_some();
+    let reading = move || {
+        let fees = !store.pending.with(HashSet::is_empty);
+        match store.read.get() {
+            Some(RowsRead::OneByOne) => Some(format!(
+                "{}: {} transactions, read from your node as their rows come into view{}.",
+                if sized {
+                    "A big block"
+                } else {
+                    "A block of a size zebrad does not report"
+                },
+                thousands(u64::from(total)),
+                if fees {
+                    "; reading the fees of the rows in view"
+                } else {
+                    ""
+                }
+            )),
             _ => None,
         }
     };
     view! {
-        {move || match page() {
-            Some(page) => {
-                let start = page.offset;
-                view! {
-                    <ol class="ex-txids" start=start + 1>
-                        {page
-                            .txids
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, txid)| {
-                                let route = ExplorerRoute::Tx { txid, out: None };
-                                let coinbase = start == 0 && index == 0;
-                                view! {
-                                    <li>
-                                        <RouteLink nav route>
-                                            <code>{short_hash(&txid.to_hex())}</code>
-                                        </RouteLink>
-                                        {coinbase.then(|| view! { <span class="ex-kind">"Coinbase"</span> })}
-                                    </li>
-                                }
-                            })
-                            .collect_view()}
-                    </ol>
-                }
-                .into_any()
-            }
-            None => view! { <Loading /> }.into_any(),
-        }}
-        {(total > 200).then(|| view! {
-            <div class="buttons ex-pager">
-                <button
-                    type="button"
-                    disabled=move || offset.get() == 0
-                    on:click=move |_| offset.update(|offset| *offset = offset.saturating_sub(200))
-                >
-                    "Previous 200"
-                </button>
-                <span class="muted">
-                    {move || format!(
-                        "{}–{} of {}",
-                        thousands(u64::from(offset.get() + 1)),
-                        thousands(u64::from((offset.get() + 200).min(total))),
-                        thousands(u64::from(total))
-                    )}
-                </span>
-                <button
-                    type="button"
-                    disabled=move || offset.get() + 200 >= total
-                    on:click=move |_| offset.update(|offset| *offset += 200)
-                >
-                    "Next 200"
-                </button>
-            </div>
-        })}
+        <section class="ex-section" aria-labelledby="ex-txs-title">
+            <h2 id="ex-txs-title">
+                {format!("Transactions ({})", thousands(u64::from(total)))}
+            </h2>
+            {move || reading().map(|reading| view! { <p class="muted ex-caption" role="status">{reading}</p> })}
+            // The first chunk whose last read failed, until it is read.
+            {move || {
+                store
+                    .failed
+                    .with(|failed| failed.values().next().cloned())
+                    .map(|error| view! { <Failure error /> })
+            }}
+            <VirtualList
+                total
+                rows_shown=ROWS_SHOWN
+                id="ex-txs-row"
+                label=format!("The block's {} transactions", thousands(u64::from(total)))
+                header
+                row
+                on_window
+                on_active
+                on_open
+            />
+            <p class="muted ex-caption">
+                "Fees come from the outputs each transaction spends. Per action and × are ZIP 317's, \
+                 as zebrad counts them: 1,000 zat per logical action, at least two."
+            </p>
+            <RpcCalls sources=store.sources title="What the table asked your node" folded=true />
+        </section>
     }
 }
 
@@ -615,9 +956,57 @@ fn Future(future: FutureBlock, nav: NodeExplorer) -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
-    use launcher_types::explorer::PerPool;
+    use std::{
+        cell::Cell,
+        pin::pin,
+        task::{Context, Waker},
+    };
 
-    use super::turnstile_scale;
+    use launcher_types::explorer::{Hash32, PerPool, TxRowPage};
+
+    use super::*;
+
+    #[test]
+    fn rows_answered_after_the_table_has_gone_are_dropped() {
+        for fees_pending in [false, true] {
+            let root = Owner::new();
+            root.set();
+            let table = root.child();
+            let (store, asked) = table.with(|| {
+                let store = Rows {
+                    rows: RwSignal::new(HashMap::new()),
+                    pending: RwSignal::new(HashSet::new()),
+                    read: RwSignal::new(None),
+                    sources: RwSignal::new(None),
+                    failed: RwSignal::new(BTreeMap::new()),
+                };
+                (store, StoredValue::new(HashSet::from([0])))
+            });
+            let calls = Cell::new(0);
+            // The page is left while the node reads; the answer comes all the same.
+            let call = async |_: ExplorerCall| {
+                calls.set(calls.get() + 1);
+                table.cleanup();
+                Ok(ExplorerReply {
+                    chain: None,
+                    response: ExplorerResponse::BlockTxs(TxRowPage {
+                        offset: 0,
+                        total: 4_600,
+                        rows: Vec::new(),
+                        read: RowsRead::OneByOne,
+                        fees_pending,
+                    }),
+                    sources: None,
+                })
+            };
+            let mut reading = pin!(read_rows(call, Hash32([7; 32]), 0, false, store, asked));
+            let ready = reading
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()));
+            assert!(ready.is_ready(), "{fees_pending}");
+            assert_eq!(calls.get(), 1, "no fees asked for a table that has gone");
+        }
+    }
 
     #[test]
     fn the_turnstile_scale_holds_every_bar() {

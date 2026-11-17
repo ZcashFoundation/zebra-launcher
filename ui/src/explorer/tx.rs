@@ -1,8 +1,10 @@
 //! The Transaction page, from the transaction's public parts: where it is and how settled
-//! (V7), what it did in one sentence, a card per shielded pool (counts and the net movement;
-//! per-note amounts are hidden), the transparent inputs and outputs, the fee when the inputs
-//! do not hide it, and the details. Input values come with a later version.
+//! (V7), what it did in one sentence, where its value went (V6), a card per shielded pool
+//! (counts and the net movement; per-note amounts are hidden), the transparent inputs with
+//! the outputs they spend and the outputs, the fee as ZIP 317 counts it, and the details. A
+//! transaction spending from many earlier ones has the rest read on request.
 
+use explorer_model::flow::tx_flow;
 use launcher_types::{
     Network, NodeId,
     explorer::{
@@ -11,14 +13,23 @@ use launcher_types::{
     },
 };
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use super::{
-    parts::{Failure, HashText, Hidden, KindBadge, Loading, PoolChip, RouteLink},
+    flow_diagram::{FlowDiagram, Lit, input_node, output_node},
+    parts::{Failure, HashText, Hidden, KindBadge, Loading, PoolChip, RouteLink, RpcCalls},
     prefs::Prefs,
     state::{Loaded, NodeExplorer, load},
-    text::{self, Unit},
+    text::{self, FeeFigures, Unit},
 };
 use crate::format::{bytes, short_hash, thousands};
+
+/// "Read them all": whether it was asked for, and how many inputs were unread then. `Copy`.
+#[derive(Clone, Copy)]
+struct ReadAll {
+    asked: RwSignal<bool>,
+    unread: StoredValue<Option<u32>>,
+}
 
 #[component]
 pub fn TxPage(
@@ -37,13 +48,27 @@ pub fn TxPage(
         })
     };
     // A waiting transaction is asked about again at every new tip, until it is mined; any
-    // transaction after a reorganisation, which may have replaced its block.
+    // transaction after a reorganisation, which may have replaced its block. "Read them all"
+    // asks again with every earlier transaction its inputs spend from.
     let waiting = RwSignal::new(false);
+    let resolve = ReadAll {
+        asked: RwSignal::new(false),
+        unread: StoredValue::new(None),
+    };
+    // Once the answer with them all is drawn, focus moves to the fee section, where the button
+    // was, and a status line says what was read.
+    let read = RwSignal::new(String::new());
+    // The output a link led here for is brought into view once, not at each redraw (a new
+    // unit, Show RPC, a waiting transaction's new tip).
+    let scrolled = StoredValue::new(false);
     let answer = load(node, nav, move || {
         let (epoch, height) = tip();
         let height = if waiting.get() { height } else { 0 };
         Some((
-            ExplorerRequest::Tx { txid },
+            ExplorerRequest::Tx {
+                txid,
+                resolve: resolve.asked.get(),
+            },
             (epoch << 32) | u64::from(height),
         ))
     });
@@ -54,6 +79,37 @@ pub fn TxPage(
         );
         waiting.set(is_waiting);
     });
+    Effect::new(move |_| {
+        let Loaded::Ready(reply) = answer.value.get() else {
+            return;
+        };
+        let ExplorerResponse::Tx(page) = &reply.response else {
+            return;
+        };
+        let Some(before) = resolve
+            .unread
+            .get_value()
+            .filter(|_| resolve.asked.get_untracked())
+        else {
+            return;
+        };
+        resolve.unread.set_value(None);
+        read.set(text::read_all_text(before, page.unresolved));
+        request_animation_frame(|| {
+            if let Some(heading) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.get_element_by_id("ex-fee-title"))
+                .and_then(|heading| heading.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                let _ = heading.set_attribute("tabindex", "-1");
+                let _ = heading.focus();
+            }
+        });
+    });
+    let sources = Signal::derive(move || match answer.value.get() {
+        Loaded::Ready(reply) => reply.sources,
+        _ => None,
+    });
     view! {
         <div class="ex-tx" class:ex-refreshing=move || answer.refreshing.get()>
             {move || match answer.value.get() {
@@ -63,20 +119,46 @@ pub fn TxPage(
                     ExplorerResponse::Tx(page) => {
                         // A new unit draws the same answer again; nothing is read for it.
                         let unit = prefs.unit(network);
-                        view! { <Tx page=*page nav unit out /> }.into_any()
+                        view! { <Tx page=*page nav unit network out resolve scrolled /> }.into_any()
                     }
                     _ => view! { <Loading /> }.into_any(),
                 },
             }}
+            <p class="visually-hidden" role="status">{read}</p>
+            <RpcCalls sources title="What this page asked your node" />
         </div>
     }
 }
 
 #[component]
-fn Tx(page: Page, nav: NodeExplorer, unit: Unit, out: Option<u32>) -> impl IntoView {
+fn Tx(
+    page: Page,
+    nav: NodeExplorer,
+    unit: Unit,
+    network: Network,
+    out: Option<u32>,
+    resolve: ReadAll,
+    /// Whether the followed output was brought into view.
+    scrolled: StoredValue<bool>,
+) -> impl IntoView {
     let sentence = text::tx_sentence(&page, unit);
     let coinbase = matches!(page.kind, TxKind::Coinbase { .. });
     let status = page.status.clone();
+    let flow = tx_flow(&page);
+    let lit = RwSignal::new(None::<Lit>);
+    // The output an input link led here for comes into view, the first time it is drawn.
+    if out.is_some() && !scrolled.get_value() {
+        scrolled.set_value(true);
+        request_animation_frame(|| {
+            if let Some(row) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.query_selector(".ex-tx .ex-row-selected").ok())
+                .flatten()
+            {
+                row.scroll_into_view_with_bool(false);
+            }
+        });
+    }
     view! {
         <section class="ex-section" aria-labelledby="ex-tx-title">
             <div class="ex-title-row">
@@ -86,6 +168,19 @@ fn Tx(page: Page, nav: NodeExplorer, unit: Unit, out: Option<u32>) -> impl IntoV
             <HashText hash=page.txid full=true />
             <Status status nav />
             <p class="ex-sentence">{sentence}</p>
+        </section>
+        <section class="ex-section" aria-labelledby="ex-flow-title">
+            <h2 id="ex-flow-title">"Where the value went"</h2>
+            <FlowDiagram page=page.clone() flow=flow.clone() unit nav lit />
+            <p class="muted ex-caption">
+                {if coinbase {
+                    "Strands meet in the middle. A coinbase's shielded outputs are public by \
+                     consensus, though the Explorer does not decrypt them."
+                } else {
+                    "Strands meet in the middle: the chain does not say which input paid which \
+                     output, and inside a shielded pool the amount of each note stays hidden."
+                }}
+            </p>
         </section>
         {(!page.shielded.is_empty()).then(|| view! {
             <section class="ex-section" aria-labelledby="ex-shielded-title">
@@ -102,23 +197,12 @@ fn Tx(page: Page, nav: NodeExplorer, unit: Unit, out: Option<u32>) -> impl IntoV
         })}
         <section class="ex-section" aria-labelledby="ex-transparent-title">
             <h2 id="ex-transparent-title">"Transparent inputs and outputs"</h2>
-            <Inputs page=page.clone() nav />
-            <Outputs page=page.clone() unit out />
+            <Inputs page=page.clone() nav unit flow=flow.clone() lit />
+            <Outputs page=page.clone() unit out flow lit />
         </section>
         <section class="ex-section" aria-labelledby="ex-fee-title">
             <h2 id="ex-fee-title">"Fee"</h2>
-            <p>
-                {match page.fee {
-                    Some(Shown::Public { zat }) => text::amount(zat, unit),
-                    Some(Shown::Unknown { .. }) => {
-                        "Public, but it needs the values of the outputs this transaction spends, \
-                         which this version of the Explorer does not read."
-                            .to_owned()
-                    }
-                    Some(Shown::Hidden) => "hidden".to_owned(),
-                    None => "None: a coinbase pays no fee; it claims the block's.".to_owned(),
-                }}
-            </p>
+            <FeeCard page=page.clone() unit network resolve />
         </section>
         <section class="ex-section">
             <details class="ex-details">
@@ -138,6 +222,118 @@ fn Tx(page: Page, nav: NodeExplorer, unit: Unit, out: Option<u32>) -> impl IntoV
                 </dl>
             </details>
         </section>
+    }
+}
+
+/// Inputs whose spent outputs were not read, and the button that reads them all.
+#[component]
+fn Unresolved(unresolved: u32, resolvable: bool, resolve: ReadAll) -> impl IntoView {
+    (unresolved > 0).then(|| {
+        view! {
+            <p class="ex-unresolved">
+                {format!(
+                    "{} input{} spent output{} not read yet, so the fee and the balance are unknown.",
+                    thousands(u64::from(unresolved)),
+                    if unresolved == 1 { "'s" } else { "s'" },
+                    if unresolved == 1 { " is" } else { "s are" }
+                )}
+                {resolvable.then(|| view! {
+                    " "
+                    // Focusable while it reads, so focus stays here until the answer comes.
+                    <button
+                        type="button"
+                        aria-disabled=move || resolve.asked.get().then_some("true")
+                        on:click=move |_| {
+                            if !resolve.asked.get_untracked() {
+                                resolve.unread.set_value(Some(unresolved));
+                                resolve.asked.set(true);
+                            }
+                        }
+                    >
+                        {move || if resolve.asked.get() { "Reading them…" } else { "Read them all" }}
+                    </button>
+                })}
+            </p>
+        }
+    })
+}
+
+/// The fee card: the fee, ZIP 317's logical actions part by part, the conventional fee, per
+/// action, the multiple and zebrad's weight ratio, with what they mean for a waiting or a mined
+/// transaction.
+#[component]
+fn FeeCard(page: Page, unit: Unit, network: Network, resolve: ReadAll) -> impl IntoView {
+    let waiting = page.status == TxStatus::Mempool;
+    let burns = page.burns_fees.then_some(
+        "From NU7, 60 % of a block's fees are burned and 40 % go to the miner; the split applies \
+         to the block's total, not to each transaction.",
+    );
+    match page.fee {
+        None => view! {
+            <p>"None: a coinbase pays no fee; it claims the block's, above."</p>
+        }
+        .into_any(),
+        Some(Shown::Public { zat }) => {
+            let figures = FeeFigures::new(u64::try_from(zat).unwrap_or(0), &page.actions);
+            let verdict = text::fee_verdict(&figures, &page.status);
+            view! {
+                <dl class="rows ex-fee-rows">
+                    <dt>"Fee"</dt>
+                    <dd>{text::amount(zat, unit)}</dd>
+                    <dt title="ZIP 317, as zebrad counts them">"Logical actions"</dt>
+                    <dd>{text::actions_breakdown(&page.actions)}</dd>
+                    <dt>"Conventional fee"</dt>
+                    <dd>
+                        {format!(
+                            "{} (1,000 zat × {} actions{})",
+                            text::amount(figures.conventional as i64, unit),
+                            figures.paid,
+                            if figures.logical < figures.paid { ", at least two" } else { "" }
+                        )}
+                    </dd>
+                    <dt>"Per action"</dt>
+                    <dd>{format!("{} zat", thousands(figures.per_action))}</dd>
+                    <dt>"Multiple"</dt>
+                    <dd>{text::multiple_text(figures.multiple)}</dd>
+                    <dt title="The fee over the conventional fee, capped at 10">"Weight ratio"</dt>
+                    <dd>{format!("{:.2} of at most 10", figures.ratio)}</dd>
+                </dl>
+                <p>{verdict}</p>
+                {waiting.then(|| view! {
+                    <p class="muted ex-caption">
+                        "zebrad picks transactions for its block template at random, weighted by \
+                         this ratio."
+                    </p>
+                })}
+                {(waiting && network == Network::Mainnet).then(|| view! {
+                    <p class="muted ex-caption">
+                        "Wallets pay 5,000 zat per action until Mainnet block 3,590,000, then 1,000."
+                    </p>
+                })}
+                {burns.map(|burns| view! { <p class="muted ex-caption">{burns}</p> })}
+            }
+            .into_any()
+        }
+        Some(Shown::Unknown { .. } | Shown::Hidden) => view! {
+            <p>
+                "Public, but some of the outputs this transaction spends were not read, so the \
+                 fee is unknown here."
+            </p>
+            <Unresolved unresolved=page.unresolved resolvable=page.resolvable resolve />
+            <p class="muted ex-caption">
+                {format!(
+                    "It is counted as {} logical actions: a conventional fee of {}.",
+                    explorer_model::zip317::logical_actions(&page.actions),
+                    text::amount(
+                        explorer_model::zip317::conventional_fee(
+                            explorer_model::zip317::logical_actions(&page.actions)
+                        ) as i64,
+                        unit
+                    )
+                )}
+            </p>
+        }
+        .into_any(),
     }
 }
 
@@ -258,45 +454,101 @@ fn PoolCard(part: PoolPart, unit: Unit, coinbase: bool) -> impl IntoView {
 }
 
 #[component]
-fn Inputs(page: Page, nav: NodeExplorer) -> impl IntoView {
+fn Inputs(
+    page: Page,
+    nav: NodeExplorer,
+    unit: Unit,
+    flow: explorer_model::flow::Flow,
+    lit: RwSignal<Option<Lit>>,
+) -> impl IntoView {
     if page.inputs.is_empty() {
         return view! { <p class="muted">"No transparent inputs."</p> }.into_any();
     }
+    if matches!(page.kind, TxKind::Coinbase { .. }) {
+        return view! {
+            <h3>"Inputs (1)"</h3>
+            <p>"Coinbase: new coins and the block's fees"</p>
+        }
+        .into_any();
+    }
+    let status = page.status.clone();
     view! {
         <h3>{format!("Inputs ({})", page.inputs.len())}</h3>
-        <ol class="ex-inputs">
-            {page
-                .inputs
-                .into_iter()
-                .map(|input| match input.prevout {
-                    Some(prevout) => {
-                        let route = ExplorerRoute::Tx {
-                            txid: prevout.txid,
-                            out: Some(prevout.vout),
-                        };
-                        view! {
-                            <li>
-                                <RouteLink nav route>
-                                    <code>{format!("{}:{}", short_hash(&prevout.txid.to_hex()), prevout.vout)}</code>
-                                </RouteLink>
-                            </li>
-                        }
-                        .into_any()
-                    }
-                    None => view! { <li>"Coinbase: new coins and the block's fees"</li> }.into_any(),
-                })
-                .collect_view()}
-        </ol>
-        // A coinbase's one input spends nothing: its line says what it is instead.
-        {(!matches!(page.kind, TxKind::Coinbase { .. })).then(|| view! {
-            <p class="muted ex-caption">"Each input spends an earlier output; its value shows on that transaction's page."</p>
-        })}
+        <div class="ex-table-wrap">
+            <table class="ex-table">
+                <thead>
+                    <tr>
+                        <th scope="col" class="ex-num">"#"</th>
+                        <th scope="col">"Spends"</th>
+                        <th scope="col">"Address"</th>
+                        <th scope="col" class="ex-num">{format!("Value ({unit})")}</th>
+                        <th scope="col" class="ex-num" title="Blocks between the output and this transaction">"Age"</th>
+                        <th scope="col"><span class="visually-hidden">"Made by"</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {page
+                        .inputs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, input)| {
+                            let node = input_node(&flow, &page, index).map(Lit::Left);
+                            let spends = input.prevout.map(|prevout| {
+                                let route = ExplorerRoute::Tx {
+                                    txid: prevout.txid,
+                                    out: Some(prevout.vout),
+                                };
+                                view! {
+                                    <RouteLink nav route>
+                                        <code>{format!("{}:{}", short_hash(&prevout.txid.to_hex()), prevout.vout)}</code>
+                                    </RouteLink>
+                                }
+                            });
+                            let spent = input.spent.clone();
+                            let age = text::coin_age(spent.as_ref().and_then(|spent| spent.height), &status);
+                            view! {
+                                <tr
+                                    class:ex-row-lit=move || node.is_some() && lit.get() == node
+                                    on:mouseenter=move |_| lit.set(node)
+                                    on:mouseleave=move |_| lit.set(None)
+                                >
+                                    <td class="ex-num">{index}</td>
+                                    <td>{spends}</td>
+                                    {match spent {
+                                        Some(spent) => view! {
+                                            <td><code class="ex-address">{spent.address.unwrap_or_else(|| spent.script.clone())}</code></td>
+                                            <td class="ex-num">{unit.number(spent.zat as i64)}</td>
+                                            <td class="ex-num">{age}</td>
+                                            <td>{spent.coinbase.then(|| view! { <span class="chip">"coinbase"</span> })}</td>
+                                        }
+                                        .into_any(),
+                                        None => view! {
+                                            <td class="muted">"not read"</td>
+                                            <td class="ex-num muted">"unknown"</td>
+                                            <td></td>
+                                            <td></td>
+                                        }
+                                        .into_any(),
+                                    }}
+                                </tr>
+                            }
+                        })
+                        .collect_view()}
+                </tbody>
+            </table>
+        </div>
     }
     .into_any()
 }
 
 #[component]
-fn Outputs(page: Page, unit: Unit, out: Option<u32>) -> impl IntoView {
+fn Outputs(
+    page: Page,
+    unit: Unit,
+    out: Option<u32>,
+    flow: explorer_model::flow::Flow,
+    lit: RwSignal<Option<Lit>>,
+) -> impl IntoView {
     if page.outputs.is_empty() {
         return view! { <p class="muted">"No transparent outputs."</p> }.into_any();
     }
@@ -320,8 +572,15 @@ fn Outputs(page: Page, unit: Unit, out: Option<u32>) -> impl IntoView {
                             // The output an input link led here for: marked in words and by a
                             // bar, not by the row's tint alone.
                             let followed = out == Some(output.n);
+                            let node = output_node(&flow, output.n).map(Lit::Right);
                             view! {
-                                <tr class:ex-row-selected=followed aria-current=followed.then_some("true")>
+                                <tr
+                                    class:ex-row-selected=followed
+                                    class:ex-row-lit=move || node.is_some() && lit.get() == node
+                                    aria-current=followed.then_some("true")
+                                    on:mouseenter=move |_| lit.set(node)
+                                    on:mouseleave=move |_| lit.set(None)
+                                >
                                     <td class="ex-num">
                                         {followed.then(|| view! {
                                             <span class="chip ex-followed" title="The output the input you followed spends">

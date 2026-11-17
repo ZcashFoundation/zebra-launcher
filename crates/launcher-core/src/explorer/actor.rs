@@ -1,6 +1,7 @@
 //! The explorer actor: one task owns the cache, the chain index, the scheduler and the
 //! permits. Request tasks, read tasks and the tip follower talk to it over one channel, so
-//! nothing is shared and nothing is locked.
+//! nothing is shared and nothing is locked. A request asked with `trace` hears of each read it
+//! took over a channel of its own, for Show RPC.
 
 use std::{
     collections::HashMap,
@@ -11,7 +12,7 @@ use std::{
 };
 
 use explorer_model::{
-    shapes::{BestBlock, BlockV1, Header, Subsidy, Tx},
+    shapes::{BestBlock, BlockV1, BlockV3, Header, Subsidy, Tx},
     upgrades::UpgradeHeights,
 };
 use launcher_types::{
@@ -19,7 +20,7 @@ use launcher_types::{
     explorer::{
         BlockHash, BlockId, ChainView, ExplorerCall, ExplorerError, ExplorerErrorKind,
         ExplorerLive, ExplorerLiveEvent, ExplorerReply, ExplorerRequest, ExplorerResponse,
-        LiveState, ReorgNotice, TxId,
+        LiveState, ReadOutcome, ReorgNotice, SourceCall, TxId,
     },
 };
 use tokio::{
@@ -32,7 +33,7 @@ use super::{
     cache::Lru,
     chain_index::{ChainIndex, Change, ForkSearch, REORG_WINDOW, TipUpdate},
     sched::{Lane, Limits, Scheduler},
-    source::{ChainSource, ReadCall, ReadResult, SourceError},
+    source::{Answer, ChainSource, ReadCall, ReadResult, SourceError},
 };
 use crate::rpc::RpcError;
 
@@ -45,8 +46,20 @@ pub(super) enum Command {
     },
 }
 
-type ReadReply = oneshot::Sender<Result<ReadResult, ExplorerError>>;
-type TipReply = oneshot::Sender<Result<ChainView, ExplorerError>>;
+/// A read's answer, with the call that answered it: the one sent to the node, or answered from
+/// the cache, which for a block asked for by a height the index knows is the read of its hash.
+type ReadReply = oneshot::Sender<(ReadCall, Result<Served, ExplorerError>)>;
+/// The tip, and whether the explorer vouched for it without asking the node.
+type TipReply = oneshot::Sender<Result<(ChainView, bool), ExplorerError>>;
+
+/// A read's answer as a request task gets it: from the cache, or from the node with the size
+/// of what it sent.
+#[derive(Clone, Debug)]
+pub(super) struct Served {
+    result: ReadResult,
+    cached: bool,
+    bytes: Option<u32>,
+}
 
 /// What request tasks, read tasks and the follower tell the actor.
 pub(super) enum Internal {
@@ -67,9 +80,10 @@ pub(super) enum Internal {
     Done {
         call: ReadCall,
         lane: Lane,
+        weight: u32,
         /// The actor's `network_changes` when the read went out.
         network_changes: u64,
-        result: Result<ReadResult, SourceError>,
+        result: Result<Answer, SourceError>,
     },
     /// The follower checked the tip.
     Followed {
@@ -78,18 +92,46 @@ pub(super) enum Internal {
     },
 }
 
-/// A request task's line to the actor.
+/// A request task's line to the actor: the lane its reads go in, and with `trace`, where each
+/// read it took is told.
 #[derive(Clone)]
 pub(super) struct Fetcher {
     tx: mpsc::UnboundedSender<Internal>,
+    lane: Lane,
+    trace: Option<mpsc::UnboundedSender<SourceCall>>,
 }
 
 /// A read that was asked for and not yet awaited, so several go out together.
-pub(super) struct Pending(oneshot::Receiver<Result<ReadResult, ExplorerError>>);
+pub(super) struct Pending {
+    response: oneshot::Receiver<(ReadCall, Result<Served, ExplorerError>)>,
+    trace: Option<(mpsc::UnboundedSender<SourceCall>, std::time::Instant)>,
+}
 
 impl Pending {
     async fn result(self) -> Result<ReadResult, ExplorerError> {
-        self.0.await.map_err(|_| stopped())?
+        let (sent, served) = self.response.await.map_err(|_| stopped())?;
+        if let Some((trace, asked)) = self.trace {
+            let (cached, bytes) = match &served {
+                Ok(served) => (served.cached, served.bytes),
+                Err(_) => (false, None),
+            };
+            let _ = trace.send(SourceCall {
+                method: sent.method().to_owned(),
+                params: sent.params().to_string(),
+                ms: if cached { 0 } else { elapsed_ms(asked) },
+                bytes,
+                cached,
+                outcome: outcome(&served),
+            });
+        }
+        served.map(|served| served.result)
+    }
+
+    pub(super) async fn block_v3(self) -> Result<Arc<BlockV3>, ExplorerError> {
+        match self.result().await? {
+            ReadResult::BlockV3(block) => Ok(block),
+            _ => Err(mismatch()),
+        }
     }
 
     pub(super) async fn block(self) -> Result<Arc<BlockV1>, ExplorerError> {
@@ -136,28 +178,55 @@ impl Pending {
 }
 
 impl Fetcher {
+    /// The same line, with its reads in `lane`.
+    pub(super) fn in_lane(&self, lane: Lane) -> Fetcher {
+        Fetcher {
+            lane,
+            ..self.clone()
+        }
+    }
+
+    /// The same line, telling no one of its reads.
+    pub(super) fn untraced(&self) -> Fetcher {
+        Fetcher {
+            trace: None,
+            ..self.clone()
+        }
+    }
+
     /// Asks for `call` now; await the answer later.
     pub(super) fn request(&self, call: ReadCall, lane: Lane) -> Pending {
         let (reply, response) = oneshot::channel();
         // A closed channel drops `reply`, which reads as a stopped explorer.
         let _ = self.tx.send(Internal::Read { call, lane, reply });
-        Pending(response)
+        Pending {
+            response,
+            trace: self
+                .trace
+                .clone()
+                .map(|trace| (trace, std::time::Instant::now())),
+        }
     }
 
     pub(super) fn block(&self, id: BlockId) -> Pending {
-        self.request(ReadCall::Block(id), Lane::Interactive)
+        self.request(ReadCall::Block(id), self.lane)
+    }
+
+    /// The block at verbosity 3: heavy.
+    pub(super) fn block_v3(&self, hash: BlockHash) -> Pending {
+        self.request(ReadCall::BlockV3(hash), self.lane)
     }
 
     pub(super) fn tx(&self, txid: TxId) -> Pending {
-        self.request(ReadCall::Tx(txid), Lane::Interactive)
+        self.request(ReadCall::Tx(txid), self.lane)
     }
 
     pub(super) fn subsidy(&self, height: u32) -> Pending {
-        self.request(ReadCall::Subsidy(height), Lane::Interactive)
+        self.request(ReadCall::Subsidy(height), self.lane)
     }
 
     pub(super) fn header(&self, id: BlockId) -> Pending {
-        self.request(ReadCall::Header(id), Lane::Interactive)
+        self.request(ReadCall::Header(id), self.lane)
     }
 
     /// A transaction a page can wait for, on the prefetch lane: interactive reads go first.
@@ -165,23 +234,68 @@ impl Fetcher {
         self.request(ReadCall::Tx(txid), Lane::Prefetch)
     }
 
+    async fn peek(&self, call: ReadCall) -> Option<ReadResult> {
+        let (reply, response) = oneshot::channel();
+        let _ = self.tx.send(Internal::Peek { call, reply });
+        response.await.ok()?
+    }
+
     /// The cached transaction `txid`, if the cache has it; nothing is read.
     pub(super) async fn cached_tx(&self, txid: TxId) -> Option<Arc<Tx>> {
-        let (reply, response) = oneshot::channel();
-        let call = ReadCall::Tx(txid);
-        let _ = self.tx.send(Internal::Peek { call, reply });
-        match response.await.ok()?? {
+        match self.peek(ReadCall::Tx(txid)).await? {
             ReadResult::Tx(tx) => Some(tx),
+            _ => None,
+        }
+    }
+
+    /// The cached block `hash` at verbosity 1, if the cache has it; nothing is read.
+    pub(super) async fn cached_block(&self, hash: BlockHash) -> Option<Arc<BlockV1>> {
+        match self.peek(ReadCall::Block(BlockId::Hash(hash))).await? {
+            ReadResult::Block(block) => Some(block),
+            _ => None,
+        }
+    }
+
+    /// The cached block `hash` at verbosity 3, if the cache has it; nothing is read.
+    pub(super) async fn cached_v3(&self, hash: BlockHash) -> Option<Arc<BlockV3>> {
+        match self.peek(ReadCall::BlockV3(hash)).await? {
+            ReadResult::BlockV3(block) => Some(block),
             _ => None,
         }
     }
 
     /// The tip, checked against the node within `max_age`.
     pub(super) async fn tip(&self, max_age: Duration) -> Result<ChainView, ExplorerError> {
+        let asked = std::time::Instant::now();
         let (reply, response) = oneshot::channel();
         let _ = self.tx.send(Internal::Tip { max_age, reply });
-        response.await.map_err(|_| stopped())?
+        let result = response.await.map_err(|_| stopped())?;
+        if let Some(trace) = &self.trace {
+            let cached = matches!(result, Ok((_, true)));
+            let call = ReadCall::Best;
+            let _ = trace.send(SourceCall {
+                method: call.method().to_owned(),
+                params: call.params().to_string(),
+                ms: if cached { 0 } else { elapsed_ms(asked) },
+                bytes: None,
+                cached,
+                outcome: outcome(&result),
+            });
+        }
+        result.map(|(view, _)| view)
     }
+}
+
+/// How a read that ended in `result` is listed.
+fn outcome<T>(result: &Result<T, ExplorerError>) -> ReadOutcome {
+    match result {
+        Ok(_) => ReadOutcome::Answered,
+        Err(err) => ReadOutcome::of_error(&err.kind),
+    }
+}
+
+fn elapsed_ms(since: std::time::Instant) -> u32 {
+    u32::try_from(since.elapsed().as_millis()).unwrap_or(u32::MAX)
 }
 
 fn stopped() -> ExplorerError {
@@ -227,6 +341,7 @@ pub(super) fn read_error(err: SourceError) -> ExplorerError {
 }
 
 /// What a request task knows when it starts.
+#[derive(Clone)]
 pub(super) struct Context {
     pub(super) fetch: Fetcher,
     pub(super) network: Network,
@@ -245,10 +360,16 @@ pub(super) struct Context {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum CacheKey {
     Block(BlockHash),
+    /// A block at verbosity 3, as zebrad's answer reduces: its transactions with the outputs
+    /// they spend. Keyed by hash, so it never goes out of date.
+    BlockV3(BlockHash),
     Tx(TxId),
     Subsidy(u32),
     FinalHeader(u32),
-    Header { height: u32, epoch: u64 },
+    Header {
+        height: u32,
+        epoch: u64,
+    },
 }
 
 /// A read under way: who waits for it, and the epoch it was asked for in.
@@ -270,16 +391,18 @@ struct DoneGuard {
     tx: mpsc::UnboundedSender<Internal>,
     call: ReadCall,
     lane: Lane,
+    weight: u32,
     network_changes: u64,
     sent: bool,
 }
 
 impl DoneGuard {
-    fn finish(mut self, result: Result<ReadResult, SourceError>) {
+    fn finish(mut self, result: Result<Answer, SourceError>) {
         self.sent = true;
         let _ = self.tx.send(Internal::Done {
             call: self.call,
             lane: self.lane,
+            weight: self.weight,
             network_changes: self.network_changes,
             result,
         });
@@ -292,6 +415,7 @@ impl Drop for DoneGuard {
             let _ = self.tx.send(Internal::Done {
                 call: self.call,
                 lane: self.lane,
+                weight: self.weight,
                 network_changes: self.network_changes,
                 result: Err(SourceError::Unavailable("the read stopped".into())),
             });
@@ -438,6 +562,8 @@ where
     fn fetcher(&self) -> Fetcher {
         Fetcher {
             tx: self.internal.clone(),
+            lane: Lane::Interactive,
+            trace: None,
         }
     }
 
@@ -576,9 +702,9 @@ where
     fn forget_reads(&mut self) {
         self.network_changes += 1;
         self.sched.clear_queue();
-        for (_, inflight) in self.inflight.drain() {
+        for (call, inflight) in self.inflight.drain() {
             for waiter in inflight.waiters {
-                let _ = waiter.send(Err(not_running()));
+                let _ = waiter.send((call, Err(not_running())));
             }
         }
     }
@@ -588,7 +714,7 @@ where
         self.run = None;
         for call in self.sched.clear_queue() {
             for waiter in self.inflight.remove(&call).unwrap_or_default().waiters {
-                let _ = waiter.send(Err(not_running()));
+                let _ = waiter.send((call, Err(not_running())));
             }
         }
         for waiter in self.tip_waiters.drain(..) {
@@ -666,20 +792,31 @@ where
             return;
         }
         let chain = self.node_chain();
+        let done = |chain| ExplorerReply {
+            chain,
+            response: ExplorerResponse::Done,
+            sources: None,
+        };
         match call.request {
             ExplorerRequest::Status => {
                 let live = self.live.borrow().live.clone();
                 let _ = reply.send(Ok(ExplorerReply {
                     chain,
                     response: ExplorerResponse::Status(live),
+                    sources: None,
                 }));
             }
             ExplorerRequest::Interest { visible, .. } => {
                 self.set_visible(visible);
-                let _ = reply.send(Ok(ExplorerReply {
-                    chain,
-                    response: ExplorerResponse::Done,
-                }));
+                let _ = reply.send(Ok(done(chain)));
+            }
+            ExplorerRequest::Prefetch { targets } => {
+                // Advice: answered at once, and read only while the node's own chain is.
+                let _ = reply.send(Ok(done(chain)));
+                if self.run.is_some() && self.other_network().is_none() {
+                    let context = self.context(chain);
+                    tokio::spawn(assemble::prefetch(targets, context));
+                }
             }
             request => {
                 if self.run.is_none() {
@@ -693,28 +830,53 @@ where
                     )));
                     return;
                 }
-                let stats = self.inputs.stats.borrow().clone();
+                let (trace, mut traced) = mpsc::unbounded_channel();
                 let context = Context {
-                    fetch: self.fetcher(),
-                    network: self.network,
-                    heights: self.heights(),
-                    chain,
-                    node_height: stats
-                        .as_ref()
-                        .and_then(|stats| u32::try_from(stats.height).ok()),
-                    estimated_height: stats
-                        .as_ref()
-                        .and_then(|stats| u32::try_from(stats.estimated_height).ok()),
-                    syncing: !self.at_tip(),
-                    end_of_support: stats
-                        .as_ref()
-                        .and_then(|stats| stats.eos.as_ref())
-                        .map(|eos| eos.block_height),
+                    fetch: Fetcher {
+                        trace: call.trace.then_some(trace),
+                        ..self.fetcher()
+                    },
+                    ..self.context(chain)
                 };
+                let trace = call.trace;
                 tokio::spawn(async move {
-                    let _ = reply.send(assemble::handle(request, context).await);
+                    let mut answer = assemble::handle(request, context).await;
+                    // Every read the answer took has told of itself by now: the request's own
+                    // lines to the channel ended with it.
+                    if let Ok(reply) = &mut answer
+                        && trace
+                    {
+                        let mut sources = Vec::new();
+                        while let Ok(source) = traced.try_recv() {
+                            sources.push(source);
+                        }
+                        reply.sources = Some(sources);
+                    }
+                    let _ = reply.send(answer);
                 });
             }
+        }
+    }
+
+    /// What a request task starts from.
+    fn context(&self, chain: Option<ChainView>) -> Context {
+        let stats = self.inputs.stats.borrow().clone();
+        Context {
+            fetch: self.fetcher(),
+            network: self.network,
+            heights: self.heights(),
+            chain,
+            node_height: stats
+                .as_ref()
+                .and_then(|stats| u32::try_from(stats.height).ok()),
+            estimated_height: stats
+                .as_ref()
+                .and_then(|stats| u32::try_from(stats.estimated_height).ok()),
+            syncing: !self.at_tip(),
+            end_of_support: stats
+                .as_ref()
+                .and_then(|stats| stats.eos.as_ref())
+                .map(|eos| eos.block_height),
         }
     }
 
@@ -763,6 +925,7 @@ where
             ReadCall::Block(BlockId::Height(height)) => {
                 self.index.hash_at(height, now).map(CacheKey::Block)
             }
+            ReadCall::BlockV3(hash) => Some(CacheKey::BlockV3(hash)),
             ReadCall::Tx(txid) => Some(CacheKey::Tx(txid)),
             ReadCall::Subsidy(height) => Some(CacheKey::Subsidy(height)),
             ReadCall::Header(BlockId::Height(height)) => self.header_key(height, now),
@@ -796,7 +959,7 @@ where
                     .chain_view()
                     .filter(|_| self.index.checked_within(max_age, now()))
                 {
-                    let _ = reply.send(Ok(view));
+                    let _ = reply.send(Ok((view, true)));
                     return;
                 }
                 if self.run.is_none() {
@@ -815,10 +978,11 @@ where
             Internal::Done {
                 call,
                 lane,
+                weight,
                 network_changes,
                 result,
             } => {
-                self.sched.done(lane);
+                self.sched.done(lane, weight);
                 if network_changes != self.network_changes {
                     // Sent on the old network: its waiters were answered when it changed.
                     self.pump();
@@ -826,11 +990,15 @@ where
                 }
                 let inflight = self.inflight.remove(&call);
                 let result = match result {
-                    Ok(value) => {
+                    Ok(answer) => {
                         if let Some(inflight) = &inflight {
-                            self.remember(call, &value, inflight.epoch);
+                            self.remember(call, &answer.result, inflight.epoch);
                         }
-                        Ok(value)
+                        Ok(Served {
+                            result: answer.result,
+                            cached: false,
+                            bytes: answer.bytes,
+                        })
                     }
                     Err(err) => Err(read_error(err)),
                 };
@@ -838,7 +1006,7 @@ where
                     .map(|inflight| inflight.waiters)
                     .unwrap_or_default()
                 {
-                    let _ = waiter.send(result.clone());
+                    let _ = waiter.send((call, result.clone()));
                 }
                 self.pump();
             }
@@ -852,7 +1020,7 @@ where
                     }
                     return;
                 }
-                let result = result.map(|update| self.apply(update));
+                let result = result.map(|update| (self.apply(update), false));
                 for waiter in self.tip_waiters.drain(..) {
                     let _ = waiter.send(result.clone());
                 }
@@ -863,22 +1031,28 @@ where
 
     fn read(&mut self, call: ReadCall, lane: Lane, reply: ReadReply) {
         if self.run.is_none() {
-            let _ = reply.send(Err(not_running()));
+            let _ = reply.send((call, Err(not_running())));
             return;
         }
         let now = now();
         let key = self.cache_key(call, now);
-        if let Some(value) = key.and_then(|key| self.cache.get(&key)) {
-            let _ = reply.send(Ok(value.clone()));
-            return;
-        }
-        // A height the index knows is read by its hash, so it joins reads of that hash.
+        // A height the index knows is read by its hash, so it joins reads of that hash, and is
+        // listed by it: that is what the node is asked, or what the cache holds it by.
         let call = match (call, key) {
             (ReadCall::Block(BlockId::Height(_)), Some(CacheKey::Block(hash))) => {
                 ReadCall::Block(BlockId::Hash(hash))
             }
             _ => call,
         };
+        if let Some(value) = key.and_then(|key| self.cache.get(&key)) {
+            let served = Served {
+                result: value.clone(),
+                cached: true,
+                bytes: None,
+            };
+            let _ = reply.send((call, Ok(served)));
+            return;
+        }
         match self.inflight.get_mut(&call) {
             Some(inflight) => {
                 inflight.waiters.push(reply);
@@ -892,7 +1066,7 @@ where
                     waiters: vec![reply],
                 };
                 self.inflight.insert(call, inflight);
-                self.sched.push(call, lane);
+                self.sched.push(call, lane, call.weight());
                 self.pump();
             }
         }
@@ -903,11 +1077,11 @@ where
         let Some(run) = &self.run else {
             return;
         };
-        while let Some((call, lane)) = self.sched.next() {
-            let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+        while let Some((call, lane, weight)) = self.sched.next() {
+            let Ok(permit) = self.permits.clone().try_acquire_many_owned(weight) else {
                 // Every permit is out: put the read back for the next report.
-                self.sched.done(lane);
-                self.sched.push(call, lane);
+                self.sched.done(lane, weight);
+                self.sched.push(call, lane, weight);
                 break;
             };
             let source = run.source.clone();
@@ -915,6 +1089,7 @@ where
                 tx: self.internal.clone(),
                 call,
                 lane,
+                weight,
                 network_changes: self.network_changes,
                 sent: false,
             };
@@ -958,6 +1133,16 @@ where
                 if self.index.tip().is_some_and(|(_, tip)| tip == block.hash) {
                     self.publish();
                 }
+            }
+            ReadResult::BlockV3(block) => {
+                let bytes = 200
+                    + block
+                        .tx
+                        .iter()
+                        .map(|tx| 200 + 150 * (tx.vin.len() + tx.vout.len()))
+                        .sum::<usize>();
+                self.cache
+                    .insert(CacheKey::BlockV3(block.hash), value.clone(), bytes);
             }
             ReadResult::Tx(tx) => {
                 // Only a transaction of a best-chain block keeps its place.

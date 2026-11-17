@@ -2,12 +2,16 @@
 //! Nothing it shows comes from anywhere else, and nothing searched leaves the computer.
 //!
 //! The shell holds back and forward, the search box, the source line (which node, which
-//! network, which tip, and the unit and time toggles) and one banner; under it, the page of the node's current route. Each
-//! node keeps its own place ([`state::Explorers`]). The tab tells the node's explorer when it
-//! is on screen (`Interest`), so the explorer follows the tip only then.
+//! network, which tip, the unit and time toggles and Show RPC) and one banner; under it, the
+//! page of the node's current route, and the hover card of the link the pointer or focus rests
+//! on ([`cards`]). Each node keeps its own place ([`state::Explorers`]). The tab tells the
+//! node's explorer when it is on screen (`Interest`), so the explorer follows the tip only
+//! then.
 
 mod block;
+mod cards;
 mod chain;
+mod flow_diagram;
 mod history;
 mod parts;
 mod prefs;
@@ -15,6 +19,7 @@ mod search;
 mod state;
 pub mod text;
 mod tx;
+mod virtual_list;
 
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -35,6 +40,7 @@ use crate::{
     format::{controls, relative, thousands},
 };
 use block::BlockPage;
+use cards::{HoverCard, HoverCards};
 use chain::ChainPage;
 use prefs::Prefs;
 use search::{SearchBox, SearchPage};
@@ -53,6 +59,19 @@ pub fn Explorer() -> impl IntoView {
     let node_id = Memo::new(move |_| app.node().info.with(|info| info.id.clone()));
     let network = Signal::derive(move || app.node().info.with(|info| info.network));
     let nav = Signal::derive(move || explorers.of(&node_id.get()));
+    let card_tip = Signal::derive(move || {
+        nav.get().live.with(|live| {
+            live.as_ref()
+                .and_then(|live| live.tip)
+                .map(|tip| (tip.epoch, tip.height))
+        })
+    });
+    let cards = HoverCards::provide(node_id.into(), network, card_tip);
+    // A page that changes takes its links' card with it.
+    Effect::new(move |_| {
+        nav.get().route();
+        cards.leave();
+    });
     let tip = Signal::derive(move || {
         nav.get().live.with(|live| {
             live.as_ref()
@@ -249,6 +268,7 @@ pub fn Explorer() -> impl IntoView {
             <SourceLine nav network tip />
             <Banner nav />
             <div class="ex-page" aria-live="off" tabindex="-1" node_ref=page_ref>{page}</div>
+            <HoverCard />
         </div>
     }
 }
@@ -439,6 +459,7 @@ fn SourceLine(
                 </span>
             })}
             <Toggles network />
+            <ShowRpc />
             <span class="ex-promise muted">
                 {info_icon()}
                 "Everything here comes from your own node. Nothing you search leaves this computer."
@@ -508,6 +529,24 @@ fn Toggles(network: Signal<Network>) -> impl IntoView {
                 })
                 .collect_view()}
         </span>
+    }
+}
+
+/// Show RPC: a toggle that makes each page list the JSON-RPC requests its answer took. Kept
+/// with the other choices ([`Prefs`]).
+#[component]
+fn ShowRpc() -> impl IntoView {
+    let prefs = Prefs::get();
+    view! {
+        <button
+            type="button"
+            class="ex-rpc-toggle"
+            aria-pressed=move || if prefs.rpc.get() { "true" } else { "false" }
+            title="List the JSON-RPC requests each page made to your node"
+            on:click=move |_| prefs.set_rpc(!prefs.rpc.get_untracked())
+        >
+            "Show RPC"
+        </button>
     }
 }
 
