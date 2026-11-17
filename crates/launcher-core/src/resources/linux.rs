@@ -330,11 +330,26 @@ mod tests {
         assert!(age < Duration::from_secs(24 * 3600), "{age:?}");
     }
 
+    /// Whether this process may read files whatever their mode: root, or any process with
+    /// `CAP_DAC_OVERRIDE` or `CAP_DAC_READ_SEARCH` in its effective set.
+    fn overrides_file_modes() -> bool {
+        let status = fs::read_to_string("/proc/self/status").expect("our own status");
+        let effective = status
+            .lines()
+            .find_map(|line| line.strip_prefix("CapEff:"))
+            .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+            .expect("a CapEff line");
+        // CAP_DAC_OVERRIDE is bit 1, CAP_DAC_READ_SEARCH bit 2.
+        effective & 0b110 != 0
+    }
+
     #[test]
     fn a_zombie_child_is_no_refused_read() {
         // The kernel gives a zombie's `io` and `fd` to root. Another test's child that has
         // exited and is not reaped yet is a zombie under this process, so `reads_this_process`
-        // failed when it counted that as the OS refusing the fields.
+        // failed when it counted that as the OS refusing the fields. A process that may
+        // override file modes (root, as in a container or under sudo) reads the zombie's
+        // `io`, and its `fd` directory is empty.
         let mut child = std::process::Command::new("true")
             .spawn()
             .expect("true starts");
@@ -364,7 +379,9 @@ mod tests {
             .find(|member| member.id.pid == pid)
             .expect("the zombie is a member, by its parent link");
         assert_eq!(zombie.memory, Some(0), "{zombie:?}");
-        assert_eq!(zombie.read, None, "{zombie:?}");
+        if !overrides_file_modes() {
+            assert_eq!(zombie.read, None, "{zombie:?}");
+        }
         assert_eq!(zombie.descriptors, Some(0), "{zombie:?}");
         assert!(
             !reading.denied.io && !reading.denied.descriptors,
