@@ -157,6 +157,13 @@ pub fn degraded(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReaso
     if facts.phase != Phase::Running || !endpoint_open {
         return Some(DegradedReason::BackingRestarting);
     }
+    // zingod's own problems come before zebrad's height: while zingod waits for zebrad to
+    // reach the tip, that is what the panel says.
+    if spec.backend == LightBackend::Zingod
+        && let Some(why) = zingod::problem(spec, facts)
+    {
+        return Some(why);
+    }
     // A few blocks behind for a moment is an ordinary gap between blocks; an unknown height
     // is behind.
     let blocks = match (facts.height, facts.tip) {
@@ -175,11 +182,6 @@ pub fn degraded(spec: &PublicServiceSpec, facts: &Facts) -> Option<DegradedReaso
             return Some(DegradedReason::BackingBehind { blocks });
         }
         Some(_) => {}
-    }
-    if spec.backend == LightBackend::Zingod
-        && let Some(why) = zingod::problem(spec, facts)
-    {
-        return Some(why);
     }
     if facts
         .wallet
