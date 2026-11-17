@@ -13,6 +13,7 @@ pub mod pause;
 pub mod plan;
 pub mod share;
 pub mod wallet;
+pub mod zingod;
 
 use std::{net::SocketAddr, time::SystemTime};
 
