@@ -1382,10 +1382,14 @@ the code differs from the design above, P0 and P1 first, then [P2](#p2-transacti
 - **The synthetic chain** funds every transparent input with an output it has (a coinbase's,
   or one of a transaction without transparent inputs, from 100 blocks back), so the fees the
   explorer works out from spent outputs are what the transactions paid; an output may be spent
-  more than once, which nothing checks. `?explorer=big` gives every tenth block (heights
-  ending in 0) 4,600 two-in, two-out payments, so that with its own transactions it is nearly
-  2 MB and under zebrad's 2,000,000 bytes; the 200,000-transaction address
-  waits for P4. The mock names its reads as the backend's RPC calls, with made-up times and
+  more than once, which nothing checks. Every transaction pays for its ZIP 317 logical
+  actions, inputs and notes included: the era's wallet fee (5,000 or 1,000 zat an action)
+  when the block's fees cover it, else zebrad's 1,000, the transparent payments taking the
+  rest; to cover 5,000 an action the synthetic fees are about 0.0025 to 0.006 ZEC a block. The
+  first payment of every hundredth block pays half of zebrad's conventional fee, for the fee
+  card's "paid less". `?explorer=big` gives every tenth block (heights ending in 0) 4,600
+  two-in, two-out payments, so that with its own transactions it is nearly 2 MB and under
+  zebrad's 2,000,000 bytes; the 200,000-transaction address waits for P4. The mock names its reads as the backend's RPC calls, with made-up times and
   sizes, and remembers them as the backend's cache would, for Show RPC.
 - **Call budgets** pinned by the actor's tests: a small block's rows are one heavy read with
   every fee, after which a transaction of the block is one read; a transaction with inputs is
